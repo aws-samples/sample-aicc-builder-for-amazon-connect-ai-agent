@@ -1,0 +1,41 @@
+# ECS Fargate deployment dependencies
+# No bedrock-agentcore, no redis
+
+# Web framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+websockets>=13.0
+
+# AI Agent SDK
+strands-agents>=1.22.0
+strands-agents-tools>=0.1.0
+
+# AWS SDK
+boto3>=1.35.0
+
+# Data validation
+pydantic>=2.0.0
+
+# Configuration
+PyYAML>=6.0.0
+
+# Auth
+python-jose[cryptography]>=3.3.0
+
+# Database drivers (for introspect_database tool)
+PyMySQL>=1.1.0
+psycopg2-binary>=2.9.0
+
+# HTTP client
+requests>=2.31.0
+
+# Observability
+aws-xray-sdk>=2.14.0
+
+# CloudWatch metrics
+watchtower>=3.0.0
+
+# Document parsers (for File Explorer binary file support)
+python-docx>=1.1.0
+PyPDF2>=3.0.0
+openpyxl>=3.1.0

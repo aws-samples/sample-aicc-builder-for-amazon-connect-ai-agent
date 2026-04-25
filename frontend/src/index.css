@@ -1,0 +1,274 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Light mode variables */
+:root {
+  --background: 250 250 250;
+  --foreground: 24 24 27;
+  --card: 255 255 255;
+  --card-foreground: 24 24 27;
+  --popover: 255 255 255;
+  --popover-foreground: 24 24 27;
+  --primary: 147 51 234;
+  --primary-foreground: 250 250 250;
+  --secondary: 244 244 245;
+  --secondary-foreground: 24 24 27;
+  --muted: 244 244 245;
+  --muted-foreground: 113 113 122;
+  --accent: 6 182 212;
+  --accent-foreground: 255 255 255;
+  --destructive: 239 68 68;
+  --destructive-foreground: 250 250 250;
+  --border: 228 228 231;
+  --input: 228 228 231;
+  --ring: 147 51 234;
+  --radius: 0.75rem;
+}
+
+/* Dark mode variables */
+.dark {
+  --background: 15 15 35;
+  --foreground: 250 250 250;
+  --card: 31 31 35;
+  --card-foreground: 250 250 250;
+  --popover: 31 31 35;
+  --popover-foreground: 250 250 250;
+  --primary: 168 85 247;
+  --primary-foreground: 255 255 255;
+  --secondary: 39 39 42;
+  --secondary-foreground: 250 250 250;
+  --muted: 39 39 42;
+  --muted-foreground: 161 161 170;
+  --accent: 34 211 238;
+  --accent-foreground: 15 15 35;
+  --destructive: 239 68 68;
+  --destructive-foreground: 250 250 250;
+  --border: 63 63 70;
+  --input: 63 63 70;
+  --ring: 168 85 247;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  min-width: 320px;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  line-height: 1.6;
+  min-height: 100vh;
+  min-height: 100dvh;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Light mode body */
+body {
+  background-color: #fafafa;
+  color: #18181b;
+}
+
+/* Dark mode body */
+.dark body {
+  background: linear-gradient(180deg, #0f0f23 0%, #1a1a2e 100%);
+  color: #fafafa;
+}
+
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom scrollbar - Light */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Custom scrollbar - Dark */
+.dark ::-webkit-scrollbar-track {
+  background: #27272a;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #52525b;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #71717a;
+}
+
+/* Code blocks */
+pre {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+
+code {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Chat message animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* Typing indicator */
+@keyframes bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-4px);
+  }
+}
+
+.typing-dot {
+  animation: bounce 1.4s infinite ease-in-out;
+}
+
+.typing-dot:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* Glow effects */
+@keyframes glow {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(168, 85, 247, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(168, 85, 247, 0.25);
+  }
+}
+
+.animate-glow {
+  animation: glow 2s ease-in-out infinite;
+}
+
+/* Progress checklist - Light */
+.checklist-item {
+  @apply flex items-center gap-3 p-2 rounded-lg transition-colors;
+}
+
+.checklist-item.completed {
+  @apply bg-green-50 text-green-700;
+}
+
+.checklist-item.in-progress {
+  @apply bg-primary-50 text-primary-700;
+}
+
+.checklist-item.pending {
+  @apply bg-gray-50 text-gray-500;
+}
+
+/* Progress checklist - Dark */
+.dark .checklist-item.completed {
+  @apply bg-green-900/30 text-green-400;
+}
+
+.dark .checklist-item.in-progress {
+  @apply bg-primary-900/30 text-primary-400;
+}
+
+.dark .checklist-item.pending {
+  @apply bg-surface-800 text-surface-400;
+}
+
+/* Card hover effects */
+.card-hover {
+  @apply transition-all duration-300;
+}
+
+.card-hover:hover {
+  @apply shadow-lg;
+}
+
+.dark .card-hover:hover {
+  @apply shadow-glow;
+}
+
+/* Glass effect for dark mode */
+.glass {
+  @apply bg-white/80 backdrop-blur-sm;
+}
+
+.dark .glass {
+  @apply bg-surface-850/80 backdrop-blur-sm border-surface-700;
+}
+
+/* Gradient text */
+.gradient-text {
+  @apply bg-gradient-to-r from-primary-500 to-accent-500 bg-clip-text text-transparent;
+}
+
+/* Button styles */
+.btn-primary {
+  @apply bg-primary-600 text-white hover:bg-primary-700
+         dark:bg-primary-500 dark:hover:bg-primary-600
+         transition-all duration-200 shadow-sm hover:shadow-md;
+}
+
+.btn-secondary {
+  @apply bg-surface-100 text-surface-900 hover:bg-surface-200
+         dark:bg-surface-800 dark:text-surface-100 dark:hover:bg-surface-700
+         transition-all duration-200;
+}
+
+/* Input styles */
+.input-field {
+  @apply bg-white border-surface-300 text-surface-900 placeholder-surface-400
+         dark:bg-surface-800 dark:border-surface-600 dark:text-surface-100 dark:placeholder-surface-500
+         focus:ring-2 focus:ring-primary-500 focus:border-transparent
+         transition-all duration-200;
+}
+
+/* Sidebar styles */
+.sidebar {
+  @apply bg-surface-900 text-white;
+}
+
+.dark .sidebar {
+  @apply bg-surface-950 border-r border-surface-800;
+}

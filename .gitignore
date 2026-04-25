@@ -1,0 +1,94 @@
+# === Generated / Deploy Outputs ===
+cdk-outputs.json
+cdk-outputs-*.json
+frontend/.env
+node_modules/
+chat
+
+# Root-level npm artifacts (none are required; harness-only packages)
+/package.json
+/package-lock.json
+/pnpm-lock.yaml
+
+# === AgentCore build artifacts ===
+backend/agentcore/.bedrock_agentcore/
+backend/agentcore/.bedrock_agentcore.yaml
+backend/agentcore/src/
+
+# === Demo & docs (managed separately) ===
+CLAUDE.md
+demo/
+debug/
+improvements/
+refactoring-to-ecs-s3files/
+PATCH_NOTES.md
+
+# === Workshop content & static assets ===
+assets/*
+!assets/README.md
+static/
+content/
+
+# === Environment & secrets ===
+.env
+.env.local
+.env.*.local
+
+# === Frontend ===
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
+# === Backend ===
+backend/.venv/
+backend/**/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/**/*.pyc
+backend/.pytest_cache/
+backend/**/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/dist/
+backend/*.egg-info/
+backend/**/*.egg-info/
+
+# === Infrastructure ===
+infrastructure/node_modules/
+infrastructure/cdk.out/
+infrastructure/cdk.context.json
+infrastructure/dist/
+infrastructure/*.js
+infrastructure/*.d.ts
+!infrastructure/jest.config.js
+
+# === IDE ===
+.idea/
+.vscode/
+.kiro/
+*.swp
+*.swo
+
+# === OS ===
+.DS_Store
+
+# === Logs ===
+*.log
+npm-debug.log*
+
+# === Deploy cache ===
+.deploy-hashes/
+
+# === Large media ===
+*.mov
+*.mp4
+
+# === Misc generated files ===
+gamma/
+blog/
+updates/
+questionnaire/*.docx
+*_tmp.html
+**/__pycache__/
