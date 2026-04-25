@@ -19,19 +19,18 @@
 
 ## What is AICC Builder?
 
-AICC Builder is an **open-source Agentic AI sample pplication** that generates a
+AICC Builder is an **open-source Agentic AI sample application** that generates a
 customized Amazon Connect asset bundle (Lambda, OpenAPI, AI prompt,
-Contact Flow, CDK infrastructure, FAQ) from a ~15-minute conversation
+Contact Flow, CDK infrastructure, FAQ) from a ~1 hour conversation
 with a customer. A single Orchestrator agent interviews the user,
 distills the conversation into a structured `OperationSpec`, and calls
 specialized sub-agents to produce each asset — with deterministic
 cross-asset validation between phases so the bundle is internally
 consistent before it is delivered.
 
-**Who is it for?** SA/Sales teams running
-[Amazon Connect AI Workshops](https://catalog.workshops.aws/) who want
-the workshop to end with a deployable PoC for the customer's actual
-business, not a generic hotel demo.
+**Who is it for?** Anyone who wants to build Amazon Connect AI Agent 
+fast in order to end with a deployable PoC for the customer's actual
+business.
 
 > 📖 **How it enforces customer requirements end-to-end:** see
 > [docs/agentic-ai.md](./docs/agentic-ai.md) for the full methodology
@@ -409,16 +408,15 @@ See [CONTRIBUTING](CONTRIBUTING.md) for more information.
 
 ## AICC Builder란?
 
-AICC Builder는 **오픈소스 Agentic AI 애플리케이션**으로, 고객과의 약 15분
+AICC Builder는 **오픈소스 Agentic AI 애플리케이션**으로, 고객과의 약 1시간
 대화만으로 Amazon Connect 맞춤형 자산 번들(Lambda, OpenAPI, AI 프롬프트,
 Contact Flow, CDK 인프라, FAQ)을 자동 생성합니다. 단일 오케스트레이터
 에이전트가 고객을 인터뷰하고, 대화를 구조화된 `OperationSpec`으로 증류한 뒤,
 각 자산을 담당하는 전문 서브 에이전트를 호출합니다. 단계 사이마다 **결정론적
 교차 자산 검증**이 실행되어, 전달 전 번들의 내부 일관성이 보장됩니다.
 
-**대상**: [Amazon Connect AI Workshop](https://catalog.workshops.aws/)을
-진행하는 SA/세일즈 팀. 워크숍의 결과물을 고정된 호텔 데모가 아닌 **고객
-실제 비즈니스에 배포 가능한 PoC**로 만들고 싶은 경우.
+**대상**: Amazon Connect의 셀프 서비스 AI Agent를 빠르게 만들어보고자 하는 사람 누구나. 
+데모가 아닌 **고객 실제 비즈니스에 배포 가능한 PoC**로 만들고 싶은 경우.
 
 > 📖 **고객 요구사항을 끝까지 지키는 메커니즘**은
 > [docs/agentic-ai.md](./docs/agentic-ai.md)를 참조하세요. OperationSpec을
