@@ -2306,6 +2306,17 @@ async def handle_inject_history_ws(websocket: WebSocket, session_id: str, data: 
             if key in session_context:
                 session["session_data"][key] = session_context[key]
 
+    # Warm the NFS view from S3 before anything reads /mnt/s3 for this session.
+    # After an ECS restart, mountpoint-s3 imports directories lazily on first
+    # access, so os.scandir on sessions/{sid}/assets/ can return an incomplete
+    # tree while imports are in flight. This forces every ancestor dir to
+    # materialize and every asset file to stat successfully.
+    try:
+        from tools.s3_asset_storage import hydrate_session_workspace
+        hydrate_session_workspace(original_session_id)
+    except Exception as e:
+        logger.warning(f"[injectHistory] hydrate failed for {original_session_id}: {e}")
+
     # Restore workspace
     try:
         from tools.project_workspace import set_workspace_session_id

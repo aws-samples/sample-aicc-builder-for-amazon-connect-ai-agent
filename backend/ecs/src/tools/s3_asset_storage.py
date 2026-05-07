@@ -664,6 +664,105 @@ def list_session_assets(session_id: str, s3_only: bool = False) -> list:
         return []
 
 
+def hydrate_session_workspace(session_id: str) -> dict:
+    """
+    Warm the NFS view so every asset for a session is materialized.
+
+    S3 Files (mountpoint-s3) lazily imports each directory on first access
+    (ON_DIRECTORY_FIRST_ACCESS). After an ECS task restart, the NFS mount for
+    a resumed session is empty — assets exist in S3 but are not visible to
+    os.scandir until each ancestor directory has been read at least once.
+    That race causes /api/workspace/{sid}/tree to return a partial tree on
+    resume (only context/conversation_history.json shows up, because that
+    file is re-written by the backend on every message).
+
+    This helper is read-only: it lists the authoritative S3 state, scandirs
+    every ancestor directory (cheap — forces readdir import), then stats
+    each file. No writes back to the mount, so versioned bucket object
+    versions are not incremented.
+
+    Args:
+        session_id: User session ID to warm.
+
+    Returns:
+        dict with:
+          - listed:  number of S3 keys found under assets/{sid}/
+          - dirs:    number of ancestor directories warmed
+          - files:   number of files whose metadata was successfully resolved
+          - skipped: number of files still missing after warm (likely >10MB
+                     import cap, or not yet flushed from write cache)
+    """
+    result = {"listed": 0, "dirs": 0, "files": 0, "skipped": 0}
+
+    if not _nfs_available():
+        logger.info(f"[HYDRATE] NFS not available, skipping for {session_id}")
+        return result
+
+    # 1. List authoritative set of keys from S3 (bypasses possibly-stale NFS).
+    try:
+        keys = list_session_assets(session_id, s3_only=True)
+    except Exception as e:
+        logger.warning(f"[HYDRATE] S3 list failed for {session_id}: {e}")
+        return result
+
+    result["listed"] = len(keys)
+    if not keys:
+        return result
+
+    safe_session = session_id.replace("..", "_").replace("/", "_")
+    mount_root = Path(S3FILES_MOUNT) / "sessions" / safe_session / "assets"
+
+    # 2. Collect every ancestor directory we need materialized.
+    dirs_to_warm = {mount_root}
+    file_paths = []
+    for key in keys:
+        _, asset_type, file_name, op_id = _parse_s3_key_to_nfs_components(key)
+        if asset_type is None:
+            continue
+        type_dir = mount_root / asset_type
+        dirs_to_warm.add(type_dir)
+        if op_id:
+            op_dir = type_dir / op_id
+            dirs_to_warm.add(op_dir)
+            file_paths.append(op_dir / file_name)
+        else:
+            file_paths.append(type_dir / file_name)
+
+    # 3. Warm directories shallow → deep so each readdir sees its parent imported.
+    for d in sorted(dirs_to_warm, key=lambda p: len(p.parts)):
+        try:
+            with os.scandir(d) as it:
+                # Consume the iterator so mountpoint-s3 completes the import.
+                for _ in it:
+                    pass
+            result["dirs"] += 1
+        except FileNotFoundError:
+            # Mount didn't materialize this dir — S3 listing may have been empty
+            # for that prefix (e.g., asset type dir but no files), or the dir
+            # lives above SizeLessThan threshold (unlikely for directories).
+            pass
+        except OSError as e:
+            logger.warning(f"[HYDRATE] scandir failed for {d}: {e}")
+
+    # 4. Stat each file to confirm it materialized in the view.
+    for p in file_paths:
+        try:
+            p.stat()
+            result["files"] += 1
+        except FileNotFoundError:
+            result["skipped"] += 1
+        except OSError as e:
+            logger.warning(f"[HYDRATE] stat failed for {p}: {e}")
+            result["skipped"] += 1
+
+    logger.info(
+        f"[HYDRATE] session={session_id} "
+        f"listed={result['listed']} dirs={result['dirs']} "
+        f"files={result['files']} skipped={result['skipped']}"
+    )
+    return result
+
+
 def delete_session_assets(session_id: str) -> int:
     """
     Delete all assets for a session.
