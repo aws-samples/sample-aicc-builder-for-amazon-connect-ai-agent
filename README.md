@@ -15,6 +15,18 @@
 
 ---
 
+## Demo
+
+**Part 1 — Build an Amazon Connect AI agent in ~1 hour**
+
+https://github.com/user-attachments/assets/074983eb-43ed-4b04-a873-720795db847f
+
+**Part 2 — Live call with the generated agent**
+
+https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
+
+---
+
 <a id="english"></a>
 
 ## What is AICC Builder?
