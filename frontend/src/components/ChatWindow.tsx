@@ -45,12 +45,23 @@ export function ChatWindow() {
   const isSessionReady = useBuilderStore(s => s.isSessionReady);
   const isLoadingSession = useBuilderStore(s => s.isLoadingSession);
   const reconnectStatus = useBuilderStore(s => s.reconnectStatus);
+  const stillProcessingCount = useBuilderStore(s => s.stillProcessingCount);
+  const connectionError = useBuilderStore(s => s.connectionError);
+  const setConnectionError = useBuilderStore(s => s.setConnectionError);
+  const resetStillProcessingCount = useBuilderStore(s => s.resetStillProcessingCount);
   const progress = useBuilderStore(s => s.progress);
   const inputHint = useBuilderStore(s => s.inputHint);
   const session = useBuilderStore(s => s.session);
 
   const { currentSessionId, updateSessionTitle, updateSessionActivity, createNewSession, sessions } = useSessionStore();
-  const { sendMessage, sendMessageWithAttachments, connect } = useWebSocket();
+  const { sendMessage, sendMessageWithAttachments, connect, switchSession } = useWebSocket();
+
+  const handleResetSession = useCallback(() => {
+    const freshId = `session-${crypto.randomUUID()}`;
+    resetStillProcessingCount();
+    setConnectionError(null);
+    switchSession(freshId, true);
+  }, [switchSession, resetStillProcessingCount, setConnectionError]);
 
   // Auto-save runs entirely outside render cycle via zustand subscribe
   useAutoSave();
@@ -476,6 +487,39 @@ export function ChatWindow() {
           <div className="mb-3 flex items-start gap-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
             <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
             <p className="text-sm text-red-600 dark:text-red-400 whitespace-pre-line">{attachmentError}</p>
+          </div>
+        )}
+
+        {connectionError && (
+          <div className="mb-3 flex items-start justify-between gap-2 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
+            <div className="flex items-start gap-2 min-w-0">
+              <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+              <p className="text-sm text-amber-700 dark:text-amber-300 whitespace-pre-line">{connectionError}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setConnectionError(null)}
+              className="text-xs text-amber-600 dark:text-amber-400 hover:underline flex-shrink-0"
+            >
+              {language === 'ko-KR' ? '닫기' : 'Dismiss'}
+            </button>
+          </div>
+        )}
+
+        {stillProcessingCount >= 2 && (
+          <div className="mb-3 flex items-center justify-between gap-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+            <p className="text-sm text-red-700 dark:text-red-300">
+              {language === 'ko-KR'
+                ? '이전 요청이 여전히 처리 중입니다. 세션을 재설정하세요.'
+                : "Previous request is still stuck. Reset the session to continue."}
+            </p>
+            <button
+              type="button"
+              onClick={handleResetSession}
+              className="px-3 py-1.5 text-xs font-medium rounded-md bg-red-600 hover:bg-red-700 text-white flex-shrink-0"
+            >
+              {language === 'ko-KR' ? '세션 재설정' : 'Reset session'}
+            </button>
           </div>
         )}
 

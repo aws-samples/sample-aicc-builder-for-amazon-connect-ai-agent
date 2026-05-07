@@ -11,6 +11,7 @@ import { useAuthStore } from "../stores/authStore";
 import type { WebSocketMessage, SubagentActivity, SubagentToolCall, AttachedFile, MessageAttachment, AttachmentData, AssetPreview, BuilderPhase } from "../types";
 import { PHASE_LABELS } from "../types";
 import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type StoredAsset, type ConversationMessage } from "../services/sessions";
+import { fetchNfsDiagnostics } from "../services/workspaceApi";
 
 // Streaming timeout configuration
 // Increased to 15 minutes to handle very long-running sub-agent operations (e.g., infrastructure_generator)
@@ -40,6 +41,39 @@ const PING_INTERVAL_MS = 15000; // 15 seconds
 let globalProactiveReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const PROACTIVE_RECONNECT_MS = 55 * 60 * 1000; // 55 minutes
 let globalIsProactiveReconnect = false; // Silent reconnect flag (no UI banner)
+
+// Session-ready watchdog: guarantees the chat input un-freezes even when the
+// backend never replies with history_injected / session_created / connected.
+// Any code path that flips isLoadingSession=true + isSessionReady=false MUST
+// call armSessionReadyWatchdog() so we auto-recover after SESSION_READY_WATCHDOG_MS.
+let globalSessionReadyWatchdog: ReturnType<typeof setTimeout> | null = null;
+const SESSION_READY_WATCHDOG_MS = 15000;
+
+// Liveness probe: tracks which session IDs we've already checked against
+// `/api/debug/nfs` so we only pay the cost once per session load.
+// `dead` means NFS dir missing AND DynamoDB history empty → safe to auto-rotate.
+const globalLivenessChecked = new Set<string>();
+function armSessionReadyWatchdog(reason: string) {
+  if (globalSessionReadyWatchdog) clearTimeout(globalSessionReadyWatchdog);
+  globalSessionReadyWatchdog = setTimeout(() => {
+    const state = useBuilderStore.getState();
+    if (!state.isSessionReady) {
+      console.warn(`[useWebSocket] session-ready watchdog fired (${reason}) — forcing ready`);
+      state.setSessionReady(true);
+      state.setLoadingSession(false);
+      state.setConnectionError(
+        "Session is taking longer than expected — you can keep typing."
+      );
+    }
+    globalSessionReadyWatchdog = null;
+  }, SESSION_READY_WATCHDOG_MS);
+}
+function disarmSessionReadyWatchdog() {
+  if (globalSessionReadyWatchdog) {
+    clearTimeout(globalSessionReadyWatchdog);
+    globalSessionReadyWatchdog = null;
+  }
+}
 
 // Session ID storage key prefix for localStorage
 const SESSION_ID_STORAGE_KEY = "aicc-session-id";
@@ -233,6 +267,13 @@ export function useWebSocket() {
   );
   const reconnectAttemptsRef = useRef(globalReconnectAttempts);
   const maxReconnectAttempts = 5;
+  // Forward-ref to switchSession so sendMessage (declared earlier) can rotate
+  // the session if the pre-send liveness probe says it's dead.
+  const switchSessionRef = useRef<
+    ((newSessionId: string, isNewSession?: boolean) => Promise<void>) | null
+  >(null);
+  // Buffered outbound message awaiting a fresh session after liveness-triggered rotation
+  const pendingOutboundRef = useRef<{ message: string } | null>(null);
   const streamingMessageIdRef = useRef<string | null>(null);
   const streamTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastStreamContentRef = useRef<string>(""); // Track last content to detect duplicates
@@ -680,6 +721,8 @@ export function useWebSocket() {
 
         case "stream":
           setTyping(true);
+          // Any successful streaming means the previous "still processing" condition cleared.
+          useBuilderStore.getState().resetStillProcessingCount();
           if (data.content) {
             // Duplicate detection: skip if this exact content was just received
             // This can happen with network retries
@@ -757,6 +800,17 @@ export function useWebSocket() {
           setTyping(false);
           lastStreamContentRef.current = "";
           streamingMessageIdRef.current = null;
+          // Detect backend "Agent is still processing" guard (app.py:1652).
+          // Ensure the chat input is re-enabled immediately and bump a counter
+          // so the UI can offer a Reset Session affordance after repeated hits.
+          if (
+            typeof data.content === "string" &&
+            data.content.toLowerCase().includes("still processing")
+          ) {
+            useBuilderStore.getState().setSessionReady(true);
+            useBuilderStore.getState().setLoadingSession(false);
+            useBuilderStore.getState().bumpStillProcessingCount();
+          }
           // Log detailed debug info to console for development
           if (data.debug) {
             console.group("🚨 Backend Error Details");
@@ -1375,6 +1429,7 @@ export function useWebSocket() {
           // Acknowledgment from backend that history was injected
           // CRITICAL: Only NOW mark session as ready to accept messages
           // This ensures history is fully loaded before user can send messages
+          disarmSessionReadyWatchdog();
           useBuilderStore.getState().setSessionReady(true);
           useBuilderStore.getState().setLoadingSession(false);
           // Restore phase from the injected session's NFS state
@@ -1398,6 +1453,7 @@ export function useWebSocket() {
         case "session_created":
           // Acknowledgment from backend that a fresh session was created
           // CRITICAL: Only NOW mark session as ready to accept messages
+          disarmSessionReadyWatchdog();
           useBuilderStore.getState().setSessionReady(true);
           useBuilderStore.getState().setLoadingSession(false);
           // Restore phase from backend
@@ -1405,6 +1461,18 @@ export function useWebSocket() {
             useBuilderStore.getState().setCurrentPhase(data.phase as BuilderPhase);
           }
           console.log("[useWebSocket] New session created:", data.sessionId, "phase:", data.phase || "interview", "- session NOW ready");
+          // Flush any outbound message the liveness probe had buffered while rotating
+          if (pendingOutboundRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+            const buffered = pendingOutboundRef.current;
+            pendingOutboundRef.current = null;
+            addMessage({ role: "user", content: buffered.message });
+            wsRef.current.send(JSON.stringify({
+              action: "sendMessage",
+              message: buffered.message,
+              language: useBuilderStore.getState().language,
+            }));
+            console.log("[useWebSocket] Flushed buffered message after session rotation");
+          }
           break;
 
         case "context_injected":
@@ -1439,6 +1507,7 @@ export function useWebSocket() {
               getSessionHistory(globalCurrentSessionId).then(history => {
                 if (!history || history.length === 0) {
                   console.log("[useWebSocket] No history to inject for mismatch recovery");
+                  disarmSessionReadyWatchdog();
                   useBuilderStore.getState().setSessionReady(true);
                   useBuilderStore.getState().setLoadingSession(false);
                   return;
@@ -1466,6 +1535,13 @@ export function useWebSocket() {
                 });
               });
             }
+          } else {
+            // No mismatch: backend accepted our session ID. Ensure the chat input un-freezes
+            // even if no separate history_injected/session_created event is coming
+            // (e.g. a plain reconnect where backend already had our history cached in memory).
+            disarmSessionReadyWatchdog();
+            useBuilderStore.getState().setSessionReady(true);
+            useBuilderStore.getState().setLoadingSession(false);
           }
           break;
 
@@ -1821,10 +1897,12 @@ export function useWebSocket() {
         } else if (wasProactiveReconnect) {
           // PROACTIVE RECONNECT: Silently mark session ready without banner
           console.log("[useWebSocket] Proactive reconnect complete — no history injection needed");
+          disarmSessionReadyWatchdog();
           useBuilderStore.getState().setSessionReady(true);
           useBuilderStore.getState().setLoadingSession(false);
         } else {
           // NEW CONNECTION: Mark session as ready (greeting is now handled by ChatEmptyState)
+          disarmSessionReadyWatchdog();
           useBuilderStore.getState().setSessionReady(true);
           useBuilderStore.getState().setLoadingSession(false);
         }
@@ -1881,6 +1959,7 @@ export function useWebSocket() {
         // IMPORTANT: Reset session ready state on disconnect
         // This ensures reconnection properly waits for history injection before allowing messages
         useBuilderStore.getState().setSessionReady(false);
+        armSessionReadyWatchdog("onclose-disconnect");
 
         // Proactive reconnect: treat as auto-reconnect, not intentional close
         if (globalIsProactiveReconnect) {
@@ -1957,6 +2036,41 @@ export function useWebSocket() {
         // Return false to indicate message was not sent
         // The UI should show a loading state or retry
         return false;
+      }
+
+      // Pre-send liveness probe (runs once per session). If the backend's NFS
+      // session dir is missing AND DynamoDB has no history for this ID, the
+      // session is effectively dead — rotate to a fresh one and re-send.
+      const currentId = globalCurrentSessionId;
+      if (currentId && !globalLivenessChecked.has(currentId)) {
+        globalLivenessChecked.add(currentId);
+        (async () => {
+          try {
+            const [diag, history] = await Promise.all([
+              fetchNfsDiagnostics(currentId),
+              getSessionHistory(currentId).catch(() => null),
+            ]);
+            const nfsMissing =
+              diag &&
+              "recent_sessions" in diag &&
+              Array.isArray(diag.recent_sessions) &&
+              !diag.recent_sessions.includes(currentId);
+            const historyEmpty = !history || history.length === 0;
+            if (nfsMissing && historyEmpty && switchSessionRef.current) {
+              const lang = useBuilderStore.getState().language;
+              useBuilderStore.getState().setConnectionError(
+                lang === "ko-KR"
+                  ? "이전 세션이 만료되었습니다 — 새 세션을 시작합니다."
+                  : "Previous session expired — started a new one."
+              );
+              pendingOutboundRef.current = { message };
+              const freshId = `session-${crypto.randomUUID()}`;
+              await switchSessionRef.current(freshId, true);
+            }
+          } catch (e) {
+            console.warn("[useWebSocket] liveness probe failed (non-fatal):", e);
+          }
+        })();
       }
 
       addMessage({
@@ -2305,6 +2419,7 @@ export function useWebSocket() {
       // CRITICAL: Mark session as NOT ready to block messages until initialization completes
       // This prevents context leakage between sessions
       useBuilderStore.getState().setSessionReady(false);
+      armSessionReadyWatchdog("switchSession");
 
       // Reset ALL session-specific state to prevent data bleeding between sessions
       // This clears: messages, assetPreviews, session, progress, downloadUrl
@@ -2753,6 +2868,12 @@ export function useWebSocket() {
     },
     [connect, getUserSub, setMessages, clearToolMessageIndexMap]
   );
+
+  // Expose switchSession via ref so the pre-send liveness probe inside
+  // sendMessage (declared earlier) can rotate the session when it detects a dead one.
+  useEffect(() => {
+    switchSessionRef.current = switchSession;
+  }, [switchSession]);
 
   /**
    * Get the current session ID
