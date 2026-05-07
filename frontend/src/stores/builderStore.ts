@@ -59,6 +59,10 @@ interface BuilderState {
   // Reconnection status for UX banners
   reconnectStatus: 'reconnecting' | 'reconnected' | null;
 
+  // Tracks repeated backend "Agent is still processing" errors so the UI can
+  // surface a Reset Session button after the user hits the wall twice.
+  stillProcessingCount: number;
+
   // Workspace file explorer refresh trigger
   workspaceRefreshTrigger: number;
 
@@ -91,6 +95,8 @@ interface BuilderState {
   setDownloadUrl: (url: string | null, expiresAt: string | null, s3Key?: string | null) => void;
   setShowDownloadModal: (show: boolean) => void;
   setReconnectStatus: (status: 'reconnecting' | 'reconnected' | null) => void;
+  bumpStillProcessingCount: () => void;
+  resetStillProcessingCount: () => void;
   triggerWorkspaceRefresh: () => void;
   setCurrentPhase: (phase: BuilderPhase) => void;
   setInputHint: (hint: { placeholder: string; phase?: string } | null) => void;
@@ -240,6 +246,7 @@ export const useBuilderStore = create<BuilderState>((set) => ({
   packageS3Key: null,
   showDownloadModal: false,
   reconnectStatus: null,
+  stillProcessingCount: 0,
   workspaceRefreshTrigger: 0,
   language: getInitialLanguage(),
   currentPhase: 'interview' as BuilderPhase,
@@ -519,6 +526,11 @@ export const useBuilderStore = create<BuilderState>((set) => ({
 
   setReconnectStatus: (status) => set({ reconnectStatus: status }),
 
+  bumpStillProcessingCount: () =>
+    set((state) => ({ stillProcessingCount: state.stillProcessingCount + 1 })),
+
+  resetStillProcessingCount: () => set({ stillProcessingCount: 0 }),
+
   triggerWorkspaceRefresh: () =>
     set((state) => ({ workspaceRefreshTrigger: state.workspaceRefreshTrigger + 1 })),
 
@@ -594,6 +606,8 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       isLoadingSession: true,
       currentPhase: 'interview' as BuilderPhase,
       inputHint: null,
+      stillProcessingCount: 0,
+      connectionError: null,
       // Keep language as it's a user preference
     }),
 
@@ -613,5 +627,7 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       isLoadingSession: false,
       currentPhase: 'interview' as BuilderPhase,
       inputHint: null,
+      stillProcessingCount: 0,
+      connectionError: null,
     }),
 }));
