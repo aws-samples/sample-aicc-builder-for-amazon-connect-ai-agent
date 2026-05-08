@@ -103,7 +103,7 @@ DEPLOY_INFRA=true
 DEPLOY_FRONTEND=true
 FORCE_BUILD=false
 SKIP_CHECKS=false
-STAGE=""
+STAGE="dev"
 
 print_usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -114,7 +114,7 @@ print_usage() {
     echo "  --infra-only       Deploy only CDK infrastructure"
     echo "  --force            Force rebuild even if no changes detected"
     echo "  --skip-checks      Skip hash checks (faster but may rebuild unnecessarily)"
-    echo "  --stage <name>     Deploy to a named stage (e.g., dev, staging). Default: production (no suffix)"
+    echo "  --stage <name>     Deploy to a named stage (e.g., dev, staging, prod). Default: dev"
     echo "  --help             Show this help message"
     echo ""
     echo "Environment variables:"
@@ -158,6 +158,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --stage)
+            if [ -z "$2" ] || [[ "$2" == -* ]]; then
+                echo -e "${RED}Error: --stage requires a value (e.g., dev, staging, prod)${NC}"
+                exit 1
+            fi
             STAGE="$2"
             shift 2
             ;;
@@ -266,28 +270,46 @@ echo -e "  Account: ${BLUE}${CALLER_ACCOUNT}${NC}"
 echo -e "  Region:  ${BLUE}${AWS_DEFAULT_REGION}${NC}"
 echo -e "  Caller:  ${BLUE}${CALLER_ARN}${NC}"
 # Interactive confirmation unless caller opted out (CI / --skip-checks)
-if [ -t 0 ] && [ "$SKIP_CHECKS" != true ] && [ "$FORCE_BUILD" != true ]; then
-    read -p "Proceed with this account/region? [y/N]: " CONFIRM
-    CONFIRM=$(echo "$CONFIRM" | tr '[:upper:]' '[:lower:]')
-    if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "yes" ]; then
-        echo "Aborted."
-        exit 0
+# NOTE: --force only skips hash checks; it does NOT bypass account/region confirmation.
+if [ -t 0 ] && [ "$SKIP_CHECKS" != true ]; then
+    if [ "$STAGE" = "prod" ] || [ "$STAGE" = "production" ]; then
+        echo -e "${RED}!! PRODUCTION DEPLOY !!${NC}"
+        echo -e "${RED}  Stack:   ${STACK_NAME}${NC}"
+        echo -e "${RED}  Account: ${CALLER_ACCOUNT}${NC}"
+        echo -e "${RED}  Region:  ${AWS_DEFAULT_REGION}${NC}"
+        read -p "Type the stage name '${STAGE}' to confirm: " PROD_CONFIRM
+        if [ "$PROD_CONFIRM" != "$STAGE" ]; then
+            echo "Aborted."
+            exit 0
+        fi
+    else
+        read -p "Proceed with this account/region? [y/N]: " CONFIRM
+        CONFIRM=$(echo "$CONFIRM" | tr '[:upper:]' '[:lower:]')
+        if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "yes" ]; then
+            echo "Aborted."
+            exit 0
+        fi
     fi
 fi
 
 # Brave Search API Key (optional, cached in .env.local)
 if [ -z "$BRAVE_API_KEY" ]; then
-    echo -e "${YELLOW}Brave Search API Key not set.${NC}"
-    echo "The Research Agent uses Brave Search for web research capabilities."
-    echo "Get your API key from: https://api.search.brave.com/app/keys"
-    echo ""
-    read -p "Enter Brave Search API Key (or press Enter to skip): " BRAVE_API_KEY_INPUT
-    if [ -n "$BRAVE_API_KEY_INPUT" ]; then
-        export BRAVE_API_KEY="$BRAVE_API_KEY_INPUT"
-        save_env_local "BRAVE_API_KEY" "$BRAVE_API_KEY_INPUT"
-        echo -e "${GREEN}Brave Search API Key configured and saved to .env.local${NC}"
+    if [ -t 0 ]; then
+        echo -e "${YELLOW}Brave Search API Key not set.${NC}"
+        echo "The Research Agent uses Brave Search for web research capabilities."
+        echo "Get your API key from: https://api.search.brave.com/app/keys"
+        echo ""
+        read -p "Enter Brave Search API Key (or press Enter to skip): " BRAVE_API_KEY_INPUT
+        if [ -n "$BRAVE_API_KEY_INPUT" ]; then
+            export BRAVE_API_KEY="$BRAVE_API_KEY_INPUT"
+            save_env_local "BRAVE_API_KEY" "$BRAVE_API_KEY_INPUT"
+            echo -e "${GREEN}Brave Search API Key configured and saved to .env.local${NC}"
+        else
+            echo -e "${YELLOW}Skipping Brave Search - Research Agent will have limited functionality${NC}"
+            export BRAVE_API_KEY=""
+        fi
     else
-        echo -e "${YELLOW}Skipping Brave Search - Research Agent will have limited functionality${NC}"
+        echo -e "${YELLOW}Brave Search API Key not set (non-interactive run) - Research Agent will have limited functionality${NC}"
         export BRAVE_API_KEY=""
     fi
 else
@@ -310,6 +332,13 @@ fi
 if ! command -v jq &> /dev/null; then
     echo -e "${RED}Error: jq not found${NC}"
     echo "Install with: brew install jq (macOS) or apt-get install jq (Linux)"
+    exit 1
+fi
+
+if ! command -v md5sum &> /dev/null; then
+    echo -e "${RED}Error: md5sum not found${NC}"
+    echo "Install with: brew install coreutils (macOS) — incremental hash checks rely on md5sum."
+    echo "Without it, every run will rebuild from scratch."
     exit 1
 fi
 

@@ -261,7 +261,12 @@ function deserializeHistoryMessages(
 }
 
 export function useWebSocket() {
-  const wsRef = useRef<WebSocket | null>(globalWs);
+  // NOTE: We deliberately do NOT keep a per-hook `wsRef`. The WebSocket is a
+  // singleton tracked by the module-level `globalWs`. Multiple components can
+  // call useWebSocket() (e.g. App and ChatWindow); per-hook refs would become
+  // stale after switchSession()/connect() since only the calling hook's
+  // wsRef would be updated, leaving other hook instances pointing at a
+  // closed socket. Always read/write through `globalWs`.
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     globalReconnectTimeout
   );
@@ -1462,11 +1467,11 @@ export function useWebSocket() {
           }
           console.log("[useWebSocket] New session created:", data.sessionId, "phase:", data.phase || "interview", "- session NOW ready");
           // Flush any outbound message the liveness probe had buffered while rotating
-          if (pendingOutboundRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+          if (pendingOutboundRef.current && globalWs?.readyState === WebSocket.OPEN) {
             const buffered = pendingOutboundRef.current;
             pendingOutboundRef.current = null;
             addMessage({ role: "user", content: buffered.message });
-            wsRef.current.send(JSON.stringify({
+            globalWs.send(JSON.stringify({
               action: "sendMessage",
               message: buffered.message,
               language: useBuilderStore.getState().language,
@@ -1501,7 +1506,7 @@ export function useWebSocket() {
           if (data.sessionId && globalCurrentSessionId && data.sessionId !== globalCurrentSessionId) {
             console.warn("[useWebSocket] Session ID MISMATCH! frontend:", globalCurrentSessionId, "backend:", data.sessionId);
             // Force history injection — backend has a different session, needs context restoration
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
+            if (globalWs?.readyState === WebSocket.OPEN) {
               console.log("[useWebSocket] Forcing injectHistory due to session mismatch");
               // Load history from DynamoDB and send to backend
               getSessionHistory(globalCurrentSessionId).then(history => {
@@ -1513,8 +1518,8 @@ export function useWebSocket() {
                   return;
                 }
                 getSessionData(globalCurrentSessionId!).then(sessionData => {
-                  if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-                  wsRef.current.send(JSON.stringify({
+                  if (globalWs?.readyState !== WebSocket.OPEN) return;
+                  globalWs.send(JSON.stringify({
                     action: "injectHistory",
                     history: history.map(msg => ({
                       role: msg.role,
@@ -1798,12 +1803,12 @@ export function useWebSocket() {
     }
 
     if (globalWs?.readyState === WebSocket.OPEN) {
-      wsRef.current = globalWs;
       setConnected(true);
       return;
     }
 
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (globalWs?.readyState === WebSocket.CONNECTING) {
+      // A connection is already being established — don't open a duplicate
       return;
     }
 
@@ -1825,11 +1830,20 @@ export function useWebSocket() {
       console.log("[useWebSocket] Connecting to WebSocket...");
       console.log("[useWebSocket] WebSocket URL:", wsUrl.substring(0, 100) + "...");
       const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
       globalWs = ws;
 
       ws.onopen = async () => {
         console.log("[useWebSocket] WebSocket connected");
+
+        // Guard against a stale onopen firing for a socket that's already been
+        // superseded (e.g. switchSession opened a newer connection while this
+        // one was still in CONNECTING). Close ourselves quietly and bail.
+        if (globalWs !== ws) {
+          console.log("[useWebSocket] Stale onopen — newer socket is active; closing this one");
+          try { ws.close(1000, "superseded"); } catch { /* no-op */ }
+          return;
+        }
+
         setConnected(true);
         setConnecting(false);
 
@@ -1940,6 +1954,16 @@ export function useWebSocket() {
         console.log("[useWebSocket] Intentional close:", globalIntentionalClose);
         console.log("[useWebSocket] Proactive reconnect:", globalIsProactiveReconnect);
 
+        // If a newer WebSocket has already replaced this one (e.g. switchSession
+        // closed us and immediately opened a fresh socket), this stale onclose
+        // must NOT mutate any shared state — otherwise it would wipe out the
+        // active connection's globalWs and trigger a spurious reconnect.
+        const isStaleClose = globalWs !== null && globalWs !== ws;
+        if (isStaleClose) {
+          console.log("[useWebSocket] Ignoring stale onclose (a newer socket is already active)");
+          return;
+        }
+
         // Clear keepalive ping interval
         if (globalPingInterval) {
           clearInterval(globalPingInterval);
@@ -1952,7 +1976,10 @@ export function useWebSocket() {
           globalProactiveReconnectTimer = null;
         }
 
-        globalWs = null;
+        // Only clear globalWs if it still points at this (now-closed) socket
+        if (globalWs === ws) {
+          globalWs = null;
+        }
         setConnected(false);
         setConnecting(false);
 
@@ -2025,7 +2052,7 @@ export function useWebSocket() {
 
   const sendMessage = useCallback(
     (message: string) => {
-      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      if (globalWs?.readyState !== WebSocket.OPEN) {
         console.error("[useWebSocket] WebSocket is not connected");
         return false;
       }
@@ -2078,7 +2105,7 @@ export function useWebSocket() {
         content: message,
       });
 
-      wsRef.current.send(
+      globalWs.send(
         JSON.stringify({
           action: "sendMessage",
           message,
@@ -2130,7 +2157,7 @@ export function useWebSocket() {
       attachments: AttachedFile[],
       attachmentsMeta: MessageAttachment[]
     ): Promise<boolean> => {
-      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      if (globalWs?.readyState !== WebSocket.OPEN) {
         console.error("[useWebSocket] WebSocket is not connected");
         return false;
       }
@@ -2228,7 +2255,11 @@ export function useWebSocket() {
             s3AttachmentCount: s3Attachments.length,
           });
 
-          wsRef.current.send(
+          if (globalWs?.readyState !== WebSocket.OPEN) {
+            console.error("[useWebSocket] WebSocket dropped before sending S3 attachments");
+            return false;
+          }
+          globalWs.send(
             JSON.stringify({
               action: "sendMessageWithS3Attachments",
               message,
@@ -2267,7 +2298,11 @@ export function useWebSocket() {
           });
 
           // Send to backend
-          wsRef.current.send(
+          if (globalWs?.readyState !== WebSocket.OPEN) {
+            console.error("[useWebSocket] WebSocket dropped before sending base64 attachments");
+            return false;
+          }
+          globalWs.send(
             JSON.stringify({
               action: "sendMessageWithAttachments",
               message,
@@ -2287,13 +2322,12 @@ export function useWebSocket() {
   );
 
   const requestAssets = useCallback(() => {
-    const ws = wsRef.current || globalWs;
-    if (ws?.readyState !== WebSocket.OPEN) {
+    if (globalWs?.readyState !== WebSocket.OPEN) {
       console.error("[useWebSocket] WebSocket is not connected");
       return false;
     }
 
-    ws.send(
+    globalWs.send(
       JSON.stringify({
         action: "downloadAssets",
       })
@@ -2303,11 +2337,11 @@ export function useWebSocket() {
   }, []);
 
   const requestProgress = useCallback(() => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+    if (globalWs?.readyState !== WebSocket.OPEN) {
       return false;
     }
 
-    wsRef.current.send(
+    globalWs.send(
       JSON.stringify({
         action: "getProgress",
       })
@@ -2317,13 +2351,13 @@ export function useWebSocket() {
   }, []);
 
   const requestHistory = useCallback(() => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+    if (globalWs?.readyState !== WebSocket.OPEN) {
       console.error("[useWebSocket] WebSocket is not connected for history request");
       return false;
     }
 
     console.log("[useWebSocket] Requesting history...");
-    wsRef.current.send(
+    globalWs.send(
       JSON.stringify({
         action: "getHistory",
       })
@@ -2333,12 +2367,12 @@ export function useWebSocket() {
   }, []);
 
   const downloadTemplate = useCallback(() => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+    if (globalWs?.readyState !== WebSocket.OPEN) {
       console.error("[useWebSocket] WebSocket is not connected");
       return false;
     }
 
-    wsRef.current.send(
+    globalWs.send(
       JSON.stringify({
         action: "downloadTemplate",
       })
@@ -2359,9 +2393,8 @@ export function useWebSocket() {
         globalReconnectTimeout = null;
       }
 
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
+      if (globalWs) {
+        globalWs.close();
         globalWs = null;
       }
 
@@ -2374,12 +2407,6 @@ export function useWebSocket() {
     },
     [setConnected, userSub]
   );
-
-  useEffect(() => {
-    if (globalWs?.readyState === WebSocket.OPEN) {
-      wsRef.current = globalWs;
-    }
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -2432,10 +2459,9 @@ export function useWebSocket() {
       setCurrentSessionId(newSessionId, sub);
 
       // Close existing connection - mark as intentional to prevent auto-reconnect
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
+      if (globalWs?.readyState === WebSocket.OPEN) {
         globalIntentionalClose = true; // Prevent onclose from auto-reconnecting
-        wsRef.current.close();
-        wsRef.current = null;
+        globalWs.close();
         globalWs = null;
       }
 
@@ -2450,9 +2476,9 @@ export function useWebSocket() {
       if (isNewSession) {
         // Wait for WebSocket to be ready, then send createNewSession
         const waitForWsAndCreateSession = () => {
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
+          if (globalWs?.readyState === WebSocket.OPEN) {
             console.log("[useWebSocket] Sending createNewSession to backend");
-            wsRef.current.send(
+            globalWs.send(
               JSON.stringify({
                 action: "createNewSession",
               })
@@ -2660,11 +2686,11 @@ export function useWebSocket() {
             );
 
             const injectHistoryToBackend = () => {
-              if (wsRef.current?.readyState === WebSocket.OPEN) {
+              if (globalWs?.readyState === WebSocket.OPEN) {
                 console.log("[useWebSocket] Injecting history into ECS session");
                 // Include originalSessionId so assets stored under this session can be accessed
                 // even if the backend assigns a different session_id on reconnection
-                wsRef.current.send(
+                globalWs.send(
                   JSON.stringify({
                     action: "injectHistory",
                     history: backendHistory.map((msg) => ({
@@ -2738,9 +2764,9 @@ export function useWebSocket() {
             const maxAssetsOnlyRetries = SESSION_CREATE_TIMEOUT_MS / 100;
 
             const notifyBackendAssetsOnly = () => {
-              if (wsRef.current?.readyState === WebSocket.OPEN) {
+              if (globalWs?.readyState === WebSocket.OPEN) {
                 console.log("[useWebSocket] Sending createNewSession for assets-only session");
-                wsRef.current.send(JSON.stringify({ action: "createNewSession" }));
+                globalWs.send(JSON.stringify({ action: "createNewSession" }));
                 // Set timeout for session_created response
                 setTimeout(() => {
                   if (!useBuilderStore.getState().isSessionReady) {
@@ -2770,9 +2796,9 @@ export function useWebSocket() {
             const maxEmptyRetries = EMPTY_SESSION_TIMEOUT_MS / 100;
 
             const notifyBackendEmpty = () => {
-              if (wsRef.current?.readyState === WebSocket.OPEN) {
+              if (globalWs?.readyState === WebSocket.OPEN) {
                 console.log("[useWebSocket] Sending createNewSession for empty session");
-                wsRef.current.send(JSON.stringify({ action: "createNewSession" }));
+                globalWs.send(JSON.stringify({ action: "createNewSession" }));
                 // Set timeout for session_created response
                 setTimeout(() => {
                   if (!useBuilderStore.getState().isSessionReady) {
