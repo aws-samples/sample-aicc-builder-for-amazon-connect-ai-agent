@@ -1738,11 +1738,7 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             try:
                 import json as _json
                 from pathlib import Path as _Path
-                _mount_root = _Path(S3FILES_MOUNT).resolve()
-                _safe_session = _sanitize_path_component(effective_session_id)
-                archive_path = (_mount_root / "sessions" / _safe_session / "context" / "interview_history.json").resolve()
-                if _mount_root not in archive_path.parents:
-                    raise ValueError(f"archive path escapes mount root: {archive_path}")
+                archive_path = _Path(S3FILES_MOUNT) / "sessions" / effective_session_id.replace("..", "_").replace("/", "_") / "context" / "interview_history.json"
                 archive_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(archive_path, "w", encoding="utf-8") as _f:
                     _json.dump(session["conversation_history"], _f, ensure_ascii=False, default=str)
@@ -2098,17 +2094,11 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
         }
 
 
-def _sanitize_path_component(value: str) -> str:
-    """Strip path-traversal segments and separators from a single path component."""
-    return value.replace("..", "_").replace("/", "_").replace("\\", "_")
-
-
 def _save_attachments_to_workspace(session_id: str, attachments: list):
     """Save inline (base64) attachments to NFS workspace for FileExplorer visibility."""
     try:
         import base64 as b64
-        safe_session = _sanitize_path_component(session_id)
-        uploads_dir = os.path.join(S3FILES_MOUNT, "sessions", safe_session, "uploads")
+        uploads_dir = os.path.join(S3FILES_MOUNT, "sessions", session_id, "uploads")
         os.makedirs(uploads_dir, exist_ok=True)
         for att in attachments:
             name = att.get("name", "unknown")
@@ -2120,8 +2110,7 @@ def _save_attachments_to_workspace(session_id: str, attachments: list):
                 data_b64 = data_b64.split(",", 1)[1]
             try:
                 file_bytes = b64.b64decode(data_b64)
-                safe_name = _sanitize_path_component(os.path.basename(name))
-                filepath = os.path.join(uploads_dir, safe_name)
+                filepath = os.path.join(uploads_dir, name)
                 with open(filepath, "wb") as f:
                     f.write(file_bytes)
                 logger.info(f"[WORKSPACE] Saved upload: {filepath} ({len(file_bytes)} bytes)")
@@ -2135,8 +2124,7 @@ def _save_s3_attachments_to_workspace(session_id: str, s3_attachments: list):
     """Save S3 attachments to NFS workspace for FileExplorer visibility."""
     try:
         from tools.attachment_handler import read_file_from_s3
-        safe_session = _sanitize_path_component(session_id)
-        uploads_dir = os.path.join(S3FILES_MOUNT, "sessions", safe_session, "uploads")
+        uploads_dir = os.path.join(S3FILES_MOUNT, "sessions", session_id, "uploads")
         os.makedirs(uploads_dir, exist_ok=True)
         for att in s3_attachments:
             s3_key = att.get("s3Key", "")
@@ -2146,8 +2134,7 @@ def _save_s3_attachments_to_workspace(session_id: str, s3_attachments: list):
             try:
                 file_bytes = read_file_from_s3(s3_key)
                 if file_bytes:
-                    safe_filename = _sanitize_path_component(os.path.basename(filename))
-                    filepath = os.path.join(uploads_dir, safe_filename)
+                    filepath = os.path.join(uploads_dir, filename)
                     with open(filepath, "wb") as f:
                         f.write(file_bytes)
                     logger.info(f"[WORKSPACE] Saved S3 upload: {filepath} ({len(file_bytes)} bytes)")
