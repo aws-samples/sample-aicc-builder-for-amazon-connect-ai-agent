@@ -1,0 +1,1121 @@
+{
+  "$defs": {
+    "BusinessRule": {
+      "additionalProperties": true,
+      "description": "A single business rule for an operation.",
+      "properties": {
+        "rule_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule Id"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Condition"
+        },
+        "action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Action"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Message"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        }
+      },
+      "title": "BusinessRule",
+      "type": "object"
+    },
+    "ConversationStep": {
+      "additionalProperties": true,
+      "description": "A single step in a structured conversation flow.",
+      "properties": {
+        "step_id": {
+          "description": "Step identifier (e.g., '1', '2', 'A', 'B')",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "label": {
+          "description": "Step name (e.g., '\ud1b5\ud654 \uac00\ub2a5 \uc5ec\ubd80 \ud655\uc778')",
+          "title": "Label",
+          "type": "string"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Fixed message verbatim (None = AI decides)",
+          "title": "Message"
+        },
+        "branches": {
+          "default": [],
+          "description": "[{\"condition\": \"\ub124\", \"next_step\": \"3\"}, ...]",
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Branches",
+          "type": "array"
+        },
+        "tool_call": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "tool_id to invoke at this step",
+          "title": "Tool Call"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Extra instructions for AI at this step",
+          "title": "Notes"
+        }
+      },
+      "required": [
+        "step_id",
+        "label"
+      ],
+      "title": "ConversationStep",
+      "type": "object"
+    },
+    "DataSourceSpec": {
+      "additionalProperties": true,
+      "description": "Specification for the data source.",
+      "properties": {
+        "db_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Database type: dynamodb, rds_mysql, rds_postgresql",
+          "title": "Db Type"
+        },
+        "table_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table Name"
+        },
+        "partition_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Partition Key"
+        },
+        "sort_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sort Key"
+        },
+        "gsi_indexes": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gsi Indexes"
+        },
+        "connection_secret_arn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connection Secret Arn"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        }
+      },
+      "title": "DataSourceSpec",
+      "type": "object"
+    },
+    "ErrorResponse": {
+      "additionalProperties": true,
+      "description": "Specification for an error response.",
+      "properties": {
+        "status_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "HTTP status code",
+          "title": "Status Code"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Condition"
+        }
+      },
+      "title": "ErrorResponse",
+      "type": "object"
+    },
+    "FieldSpec": {
+      "additionalProperties": true,
+      "description": "Specification for a single input/output field.",
+      "properties": {
+        "name": {
+          "description": "Field name (camelCase)",
+          "title": "Name",
+          "type": "string"
+        },
+        "field_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Data type: string, number, integer, boolean, date, datetime, email, phone, enum, array, object",
+          "title": "Field Type"
+        },
+        "required": {
+          "default": true,
+          "description": "Whether this field is required",
+          "title": "Required",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable description",
+          "title": "Description"
+        },
+        "min_length": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Minimum string length",
+          "title": "Min Length"
+        },
+        "max_length": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum string length",
+          "title": "Max Length"
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Regex pattern for validation",
+          "title": "Pattern"
+        },
+        "min_value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Minimum numeric value",
+          "title": "Min Value"
+        },
+        "max_value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum numeric value",
+          "title": "Max Value"
+        },
+        "enum_values": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Allowed values for enum type",
+          "title": "Enum Values"
+        },
+        "date_format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Expected date format",
+          "title": "Date Format"
+        },
+        "allow_future_dates": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allow Future Dates"
+        },
+        "allow_past_dates": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allow Past Dates"
+        },
+        "max_days_in_future": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Days In Future"
+        },
+        "max_days_in_past": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Days In Past"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Additional validation rule",
+          "title": "Validation"
+        },
+        "default_value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Value"
+        },
+        "example_value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Example valid value",
+          "title": "Example Value"
+        },
+        "is_pii": {
+          "default": false,
+          "title": "Is Pii",
+          "type": "boolean"
+        },
+        "mask_in_logs": {
+          "default": false,
+          "title": "Mask In Logs",
+          "type": "boolean"
+        },
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For field_type='array': schema of each element. If items.field_type='object', use items.properties for sub-fields. If items is a scalar/enum, use items.field_type + items.enum_values."
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/FieldSpec"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For field_type='object': list of sub-field FieldSpec objects. For arrays of objects, set items.field_type='object' and items.properties.",
+          "title": "Properties"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "FieldSpec",
+      "type": "object"
+    },
+    "SideEffect": {
+      "additionalProperties": true,
+      "description": "A side effect that occurs after the main operation.",
+      "properties": {
+        "effect_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Type: email, sms, notification, webhook, audit_log",
+          "title": "Effect Type"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Condition"
+        },
+        "recipient_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recipient Field"
+        },
+        "template_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template Name"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject"
+        },
+        "webhook_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Webhook Url"
+        },
+        "audit_fields": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audit Fields"
+        }
+      },
+      "title": "SideEffect",
+      "type": "object"
+    },
+    "ToolSpec": {
+      "additionalProperties": true,
+      "description": "Individual tool definition within an Operation. Each tool = 1 Lambda + 1 API path.",
+      "properties": {
+        "tool_id": {
+          "description": "Tool identifier (e.g., 'notify_customs_clearance_status')",
+          "title": "Tool Id",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        },
+        "role": {
+          "default": "primary",
+          "description": "'primary' | 'helper' | 'session'",
+          "title": "Role",
+          "type": "string"
+        },
+        "http_method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "POST",
+          "title": "Http Method"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "API path (auto: /tools/{tool_id})",
+          "title": "Path"
+        },
+        "input_fields": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FieldSpec"
+          },
+          "title": "Input Fields",
+          "type": "array"
+        },
+        "output_fields": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FieldSpec"
+          },
+          "title": "Output Fields",
+          "type": "array"
+        },
+        "data_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataSourceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "trigger_context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When to use this tool (e.g., '\uc774\uba54\uc77c \ubbf8\uc218\uc2e0 \uc2dc')",
+          "title": "Trigger Context"
+        },
+        "validation_rules": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Validation Rules"
+        },
+        "error_handling": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "'retry_once' | 'retry_3' | 'escalate' | 'ignore'",
+          "title": "Error Handling"
+        },
+        "generate_lambda": {
+          "default": true,
+          "title": "Generate Lambda",
+          "type": "boolean"
+        },
+        "generate_openapi": {
+          "default": true,
+          "title": "Generate Openapi",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "tool_id"
+      ],
+      "title": "ToolSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Complete specification for a single API operation.",
+  "properties": {
+    "operation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Operation Id"
+    },
+    "operation_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Operation Type"
+    },
+    "http_method": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Http Method"
+    },
+    "path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Path"
+    },
+    "summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Summary"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "input_fields": {
+      "default": [],
+      "description": "All input fields",
+      "items": {
+        "$ref": "#/$defs/FieldSpec"
+      },
+      "title": "Input Fields",
+      "type": "array"
+    },
+    "output_fields": {
+      "default": [],
+      "description": "All output fields",
+      "items": {
+        "$ref": "#/$defs/FieldSpec"
+      },
+      "title": "Output Fields",
+      "type": "array"
+    },
+    "data_source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DataSourceSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "business_rules": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/BusinessRule"
+      },
+      "title": "Business Rules",
+      "type": "array"
+    },
+    "cross_field_validations": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cross Field Validations"
+    },
+    "success_status_code": {
+      "default": 200,
+      "title": "Success Status Code",
+      "type": "integer"
+    },
+    "success_message_template": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Success Message Template"
+    },
+    "error_responses": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ErrorResponse"
+      },
+      "title": "Error Responses",
+      "type": "array"
+    },
+    "side_effects": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SideEffect"
+      },
+      "title": "Side Effects",
+      "type": "array"
+    },
+    "requires_authentication": {
+      "default": true,
+      "title": "Requires Authentication",
+      "type": "boolean"
+    },
+    "allowed_roles": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Allowed Roles"
+    },
+    "rate_limit_per_minute": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rate Limit Per Minute"
+    },
+    "conversation_script": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Conversation scenario verbatim or S3 key reference",
+      "title": "Conversation Script"
+    },
+    "greeting_message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Exact greeting message from customer requirements",
+      "title": "Greeting Message"
+    },
+    "closing_message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Exact closing message from customer requirements",
+      "title": "Closing Message"
+    },
+    "exception_scenarios": {
+      "anyOf": [
+        {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Exception/fallback scenarios",
+      "title": "Exception Scenarios"
+    },
+    "call_direction": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "'inbound' or 'outbound'",
+      "title": "Call Direction"
+    },
+    "scenario_step_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Number of scenario steps (for verification)",
+      "title": "Scenario Step Count"
+    },
+    "tools": {
+      "default": [],
+      "description": "Tools belonging to this operation (primary + helper)",
+      "items": {
+        "$ref": "#/$defs/ToolSpec"
+      },
+      "title": "Tools",
+      "type": "array"
+    },
+    "conversation_steps": {
+      "default": [],
+      "description": "Structured conversation steps (structured version of conversation_script)",
+      "items": {
+        "$ref": "#/$defs/ConversationStep"
+      },
+      "title": "Conversation Steps",
+      "type": "array"
+    },
+    "flow_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "'scripted' | 'intent_driven' | 'hybrid'",
+      "title": "Flow Type"
+    },
+    "generate_lambda": {
+      "default": true,
+      "title": "Generate Lambda",
+      "type": "boolean"
+    },
+    "generate_openapi": {
+      "default": true,
+      "title": "Generate Openapi",
+      "type": "boolean"
+    },
+    "language": {
+      "default": "python",
+      "title": "Language",
+      "type": "string"
+    }
+  },
+  "title": "OperationSpec",
+  "type": "object"
+}

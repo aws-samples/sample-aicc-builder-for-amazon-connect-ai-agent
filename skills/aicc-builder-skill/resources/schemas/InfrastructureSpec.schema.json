@@ -1,0 +1,338 @@
+{
+  "$defs": {
+    "ApiGatewayConfig": {
+      "additionalProperties": true,
+      "description": "API Gateway configuration.",
+      "properties": {
+        "stage_name": {
+          "default": "prod",
+          "title": "Stage Name",
+          "type": "string"
+        },
+        "api_key_required": {
+          "default": false,
+          "description": "Whether API key is required on methods",
+          "title": "Api Key Required",
+          "type": "boolean"
+        },
+        "cors_origins": {
+          "default": "*",
+          "description": "CORS allowed origins ('*' for all, or comma-separated domains)",
+          "title": "Cors Origins",
+          "type": "string"
+        },
+        "cors_methods": {
+          "default": "*",
+          "description": "CORS allowed methods",
+          "title": "Cors Methods",
+          "type": "string"
+        },
+        "base_path": {
+          "default": "/tools",
+          "description": "Base path prefix for all tool endpoints (e.g., /tools \u2192 /tools/{tool_id})",
+          "title": "Base Path",
+          "type": "string"
+        },
+        "custom_domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Custom domain name if applicable",
+          "title": "Custom Domain"
+        }
+      },
+      "title": "ApiGatewayConfig",
+      "type": "object"
+    },
+    "DynamoDbConfig": {
+      "additionalProperties": true,
+      "description": "DynamoDB configuration (only when db_type is dynamodb).",
+      "properties": {
+        "tables": {
+          "default": [],
+          "description": "Table definitions [{'name': '...', 'partition_key': '...', 'sort_key': '...', 'gsi': [...]}]",
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tables",
+          "type": "array"
+        },
+        "billing_mode": {
+          "default": "PAY_PER_REQUEST",
+          "description": "'PAY_PER_REQUEST' or 'PROVISIONED'",
+          "title": "Billing Mode",
+          "type": "string"
+        },
+        "include_sample_data": {
+          "default": true,
+          "description": "Whether to seed sample data on deployment",
+          "title": "Include Sample Data",
+          "type": "boolean"
+        }
+      },
+      "title": "DynamoDbConfig",
+      "type": "object"
+    },
+    "LambdaConfig": {
+      "additionalProperties": true,
+      "description": "Lambda function defaults.",
+      "properties": {
+        "runtime": {
+          "default": "python3.11",
+          "title": "Runtime",
+          "type": "string"
+        },
+        "memory_mb": {
+          "default": 256,
+          "title": "Memory Mb",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 30,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "architectures": {
+          "default": [
+            "arm64"
+          ],
+          "description": "CloudFormation AWS::Lambda::Function 'Architectures' property. MUST be a YAML list with exactly ONE string: ['arm64'] or ['x86_64']. Do NOT use the singular form 'Architecture' and do NOT use a bare string.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Architectures",
+          "type": "array"
+        },
+        "layers": {
+          "default": [],
+          "description": "Lambda layer ARNs to attach to all functions",
+          "items": {
+            "type": "string"
+          },
+          "title": "Layers",
+          "type": "array"
+        },
+        "environment_variables": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Extra environment variables shared across all Lambda functions",
+          "title": "Environment Variables",
+          "type": "object"
+        }
+      },
+      "title": "LambdaConfig",
+      "type": "object"
+    },
+    "RdsConfig": {
+      "additionalProperties": true,
+      "description": "RDS connection configuration (only when db_type is rds_*).",
+      "properties": {
+        "cluster_arn": {
+          "description": "Aurora cluster ARN",
+          "title": "Cluster Arn",
+          "type": "string"
+        },
+        "secret_arn": {
+          "description": "Secrets Manager ARN for DB credentials",
+          "title": "Secret Arn",
+          "type": "string"
+        },
+        "database_name": {
+          "description": "Database name to connect to",
+          "title": "Database Name",
+          "type": "string"
+        },
+        "engine": {
+          "default": "postgresql",
+          "description": "Database engine: 'mysql' or 'postgresql'",
+          "title": "Engine",
+          "type": "string"
+        },
+        "tables": {
+          "default": [],
+          "description": "Known tables and their schemas [{'name': 'reservations', 'columns': [...]}]",
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tables",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cluster_arn",
+        "secret_arn",
+        "database_name"
+      ],
+      "title": "RdsConfig",
+      "type": "object"
+    },
+    "VpcConfig": {
+      "additionalProperties": true,
+      "description": "VPC configuration (only when vpc_required is True).",
+      "properties": {
+        "vpc_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vpc Id"
+        },
+        "subnet_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Subnet Ids",
+          "type": "array"
+        },
+        "security_group_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Security Group Ids",
+          "type": "array"
+        }
+      },
+      "title": "VpcConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Project-level infrastructure specification \u2014 the single source of truth for all generators.\n\nThis spec defines the infrastructure architecture that all generators must follow:\n- Infrastructure Generator: uses this to produce CloudFormation\n- Lambda Generator: reads db_type, rds_config/dynamodb_config for data access patterns\n- OpenAPI Generator: reads api_gateway config for path structure\n- Reviewer: validates generated assets against this spec",
+  "properties": {
+    "project_name": {
+      "description": "Project identifier for resource naming (e.g., 'sunny-hotel')",
+      "title": "Project Name",
+      "type": "string"
+    },
+    "region": {
+      "default": "ap-northeast-2",
+      "description": "AWS region for all resources",
+      "title": "Region",
+      "type": "string"
+    },
+    "db_type": {
+      "description": "Database type: 'dynamodb', 'rds_mysql', 'rds_postgresql'",
+      "title": "Db Type",
+      "type": "string"
+    },
+    "rds_config": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RdsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "RDS connection details (required when db_type starts with 'rds_')"
+    },
+    "dynamodb_config": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DynamoDbConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "DynamoDB settings (required when db_type is 'dynamodb')"
+    },
+    "lambda_config": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LambdaConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Lambda function defaults"
+    },
+    "api_gateway_config": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ApiGatewayConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "API Gateway configuration"
+    },
+    "vpc_required": {
+      "default": false,
+      "description": "Whether Lambda functions need VPC access",
+      "title": "Vpc Required",
+      "type": "boolean"
+    },
+    "vpc_config": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VpcConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "VPC details (required when vpc_required is True)"
+    },
+    "include_s3_bucket": {
+      "default": true,
+      "description": "Whether to include S3 bucket (for FAQ/Knowledge Base uploads)",
+      "title": "Include S3 Bucket",
+      "type": "boolean"
+    },
+    "include_customer_phone_lookup": {
+      "default": false,
+      "description": "Whether to include CustomerLookup + UpdateQSession Lambda resources",
+      "title": "Include Customer Phone Lookup",
+      "type": "boolean"
+    },
+    "tags": {
+      "additionalProperties": true,
+      "default": {},
+      "description": "AWS resource tags to apply to all resources",
+      "title": "Tags",
+      "type": "object"
+    },
+    "notes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Additional infrastructure notes or constraints",
+      "title": "Notes"
+    }
+  },
+  "required": [
+    "project_name",
+    "db_type"
+  ],
+  "title": "InfrastructureSpec",
+  "type": "object"
+}

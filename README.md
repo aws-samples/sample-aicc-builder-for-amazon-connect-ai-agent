@@ -203,7 +203,7 @@ AWS CLI 2.x (>= 2.34.27 for `s3files` support) · Node.js 18+ · Python 3.11+ ·
 ### Deploy
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/aws-samples/sample-aicc-builder-for-amazon-connect-ai-agent.git
 cd aicc-builder
 
 # Full deployment (default: Seoul ap-northeast-2)

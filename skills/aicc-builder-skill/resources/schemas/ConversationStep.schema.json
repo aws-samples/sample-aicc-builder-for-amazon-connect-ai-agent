@@ -1,0 +1,71 @@
+{
+  "additionalProperties": true,
+  "description": "A single step in a structured conversation flow.",
+  "properties": {
+    "step_id": {
+      "description": "Step identifier (e.g., '1', '2', 'A', 'B')",
+      "title": "Step Id",
+      "type": "string"
+    },
+    "label": {
+      "description": "Step name (e.g., '\ud1b5\ud654 \uac00\ub2a5 \uc5ec\ubd80 \ud655\uc778')",
+      "title": "Label",
+      "type": "string"
+    },
+    "message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Fixed message verbatim (None = AI decides)",
+      "title": "Message"
+    },
+    "branches": {
+      "default": [],
+      "description": "[{\"condition\": \"\ub124\", \"next_step\": \"3\"}, ...]",
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Branches",
+      "type": "array"
+    },
+    "tool_call": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "tool_id to invoke at this step",
+      "title": "Tool Call"
+    },
+    "notes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Extra instructions for AI at this step",
+      "title": "Notes"
+    }
+  },
+  "required": [
+    "step_id",
+    "label"
+  ],
+  "title": "ConversationStep",
+  "type": "object"
+}
