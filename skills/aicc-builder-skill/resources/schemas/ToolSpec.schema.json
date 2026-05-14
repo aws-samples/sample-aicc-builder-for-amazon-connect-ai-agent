@@ -1,0 +1,482 @@
+{
+  "$defs": {
+    "DataSourceSpec": {
+      "additionalProperties": true,
+      "description": "Specification for the data source.",
+      "properties": {
+        "db_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Database type: dynamodb, rds_mysql, rds_postgresql",
+          "title": "Db Type"
+        },
+        "table_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table Name"
+        },
+        "partition_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Partition Key"
+        },
+        "sort_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sort Key"
+        },
+        "gsi_indexes": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gsi Indexes"
+        },
+        "connection_secret_arn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connection Secret Arn"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        }
+      },
+      "title": "DataSourceSpec",
+      "type": "object"
+    },
+    "FieldSpec": {
+      "additionalProperties": true,
+      "description": "Specification for a single input/output field.",
+      "properties": {
+        "name": {
+          "description": "Field name (camelCase)",
+          "title": "Name",
+          "type": "string"
+        },
+        "field_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Data type: string, number, integer, boolean, date, datetime, email, phone, enum, array, object",
+          "title": "Field Type"
+        },
+        "required": {
+          "default": true,
+          "description": "Whether this field is required",
+          "title": "Required",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable description",
+          "title": "Description"
+        },
+        "min_length": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Minimum string length",
+          "title": "Min Length"
+        },
+        "max_length": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum string length",
+          "title": "Max Length"
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Regex pattern for validation",
+          "title": "Pattern"
+        },
+        "min_value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Minimum numeric value",
+          "title": "Min Value"
+        },
+        "max_value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum numeric value",
+          "title": "Max Value"
+        },
+        "enum_values": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Allowed values for enum type",
+          "title": "Enum Values"
+        },
+        "date_format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Expected date format",
+          "title": "Date Format"
+        },
+        "allow_future_dates": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allow Future Dates"
+        },
+        "allow_past_dates": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allow Past Dates"
+        },
+        "max_days_in_future": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Days In Future"
+        },
+        "max_days_in_past": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Days In Past"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Additional validation rule",
+          "title": "Validation"
+        },
+        "default_value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Value"
+        },
+        "example_value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Example valid value",
+          "title": "Example Value"
+        },
+        "is_pii": {
+          "default": false,
+          "title": "Is Pii",
+          "type": "boolean"
+        },
+        "mask_in_logs": {
+          "default": false,
+          "title": "Mask In Logs",
+          "type": "boolean"
+        },
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For field_type='array': schema of each element. If items.field_type='object', use items.properties for sub-fields. If items is a scalar/enum, use items.field_type + items.enum_values."
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/FieldSpec"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For field_type='object': list of sub-field FieldSpec objects. For arrays of objects, set items.field_type='object' and items.properties.",
+          "title": "Properties"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "FieldSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Individual tool definition within an Operation. Each tool = 1 Lambda + 1 API path.",
+  "properties": {
+    "tool_id": {
+      "description": "Tool identifier (e.g., 'notify_customs_clearance_status')",
+      "title": "Tool Id",
+      "type": "string"
+    },
+    "summary": {
+      "default": "",
+      "title": "Summary",
+      "type": "string"
+    },
+    "role": {
+      "default": "primary",
+      "description": "'primary' | 'helper' | 'session'",
+      "title": "Role",
+      "type": "string"
+    },
+    "http_method": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "POST",
+      "title": "Http Method"
+    },
+    "path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "API path (auto: /tools/{tool_id})",
+      "title": "Path"
+    },
+    "input_fields": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FieldSpec"
+      },
+      "title": "Input Fields",
+      "type": "array"
+    },
+    "output_fields": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FieldSpec"
+      },
+      "title": "Output Fields",
+      "type": "array"
+    },
+    "data_source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DataSourceSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "trigger_context": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "When to use this tool (e.g., '\uc774\uba54\uc77c \ubbf8\uc218\uc2e0 \uc2dc')",
+      "title": "Trigger Context"
+    },
+    "validation_rules": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Validation Rules"
+    },
+    "error_handling": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "'retry_once' | 'retry_3' | 'escalate' | 'ignore'",
+      "title": "Error Handling"
+    },
+    "generate_lambda": {
+      "default": true,
+      "title": "Generate Lambda",
+      "type": "boolean"
+    },
+    "generate_openapi": {
+      "default": true,
+      "title": "Generate Openapi",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tool_id"
+  ],
+  "title": "ToolSpec",
+  "type": "object"
+}
