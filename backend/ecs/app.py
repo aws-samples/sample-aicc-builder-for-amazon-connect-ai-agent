@@ -1149,6 +1149,25 @@ async def verify_token(authorization: str = Header(default="")):
     return claims
 
 
+def _looks_like_cold_workspace(tree: list) -> bool:
+    """Detect a session whose NFS view was evicted/never-imported.
+
+    True when the only top-level entry is `context/` (the session always
+    rewrites conversation_history.json on every message, so it stays warm
+    even when assets/, state/, and specs/ have been evicted).
+    """
+    if not tree:
+        return True
+    non_context = [n for n in tree if n.get("name") != "context"]
+    if not non_context:
+        return True
+    # All non-context top-level dirs are empty → assets weren't materialized.
+    return all(
+        n.get("type") == "dir" and not n.get("children")
+        for n in non_context
+    )
+
+
 def _build_tree(directory: str, current_depth: int = 0, max_depth: int = 3) -> list:
     """Recursively build file tree from directory."""
     entries = []
@@ -1233,6 +1252,16 @@ async def get_workspace_tree(
         sessions_exists = sessions_dir.exists()
 
         if not target.exists():
+            # Session dir not on NFS — could be cold (lazy-import miss after a
+            # task restart). Try hydrating once before giving up.
+            if not path:
+                try:
+                    from tools.s3_asset_storage import hydrate_session_workspace
+                    hydrate_session_workspace(session_id)
+                except Exception as e:
+                    logger.warning(f"[workspace-api] hydrate failed for {session_id}: {e}")
+
+        if not target.exists():
             # Log diagnostic info for debugging NFS mount issues
             mount_contents = "N/A"
             if mount_exists:
@@ -1249,6 +1278,21 @@ async def get_workspace_tree(
             return JSONResponse({"success": True, "tree": []})
 
         tree = _build_tree(str(target), max_depth=min(depth, 8))
+
+        # Self-heal: if the FileExplorer is loading a session whose NFS view
+        # has been evicted (cache eviction after 30 days, or never imported
+        # for files >10MB), copy the durable S3 copies back into the NFS path
+        # and rebuild the tree. Only runs at the workspace root, not for
+        # sub-path queries.
+        if not path and _looks_like_cold_workspace(tree):
+            try:
+                from tools.s3_asset_storage import hydrate_session_workspace
+                hydrate_session_workspace(session_id)
+                if target.exists():
+                    tree = _build_tree(str(target), max_depth=min(depth, 8))
+            except Exception as e:
+                logger.warning(f"[workspace-api] hydrate failed for {session_id}: {e}")
+
         return JSONResponse({"success": True, "tree": tree})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
