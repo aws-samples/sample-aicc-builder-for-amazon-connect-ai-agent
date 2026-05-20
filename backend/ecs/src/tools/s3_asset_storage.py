@@ -664,101 +664,147 @@ def list_session_assets(session_id: str, s3_only: bool = False) -> list:
         return []
 
 
+def _copy_s3_key_to_nfs(s3_key: str, nfs_path: Path) -> bool:
+    """Download an S3 object and write it to *nfs_path* atomically.
+
+    Used by hydrate_session_workspace to repopulate the NFS view from the
+    durable S3 copy when lazy mountpoint-s3 import didn't bring the file
+    back (file >10MB, dir not yet read, or evicted after 30 days).
+    """
+    bucket = get_bucket_name()
+    if not bucket:
+        return False
+    try:
+        s3 = get_s3_client()
+        body = s3.get_object(Bucket=bucket, Key=s3_key)["Body"].read()
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code != "NoSuchKey":
+            logger.warning(f"[HYDRATE] S3 GET failed {s3_key}: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"[HYDRATE] S3 GET error {s3_key}: {e}")
+        return False
+    try:
+        nfs_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = nfs_path.with_suffix(nfs_path.suffix + ".tmp")
+        with open(tmp, "wb") as f:
+            f.write(body)
+        os.rename(tmp, nfs_path)
+        return True
+    except OSError as e:
+        logger.warning(f"[HYDRATE] NFS write failed {nfs_path}: {e}")
+        return False
+
+
+def _list_s3_prefix(prefix: str) -> list:
+    """List every S3 key under *prefix* (handles pagination)."""
+    bucket = get_bucket_name()
+    if not bucket:
+        return []
+    keys: list = []
+    try:
+        s3 = get_s3_client()
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                keys.append(obj["Key"])
+    except Exception as e:
+        logger.warning(f"[HYDRATE] list {prefix} failed: {e}")
+    return keys
+
+
 def hydrate_session_workspace(session_id: str) -> dict:
     """
-    Warm the NFS view so every asset for a session is materialized.
+    Repopulate the NFS view from S3 so every asset for a session is visible.
 
-    S3 Files (mountpoint-s3) lazily imports each directory on first access
-    (ON_DIRECTORY_FIRST_ACCESS). After an ECS task restart, the NFS mount for
-    a resumed session is empty — assets exist in S3 but are not visible to
-    os.scandir until each ancestor directory has been read at least once.
-    That race causes /api/workspace/{sid}/tree to return a partial tree on
-    resume (only context/conversation_history.json shows up, because that
-    file is re-written by the backend on every message).
+    S3 Files (managed NFS over S3) lazily imports each directory on first
+    access (ON_DIRECTORY_FIRST_ACCESS) and only for files ≤10MB. Files larger
+    than that, or older than the 30-day eviction window, never come back via
+    auto-import — even though the underlying S3 objects still exist. Every
+    asset is dual-written: NFS at sessions/{sid}/assets/{type}/{file} AND a
+    durable PutObject at assets/{sid}/{type}/{file}. This helper bridges the
+    two: it lists the authoritative durable copy and copies any missing files
+    into the NFS view so the workspace tree shows the full session contents.
 
-    This helper is read-only: it lists the authoritative S3 state, scandirs
-    every ancestor directory (cheap — forces readdir import), then stats
-    each file. No writes back to the mount, so versioned bucket object
-    versions are not incremented.
+    Covers three S3 prefixes:
+      - assets/{sid}/{type}/...      → /mnt/s3/sessions/{sid}/assets/{type}/...
+      - assets/{sid}/specs/{op}.json → /mnt/s3/sessions/{sid}/assets/specs/...
+      - assets/{sid}/state/...       → /mnt/s3/sessions/{sid}/state/...
+
+    Idempotent: files already present on NFS are skipped.
 
     Args:
-        session_id: User session ID to warm.
+        session_id: User session ID to hydrate.
 
     Returns:
         dict with:
-          - listed:  number of S3 keys found under assets/{sid}/
-          - dirs:    number of ancestor directories warmed
-          - files:   number of files whose metadata was successfully resolved
-          - skipped: number of files still missing after warm (likely >10MB
-                     import cap, or not yet flushed from write cache)
+          - listed:   total S3 keys discovered for the session
+          - files:    files already present on NFS (no work needed)
+          - restored: files newly copied from S3 to NFS
+          - skipped:  files we couldn't restore (S3 read or NFS write failed)
     """
-    result = {"listed": 0, "dirs": 0, "files": 0, "skipped": 0}
+    result = {"listed": 0, "files": 0, "restored": 0, "skipped": 0}
 
     if not _nfs_available():
         logger.info(f"[HYDRATE] NFS not available, skipping for {session_id}")
         return result
 
-    # 1. List authoritative set of keys from S3 (bypasses possibly-stale NFS).
-    try:
-        keys = list_session_assets(session_id, s3_only=True)
-    except Exception as e:
-        logger.warning(f"[HYDRATE] S3 list failed for {session_id}: {e}")
-        return result
-
-    result["listed"] = len(keys)
-    if not keys:
-        return result
-
     safe_session = session_id.replace("..", "_").replace("/", "_")
-    mount_root = Path(S3FILES_MOUNT) / "sessions" / safe_session / "assets"
+    mount_root = Path(S3FILES_MOUNT) / "sessions" / safe_session
 
-    # 2. Collect every ancestor directory we need materialized.
-    dirs_to_warm = {mount_root}
-    file_paths = []
-    for key in keys:
+    # Map each S3 key to its target NFS path. Three durable prefixes:
+    #   - assets/{sid}/state/...   → state/...
+    #   - assets/{sid}/specs/...   → assets/specs/...
+    #   - assets/{sid}/{type}/...  → assets/{type}/...
+    plan: list[tuple[str, Path]] = []
+
+    # Asset files (lambda, openapi, contact_flow, infrastructure, prompt, faq, …).
+    try:
+        asset_keys = list_session_assets(session_id, s3_only=True)
+    except Exception as e:
+        logger.warning(f"[HYDRATE] list assets failed for {session_id}: {e}")
+        asset_keys = []
+    for key in asset_keys:
         _, asset_type, file_name, op_id = _parse_s3_key_to_nfs_components(key)
         if asset_type is None:
             continue
-        type_dir = mount_root / asset_type
-        dirs_to_warm.add(type_dir)
+        target = mount_root / "assets" / asset_type
         if op_id:
-            op_dir = type_dir / op_id
-            dirs_to_warm.add(op_dir)
-            file_paths.append(op_dir / file_name)
-        else:
-            file_paths.append(type_dir / file_name)
+            target = target / op_id
+        target = target / file_name
+        plan.append((key, target))
 
-    # 3. Warm directories shallow → deep so each readdir sees its parent imported.
-    for d in sorted(dirs_to_warm, key=lambda p: len(p.parts)):
+    # State files (project.json, progress.json, requirements/, schemas/).
+    state_prefix = f"assets/{safe_session}/state/"
+    for key in _list_s3_prefix(state_prefix):
+        rel = key[len(state_prefix):]
+        if not rel:
+            continue
+        plan.append((key, mount_root / "state" / rel))
+
+    result["listed"] = len(plan)
+    if not plan:
+        return result
+
+    for s3_key, nfs_path in plan:
         try:
-            with os.scandir(d) as it:
-                # Consume the iterator so mountpoint-s3 completes the import.
-                for _ in it:
-                    pass
-            result["dirs"] += 1
-        except FileNotFoundError:
-            # Mount didn't materialize this dir — S3 listing may have been empty
-            # for that prefix (e.g., asset type dir but no files), or the dir
-            # lives above SizeLessThan threshold (unlikely for directories).
-            pass
+            if nfs_path.exists():
+                result["files"] += 1
+                continue
         except OSError as e:
-            logger.warning(f"[HYDRATE] scandir failed for {d}: {e}")
-
-    # 4. Stat each file to confirm it materialized in the view.
-    for p in file_paths:
-        try:
-            p.stat()
-            result["files"] += 1
-        except FileNotFoundError:
+            logger.warning(f"[HYDRATE] stat failed for {nfs_path}: {e}")
             result["skipped"] += 1
-        except OSError as e:
-            logger.warning(f"[HYDRATE] stat failed for {p}: {e}")
+            continue
+        if _copy_s3_key_to_nfs(s3_key, nfs_path):
+            result["restored"] += 1
+        else:
             result["skipped"] += 1
 
     logger.info(
         f"[HYDRATE] session={session_id} "
-        f"listed={result['listed']} dirs={result['dirs']} "
-        f"files={result['files']} skipped={result['skipped']}"
+        f"listed={result['listed']} files={result['files']} "
+        f"restored={result['restored']} skipped={result['skipped']}"
     )
     return result
 
