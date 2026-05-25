@@ -611,24 +611,19 @@ cd backend/ecs && uvicorn app:app --port 8080
 
 # 日本語
 
-## AICC Builderとは？
+## AICC Builder とは？
 
-AICC Builderは、お客様との約1時間の会話から、Amazon Connectのカスタマイズされた
-資産バンドル（Lambda、OpenAPI、AIプロンプト、Contact Flow、CDKインフラ、FAQ）を
-自動生成する**オープンソースのAgentic AIサンプルアプリケーション**です。
-1つのオーケストレーターエージェントがお客様にインタビューし、会話を構造化された
-`OperationSpec`に蒸留した上で、各資産を生成する専門サブエージェントを呼び出します。
-フェーズ間で**決定論的なクロスアセット検証**を実行し、納品前にバンドルの
-内部一貫性を保証します。
+AICC Builder は、約 1 時間の対話で、Amazon Connect 用のカスタムアセット一式（Lambda、OpenAPI、AI プロンプト、Contact Flow、CDK インフラ、FAQ）を自動生成する**オープンソースの Agentic AI サンプルアプリケーション**です。
 
-**対象**: Amazon Connect AI Agentを高速に構築し、お客様の実ビジネスに
-デプロイ可能なPoCに仕上げたい方。
+オーケストレーターエージェントがお客様への聞き取りを進め、対話の内容を構造化された `OperationSpec` に集約します。そこから各アセット担当の専門サブエージェントを呼び出してビルドを進めますが、各フェーズの間に整合性チェックが走るため、最終的に出力されるアセット一式は内部的に整合性の取れた状態で揃います。
 
-> 📖 **お客様の要件をエンドツーエンドでどう守るか:**
-> [docs/agentic-ai.md](./docs/agentic-ai.md) で全方法論を解説しています。
-> OperationSpecを契約として扱う方式、9種の決定論的検証、パッチ専用修正、
-> コンテナ再起動を超えて要件を保持するNFSベースのworkspace構造などを
-> 詳しく説明しています。
+**こんな方におすすめ:** Amazon Connect の AI エージェントをすばやく立ち上げ、お客様の実ビジネスでそのまま動かせる PoC を構築したい方。
+
+> 📖 **要件をエンドツーエンドで守る仕組みについて:**
+> 詳細は [docs/agentic-ai.md](./docs/agentic-ai.md) を参照してください。
+> OperationSpec を「契約」と見立てる考え方、9 項目の決定論的バリデーション、
+> 差分のみで反映するパッチ方式の修正、コンテナを再起動しても要件が消えない
+> NFS ベースのワークスペース構造などを解説しています。
 
 ---
 
@@ -639,17 +634,17 @@ AICC Builderは、お客様との約1時間の会話から、Amazon Connectの�
 │                  │         │                  │         │                         │
 │   💬 入力         │         │  🤖 AICC Builder  │         │   📦 出力                │
 │                  │  ────▶  │                  │  ────▶  │                         │
-│  AI 会話         │         │  9種の専門         │         │  6種のプロダクション     │
-│  (~15分)         │         │  エージェント       │         │  対応資産パッケージ       │
+│  AI との対話      │         │  9 個の専門        │         │  そのまま使える 6 種の    │
+│  （約 15 分）     │         │  エージェント       │         │  アセットパッケージ       │
 │                  │         │                  │         │                         │
 └─────────────────┘         └──────────────────┘         └─────────────────────────┘
 
   • 業種・会社情報             オーケストレーター        ✅ Lambda 関数
-  • 業務オペレーション           リサーチエージェント       ✅ OpenAPI スペック (MCP Gateway)
-  • ルール・ポリシー             FAQ ジェネレーター        ✅ AI プロンプト
-  • 会話シナリオ                Lambda ジェネレーター      ✅ Contact Flow
-  • トーン・言語                 OpenAPI ジェネレーター     ✅ CDK インフラ
-  • エッジケース                 プロンプトジェネレーター     ✅ FAQ / ナレッジベース
+  • 業務オペレーション          リサーチエージェント       ✅ OpenAPI スペック (MCP Gateway)
+  • ルール・ポリシー            FAQ ジェネレーター        ✅ AI プロンプト
+  • 会話シナリオ                Lambda ジェネレーター     ✅ Contact Flow
+  • トーン・言語                OpenAPI ジェネレーター    ✅ CDK インフラ
+  • 例外パターン                プロンプトジェネレーター    ✅ FAQ / ナレッジベース
                               Contact Flow ジェネレーター
                               インフラジェネレーター
                               レビューエージェント
@@ -659,103 +654,73 @@ AICC Builderは、お客様との約1時間の会話から、Amazon Connectの�
 
 ## なぜ必要か？
 
-| | 従来のワークショップ | AICC Builder適用後 |
+| | 従来のワークショップ | AICC Builder 適用後 |
 |---|---|---|
-| **シナリオ** | 固定のホテル予約デモ | お客様の実ビジネス |
-| **アセット** | 汎用、事前作成 | 自動生成、カスタマイズ |
-| **ワークショップの成果** | 教育的な知識 | デプロイ可能なPoC |
-| **ワークショップ後の価値** | 「面白かったです」 | 「来週パイロットしましょう」 |
-| **PoCまでの時間** | 数週間の手作業 | 15分の対話 |
+| **シナリオ** | 定型化されたホテル予約デモ | お客様の運用フローに即したデモ |
+| **アセット** | 汎用的 | お客様向けに自動生成 |
+| **ワークショップの成果物** | 一般的な知見 | 現場で使える PoC |
+| **終了後の反応** | 「勉強になりました」 | 「来週 PoC を始めましょう」 |
+| **PoC 完成までの期間** | 数週間の作業 | 15 分の対話 |
 
 ---
 
 ## 仕組み
 
-### Step 1 — デプロイ（約10分）
+### Step 1 — デプロイ（約 10 分）
 
 ```bash
 git clone <repository-url> && cd aicc-builder
 ./deploy.sh
 ```
 
-### Step 2 — 対話（約15分）
+### Step 2 — 対話（約 15 分）
 
-お客様はWebインターフェース上でAIエージェントと対話します:
+Web 画面から AI エージェントとチャット形式でやり取りをします。
 
 ```
 🤖  御社の業種を教えてください。
-👤  Eコマースです。電子製品をオンライン販売しています。
+👤  E コマースです。電子製品をオンラインで販売しています。
 
-🤖  AIアシスタントが扱うべき業務は何ですか？
-👤  注文追跡、返品、保証請求の3つです。
+🤖  AI アシスタントには、どのような業務を任せたいですか？
+👤  注文状況の確認、返品対応、保証請求の 3 つです。
 
-🤖  返品ポリシーはどうなっていますか？
-👤  500ドル未満は自動承認、それ以上はマネージャー承認。期間は30日です。
+🤖  返品ポリシーを教えてください。
+👤  500 ドル未満は自動承認、それ以上はマネージャー承認です。期間は 30 日。
 
-🤖  カスタマイズされた資産を生成中です...
+🤖  カスタマイズ済みのアセットを生成しています...
 ```
 
-### Step 3 — 生成される資産
+### Step 3 — 生成されるアセット
 
-システムは、ワークショップですぐ使える完全な成果物セットを生成します:
+ワークショップですぐに使える成果物一式が出力されます。
 
-| 生成資産 | 内容 | 利用ワークショップモジュール |
+| 生成アセット | 内容 | 利用ワークショップモジュール |
 |---|---|---|
-| **Lambda 関数** | 各業務オペレーション用のPythonハンドラー（例: `process_return`, `track_order`） | Module 2: MCP Server Setup |
-| **OpenAPI スペック** | Amazon Connect MCP Gateway連携用のAPI定義 | Module 2: MCP Gateway |
-| **AI プロンプト** | カスタマイズされたペルソナ、トーン、ビジネスルール、ガードレール | Module 2: AI Agent Prompt |
-| **Contact Flow** | Amazon Connectフロー設定 + Mermaidビジュアル図 | Module 2: Flow Builder |
-| **CDK インフラ** | 完全なAWS CDKプロジェクト（Lambda、API Gateway、DynamoDB） | Module 2: Deploy |
-| **FAQ ドキュメント** | 顧客の頻出質問に対するナレッジベース記事 | Module 3: Knowledge Base |
+| **Lambda 関数** | 業務ごとの Python ハンドラー（例: `process_return`、`track_order`） | Module 2: MCP Server Setup |
+| **OpenAPI スペック** | Amazon Connect MCP Gateway 連携用の API 定義 | Module 2: MCP Gateway |
+| **AI プロンプト** | 業種に合わせたペルソナ、トーン、業務ルール、ガードレール | Module 2: AI Agent Prompt |
+| **Contact Flow** | Amazon Connect のフロー設定と Mermaid によるビジュアル図 | Module 2: Flow Builder |
+| **CDK インフラ** | Lambda、API Gateway、DynamoDB を含む AWS CDK プロジェクト一式 | Module 2: Deploy |
+| **FAQ ドキュメント** | よくある問い合わせ向けのナレッジベース記事 | Module 3: Knowledge Base |
 
 ### Step 4 — ワークショップ
 
-お客様はワークショップを通じて生成済み資産を使用し、最終的に**自社の実ビジネスに
-デプロイ可能なPoC**を手にします。
+生成されたアセットをワークショップを通じて触りながら、最終的に**自社のビジネスで動かせる PoC** を持ち帰ることができます。
 
 ---
 
-## 🇯🇵 日本向けデプロイガイド
+## デプロイガイド
 
-### リージョンとサービス対応状況
+### リージョンとサービスの対応状況
 
 | サービス | 東京リージョン (ap-northeast-1) | 備考 |
 |---------|-------------------------------|------|
-| **Amazon Bedrock (Claude)** | ✅ 利用可能 | `global.anthropic.claude-opus-4-6-v1` でクロスリージョン推論を使用 |
-| **Amazon Connect** | ✅ 利用可能 | 東京リージョンでインスタンス作成可能 |
-| **Amazon Polly (日本語)** | ✅ 利用可能 | Takumi (男性)、Kazuha (女性)、Tomoko (女性) |
-| **ECS Fargate (Graviton)** | ✅ 利用可能 | ARM64 で高コスパ運用 |
-| **S3 Files** | ✅ 利用可能 | NFS マウントによるセッション永続化 |
-| **Bedrock Knowledge Base** | ✅ 利用可能 | Contact Flow RAG 用 |
-
-### 日本語 TTS 音声の選択
-
-生成されるContact Flowでは、Amazon Pollyの日本語音声が自動設定されます:
-
-| 音声名 | 性別 | エンジン | 推奨用途 |
-|--------|------|---------|---------|
-| **Takumi** | 男性 | Generative | ビジネス向け（デフォルト） |
-| **Kazuha** | 女性 | Generative | カスタマーサービス向け |
-| **Tomoko** | 女性 | Neural | 標準的な案内 |
-
-### 日本語対話の特徴
-
-- **敬語（です/ます調）** をデフォルトで使用
-- 日本の電話番号形式（090-XXXX-XXXX、03-XXXX-XXXX）を自動認識
-- 日本の住所形式（都道府県→市区町村→番地）に対応
-- 円（¥）表記、小数点なし
-- タイムゾーン: Asia/Tokyo (JST, UTC+9)
-- 業務時間の典型例: 09:00-17:30 JST
-
-### 多言語対応
-
-UIの言語は3つから選択可能です（フロントエンド右上のメニュー）:
-- 🇯🇵 日本語（デフォルト）
-- 🇺🇸 English
-- 🇰🇷 한국어
-
-生成されるアセット（プロンプト、FAQ、Contact Flow）の言語は、対話中にお客様が
-使用する言語に自動適応します。
+| **Amazon Bedrock (Claude)** | ✅ 利用可能 | `global.anthropic.claude-opus-4-6-v1` をクロスリージョン推論で利用 |
+| **Amazon Connect** | ✅ 利用可能 | 東京リージョンでインスタンスを作成可能 |
+| **Amazon Polly (日本語)** | ✅ 利用可能 | Takumi（男性）、Kazuha（女性）、Tomoko（女性） |
+| **ECS Fargate (Graviton)** | ✅ 利用可能 | ARM64 でコストパフォーマンスよく運用 |
+| **S3 Files** | ✅ 利用可能 | NFS マウントでセッションを永続化 |
+| **Bedrock Knowledge Base** | ✅ 利用可能 | Contact Flow の RAG 用途 |
 
 ---
 
@@ -775,18 +740,18 @@ UIの言語は3つから選択可能です（フロントエンド右上のメ�
                         │   FastAPI + Uvicorn       │
                         │                           │
                         │   ┌───────────────────┐   │
-                        │   │  オーケストレーター   │   │
+                        │   │  オーケストレーター  │   │
                         │   │  (Claude Sonnet)  │   │
                         │   └───────┬───────────┘   │
                         │           │ Agent-as-Tool  │
                         │   ┌───────▼───────────┐   │
-                        │   │  9 サブエージェント │   │
-                        │   │  (専門化)          │   │
+                        │   │  9 個のサブエージェント │   │
+                        │   │  （専門分業）         │   │
                         │   └───────────────────┘   │
                         │           │               │
                         │   ┌───────▼───────────┐   │
                         │   │  /mnt/s3 (NFS)    │   │
-                        │   │  S3 Files マウント  │   │
+                        │   │  S3 Files マウント │   │
                         │   └───────────────────┘   │
                         └────────────┬─────────────┘
                                      │
@@ -800,22 +765,23 @@ UIの言語は3つから選択可能です（フロントエンド右上のメ�
                              └─────────────┘
 ```
 
-ランタイムのハイライト:
+ランタイムのポイント:
 
-- ランタイム: ECS Fargate (ARM64 Graviton) で FastAPI + Uvicorn を実行
-- WebSocket: Cognito JWT認証付きALB（スティッキーセッション、4時間アイドルタイムアウト）、CloudFrontで同一オリジンプロキシ
-- セッションストレージ: 3階層 — インメモリ → S3 Files NFS (`/mnt/s3/`) → DynamoDB
-- ファイルI/O: `/mnt/s3/` への直接NFSアクセス — エージェントはローカルファイルシステムのようにread/write/patch
-- スケーリング: `ActiveWebSocketConnections` CloudWatchメトリクスに基づくオートスケーリング（1〜10タスク）
+- ランタイム: ECS Fargate（ARM64 Graviton）上で FastAPI + Uvicorn を実行
+- WebSocket: Cognito JWT で認証する ALB（スティッキーセッション、アイドルタイムアウト 4 時間）CloudFront 経由で同一オリジンに見せる
+- セッションストア: 3 段構成（インメモリ → S3 Files NFS（`/mnt/s3/`）→ DynamoDB）
+- ファイル I/O: `/mnt/s3/` への直接 NFS アクセス。エージェントはローカルファイルシステムと同じ感覚で読み書きやパッチ適用が可能
+- スケーリング: `ActiveWebSocketConnections` という CloudWatch メトリクスに連動するオートスケーリング（1〜10 タスク）
 
-**S3 Files NFS** (`/mnt/s3/`) はS3への直接ファイルシステムアクセスを提供し、以下を実現します:
-- 3階層セッションストレージ（インメモリ → NFS → DynamoDBメタデータ）
-- NFSバックアップされたOperationSpec / Fragment Registry（コンテナ再起動を超えて永続）
-- アセットのバージョニング（再生成時に v1/, v2/）
+**S3 Files NFS**（`/mnt/s3/`）は S3 をファイルシステムのように扱える仕組みで、次のような用途を支えています。
+
+- 3 段構成のセッションストア（インメモリ → NFS → DynamoDB のメタデータ）
+- NFS に保存される OperationSpec とフラグメントレジストリ（コンテナ再起動後も残る）
+- アセットのバージョン管理（再生成時の `v1/`、`v2/`）
 - システムプロンプトのホットリロード
-- エージェント用ワークスペースファイルツール（直接ファイルread/write/patch）
+- エージェント向けのワークスペースファイルツール（読み書きとパッチ適用）
 
-> 詳細なアーキテクチャドキュメント: [docs/architecture.md](./docs/architecture.md)
+> アーキテクチャの詳しい解説は [docs/architecture.md](./docs/architecture.md) を参照してください。
 
 ---
 
@@ -823,7 +789,7 @@ UIの言語は3つから選択可能です（フロントエンド右上のメ�
 
 ### 前提条件
 
-AWS CLI 2.x（`s3files`サポートには 2.34.27 以上）· Node.js 18+ · Python 3.11+ · Docker · AWS CDK 2.x
+AWS CLI 2.x（`s3files` を使うには 2.34.27 以上） · Node.js 18+ · Python 3.11+ · Docker · AWS CDK 2.x
 
 ### デプロイ
 
@@ -834,24 +800,24 @@ cd aicc-builder
 # フルデプロイ（デフォルト: 東京 ap-northeast-1）
 ./deploy.sh
 
-# 別リージョンへのデプロイ
+# 別リージョンへデプロイ
 AWS_DEFAULT_REGION=us-east-1 ./deploy.sh
 
-# 名前付きステージ（prodと並行してstaging用などに別スタック）
+# ステージ名を付けて分離（例: 本番と並行して staging を立てる）
 ./deploy.sh --stage prod
-AWS_DEFAULT_REGION=ap-northeast-2 ./deploy.sh --stage prod  # prodスタックをソウルに
+AWS_DEFAULT_REGION=ap-northeast-2 ./deploy.sh --stage prod  # prod スタックをソウルにデプロイ
 ```
 
-**選択的デプロイ:**
+**部分デプロイ:**
 
 ```bash
-./deploy.sh --backend-only    # バックエンド (ECS) のみ再デプロイ
-./deploy.sh --frontend-only   # フロントエンドの再ビルド + デプロイのみ
-./deploy.sh --infra-only      # CDKインフラのみ再デプロイ
-./deploy.sh --force           # ハッシュチェックを無視してフルリビルド
+./deploy.sh --backend-only    # バックエンド（ECS）のみ再デプロイ
+./deploy.sh --frontend-only   # フロントエンドのビルドとデプロイのみ
+./deploy.sh --infra-only      # CDK インフラのみ再デプロイ
+./deploy.sh --force           # ハッシュチェックを無視して全体を再ビルド
 ```
 
-> deploy.sh の完全リファレンス: [docs/development.md](./docs/development.md#deploysh-reference)
+> deploy.sh の全オプション: [docs/development.md](./docs/development.md#deploysh-reference)
 
 ### ローカル開発
 
@@ -879,10 +845,10 @@ aws cognito-idp admin-create-user \
 
 ## コスト
 
-| | おおよそのコスト |
+| | 目安 |
 |---|---|
-| **会話セッション 1回あたり** | ~$1.55 (Bedrockトークン) |
-| **月額インフラ（アイドル時）** | ~$45 (Fargate ~$25, ALB ~$10, DynamoDB ~$5, S3+CloudFront ~$5) |
+| **対話セッション 1 回あたり** | 約 $1.55（Bedrock のトークン課金） |
+| **インフラの月額（アイドル時）** | 約 $45（Fargate ~$25、ALB ~$10、DynamoDB ~$5、S3+CloudFront ~$5） |
 
 ---
 
@@ -901,135 +867,139 @@ aws cognito-idp admin-create-user \
 
 ```
 ├── backend/
-│   └── ecs/                     # ECS Fargate エントリポイント (source of truth)
-│       ├── app.py               # FastAPI (WebSocket + HTTP, Cognito JWT, SIGTERM)
-│       ├── Dockerfile           # ARM64 Python 3.11, uvicorn
+│   └── ecs/                     # ECS Fargate のエントリポイント（正本）
+│       ├── app.py               # FastAPI（WebSocket + HTTP、Cognito JWT、SIGTERM 対応）
+│       ├── Dockerfile           # ARM64 Python 3.11、uvicorn
 │       ├── requirements.txt
 │       ├── healthcheck.py       # ALB ヘルスチェック
 │       └── src/
-│           ├── agents/              # 9 種の専門サブエージェント
-│           │   ├── research_agent/      # Web検索 (Brave API)
-│           │   ├── faq_generator/       # ナレッジベースドキュメント
-│           │   ├── lambda_generator/    # Python Lambdaハンドラー
-│           │   ├── openapi_generator/   # OpenAPI 3.0 スペック (チャンク化)
-│           │   ├── prompt_generator/    # AI エージェントプロンプト
-│           │   ├── contact_flow_generator/  # Connect フロー + Mermaid
-│           │   ├── infrastructure_generator/ # CloudFormation YAML (チャンク化)
-│           │   └── reviewer_agent/      # アセット一貫性検証
+│           ├── agents/              # 9 個の専門サブエージェント
+│           │   ├── research_agent/      # Web 検索（Brave API）
+│           │   ├── faq_generator/       # ナレッジベース用ドキュメント
+│           │   ├── lambda_generator/    # Python の Lambda ハンドラー
+│           │   ├── openapi_generator/   # OpenAPI 3.0 スペック（チャンク生成）
+│           │   ├── prompt_generator/    # AI エージェント用プロンプト
+│           │   ├── contact_flow_generator/  # Connect フロー + Mermaid 図
+│           │   ├── infrastructure_generator/ # CloudFormation YAML（チャンク生成）
+│           │   └── reviewer_agent/      # アセット間の整合性チェック
 │           ├── tools/                   # ユーティリティツール
-│           │   ├── project_workspace.py     # NFSバックアップ状態永続化
-│           │   ├── spec_manager.py          # OperationSpec CRUD + NFS同期
-│           │   ├── workspace_file_tools.py  # エージェント用 NFS file read/write/patch
-│           │   ├── workspace_tools_for_subagent.py  # 修正リクエスト用パッチモードツール
-│           │   ├── s3_asset_storage.py      # S3 + NFS デュアルライトアセットストレージ
-│           │   ├── clues_format.py          # CLUES レスポンス形式 (Context Engineering)
-│           │   ├── validate_consistency.py  # クロスアセット検証 (9 チェック)
+│           │   ├── project_workspace.py     # NFS 上での状態永続化
+│           │   ├── spec_manager.py          # OperationSpec の CRUD と NFS 同期
+│           │   ├── workspace_file_tools.py  # エージェントが NFS ファイルを読み書きするツール
+│           │   ├── workspace_tools_for_subagent.py  # 修正リクエスト用のパッチモードツール
+│           │   ├── s3_asset_storage.py      # S3 と NFS への二重書き込み
+│           │   ├── clues_format.py          # CLUES レスポンス形式（コンテキストエンジニアリング）
+│           │   ├── validate_consistency.py  # アセット間の整合性チェック（9 項目）
 │           │   └── ...
-│           ├── context/                 # セッションコンテキスト (3階層 s3files store)
+│           ├── context/                 # セッションコンテキスト（3 段構成 s3files ストア）
 │           │   ├── __init__.py
 │           │   ├── s3files_store.py     # メモリ → NFS → DynamoDB
-│           │   ├── shared_state.py      # エージェント間共有状態
-│           │   └── structured_notes.py  # 構造化ノートテイキング
+│           │   ├── shared_state.py      # エージェント間の共有ステート
+│           │   └── structured_notes.py  # 構造化ノート
 │           └── prompts/
-│               ├── system_prompt.py     # オーケストレーターシステムプロンプト (~60KB)
-│               └── prompt_loader.py     # NFSからのホットリロード
-├── frontend/                    # React 18 チャットインターフェース
+│               ├── system_prompt.py     # オーケストレーター用システムプロンプト（約 60KB）
+│               └── prompt_loader.py     # NFS からホットリロード
+├── frontend/                    # React 18 のチャット UI
 │   └── src/
-│       ├── components/          # UI コンポーネント (モバイル対応)
-│       ├── hooks/               # useWebSocket (ALB + CloudFront 同一オリジン)
-│       ├── stores/              # authStore, builderStore, sessionStore
+│       ├── components/          # UI コンポーネント（モバイル対応）
+│       ├── hooks/               # useWebSocket（ALB と CloudFront を同一オリジンに）
+│       ├── stores/              # authStore、builderStore、sessionStore
 │       └── services/            # 認証、セッション API
 ├── infrastructure/              # AWS CDK
 │   └── lib/
-│       ├── aicc-builder-stack.ts    # メインスタック (Cognito, S3, CloudFront, DynamoDB)
-│       ├── ecs-stack.ts             # ECS Fargate スタック (VPC, ALB, Fargate, オートスケーリング)
-│       ├── knowledge-base-stack.ts  # Bedrock Knowledge Base (オプション; FAQ既定パスは S3 + Connect AI agents domain)
-│       └── app.ts                   # CDK エントリポイント
+│       ├── aicc-builder-stack.ts    # メインスタック（Cognito、S3、CloudFront、DynamoDB）
+│       ├── ecs-stack.ts             # ECS Fargate スタック（VPC、ALB、Fargate、オートスケーリング）
+│       ├── knowledge-base-stack.ts  # Bedrock Knowledge Base（任意。FAQ のデフォルト経路は S3 + Connect AI agents domain）
+│       └── app.ts                   # CDK のエントリポイント
 ├── docs/                        # 詳細ドキュメント
-└── deploy.sh                    # フルデプロイパイプライン
+└── deploy.sh                    # デプロイ全体のパイプライン
 ```
 
 ---
 
 ## ランタイム詳細
 
-### S3 Files NFS マウント構造
+### S3 Files NFS マウントのレイアウト
 
 ```
 /mnt/s3/
   sessions/{session_id}/
     state/          # project.json, progress.json, specs/*.json, schemas/
     assets/v1/      # lambda/, openapi/, prompt/, contact_flow/, infrastructure/, faq/
-    assets/v2/      # 再生成時
+    assets/v2/      # 再生成時に追加
     context/        # conversation_history.json, shared_state.json, all_results.txt
     workspace/      # requirements/, fragments/
-  prompts/          # ホットリロード可能なシステムプロンプト
-  config/           # ホットリロード可能なモデル設定
+  prompts/          # ホットリロード対応のシステムプロンプト
+  config/           # ホットリロード対応のモデル設定
 ```
 
 ### 主な機能
 
-- **Graceful Shutdown**: SIGTERM時にアクティブセッションをS3 Filesにフラッシュし、WebSocketを1001でクローズ
-- **オートスケーリング**: `ActiveWebSocketConnections` CloudWatchメトリクスに基づくステップスケーリング（1〜10タスク）
-- **オブザーバビリティ**: Container Insights + X-Rayサイドカー
-- **ワークスペースファイルツール**: エージェントがNFS上のファイルを直接 read/write/patch（ローカルファイルシステムのように扱える）
-- **Patch-only 修正**: `modification_request` でアセットを再生成する際、サブエージェントは workspace ツール（`read_current_file`, `patch_file`）で最小限の編集のみ実行 — ファイル全体の再生成は拒否されます
-- **Fragment Registry**: インフラ/OpenAPI ジェネレーターのフラグメントをNFSに永続化 — コンテナ再起動を超えて保持
-- **Context Engineering**: CLUES レスポンス形式でサブエージェントのトークン消費を削減; 長時間実行エージェント向けに SummarizingConversationManager を使用
+- **グレースフルシャットダウン**: SIGTERM を受け取るとアクティブセッションを S3 Files に書き出し、WebSocket をクローズコード 1001 で切断
+- **オートスケーリング**: `ActiveWebSocketConnections` の CloudWatch メトリクスに連動するステップスケーリング（1〜10 タスク）
+- **オブザーバビリティ**: Container Insights と X-Ray サイドカー
+- **ワークスペースファイルツール**: エージェントは NFS 上のファイルをローカル感覚で直接読み書き・パッチ適用できる
+- **パッチモードでの修正**: `modification_request` でアセットを再生成する際は、サブエージェントは `read_current_file` と `patch_file` を使って必要最小限の変更のみ行う。ファイル丸ごとの再生成は受け付けない
+- **フラグメントレジストリ**: インフラと OpenAPI ジェネレーターのフラグメントを NFS に保持し、コンテナ再起動後も復元可能
+- **コンテキストエンジニアリング**: CLUES レスポンス形式でサブエージェントのトークン消費を抑制。長時間動くエージェントには SummarizingConversationManager を併用
 
 ---
 
 ## ドキュメント
 
-| ドキュメント | 説明 |
+| ドキュメント | 内容 |
 |---|---|
-| [docs/agentic-ai.md](./docs/agentic-ai.md) | **マルチエージェントシステムが顧客要件をエンドツーエンドで保持する仕組み** — OperationSpec契約、決定論的検証、パッチ専用修正 |
-| [docs/architecture.md](./docs/architecture.md) | ランタイムアーキテクチャ、WebSocketプロトコル、データフロー |
-| [docs/architecture-asset-flow.md](./docs/architecture-asset-flow.md) | アセットの read/write/stream パス、NFS + S3 へのデュアルライト |
-| [docs/agents.md](./docs/agents.md) | 9種のエージェント: 役割、ツール、モデル設定、生成シーケンス |
-| [docs/development.md](./docs/development.md) | ローカルセットアップ、エージェント追加、deploy.sh リファレンス、デバッグ |
-| [backend/README.md](./backend/README.md) | バックエンド概要とディレクトリ構造 |
-| [frontend/README.md](./frontend/README.md) | フロントエンドコンポーネントと状態管理 |
-| [infrastructure/README.md](./infrastructure/README.md) | CDKスタック、リソース、デプロイ |
+| [docs/agentic-ai.md](./docs/agentic-ai.md) | **マルチエージェントがお客様の要件を最後まで保ち続ける仕組み** — OperationSpec を契約と見立てる方式、決定論的なバリデーション、パッチモードでの修正 |
+| [docs/architecture.md](./docs/architecture.md) | ランタイムのアーキテクチャ、WebSocket プロトコル、データフロー |
+| [docs/architecture-asset-flow.md](./docs/architecture-asset-flow.md) | アセットの読み書きとストリーミング経路、NFS と S3 への二重書き込み |
+| [docs/agents.md](./docs/agents.md) | 9 個のエージェントの役割、ツール、モデル設定、生成順 |
+| [docs/development.md](./docs/development.md) | ローカルセットアップ、エージェントの追加方法、deploy.sh の詳細、デバッグ |
+| [backend/README.md](./backend/README.md) | バックエンドの概要とディレクトリ構成 |
+| [frontend/README.md](./frontend/README.md) | フロントエンドのコンポーネントと状態管理 |
+| [infrastructure/README.md](./infrastructure/README.md) | CDK スタック、リソース、デプロイ |
 
 ---
 
 ## セキュリティ
 
-> ⚠️ **免責事項 — ワークショップ/デモツールであり、本番用ではありません**
+> ⚠️ **ご注意 — ワークショップ／デモ用ツールであり、本番運用向けではありません**
 >
-> AICC Builder は、Amazon Connect 上にセルフサービス AI エージェントを高速に
-> （約1時間で）構築したいすべての方を対象とした **ワークショップおよびPoCジェネレーター**
-> です。生成される資産（Lambdaコード、CloudFormationテンプレート、プロンプト、
-> Contact Flow、FAQドキュメント）は **出発点** であって、堅牢化された本番アーティファクト
-> ではありません。LLMによって生成されているため、実際の顧客データを扱う環境に
-> デプロイする前に必ずレビューしてください。
+> AICC Builder は、Amazon Connect 上のセルフサービス AI エージェントを 1 時間ほどで
+> 立ち上げたい方に向けた **ワークショップおよび PoC 生成ツール** です。
+> 出力されるアセット（Lambda コード、CloudFormation テンプレート、プロンプト、
+> Contact Flow、FAQ ドキュメント）は **あくまで出発点** であって、本番運用に堪える
+> 形までチューニングされた成果物ではありません。LLM が生成しているため、実際の
+> 顧客データが流れる環境にデプロイする前には必ずレビューしてください。
 >
-> 具体的には、生成された出力を本番で使用する前に、最低限以下を実施してください:
-> - インフラジェネレーターが生成した IAMロール、セキュリティグループ、リソースポリシー
->   を見直し、最小権限化する。
-> - API Gateway APIキーをローテーションし、スコープを絞る（ワークショップテンプレートは
->   簡素化のため意図的にメソッドを `ApiKeyRequired: false` に設定しています）。
-> - 顧客データを保存するS3バケットでサーバーアクセスログ、オブジェクトバージョニング、
->   ライフサイクルルールを有効化する（アプリ自体のバケットは
->   `blockPublicAccess: BLOCK_ALL` および `enforceSSL: true` で設定済みですが、
->   **S3 サーバーアクセスログはデフォルトでは無効** であり、本番では有効化が必要です）。
-> - 生成されたLambdaコードを組織のセキュアコーディング標準（入力検証、シークレット
->   管理、依存関係スキャン）に照らして検証する。
-> - 公開ALB + CloudFrontディストリビューションに AWS WAF / スロットリングを有効化する。
-> - 生成されたAIプロンプトを、組織固有の脅威モデルに対するプロンプトインジェクション
->   耐性の観点でレビューする。
+> 生成物を本番で使う前に、最低でも次の点を確認・対応することをおすすめします。
 >
-> アプリ自体は会話のトランスクリプトと生成された資産を、デプロイ先のAWSアカウント内の
-> S3（S3 Files NFS経由）と DynamoDB に保存します。ワークショップセッション中に
-> 実際のPIIや機密データを入力しないでください。
+> - インフラジェネレーターが生成した IAM ロール、セキュリティグループ、リソース
+>   ポリシーを見直し、最小権限に絞り込む。
+> - API Gateway の API キーをローテーションし、利用範囲を絞る（ワークショップ
+>   テンプレートでは簡略化のため、各メソッドを意図的に `ApiKeyRequired: false`
+>   にしています）。
+> - 顧客データを保存する S3 バケットでは、サーバーアクセスログ、オブジェクト
+>   バージョニング、ライフサイクルルールを有効化する（このアプリ自体のバケットは
+>   `blockPublicAccess: BLOCK_ALL` と `enforceSSL: true` を設定済みですが、
+>   **S3 のサーバーアクセスログはデフォルトで無効** のため、本番では有効化が
+>   必要です）。
+> - 生成された Lambda コードを、自社のセキュアコーディング基準（入力検証、
+>   シークレット管理、依存関係スキャンなど）に照らして検証する。
+> - 公開 ALB と CloudFront ディストリビューションに、AWS WAF やスロットリングを
+>   設定する。
+> - 生成された AI プロンプトについて、自社の脅威モデルに沿ってプロンプト
+>   インジェクション耐性をレビューする。
+>
+> このアプリは、対話のトランスクリプトと生成アセットを、デプロイ先 AWS アカウントの
+> S3（S3 Files NFS 経由）と DynamoDB に保存します。ワークショップ中に実在の PII や
+> 機密データを入力しないようご注意ください。
 
-**AICC Builder自体** のセキュリティ問題の報告については、
+**AICC Builder 自体** のセキュリティ問題の報告については、
 [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) を参照してください。
 
 ## ライセンス
 
-このライブラリは MIT-0 ライセンスの下で提供されます。詳細は [LICENSE](LICENSE) ファイルを参照してください。
+本ライブラリは MIT-0 ライセンスのもとで提供されます。詳細は [LICENSE](LICENSE) を参照してください。
 
 ## コントリビューション
 
