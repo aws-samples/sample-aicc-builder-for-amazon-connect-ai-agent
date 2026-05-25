@@ -94,7 +94,7 @@ business.
 ### Step 1 — Deploy (~10 min)
 
 ```bash
-git clone <repository-url> && cd aicc-builder
+git clone https://github.com/aws-samples/sample-aicc-builder-for-amazon-connect-ai-agent.git && cd aicc-builder
 ./deploy.sh
 ```
 
@@ -206,7 +206,7 @@ AWS CLI 2.x (>= 2.34.27 for `s3files` support) · Node.js 18+ · Python 3.11+ ·
 git clone https://github.com/aws-samples/sample-aicc-builder-for-amazon-connect-ai-agent.git
 cd aicc-builder
 
-# Full deployment (default: Tokyo ap-northeast-1)
+# Full deployment (default: Seoul ap-northeast-2)
 ./deploy.sh
 
 # Deploy to a different region
@@ -247,7 +247,7 @@ aws cognito-idp admin-create-user \
   --user-attributes Name=email,Value=<email> \
   --temporary-password "TempPass123!" \
   --message-action SUPPRESS \
-  --region ap-northeast-1
+  --region ap-northeast-2
 ```
 
 ---
@@ -484,14 +484,14 @@ AWS CLI 2.x (>= 2.34.27, `s3files` 지원) · Node.js 18+ · Python 3.11+ · Doc
 ### 배포
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/aws-samples/sample-aicc-builder-for-amazon-connect-ai-agent.git
 cd aicc-builder
 
-# 전체 배포 (기본: 도쿄 ap-northeast-1)
+# 전체 배포 (기본: 서울 ap-northeast-2)
 ./deploy.sh
 
-# 다른 리전에 배포 (예: 서울)
-AWS_DEFAULT_REGION=ap-northeast-2 ./deploy.sh
+# 다른 리전에 배포 (예: 도쿄)
+AWS_DEFAULT_REGION=ap-northeast-1 ./deploy.sh
 
 # 이름이 있는 스테이지로 배포 (prod, staging 등)
 ./deploy.sh --stage prod
@@ -506,7 +506,7 @@ AWS_DEFAULT_REGION=ap-northeast-2 ./deploy.sh
 ./deploy.sh --force           # 해시 무시하고 강제 전체 재빌드
 ```
 
-**리전 선택:** 모든 스택이 동일 리전에 배포됩니다. 기본 리전은 도쿄(`ap-northeast-1`)이며, `AWS_DEFAULT_REGION`으로 변경 가능합니다.
+**리전 선택:** 모든 스택이 동일 리전에 배포됩니다. 기본 리전은 서울(`ap-northeast-2`)이며, `AWS_DEFAULT_REGION`으로 변경 가능합니다.
 
 ### 로컬 개발
 
@@ -669,7 +669,7 @@ AICC Builder は、約 1 時間の対話で、Amazon Connect 用のカスタム�
 ### Step 1 — デプロイ（約 10 分）
 
 ```bash
-git clone <repository-url> && cd aicc-builder
+git clone https://github.com/aws-samples/sample-aicc-builder-for-amazon-connect-ai-agent.git && cd aicc-builder
 ./deploy.sh
 ```
 
