@@ -283,6 +283,18 @@ def build_field_schema_section(ops_list: list) -> str:
     blocks: list = []
 
     for op in ops_list or []:
+        # Fault-tolerance: a spec may arrive double-encoded (a JSON string
+        # instead of a parsed dict). Recover by parsing once; skip anything
+        # that still isn't a dict rather than crashing with
+        # "'str' object has no attribute 'get'".
+        if isinstance(op, str):
+            try:
+                import json as _json
+                op = _json.loads(op)
+            except Exception:
+                continue
+        if not isinstance(op, dict):
+            continue
         op_id = op.get("operation_id") or op.get("tool_id") or ""
 
         def _emit_fields(owner_label: str, in_fields: list, out_fields: list) -> None:
@@ -312,6 +324,8 @@ def build_field_schema_section(ops_list: list) -> str:
 
         # Tool-level fields (multi-tool operations)
         for t in op.get("tools") or []:
+            if not isinstance(t, dict):
+                continue
             tool_id = t.get("tool_id") or ""
             if not tool_id:
                 continue

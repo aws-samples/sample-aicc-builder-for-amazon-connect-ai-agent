@@ -306,6 +306,21 @@ Only change what the modification request asks for.
     except (json.JSONDecodeError, TypeError):
         _all_ops_list = []
 
+    # Fault-tolerance: normalize each entry to a dict. Specs occasionally arrive
+    # double-encoded (a list of JSON strings), which would make `op.get(...)`
+    # raise "'str' object has no attribute 'get'" downstream. Parse-or-drop here
+    # so every consumer (filter, spec table, field schema) sees clean dicts.
+    _normalized_ops = []
+    for _op in _all_ops_list:
+        if isinstance(_op, str):
+            try:
+                _op = json.loads(_op)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if isinstance(_op, dict):
+            _normalized_ops.append(_op)
+    _all_ops_list = _normalized_ops
+
     if mode == "base":
         spec_table = _build_operation_spec_table(_all_ops_list)
         field_schema = build_field_schema_section(_all_ops_list)

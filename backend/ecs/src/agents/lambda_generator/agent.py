@@ -328,8 +328,18 @@ The ToolSpec role indicates: primary=main CRUD, helper=auxiliary logic, session=
             field_src = json.loads(tool_spec_json)
         elif operation_spec:
             field_src = json.loads(operation_spec)
-        if field_src:
+        # Guard against double-encoded JSON (a JSON string whose value is itself
+        # a JSON string). Without this, field_src stays a str and the downstream
+        # `.get()` raises "'str' object has no attribute 'get'".
+        if isinstance(field_src, str):
+            try:
+                field_src = json.loads(field_src)
+            except (json.JSONDecodeError, TypeError):
+                field_src = None
+        if isinstance(field_src, dict):
             field_schema_section = build_field_schema_section([field_src])
+        elif field_src:
+            logger.warning(f"[LAMBDA] field_src is {type(field_src).__name__}, not a dict — skipping field-schema section")
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning(f"[LAMBDA] Failed to build field-schema section: {e}")
 
