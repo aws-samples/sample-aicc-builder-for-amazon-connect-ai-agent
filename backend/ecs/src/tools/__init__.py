@@ -21,7 +21,7 @@ from .db_introspector import introspect_database, convert_to_infrastructure_sche
 from .lambda_generator import generate_lambda_function
 from .openapi_generator import generate_openapi_spec
 from .prompt_generator import generate_ai_prompt
-from .spec_manager import save_operation_spec, get_operation_spec, list_operations, get_all_operation_ids, get_all_tool_ids, update_operation_spec, format_operation_summary, save_session_flow_config, get_session_flow_config_tool, save_infrastructure_spec, get_infrastructure_spec_tool, infer_missing_tools
+from .spec_manager import save_operation_spec, get_operation_spec, list_operations, get_all_operation_ids, get_all_tool_ids, update_operation_spec, format_operation_summary, save_session_flow_config, get_session_flow_config_tool, save_infrastructure_spec, get_infrastructure_spec_tool, infer_missing_tools, save_contact_flow_spec, get_contact_flow_spec_tool
 from .asset_packager import package_and_upload_assets
 from .contact_flow_generator import (
     generate_contact_flow,
@@ -32,6 +32,7 @@ from .cdk_generator import generate_cdk_infrastructure
 from .stream_fallback_asset import stream_fallback_asset
 from .merge_infrastructure import merge_infrastructure_fragments
 from .merge_openapi import merge_openapi_fragments
+from .asset_linters import lint_cloudformation, lint_openapi
 from .incremental_streamer import IncrementalCodeStreamer
 from .asset_lookup import asset_lookup, get_assets_for_review
 from .validate_consistency import validate_parameter_consistency
@@ -42,6 +43,7 @@ from .workspace_file_tools import (
     read_workspace_file,
     write_workspace_file,
     append_workspace_file,
+    copy_workspace_file,
     list_workspace_dir,
     patch_workspace_file,
     find_workspace_files,
@@ -98,6 +100,8 @@ __all__ = [
     "format_operation_summary",
     "save_session_flow_config",
     "get_session_flow_config_tool",
+    "save_contact_flow_spec",
+    "get_contact_flow_spec_tool",
     "save_infrastructure_spec",
     "get_infrastructure_spec_tool",
     "infer_missing_tools",
@@ -109,6 +113,9 @@ __all__ = [
     "stream_fallback_asset",
     "merge_infrastructure_fragments",
     "merge_openapi_fragments",
+    # Asset linters (CloudFormation cfn-lint / OpenAPI 3.0 validation)
+    "lint_cloudformation",
+    "lint_openapi",
     # Incremental code streaming
     "IncrementalCodeStreamer",
     # Asset lookup
@@ -120,6 +127,7 @@ __all__ = [
     "read_workspace_file",
     "write_workspace_file",
     "append_workspace_file",
+    "copy_workspace_file",
     "list_workspace_dir",
     "patch_workspace_file",
     "find_workspace_files",

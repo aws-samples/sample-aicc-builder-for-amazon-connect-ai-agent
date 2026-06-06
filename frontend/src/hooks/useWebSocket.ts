@@ -800,6 +800,24 @@ export function useWebSocket() {
           }
           break;
 
+        case "generation_cancelled":
+        case "generation_cancel_noop":
+          // User cancelled the in-flight generation. Stop the typing/streaming
+          // indicators and surface a short notice.
+          clearStreamTimeout();
+          setTyping(false);
+          lastStreamContentRef.current = "";
+          if (pendingStreamContentRef.current) {
+            updateLastMessage(pendingStreamContentRef.current);
+            pendingStreamContentRef.current = "";
+          }
+          streamingMessageIdRef.current = null;
+          useBuilderStore.getState().setLoadingSession(false);
+          if (data.message && data.type === "generation_cancelled") {
+            addMessage({ role: "assistant", content: data.message as string });
+          }
+          break;
+
         case "error":
           clearStreamTimeout();
           setTyping(false);
@@ -2350,6 +2368,22 @@ export function useWebSocket() {
     return true;
   }, []);
 
+  const cancelGeneration = useCallback(() => {
+    if (globalWs?.readyState !== WebSocket.OPEN) {
+      console.error("[useWebSocket] WebSocket is not connected for cancel request");
+      return false;
+    }
+
+    console.log("[useWebSocket] Cancelling in-flight generation...");
+    globalWs.send(
+      JSON.stringify({
+        action: "cancelGeneration",
+      })
+    );
+
+    return true;
+  }, []);
+
   const requestHistory = useCallback(() => {
     if (globalWs?.readyState !== WebSocket.OPEN) {
       console.error("[useWebSocket] WebSocket is not connected for history request");
@@ -2915,6 +2949,7 @@ export function useWebSocket() {
     sendMessageWithAttachments,
     requestAssets,
     requestProgress,
+    cancelGeneration,
     requestHistory,
     downloadTemplate,
     switchSession,

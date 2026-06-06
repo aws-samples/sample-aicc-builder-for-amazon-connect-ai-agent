@@ -62,17 +62,22 @@ from tools import (
     format_operation_summary,
     save_session_flow_config,
     get_session_flow_config_tool,
+    save_contact_flow_spec,
+    get_contact_flow_spec_tool,
     save_infrastructure_spec,
     get_infrastructure_spec_tool,
     infer_missing_tools,
     stream_fallback_asset,
     merge_infrastructure_fragments,
     merge_openapi_fragments,
+    lint_cloudformation,
+    lint_openapi,
     asset_lookup,
     validate_parameter_consistency,
     read_workspace_file,
     write_workspace_file,
     append_workspace_file,
+    copy_workspace_file,
     list_workspace_dir,
     patch_workspace_file,
     find_workspace_files,
@@ -141,6 +146,8 @@ SUBAGENT_TO_PROGRESS_ID = {
     "infrastructure_generator_agent": "cdk",
     "merge_infrastructure_fragments": "cdk",
     "merge_openapi_fragments": "openapi",
+    "lint_cloudformation": "cdk",
+    "lint_openapi": "openapi",
     "lambda_generator_agent": "lambda",
     "openapi_generator_agent": "openapi",
     "prompt_generator_agent": "prompt",
@@ -161,6 +168,8 @@ INTERVIEW_TOOLS = [
     format_operation_summary,
     save_session_flow_config,
     get_session_flow_config_tool,
+    save_contact_flow_spec,
+    get_contact_flow_spec_tool,
     save_infrastructure_spec,
     get_infrastructure_spec_tool,
     infer_missing_tools,
@@ -170,6 +179,7 @@ INTERVIEW_TOOLS = [
     read_workspace_file,
     write_workspace_file,
     append_workspace_file,
+    copy_workspace_file,
     list_workspace_dir,
     patch_workspace_file,
     find_workspace_files,
@@ -186,12 +196,14 @@ GENERATION_TOOLS = [
     get_all_operation_ids,
     get_all_tool_ids,
     get_session_flow_config_tool,
+    get_contact_flow_spec_tool,
     get_infrastructure_spec_tool,
     load_requirement_document,
     # NFS workspace file tools
     read_workspace_file,
     write_workspace_file,
     append_workspace_file,
+    copy_workspace_file,
     list_workspace_dir,
     patch_workspace_file,
     find_workspace_files,
@@ -200,6 +212,8 @@ GENERATION_TOOLS = [
     stream_fallback_asset,
     merge_infrastructure_fragments,
     merge_openapi_fragments,
+    lint_cloudformation,
+    lint_openapi,
     asset_lookup,
     validate_parameter_consistency,
     # Sub-agents for generation
@@ -1637,6 +1651,8 @@ async def websocket_handler(
                 await handle_create_new_session_ws(websocket, session_id)
             elif action == "ping":
                 await safe_send_json(websocket, {"type": "pong"})
+            elif action in ("cancelGeneration", "stopGeneration", "interrupt"):
+                await handle_cancel_generation_ws(websocket, session_id)
             else:
                 await safe_send_json(websocket, {"type": "error", "content": f"Unknown action: {action}"})
 
@@ -2090,6 +2106,31 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             )
             _context_store.save_conversation_history(session_id, session["conversation_history"])
 
+        except asyncio.CancelledError:
+            # User cancelled generation (cancelGeneration action). Preserve any
+            # partial work, notify the client, then re-raise so the task is
+            # correctly marked cancelled. The finally block persists history.
+            logger.info(f"[BG] Generation cancelled by user for {session_id}")
+            try:
+                partial = _extract_new_messages(streaming_agent.messages, pre_stream_message_count)
+                if partial:
+                    try:
+                        _update_generation_progress(effective_session_id, partial)
+                    except Exception:
+                        pass
+                    session["conversation_history"].extend(partial)
+                    session["conversation_history"] = _prune_conversation_history(
+                        session["conversation_history"], max_messages=MAX_HISTORY_MESSAGES
+                    )
+                    _context_store.save_conversation_history(session_id, session["conversation_history"])
+            except Exception as save_err:
+                logger.warning(f"[BG] partial save on cancel failed for {session_id}: {save_err}")
+            await safe_send_or_log({
+                "type": "generation_cancelled",
+                "sessionId": session_id,
+                "message": "생성이 취소됐어요.",
+            })
+            raise
         except Exception as e:
             logger.error(f"[BG] Streaming error for {session_id}: {e}\n{traceback.format_exc()}")
             await safe_send_or_log({"type": "error", "content": str(e)})
@@ -2303,6 +2344,34 @@ async def handle_get_assets_ws(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.error(f"Asset packaging error: {e}")
         await safe_send_json(websocket, {"type": "error", "content": f"Asset packaging failed: {e}"})
+
+
+async def handle_cancel_generation_ws(websocket: WebSocket, session_id: str):
+    """Cancel the in-flight agent generation for this session.
+
+    The agent runs as a registered asyncio.Task in `_background_tasks`. Cancelling
+    it raises CancelledError inside the stream_async loop; the task's `finally`
+    block still runs (flushes partial history to NFS, deregisters the task), so
+    cancellation is clean and the session can immediately accept a new message.
+    """
+    cancelled = False
+    async with _background_tasks_lock:
+        bg = _background_tasks.get(session_id)
+        if bg and not bg["task"].done():
+            bg["task"].cancel()
+            cancelled = True
+            logger.info(f"[WS] Cancel requested — cancelled running agent task for {session_id}")
+
+    await safe_send_json(websocket, {
+        "type": "generation_cancelled" if cancelled else "generation_cancel_noop",
+        "sessionId": session_id,
+        "cancelled": cancelled,
+        "message": (
+            "생성을 취소했어요. 이어서 다른 요청을 하셔도 됩니다."
+            if cancelled else
+            "취소할 진행 중인 작업이 없어요."
+        ),
+    })
 
 
 async def handle_get_progress_ws(websocket: WebSocket, session_id: str):
