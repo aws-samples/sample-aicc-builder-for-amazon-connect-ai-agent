@@ -28,6 +28,7 @@ packages them into a downloadable ZIP with the following structure:
 import io
 import logging
 import os
+import re
 import zipfile
 from datetime import datetime, timezone
 from typing import Optional
@@ -313,10 +314,15 @@ def package_assets_impl(
         zip_buffer.seek(0)  # Reset to beginning
 
         # Upload to S3 (include filter/type in key so types don't overwrite each other)
+        # The DOWNLOAD filename also carries the timestamp so successive downloads
+        # are distinguishable on disk (previously every download landed as the
+        # same `{project_name}.zip`, which is not scalable across iterations).
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         type_tag = f"-{asset_type_filter}" if asset_type_filter else ""
-        s3_key = f"packages/{session_id}/{project_name}{type_tag}-{timestamp}.zip"
-        download_filename = f"{project_name}{type_tag}.zip"
+        # Sanitize project_name for use in a filename (spaces/slashes → hyphen).
+        safe_project = re.sub(r'[^A-Za-z0-9._-]+', '-', (project_name or "aicc-poc")).strip('-') or "aicc-poc"
+        s3_key = f"packages/{session_id}/{safe_project}{type_tag}-{timestamp}.zip"
+        download_filename = f"{safe_project}{type_tag}-{timestamp}.zip"
 
         s3_client = get_s3_client()
         s3_client.upload_fileobj(
