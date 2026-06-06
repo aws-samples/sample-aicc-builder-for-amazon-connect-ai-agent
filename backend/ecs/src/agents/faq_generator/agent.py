@@ -500,18 +500,50 @@ async def faq_generator_agent(
         except Exception:
             pass
 
+    # 4) Fallback: user-uploaded FAQ/reference documents in the workspace.
+    #    research_agent is NOT a hard prerequisite — the user may have uploaded
+    #    their own FAQ material, or we can synthesize a reasonable starter set
+    #    from the orchestrator's briefing.
+    uploaded_docs_text = ""
     if not research:
-        yield {"type": "error", "agent": "faq_generator", "content": "No research data found"}
+        try:
+            from tools.workspace_file_tools import find_workspace_files, read_workspace_file
+            found = find_workspace_files(session_id=session_id, pattern="*", path="uploads")
+            for m in (found.get("matches", []) if isinstance(found, dict) else []):
+                p = m.get("path") if isinstance(m, dict) else None
+                if not p or not p.lower().endswith((".txt", ".md", ".csv", ".json")):
+                    continue
+                r = read_workspace_file(session_id=session_id, path=p)
+                if r.get("success") and r.get("content"):
+                    uploaded_docs_text += f"\n\n### Source: {p}\n{r['content'][:20000]}"
+            if uploaded_docs_text:
+                logger.info(f"[FAQ] Using uploaded workspace documents ({len(uploaded_docs_text)} chars)")
+        except Exception as e:
+            logger.warning(f"[FAQ] uploaded-doc fallback failed: {e}")
+
+    # Decide the source mode. We proceed as long as we have SOMETHING to work
+    # from: research, uploaded docs, or an orchestrator briefing (mock mode).
+    if research:
+        source_mode = "research"
+    elif uploaded_docs_text:
+        source_mode = "uploaded"
+    elif orchestrator_context or company_name:
+        source_mode = "mock"
+    else:
+        yield {"type": "error", "agent": "faq_generator", "content": "No FAQ source available"}
         yield {
             "success": False,
             "_completion_marker": "SUBAGENT_COMPLETE",
-            "error": "No research data available. Run research_agent first.",
-            "summary": "No research data found"
+            "error": (
+                "No FAQ source available. Provide one of: research (run research_agent), "
+                "uploaded FAQ documents, or an orchestrator briefing / company name for a mock starter set."
+            ),
+            "summary": "No FAQ source found"
         }
         return
 
     if not company_name:
-        company_name = research.get("company_name", "Company")
+        company_name = (research or {}).get("company_name", "Company") if isinstance(research, dict) else "Company"
 
     # Build generation prompt
     history = get_session_history(session_id)
@@ -543,31 +575,56 @@ async def faq_generator_agent(
     # Combine shared context with PM briefing
     full_context = shared_context + pm_briefing
 
+    # Build the source-material section + a mode-specific instruction. FAQ
+    # generation no longer requires research_agent: it works from research,
+    # user-uploaded documents, or (as a last resort) a sensible mock starter set.
+    if source_mode == "research":
+        source_section = f"### Research Findings\n{json.dumps(research, indent=2, ensure_ascii=False)}"
+        mode_instruction = "Base every answer on the research findings above. Use the same language as the research content."
+    elif source_mode == "uploaded":
+        source_section = f"### User-Uploaded Source Documents\n{uploaded_docs_text}"
+        mode_instruction = (
+            "Base the FAQ on the user-uploaded source documents above. Extract and "
+            "restructure their content into clean Q&A pairs. Do NOT invent facts that "
+            "contradict the documents. Match the documents' language."
+        )
+    else:  # mock
+        source_section = (
+            "### No external source provided\n"
+            "No research or uploaded documents are available. Generate a REASONABLE "
+            "STARTER FAQ set using general knowledge for this kind of business."
+        )
+        mode_instruction = (
+            "⚠️ MOCK MODE: There is no authoritative source. Produce a plausible STARTER "
+            "FAQ a human can edit. Keep company-specific facts (prices, hours, phone numbers, "
+            "policies) as clearly-marked placeholders like `[확인 필요]` / `[TBD]` instead of "
+            "inventing specifics. State in the document metadata that this is a draft. Use the "
+            "language of the PM briefing / company name."
+        )
+
     generation_prompt = f"""{full_context}## Generate FAQ Documents
 
 Company: {company_name}
+Source mode: {source_mode}
 
-### Research Findings
-{json.dumps(research, indent=2, ensure_ascii=False)}
+{source_section}
 
 ### Instructions
-Based on the research findings above, generate FAQ documents for a knowledge base.
+Generate FAQ documents for a knowledge base. {mode_instruction}
 
 **IMPORTANT: Call save_faq_document ONE AT A TIME — generate one document, save it, then move to the next. The user sees each document appear in real-time.**
 
-1. Analyze the research and plan all FAQ documents
+1. Plan all FAQ documents
 2. Call save_faq_document for each document sequentially (one tool call per turn)
 3. Organize documents by category with metadata and keywords
-4. Ensure answers are accurate based on research
+4. Ensure answers are consistent with the source material (or clearly marked as placeholders in mock mode)
 
 Cover these topics:
 - Company overview and general information
 - Products/services offered
 - Policies (return, shipping, etc.)
 - Customer service information
-- Any specific topics from the research
-
-Use the same language as the research content.
+- Any specific topics from the source material
 """
 
     documents_generated = []
