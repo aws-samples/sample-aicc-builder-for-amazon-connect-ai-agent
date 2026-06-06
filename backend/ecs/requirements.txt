@@ -16,6 +16,10 @@ boto3>=1.35.0
 # Data validation
 pydantic>=2.0.0
 
+# Asset linting (deterministic post-generation validation gates)
+cfn-lint>=1.0.0
+openapi-spec-validator>=0.7.0
+
 # Configuration
 PyYAML>=6.0.0
 

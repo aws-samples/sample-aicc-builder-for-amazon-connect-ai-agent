@@ -30,40 +30,49 @@ def _clean_fragment(fragment: str) -> str:
     return stripped
 
 
-def _merge_at_anchor(base_yaml: str, fragments: list[str]) -> str:
-    """Insert all fragments at the anchor comment position in base YAML."""
+def _merge_at_anchor(base_yaml: str, fragments: list[str]) -> tuple[str, dict]:
+    """Insert all fragments at the anchor comment position in base YAML.
+
+    Returns (merged_yaml, info) where info records the insertion strategy used
+    and how many fragments were empty/skipped — so the caller can surface a
+    warning instead of silently producing a structurally-wrong template (the
+    "append to end" fallback in particular usually means the base template was
+    malformed).
+    """
     combined = ""
+    skipped = 0
     for i, frag in enumerate(fragments):
         cleaned = _clean_fragment(frag)
         if not cleaned:
             logger.warning(f"[MERGE] Fragment {i} is empty, skipping")
+            skipped += 1
             continue
         combined += cleaned.rstrip("\n") + "\n\n"
 
     if not combined.strip():
         logger.warning("[MERGE] No valid fragments to merge")
-        return base_yaml
+        return base_yaml, {"strategy": "none", "skipped": skipped, "degraded": True}
 
     anchor_idx = base_yaml.find(ANCHOR_COMMENT)
     if anchor_idx != -1:
         merged = base_yaml[:anchor_idx] + combined + base_yaml[anchor_idx:]
         logger.info(f"[MERGE] Inserted {len(combined)} chars at anchor comment")
-        return merged
+        return merged, {"strategy": "anchor", "skipped": skipped, "degraded": False}
 
     deploy_idx = base_yaml.find("\n  ApiDeployment:")
     if deploy_idx != -1:
         merged = base_yaml[:deploy_idx + 1] + combined + base_yaml[deploy_idx + 1:]
         logger.info(f"[MERGE] Inserted at ApiDeployment fallback")
-        return merged
+        return merged, {"strategy": "apideployment_fallback", "skipped": skipped, "degraded": False}
 
     outputs_idx = base_yaml.find("\nOutputs:")
     if outputs_idx != -1:
         merged = base_yaml[:outputs_idx + 1] + combined + base_yaml[outputs_idx + 1:]
         logger.info(f"[MERGE] Inserted at Outputs fallback")
-        return merged
+        return merged, {"strategy": "outputs_fallback", "skipped": skipped, "degraded": False}
 
-    logger.warning("[MERGE] No insertion point found, appending to end")
-    return base_yaml.rstrip("\n") + "\n\n" + combined
+    logger.warning("[MERGE] No insertion point found, appending to end (DEGRADED — base template likely malformed)")
+    return base_yaml.rstrip("\n") + "\n\n" + combined, {"strategy": "append_eof", "skipped": skipped, "degraded": True}
 
 
 def _remove_anchor_comment(yaml_str: str) -> str:
@@ -365,14 +374,50 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
 
     logger.info(f"[MERGE] Merging {len(fragments)} fragments into base ({len(base_yaml)} chars)")
 
-    merged = _merge_at_anchor(base_yaml, fragments)
+    merged, merge_info = _merge_at_anchor(base_yaml, fragments)
     final_yaml = _remove_anchor_comment(merged)
     final_yaml = _fix_common_property_hallucinations(final_yaml)
     final_yaml = _deduplicate_resources(final_yaml)
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)
 
+    # cfn-lint gate: auto-fix the recurring syntax issues (e.g. !Sub in a
+    # string-only Description field — cfn-lint E1004) and capture any errors
+    # that remain so the caller can surface / patch them. Fault-tolerant: if
+    # cfn-lint is unavailable this is a no-op pass-through.
+    lint_result = {"errors": [], "warnings": [], "fixes_applied": [], "available": False}
+    try:
+        from .asset_linters import lint_and_autofix_cfn
+        lint_result = lint_and_autofix_cfn(final_yaml)
+        final_yaml = lint_result["fixed_yaml"]
+    except Exception as e:
+        logger.error(f"[MERGE] cfn-lint gate failed (non-fatal): {e}")
+
     logger.info(f"[MERGE] Final template: {len(final_yaml)} chars")
+
+    # --- Completeness verification (silent-failure backstop) ---
+    # Confirm every fragment's top-level logical IDs survived into the final
+    # template. If a fragment got dropped by a bad anchor/dedup, this surfaces it
+    # instead of letting a silently-incomplete template through.
+    missing_resources: list[str] = []
+    try:
+        for fk, frag in zip(fragment_keys, fragments):
+            cleaned = _clean_fragment(frag)
+            frag_ids = re.findall(r'^  (\w+):\s*$', cleaned, re.MULTILINE)
+            for lid in frag_ids:
+                # present as a top-level resource definition in the final yaml?
+                if not re.search(r'^  ' + re.escape(lid) + r':\s*$', final_yaml, re.MULTILINE):
+                    missing_resources.append(f"{fk}:{lid}")
+        if missing_resources:
+            logger.warning(
+                f"[MERGE] {len(missing_resources)} fragment resource(s) missing from "
+                f"final template: {missing_resources[:10]}"
+            )
+    except Exception as e:
+        logger.warning(f"[MERGE] completeness check failed (non-fatal): {e}")
+
+    if merge_info.get("degraded"):
+        logger.warning(f"[MERGE] DEGRADED merge strategy={merge_info.get('strategy')}")
 
     # Stream to frontend + save to S3
     try:
@@ -420,10 +465,39 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     # Clean up registry
     clear_fragments(project_name)
 
-    return {
+    cfn_errors = lint_result.get("errors", [])
+    merge_degraded = merge_info.get("degraded", False)
+    result = {
         "success": True,
         "project_name": project_name,
         "fragment_count": len(fragments),
         "total_chars": len(final_yaml),
-        "summary": f"Merged {len(fragments)} operation fragments into infrastructure.yaml ({len(final_yaml)} chars)",
+        "merge_strategy": merge_info.get("strategy"),
+        "merge_degraded": merge_degraded,
+        "fragments_skipped": merge_info.get("skipped", 0),
+        "missing_resources": missing_resources[:20],
+        "lint_available": lint_result.get("available", False),
+        "lint_fixes_applied": lint_result.get("fixes_applied", []),
+        "lint_errors": cfn_errors[:20],
+        "lint_error_count": len(cfn_errors),
+        "summary": (
+            f"Merged {len(fragments)} operation fragments into infrastructure.yaml "
+            f"({len(final_yaml)} chars). "
+            f"cfn-lint: {len(lint_result.get('fixes_applied', []))} auto-fix(es), "
+            f"{len(cfn_errors)} error(s) remaining"
+            + (
+                " — REVIEW/PATCH the lint_errors before deploying."
+                if cfn_errors else "."
+            )
+            + (
+                f" ⚠️ {len(missing_resources)} fragment resource(s) MISSING from the "
+                "template — a fragment may have been dropped; inspect before deploying."
+                if missing_resources else ""
+            )
+            + (
+                f" ⚠️ DEGRADED merge ({merge_info.get('strategy')}): base template may be malformed."
+                if merge_degraded else ""
+            )
+        ),
     }
+    return result
