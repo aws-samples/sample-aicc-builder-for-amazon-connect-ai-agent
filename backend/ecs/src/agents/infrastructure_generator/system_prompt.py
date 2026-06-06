@@ -157,7 +157,9 @@ The Orchestrator provides operations with explicit schema. You MUST use these va
    - Example: `/check-reservation` → `PathPart: check_reservation`
    - This ensures consistency with operation_id naming (which uses `_`)
 2. **Lambda Function Name**: Use `operation_id` (replace `_` with `-` for FunctionName only)
-   - `operation_id: "check_reservation"` → `FunctionName: ${ProjectName}-check-reservation`
+   - `operation_id: "check_reservation"` → `FunctionName: !Sub '${ProjectName}-${Environment}-check-reservation'`
+   - ⚠️ ALWAYS include the `${Environment}` segment so the name matches the
+     packaged deploy.sh update convention (`${ProjectName}-${Environment}-<op>`).
 3. **DynamoDB PK**: Use `primary_key_field` from FIRST operation
 4. **HTTP Method**: Use `http_method` from each operation
 
@@ -301,6 +303,7 @@ This allows immediate testing after CloudFormation deployment.
                 Action:
                   - dynamodb:PutItem
                   - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
                 Resource:
                   - !GetAtt ReservationsTable.Arn
 
@@ -338,12 +341,39 @@ This allows immediate testing after CloudFormation deployment.
                   dynamodb = boto3.resource('dynamodb')
                   table = dynamodb.Table(table_name)
 
+                  # Discover the table's key attributes (table PK/SK + every GSI
+                  # PK/SK). DynamoDB rejects a PutItem whose key attribute is
+                  # absent or null, so we must skip such items rather than fail
+                  # the whole stack (the recurring "NULL in GSI key" bug).
+                  key_attrs = set()
+                  try:
+                      desc = boto3.client('dynamodb').describe_table(TableName=table_name)['Table']
+                      for k in desc.get('KeySchema', []):
+                          key_attrs.add(k['AttributeName'])
+                      for gsi in desc.get('GlobalSecondaryIndexes', []) or []:
+                          for k in gsi.get('KeySchema', []):
+                              key_attrs.add(k['AttributeName'])
+                  except Exception as de:
+                      print(f"describe_table failed (continuing): {de}")
+
+                  seeded = 0
+                  skipped = 0
                   for item in sample_data:
-                      item = {k: v for k, v in item.items() if v != ''}
+                      # Drop empty-string AND null values — neither is a valid
+                      # DynamoDB attribute value via the resource client.
+                      item = {k: v for k, v in item.items() if v is not None and v != ''}
+                      # Skip any record missing a required key attribute instead
+                      # of letting DynamoDB raise ValidationException.
+                      missing = [k for k in key_attrs if k not in item]
+                      if missing:
+                          print(f"Skipping sample record missing key attr(s) {missing}: {item}")
+                          skipped += 1
+                          continue
                       table.put_item(Item=item)
+                      seeded += 1
 
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, {
-                      'ItemsSeeded': len(sample_data)
+                      'ItemsSeeded': seeded, 'ItemsSkipped': skipped
                   })
 
               except Exception as e:
@@ -396,11 +426,28 @@ This allows immediate testing after CloudFormation deployment.
 - Include various statuses (CONFIRMED, PENDING, CANCELLED, etc.)
 - Use consistent phone number format (E.164 without +)
 - Include records that allow testing GSI queries (e.g., same phone number for multiple reservations)
+- **🚨 EVERY key attribute MUST be present and non-null on EVERY record.** This
+  means the table's partition/sort key AND every GSI's partition/sort key. A
+  record that omits a GSI key attribute, or sets it to `null`/`""`, will be
+  REJECTED by DynamoDB (the seeder now skips such records, but that means your
+  sample data silently shrinks — so populate ALL key attributes on ALL records).
+  - ❌ `{"reservationId": "R-1", "phoneNumber": null, ...}` when `phoneNumber` is a GSI key
+  - ✅ give every record a real value for every key/GSI-key attribute
 - **🚨 DynamoDB does NOT support float/double types. ALL numeric values with decimals MUST be strings.**
   - ❌ `"price": 150.50` → CloudFormation will fail (JSON float → Python float → DynamoDB error)
   - ✅ `"price": "150.50"` → Use string type for decimal values
   - ✅ `"quantity": 3` → Integers are fine as numbers
   - This applies to: prices, amounts, rates, percentages, coordinates, etc.
+- **🗓️ Dates must be CURRENT-RELATIVE, not hardcoded to a stale year.** When the
+  scenario implies an upcoming event (e.g. an upcoming reservation/appointment),
+  the date MUST be in the near future relative to TODAY (use the session's
+  current date provided in context). Past events should be in the recent past.
+  Never ship sample data whose "upcoming" records are dated in a year that has
+  already passed — it makes the demo look broken.
+- **📞 Test phone number**: if the interviewer captured a test phone number (the
+  number that will actually call into Connect), make at least one sample record
+  use THAT phone number as its `phoneNumber`, so a live test call immediately
+  finds a matching customer record.
 - **Adapt sample data to the session language/locale** (e.g., Korean names for ko-KR, English names for en-US, Japanese names for ja-JP)
 
 ## DATABASE MODE DETECTION (CRITICAL)
@@ -980,6 +1027,19 @@ When `Include Customer Phone Lookup: False` or not mentioned, do NOT add these r
 - Called DIRECTLY from Contact Flow — NOT via API Gateway
 - ⚠️ Do NOT create API Gateway Resource/Method/Options for this Lambda
 - **Handler: index.lambda_handler** (CloudFormation uses standard lambda_handler entry point)
+- 🚨 **PLACEHOLDER CODE ONLY — DO NOT INLINE BUSINESS LOGIC.** Like every other
+  Lambda in this template, `CustomerLookupFunction` MUST use a 501-return
+  placeholder `ZipFile`. The real DynamoDB-query handler is produced separately
+  by the Lambda Generator (`lambda_generator_agent(operation_id="customer_lookup")`)
+  and uploaded by deploy.sh. NEVER embed the actual lookup logic in the
+  CloudFormation `ZipFile` — doing so makes the code un-reviewable, un-patchable,
+  and drifts from the generated asset.
+  ```yaml
+  Code:
+    ZipFile: |
+      def lambda_handler(event, context):
+          return {"statusCode": 501, "body": "Replace with customer_lookup/index.py from downloaded assets"}
+  ```
 - IAM: dynamodb:Query on the main table + phone GSI
 - Environment: The main table env var (e.g., SUBSCRIBERS_TABLE_NAME) + any phone GSI name
 - **MUST include** `AWS::Lambda::Permission` for Amazon Connect (NOT API Gateway):

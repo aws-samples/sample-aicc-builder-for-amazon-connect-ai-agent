@@ -800,11 +800,24 @@ async def _generate_base(project_name, industry, operations_str, ops_list,
 
     spec_table = _build_operation_spec_table(ops_list)
 
+    # Inject today's date so sample data is current-relative (upcoming records
+    # in the near future, past records recently) instead of a stale hardcoded
+    # year. Falls back silently if the clock is unavailable.
+    try:
+        from datetime import datetime as _dt
+        _today = _dt.now().strftime("%Y-%m-%d")
+        current_date_line = (
+            f"Current Date (TODAY): {_today} — sample data dates MUST be relative "
+            f"to this (upcoming events in the near future, past events recently).\n"
+        )
+    except Exception:
+        current_date_line = ""
+
     prompt = f"""BASE MODE - Generate shared infrastructure only.
 
 Project Name: {project_name}
 Industry: {industry}
-Include Sample Data: {include_sample_data}
+{current_date_line}Include Sample Data: {include_sample_data}
 Include Customer Phone Lookup: {include_customer_phone_lookup}
 {infra_spec_section}{spec_table}
 ALL operations (for Schema Summary JSON, DependsOn, and DynamoDB design):
