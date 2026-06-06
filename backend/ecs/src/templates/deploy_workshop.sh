@@ -74,6 +74,40 @@ get_output() {
         --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>/dev/null || echo ""
 }
 
+# Cache of all Lambda PhysicalResourceIds (actual function names) in the stack.
+# Populated lazily on first use. This makes Lambda code updates robust against
+# whatever FunctionName the CloudFormation template assigned, instead of
+# assuming a fixed `${PROJECT_NAME}-${ENV}-<kebab>` convention that may not match.
+STACK_LAMBDA_NAMES=""
+_load_stack_lambda_names() {
+    [ -n "$STACK_LAMBDA_NAMES" ] && return 0
+    STACK_LAMBDA_NAMES=$(aws cloudformation list-stack-resources \
+        --stack-name "$STACK_NAME" --region "$REGION" \
+        --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" \
+        --output text 2>/dev/null || echo "")
+}
+
+# Resolve a lambda directory name (e.g. "check_reservation") to the actual
+# deployed function name by fuzzy-matching against the stack's Lambda functions.
+# Compares on a normalized (lowercased, separators stripped) key so
+# `check_reservation` matches `mystack-CheckReservationFn-ABC123` etc.
+# Echoes the matched function name, or empty string if no confident match.
+resolve_stack_function() {
+    local dir_name="$1"
+    _load_stack_lambda_names
+    [ -z "$STACK_LAMBDA_NAMES" ] && { echo ""; return; }
+    local needle
+    needle=$(echo "$dir_name" | tr '[:upper:]' '[:lower:]' | tr -d '_-')
+    local fn norm
+    for fn in $STACK_LAMBDA_NAMES; do
+        norm=$(echo "$fn" | tr '[:upper:]' '[:lower:]' | tr -d '_-')
+        case "$norm" in
+            *"$needle"*) echo "$fn"; return ;;
+        esac
+    done
+    echo ""
+}
+
 # #############################################################################
 #
 #  CLEANUP COMMAND
@@ -529,6 +563,13 @@ do_deploy() {
     CUSTOMER_LOOKUP_ARN=$(get_output "CustomerLookupFunctionArn")
     UPDATE_Q_SESSION_ARN=$(get_output "UpdateQSessionFunctionArn")
 
+    # Override the convention-based UPDATE_Q_FUNC with the real function name
+    # from the exported ARN (last `:`-segment) so Step 7 env-var injection
+    # targets the function that actually exists in the stack.
+    if [ -n "${UPDATE_Q_SESSION_ARN:-}" ]; then
+        UPDATE_Q_FUNC="$(echo "$UPDATE_Q_SESSION_ARN" | awk -F: '{print $NF}')"
+    fi
+
     echo ""
     echo "   API Endpoint: $API_ENDPOINT"
     echo "   API Key:      ${API_KEY:0:10}..."
@@ -555,13 +596,40 @@ do_deploy() {
 
             [ -z "$entry_file" ] && continue
 
-            # Map function directory name to AWS Lambda function name
+            # Map function directory name to AWS Lambda function name.
+            #
+            # ROBUST RESOLUTION: the deployed function name is whatever the
+            # CloudFormation template assigned (e.g. `${AWS::StackName}-...`),
+            # which does NOT necessarily match a fixed `${PROJECT_NAME}-...-${ENV}`
+            # convention. When the stack exports the function ARN, derive the
+            # real name from the ARN's last segment (`...:function:NAME`) so the
+            # update always targets the function that actually exists. Fall back
+            # to the naming convention only when no ARN was exported.
+            arn_to_func_name() { echo "$1" | awk -F: '{print $NF}'; }
+
             case "$func_name" in
-                customer_lookup)  aws_func="${PROJECT_NAME}-customer-lookup-${ENVIRONMENT}" ;;
-                update_q_session) aws_func="${PROJECT_NAME}-update-qsession-${ENVIRONMENT}" ;;
+                customer_lookup)
+                    if [ -n "${CUSTOMER_LOOKUP_ARN:-}" ]; then
+                        aws_func="$(arn_to_func_name "$CUSTOMER_LOOKUP_ARN")"
+                    else
+                        aws_func="${PROJECT_NAME}-customer-lookup-${ENVIRONMENT}"
+                    fi
+                    ;;
+                update_q_session)
+                    if [ -n "${UPDATE_Q_SESSION_ARN:-}" ]; then
+                        aws_func="$(arn_to_func_name "$UPDATE_Q_SESSION_ARN")"
+                    else
+                        aws_func="${PROJECT_NAME}-update-qsession-${ENVIRONMENT}"
+                    fi
+                    ;;
                 *)
+                    # Per-operation tool Lambdas: resolve the real name by
+                    # listing stack resources and matching the logical-id stem,
+                    # falling back to the kebab-case convention if not found.
                     kebab=$(echo "$func_name" | sed 's/_/-/g' | sed 's/\([A-Z]\)/-\L\1/g' | sed 's/^-//')
                     aws_func="${PROJECT_NAME}-${ENVIRONMENT}-${kebab}"
+                    resolved=$(resolve_stack_function "$func_name")
+                    [ -n "$resolved" ] && aws_func="$resolved"
                     ;;
             esac
 
