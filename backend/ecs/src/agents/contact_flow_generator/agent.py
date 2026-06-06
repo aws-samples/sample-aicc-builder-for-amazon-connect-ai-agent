@@ -390,6 +390,23 @@ async def contact_flow_generator_agent(
     except Exception as e:
         logger.warning(f"[CONTACT_FLOW] Failed to auto-load session flow config: {e}")
 
+    # Auto-load the dedicated Contact Flow spec — the explicit behavior contract
+    # (callback / queue transfer / business hours / escalation, with block
+    # dependency order). If the interview captured one, fold it into the
+    # contact_flow_requirements so the agent builds from the contract, not chat.
+    contact_flow_spec_json = ""
+    try:
+        from tools.spec_manager import get_contact_flow_spec
+        cf_spec = get_contact_flow_spec()
+        if cf_spec:
+            contact_flow_spec_json = json.dumps(cf_spec.model_dump(), ensure_ascii=False)
+            logger.info(
+                f"[CONTACT_FLOW] Auto-loaded ContactFlowSpec "
+                f"({len(cf_spec.behaviors)} behavior(s))"
+            )
+    except Exception as e:
+        logger.warning(f"[CONTACT_FLOW] Failed to auto-load contact flow spec: {e}")
+
     _send_progress("started", flow_name)
     yield {
         "type": "progress",
@@ -494,6 +511,23 @@ Session Flow Config (customer_info_variables → Contact Flow session attributes
 {session_flow_json}
 """
 
+    # Build the dedicated Contact Flow Spec section — this is the BEHAVIOR
+    # CONTRACT. Every behavior listed here MUST be realized in the flow JSON,
+    # using the named blocks in their given dependency order.
+    contact_flow_spec_section = ""
+    if contact_flow_spec_json:
+        contact_flow_spec_section = f"""
+
+## 🎯 CONTACT FLOW SPEC — BEHAVIOR CONTRACT (BUILD EXACTLY THIS)
+This is the authoritative spec for the flow. For EVERY entry in `behaviors`,
+emit the listed `blocks` in order (each block's NextAction chains to the next),
+honoring `depends_on` ordering and `parameters`. Use native Retrieve for FAQ and
+native Return-to-Control for escalation/end-call when the spec flags say so —
+do NOT add Lambda/API blocks for those. If any behavior cannot be realized,
+state it explicitly in your summary instead of dropping it silently.
+{contact_flow_spec_json}
+"""
+
     prompt = f"""Generate Contact Flow for:
 
 Flow Name: {flow_name}
@@ -502,6 +536,7 @@ Language: {language}
 
 Operations:
 {operations}
+{contact_flow_spec_section}
 {session_flow_section}
 {requirements_section}
 {modification_section}

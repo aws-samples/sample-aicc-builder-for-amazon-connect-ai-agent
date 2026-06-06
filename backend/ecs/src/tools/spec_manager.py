@@ -346,6 +346,67 @@ class SessionFlowConfig(FlexibleBaseModel):
     )
 
 
+class FlowBehavior(FlexibleBaseModel):
+    """A single customer-requested Contact Flow behavior, mapped to the
+    Amazon Connect blocks that implement it (with dependency ordering).
+
+    This is the unit the Contact Flow generator MUST realize in the flow JSON.
+    """
+
+    behavior: str = Field(
+        description="One of: 'callback', 'queue_transfer', 'business_hours', "
+        "'agent_escalation', 'dtmf_auth', 'language_branch', 'recording', 'custom'",
+    )
+    description: str = Field(default="", description="What the customer asked for, in their words")
+    blocks: list[str] = Field(
+        default=[],
+        description="Ordered Amazon Connect block Types that implement this behavior "
+        "(e.g. ['UpdateContactCallbackNumber','TransferContactToQueue']). "
+        "Order encodes dependency: each block's NextAction points to the next.",
+    )
+    parameters: dict = Field(
+        default={},
+        description="Behavior-specific params, e.g. {'queue':'sales','hours_id':'...','after_hours_message':'...'}",
+    )
+    depends_on: list[str] = Field(
+        default=[],
+        description="Other behaviors/blocks that must precede this one (e.g. 'dtmf_auth' before 'agent_escalation')",
+    )
+
+
+class ContactFlowSpec(FlexibleBaseModel):
+    """Dedicated specification for the Contact Flow generator.
+
+    Unlike OperationSpec (which describes API business operations), this captures
+    the FLOW-level behaviors the customer requested — callback, queue transfers,
+    business-hours branching, escalation, DTMF auth — so the Contact Flow agent
+    builds from an explicit contract instead of inferring from chat. Each
+    behavior names the Connect blocks and their dependency order.
+    """
+
+    flow_name: str = Field(default="main-flow")
+    call_direction: str = Field(default="inbound")
+    include_customer_phone_lookup: bool = Field(default=False)
+    use_native_faq_retrieve: bool = Field(
+        default=True,
+        description="True → rely on Connect AI agent native Retrieve for FAQ "
+        "(NO custom Lambda/API). False only when an external doc API was requested.",
+    )
+    use_native_escalation: bool = Field(
+        default=True,
+        description="True → agent escalation/end-call via native Return to Control "
+        "(flow routing), NOT a custom Lambda/tool.",
+    )
+    behaviors: list[FlowBehavior] = Field(
+        default=[],
+        description="Ordered list of customer-requested flow behaviors to realize.",
+    )
+    welcome_message: Optional[str] = Field(default=None)
+    transfer_message: Optional[str] = Field(default=None)
+    after_hours_message: Optional[str] = Field(default=None)
+    notes: str = Field(default="", description="Free-text design notes for the flow generator")
+
+
 class RdsConfig(FlexibleBaseModel):
     """RDS connection configuration (only when db_type is rds_*)."""
 
@@ -840,7 +901,11 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
             branch_info = ""
             if s.branches:
                 branch_info = " → " + ", ".join(
-                    f"{b.get('condition', '?')}→{b.get('next_step', '?')}" for b in s.branches
+                    (
+                        f"{b.get('condition', '?')}→{b.get('next_step', '?')}"
+                        if isinstance(b, dict) else str(b)
+                    )
+                    for b in s.branches
                 )
             tool_info = f" [tool: {s.tool_call}]" if s.tool_call else ""
             lines.append(f"- {s.step_id}. {s.label}{tool_info}{branch_info}")
@@ -859,13 +924,30 @@ def _safe_parse_model(model_class, data: dict):
     """
     Safely parse data into a Pydantic model.
     If validation fails, store the raw dict with extra="allow".
+
+    Fault-tolerance: ``data`` is expected to be a dict, but persisted specs can
+    arrive double-encoded (a JSON string). Recover by parsing once; if it still
+    isn't a dict, fall back to an empty model rather than raising
+    ``'str' object has no attribute ...`` / ``argument of type 'str'``.
     """
+    if isinstance(data, str):
+        try:
+            data = _json.loads(data)
+        except Exception:
+            logger.warning(f"[SpecManager] _safe_parse_model got a non-JSON string for {model_class.__name__}")
+            data = {}
+    if not isinstance(data, dict):
+        logger.warning(f"[SpecManager] _safe_parse_model got {type(data).__name__}, expected dict for {model_class.__name__}")
+        data = {}
     try:
         return model_class(**data)
     except Exception:
         # If model parsing fails, create instance with just the raw data
         # The extra="allow" config will accept all fields
-        return model_class.model_construct(**data)
+        try:
+            return model_class.model_construct(**data)
+        except Exception:
+            return model_class.model_construct()
 
 
 @tool
@@ -1757,6 +1839,143 @@ def get_session_flow_config_tool() -> dict:
     if config:
         return {"success": True, "config": config.model_dump()}
     return {"success": False, "error": "Session flow config not saved yet."}
+
+
+# ── Contact Flow Spec (dedicated flow-behavior contract) ────────────────────
+
+def get_contact_flow_spec() -> Optional[ContactFlowSpec]:
+    """Get the saved ContactFlowSpec (internal use by the contact flow generator).
+
+    Loads from NFS state dir, then S3 workspace, mirroring flow_config handling.
+    Fault-tolerant: any failure returns None.
+    """
+    sid = _get_current_session_id()
+    if not sid:
+        return None
+    # NFS fast-path
+    try:
+        state_dir = _nfs_state_dir(sid)
+        if state_dir is not None:
+            cf_file = state_dir / "contact_flow_spec.json"
+            if cf_file.is_file():
+                data = _json.loads(cf_file.read_text(encoding="utf-8"))
+                return _safe_parse_model(ContactFlowSpec, data)
+    except Exception as e:
+        logger.warning(f"[SpecManager] NFS contact_flow_spec restore failed: {e}")
+    # S3 fallback
+    try:
+        from tools.project_workspace import get_workspace
+        ws = get_workspace()
+        if ws and hasattr(ws, "_load_json"):
+            data = ws._load_json(["contact_flow_spec.json"])
+            if data:
+                return _safe_parse_model(ContactFlowSpec, data)
+    except Exception as e:
+        logger.warning(f"[SpecManager] S3 contact_flow_spec restore failed: {e}")
+    return None
+
+
+@tool
+def save_contact_flow_spec(
+    flow_name: str = "main-flow",
+    call_direction: str = "inbound",
+    include_customer_phone_lookup: bool = False,
+    use_native_faq_retrieve: bool = True,
+    use_native_escalation: bool = True,
+    behaviors: list[dict] = None,
+    welcome_message: str = None,
+    transfer_message: str = None,
+    after_hours_message: str = None,
+    notes: str = "",
+) -> dict:
+    """
+    Save the dedicated Contact Flow specification — the explicit contract the
+    Contact Flow generator builds from.
+
+    Call this during the interview AFTER session flow config is saved, capturing
+    every flow-level behavior the customer requested (callback, queue transfer,
+    business hours branching, DTMF auth, etc.) with the blocks that implement
+    each and their dependency order.
+
+    Args:
+        flow_name: Name for the contact flow.
+        call_direction: 'inbound' or 'outbound'.
+        include_customer_phone_lookup: True if phone-based personalization was requested.
+        use_native_faq_retrieve: True → native Retrieve for FAQ (no custom Lambda/API).
+        use_native_escalation: True → native Return to Control for escalation/end-call.
+        behaviors: List of FlowBehavior dicts. Each:
+            {"behavior": "callback", "description": "...",
+             "blocks": ["UpdateContactCallbackNumber","TransferContactToQueue"],
+             "parameters": {"queue": "..."}, "depends_on": []}
+            behavior ∈ callback|queue_transfer|business_hours|agent_escalation|dtmf_auth|language_branch|recording|custom
+        welcome_message / transfer_message / after_hours_message: custom wording.
+        notes: free-text design notes.
+
+    Returns:
+        Confirmation with saved spec summary.
+    """
+    try:
+        parsed_behaviors = [_safe_parse_model(FlowBehavior, b) for b in (behaviors or [])]
+        spec = ContactFlowSpec(
+            flow_name=flow_name,
+            call_direction=call_direction,
+            include_customer_phone_lookup=include_customer_phone_lookup,
+            use_native_faq_retrieve=use_native_faq_retrieve,
+            use_native_escalation=use_native_escalation,
+            behaviors=parsed_behaviors,
+            welcome_message=welcome_message,
+            transfer_message=transfer_message,
+            after_hours_message=after_hours_message,
+            notes=notes,
+        )
+        sid = _get_current_session_id()
+        if sid:
+            state_dir = _nfs_state_dir(sid)
+            if state_dir is not None:
+                try:
+                    state_dir.mkdir(parents=True, exist_ok=True)
+                    target = state_dir / "contact_flow_spec.json"
+                    tmp = target.with_suffix(".tmp")
+                    tmp.write_text(_json.dumps(spec.model_dump(), ensure_ascii=False, default=str), encoding="utf-8")
+                    tmp.rename(target)
+                except Exception as e:
+                    logger.warning(f"[SpecManager] NFS persist failed for contact_flow_spec: {e}")
+            try:
+                from tools.project_workspace import get_workspace
+                ws = get_workspace()
+                if ws and hasattr(ws, "_save_json"):
+                    ws._save_json(["contact_flow_spec.json"], spec.model_dump())
+            except Exception as e:
+                logger.warning(f"[SpecManager] S3 persist failed for contact_flow_spec: {e}")
+
+        return {
+            "success": True,
+            "message": "Contact Flow spec saved.",
+            "summary": {
+                "flow_name": flow_name,
+                "call_direction": call_direction,
+                "behavior_count": len(parsed_behaviors),
+                "behaviors": [b.behavior for b in parsed_behaviors],
+                "native_faq": use_native_faq_retrieve,
+                "native_escalation": use_native_escalation,
+            },
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"Failed to save contact flow spec: {e}"}
+
+
+@tool
+def get_contact_flow_spec_tool() -> dict:
+    """
+    Retrieve the saved Contact Flow specification.
+
+    Returns:
+        The contact flow spec or error if not yet saved.
+    """
+    spec = get_contact_flow_spec()
+    if spec:
+        return {"success": True, "spec": spec.model_dump()}
+    return {"success": False, "error": "Contact flow spec not saved yet."}
 
 
 @tool
