@@ -381,19 +381,15 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)
 
-    # cfn-lint gate: auto-fix the recurring syntax issues (e.g. !Sub in a
-    # string-only Description field — cfn-lint E1004) and capture any errors
-    # that remain so the caller can surface / patch them. Fault-tolerant: if
-    # cfn-lint is unavailable this is a no-op pass-through.
-    lint_result = {"errors": [], "warnings": [], "fixes_applied": [], "available": False}
-    try:
-        from .asset_linters import lint_and_autofix_cfn
-        lint_result = lint_and_autofix_cfn(final_yaml)
-        final_yaml = lint_result["fixed_yaml"]
-    except Exception as e:
-        logger.error(f"[MERGE] cfn-lint gate failed (non-fatal): {e}")
-
     logger.info(f"[MERGE] Final template: {len(final_yaml)} chars")
+
+    # NOTE: cfn-lint runs AFTER streaming/saving (further below). cfn-lint is a
+    # CPU-bound call that blocks the event loop for several seconds on a large
+    # template; running it here (before stream_asset) delayed/dropped the
+    # infrastructure.yaml asset_preview events on the frontend. We stream the
+    # deterministically-merged template first (instant preview, original UX),
+    # then lint and re-stream only if the autofix actually changed something.
+    lint_result = {"errors": [], "warnings": [], "fixes_applied": [], "available": False}
 
     # --- Completeness verification (silent-failure backstop) ---
     # Confirm every fragment's top-level logical IDs survived into the final
@@ -461,6 +457,37 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
                              operation_id="update_q_session", is_complete=True)
     except Exception as e:
         logger.error(f"[MERGE] Streaming/S3 error: {e}")
+
+    # cfn-lint gate (runs AFTER the initial stream/save so the preview is
+    # instant). Auto-fixes recurring syntax issues (e.g. !Sub in a string-only
+    # Description — E1004) and records remaining errors. If the autofix changed
+    # the template, re-stream + re-save the corrected version. Fault-tolerant:
+    # any failure leaves the already-streamed template in place.
+    try:
+        from .asset_linters import lint_and_autofix_cfn
+        lint_result = lint_and_autofix_cfn(final_yaml)
+        fixed_yaml = lint_result["fixed_yaml"]
+        if fixed_yaml != final_yaml:
+            final_yaml = fixed_yaml
+            logger.info("[MERGE] cfn-lint autofix changed template — re-streaming")
+            try:
+                from tools.streaming_callback import stream_asset, clear_asset_preview_cache, get_session_id
+                from tools.s3_asset_storage import save_asset_to_s3
+                clear_asset_preview_cache("cloudformation", "infrastructure.yaml", project_name)
+                MAX_CHUNK = 15000
+                for i in range(0, len(final_yaml), MAX_CHUNK):
+                    chunk_end = min(i + MAX_CHUNK, len(final_yaml))
+                    stream_asset("cloudformation", "infrastructure.yaml", final_yaml[:chunk_end],
+                                 operation_id=project_name, is_complete=chunk_end >= len(final_yaml))
+                _sid = get_session_id()
+                if _sid:
+                    save_asset_to_s3(session_id=_sid, asset_type="cloudformation",
+                                     file_name="infrastructure.yaml", content=final_yaml,
+                                     operation_id=project_name)
+            except Exception as e:
+                logger.error(f"[MERGE] cfn-lint re-stream/save failed (non-fatal): {e}")
+    except Exception as e:
+        logger.error(f"[MERGE] cfn-lint gate failed (non-fatal): {e}")
 
     # Clean up registry
     clear_fragments(project_name)

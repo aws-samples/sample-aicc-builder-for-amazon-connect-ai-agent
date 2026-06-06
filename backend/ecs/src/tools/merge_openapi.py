@@ -318,18 +318,13 @@ def merge_openapi_fragments(api_title: str) -> dict:
             logger.info("[MERGE_OPENAPI] Final dedup pass removed duplicate paths from merged output")
             final_yaml = final_yaml[:paths_match.start(2)] + deduped_body + final_yaml[paths_match.end(2):]
 
-    # OpenAPI 3.0 lint gate: scrub null fields, add missing operation responses,
-    # and validate against the OpenAPI 3.0 schema. Fault-tolerant pass-through
-    # if the validator is unavailable.
-    lint_result = {"errors": [], "fixes_applied": [], "available": False}
-    try:
-        from .asset_linters import lint_and_autofix_openapi
-        lint_result = lint_and_autofix_openapi(final_yaml)
-        final_yaml = lint_result["fixed_yaml"]
-    except Exception as e:
-        logger.error(f"[MERGE_OPENAPI] openapi lint gate failed (non-fatal): {e}")
-
     logger.info(f"[MERGE_OPENAPI] Final spec: {len(final_yaml)} chars")
+
+    # NOTE: the OpenAPI lint gate runs AFTER streaming/saving (below). The
+    # validator/YAML round-trip is CPU-bound and blocks the event loop, which
+    # would delay/drop the openapi.yaml asset_preview events. Stream the merged
+    # spec first (instant preview), then lint and re-stream only if changed.
+    lint_result = {"errors": [], "fixes_applied": [], "available": False}
 
     # Stream to frontend + save to S3
     op_id = api_title.replace(" ", "_").lower()
@@ -356,6 +351,33 @@ def merge_openapi_fragments(api_title: str) -> dict:
             logger.info(f"[MERGE_OPENAPI] Saved to S3: {s3_key}")
     except Exception as e:
         logger.error(f"[MERGE_OPENAPI] Streaming/S3 error: {e}")
+
+    # OpenAPI 3.0 lint gate (post-stream): scrub nulls, add missing responses,
+    # validate. Re-stream + re-save only if the autofix changed the spec.
+    try:
+        from .asset_linters import lint_and_autofix_openapi
+        lint_result = lint_and_autofix_openapi(final_yaml)
+        fixed_yaml = lint_result["fixed_yaml"]
+        if fixed_yaml != final_yaml:
+            final_yaml = fixed_yaml
+            logger.info("[MERGE_OPENAPI] lint autofix changed spec — re-streaming")
+            try:
+                from tools.streaming_callback import stream_asset, clear_asset_preview_cache, get_session_id
+                from tools.s3_asset_storage import save_asset_to_s3
+                clear_asset_preview_cache("openapi", "openapi.yaml", op_id)
+                MAX_CHUNK = 15000
+                for i in range(0, len(final_yaml), MAX_CHUNK):
+                    chunk_end = min(i + MAX_CHUNK, len(final_yaml))
+                    stream_asset("openapi", "openapi.yaml", final_yaml[:chunk_end],
+                                 operation_id=op_id, is_complete=chunk_end >= len(final_yaml))
+                _sid = get_session_id()
+                if _sid:
+                    save_asset_to_s3(session_id=_sid, asset_type="openapi",
+                                     file_name="openapi.yaml", content=final_yaml, operation_id=op_id)
+            except Exception as e:
+                logger.error(f"[MERGE_OPENAPI] lint re-stream/save failed (non-fatal): {e}")
+    except Exception as e:
+        logger.error(f"[MERGE_OPENAPI] openapi lint gate failed (non-fatal): {e}")
 
     # Clean up registry
     clear_fragments(api_title)
