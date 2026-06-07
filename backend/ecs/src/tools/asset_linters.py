@@ -549,6 +549,318 @@ INVALID_CONTACT_FLOW_TYPE_HINTS = {
 }
 
 
+# Action Types that are TERMINAL — they end flow execution and MUST NOT carry
+# Transitions. Connect rejects "Action does not support transitions" otherwise.
+TERMINAL_ACTION_TYPES = frozenset({
+    "DisconnectParticipant", "EndFlowExecution", "ReturnFromFlowModule",
+    "TransferToFlow", "TransferContactToQueue", "TransferToAgent",
+})
+# TransferContactToQueue/TransferToAgent DO support transitions (queue-full etc.)
+# so keep only the truly terminal ones for the no-transitions rule.
+NO_TRANSITION_ACTION_TYPES = frozenset({
+    "DisconnectParticipant", "EndFlowExecution", "ReturnFromFlowModule",
+})
+
+# Required Error handlers per Action Type (Connect import enforces these).
+REQUIRED_ERRORS_BY_TYPE = {
+    "MessageParticipant": ["NoMatchingError"],
+    "GetParticipantInput": ["NoMatchingError", "InputTimeLimitExceeded", "NoMatchingCondition"],
+    "Compare": ["NoMatchingCondition"],
+    "ConnectParticipantWithLexBot": ["NoMatchingError", "NoMatchingCondition"],
+    "InvokeLambdaFunction": ["NoMatchingError"],
+    "CreateWisdomSession": ["NoMatchingError"],
+    "UpdateContactData": ["NoMatchingError"],
+    "TransferContactToQueue": ["QueueAtCapacity", "NoMatchingError"],
+    "UpdateContactTargetQueue": ["NoMatchingError"],
+    "CheckHoursOfOperation": ["NoMatchingError"],   # branches via True/False Conditions; needs NoMatchingError
+    "UpdateContactCallbackNumber": ["InvalidNumber", "NotDialable", "NoMatchingError"],
+}
+
+# Error types that are NOT valid for a given block — strip them on import.
+INVALID_ERRORS_BY_TYPE = {
+    "ConnectParticipantWithLexBot": {"AgentError"},
+    "CheckHoursOfOperation": {"NoMatchingCondition"},
+    # Compare branches via Conditions; its only valid Error is NoMatchingCondition.
+    "Compare": {"NoMatchingError"},
+}
+
+# Canonical AI-bot tool-result vocabulary (see SUBAGENT_TERMINOLOGY_AND_ESCALATION).
+# The bot returns exactly `Complete` (end call) or `Escalate` (human transfer);
+# the flow's Compare branches on these. Map common LLM synonyms back to canonical.
+# Keys are upper-cased for case-insensitive matching. Spec-driven extensions like
+# `OutOfHoursComplete` / `EscalateBilling` are intentionally NOT remapped.
+_CANONICAL_TOOL_RESULT = {
+    "COMPLETE": "Complete",
+    "END_CALL": "Complete",
+    "ENDCALL": "Complete",
+    "END_CONVERSATION": "Complete",
+    "ENDCONVERSATION": "Complete",
+    "DONE": "Complete",
+    "FINISH": "Complete",
+    "FINISHED": "Complete",
+    "HANGUP": "Complete",
+    "DISCONNECT": "Complete",
+    "ESCALATE": "Escalate",
+    "ESCALATION": "Escalate",
+    "TRANSFER": "Escalate",
+    "TRANSFER_TO_AGENT": "Escalate",
+    "AGENT": "Escalate",
+    "HUMAN": "Escalate",
+    "HANDOFF": "Escalate",
+}
+
+# Valid JSONPath root namespaces for Compare.ComparisonValue / attribute refs.
+# The model sometimes invents roots like `$.Agent.ReturnControlEvent.Type`.
+_VALID_JSONPATH_ROOTS = (
+    "$.Attributes.", "$.Channel", "$.CustomerEndpoint", "$.SystemEndpoint",
+    "$.Lex.", "$.Customer.", "$.External.", "$.StoredCustomerInput",
+    "$.Media.", "$.ContactId", "$.InitialContactId", "$.Queue.",
+    "$.Metadata.", "$.FlowAttributes.",
+)
+
+
+def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: list) -> None:
+    """Rewrite block Parameters/Transitions to the shapes Amazon Connect's
+    CreateContactFlow API actually accepts. Mutates `actions` in place and
+    appends human-readable notes to `fixes`.
+
+    Every rule here was derived from real InvalidContactFlowException `problems`
+    returned by the Connect API (the strict validator the console import uses):
+      - UpdateContactRecordingBehavior: {Agent,Customer} → {RecordingBehavior,…}
+      - UpdateContactTextToSpeechVoice: {VoiceId,Engine,LanguageCode} → {TextToSpeechVoice,TextToSpeechEngine}
+      - UpdateFlowLoggingBehavior:      {LoggingBehavior} → {FlowLoggingBehavior}
+      - UpdateContactTargetQueue:       {Queue} → {QueueId}
+      - ConnectParticipantWithLexBot:   {BotAliasArn,LexBot{AliasArn},Participant…} → {LexV2Bot{AliasArn},Text}
+      - terminal blocks:                strip Transitions
+      - MessageParticipant:             only ONE of Text/SSML/Media
+      - missing required Error handlers: injected, routed to a safe fallback
+    """
+    # A safe fallback target for injected error transitions: prefer an existing
+    # disconnect/terminal block, else the first action.
+    fallback = None
+    for a in actions:
+        if isinstance(a, dict) and (a.get("Type") or a.get("type")) == "DisconnectParticipant":
+            fallback = a.get("Identifier") or a.get("identifier")
+            break
+    if not fallback and actions:
+        fallback = actions[0].get("Identifier") or actions[0].get("identifier")
+
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        t = a.get("Type") or a.get("type")
+        p = a.get("Parameters")
+        if p is None:
+            p = a.get("parameters")
+        if p is None:
+            p = {}
+        pkey = "Parameters" if "Parameters" in a or "parameters" not in a else "parameters"
+        aid = a.get("Identifier") or a.get("identifier")
+
+        # --- UpdateContactRecordingBehavior: {Agent, Customer} → RecordingBehavior
+        if t == "UpdateContactRecordingBehavior":
+            if "RecordingBehavior" not in p:
+                p.pop("Agent", None)
+                p.pop("Customer", None)
+                p["RecordingBehavior"] = {
+                    "RecordedParticipants": ["Agent", "Customer"],
+                    "IVRRecordingBehavior": "Enabled",
+                }
+                p.setdefault("AnalyticsBehavior", {
+                    "Enabled": "True",
+                    "AnalyticsLanguage": "ko-KR",
+                    "ChannelConfiguration": {
+                        "Chat": {"AnalyticsModes": ["ContactLens"]},
+                        "Voice": {"AnalyticsModes": ["PostContact"]},
+                    },
+                })
+                fixes.append(f"[{aid}] UpdateContactRecordingBehavior: rebuilt RecordingBehavior (removed Agent/Customer)")
+
+        # --- UpdateContactTextToSpeechVoice: {VoiceId,Engine,LanguageCode} → {TextToSpeechVoice,Engine}
+        elif t == "UpdateContactTextToSpeechVoice":
+            if "TextToSpeechVoice" not in p:
+                voice = p.pop("VoiceId", None) or "Seoyeon"
+                eng = p.pop("Engine", None) or "Generative"
+                p.pop("LanguageCode", None)
+                p["TextToSpeechVoice"] = voice
+                p["TextToSpeechEngine"] = eng
+                p.setdefault("TextToSpeechStyle", "None")
+                fixes.append(f"[{aid}] UpdateContactTextToSpeechVoice: VoiceId/Engine/LanguageCode → TextToSpeechVoice/TextToSpeechEngine")
+
+        # --- UpdateFlowLoggingBehavior: {LoggingBehavior} → {FlowLoggingBehavior}
+        elif t == "UpdateFlowLoggingBehavior":
+            if "FlowLoggingBehavior" not in p and "LoggingBehavior" in p:
+                p["FlowLoggingBehavior"] = p.pop("LoggingBehavior")
+                fixes.append(f"[{aid}] UpdateFlowLoggingBehavior: LoggingBehavior → FlowLoggingBehavior")
+
+        # --- UpdateContactTargetQueue: {Queue} → {QueueId}; flatten nested QueueId
+        elif t == "UpdateContactTargetQueue":
+            if "QueueId" not in p and "Queue" in p:
+                p["QueueId"] = p.pop("Queue")
+                fixes.append(f"[{aid}] UpdateContactTargetQueue: Queue → QueueId")
+            # QueueId must be a string ARN/id, not a nested object {"QueueId": "..."}
+            if isinstance(p.get("QueueId"), dict):
+                inner = p["QueueId"].get("QueueId") or p["QueueId"].get("Id") or next(iter(p["QueueId"].values()), None)
+                p["QueueId"] = inner or "{{QUEUE_ARN}}"
+                fixes.append(f"[{aid}] UpdateContactTargetQueue: flattened nested QueueId → string")
+
+        # --- InvokeLambdaFunction: RequestAttributes → LambdaInvocationAttributes
+        elif t == "InvokeLambdaFunction":
+            if "RequestAttributes" in p:
+                p.setdefault("LambdaInvocationAttributes", p.pop("RequestAttributes"))
+                fixes.append(f"[{aid}] InvokeLambdaFunction: RequestAttributes → LambdaInvocationAttributes")
+            # ResponseValidation.ResponseType must be STRING_MAP (JSON is not accepted)
+            rv = p.get("ResponseValidation")
+            if isinstance(rv, dict) and rv.get("ResponseType") not in ("STRING_MAP", "JSON_OBJECT"):
+                rv["ResponseType"] = "STRING_MAP"
+                fixes.append(f"[{aid}] InvokeLambdaFunction: ResponseValidation.ResponseType → STRING_MAP")
+
+        # --- CheckHoursOfOperation: null/missing HoursOfOperationId → placeholder
+        elif t == "CheckHoursOfOperation":
+            if not p.get("HoursOfOperationId"):
+                p["HoursOfOperationId"] = "{{HOURS_OF_OPERATION_ID}}"
+                fixes.append(f"[{aid}] CheckHoursOfOperation: filled missing HoursOfOperationId placeholder")
+            # Must branch on BOTH True and False conditions.
+            tr = a.get("Transitions") or a.get("transitions") or {}
+            conds = tr.get("Conditions") or tr.get("conditions") or []
+            operands = {str(c.get("Condition", {}).get("Operands", [None])[0])
+                        for c in conds if isinstance(c, dict)}
+            nxt = tr.get("NextAction") or tr.get("nextAction") or fallback
+            true_target = next((c.get("NextAction") for c in conds
+                                if isinstance(c, dict) and str(c.get("Condition", {}).get("Operands", [None])[0]) == "True"), None)
+            if "False" not in operands:
+                conds.append({"Condition": {"Operator": "Equals", "Operands": ["False"]},
+                              "NextAction": nxt})
+                fixes.append(f"[{aid}] CheckHoursOfOperation: added missing 'False' branch")
+            if "True" not in operands:
+                conds.insert(0, {"Condition": {"Operator": "Equals", "Operands": ["True"]},
+                                 "NextAction": true_target or nxt})
+                fixes.append(f"[{aid}] CheckHoursOfOperation: added missing 'True' branch")
+            tr["Conditions"] = conds
+            a["Transitions" if "Transitions" in a or "transitions" not in a else "transitions"] = tr
+
+        # --- Compare: ComparisonValue must use a valid JSONPath root
+        elif t == "Compare":
+            cv = p.get("ComparisonValue")
+            if isinstance(cv, str) and cv.startswith("$.") and not cv.startswith(_VALID_JSONPATH_ROOTS):
+                # Re-home an invented root (e.g. $.Agent.ReturnControlEvent.Type)
+                # to a contact attribute, which is where flow logic should read.
+                leaf = cv.rstrip(".").split(".")[-1]
+                p["ComparisonValue"] = f"$.Attributes.{leaf}"
+                fixes.append(f"[{aid}] Compare: ComparisonValue '{cv}' → '$.Attributes.{leaf}' (invalid JSONPath root)")
+            # Canonical AI-bot tool-result vocabulary: when this Compare branches on
+            # the bot's Tool result, the operands MUST be `Complete`/`Escalate`
+            # (see SUBAGENT_TERMINOLOGY_AND_ESCALATION). Normalize known wrong
+            # synonyms so the flow's branch matches what the bot actually returns.
+            cv2 = p.get("ComparisonValue") or ""
+            if isinstance(cv2, str) and (".Tool" in cv2 or "actionType" in cv2 or ".toolResult" in cv2 or ".Tool." in cv2):
+                tr = a.get("Transitions") or a.get("transitions") or {}
+                for cond in (tr.get("Conditions") or tr.get("conditions") or []):
+                    if not isinstance(cond, dict):
+                        continue
+                    ops = cond.get("Condition", {}).get("Operands")
+                    if not isinstance(ops, list):
+                        continue
+                    for i_op, val in enumerate(ops):
+                        canon = _CANONICAL_TOOL_RESULT.get(str(val).strip().upper())
+                        if canon and val != canon:
+                            ops[i_op] = canon
+                            fixes.append(f"[{aid}] Compare: tool-result operand '{val}' → '{canon}' (canonical Complete/Escalate vocabulary)")
+
+        # --- ConnectParticipantWithLexBot: normalize to LexV2Bot.AliasArn + one message
+        elif t == "ConnectParticipantWithLexBot":
+            # Collect any ARN the model produced under various wrong keys.
+            arn = (p.pop("BotAliasArn", None)
+                   or p.pop("AgentAliasArn", None)
+                   or (isinstance(p.get("LexBot"), dict) and p["LexBot"].get("AliasArn"))
+                   or (isinstance(p.get("LexV2Bot"), dict) and p["LexV2Bot"].get("AliasArn")))
+            # Drop non-existent params.
+            for bad in ("ParticipantRole", "SessionAttributes", "RequestAttributes",
+                        "IdleSessionTimeout", "EndConversationPhrase"):
+                if bad in p and bad != "SessionAttributes":
+                    p.pop(bad, None)
+            # Migrate LexSessionAttributes-style key if present under SessionAttributes.
+            if "SessionAttributes" in p:
+                p.setdefault("LexSessionAttributes", p.pop("SessionAttributes"))
+            # Remove a malformed LexBot (V1 requires Name+Region+Alias; we use V2).
+            lexbot = p.get("LexBot")
+            if isinstance(lexbot, dict) and not all(k in lexbot for k in ("Name", "Region", "Alias")):
+                p.pop("LexBot", None)
+            if "LexV2Bot" not in p and "LexBot" not in p:
+                p["LexV2Bot"] = {"AliasArn": arn or "{{LEX_BOT_ALIAS_ARN}}"}
+                fixes.append(f"[{aid}] ConnectParticipantWithLexBot: normalized to LexV2Bot.AliasArn")
+            # Must have exactly one message property.
+            msg_keys = [k for k in ("Text", "SSML", "PromptId", "Media", "LexInitializationData") if k in p]
+            if not msg_keys:
+                p["Text"] = "{{WELCOME_MESSAGE}}"
+                fixes.append(f"[{aid}] ConnectParticipantWithLexBot: added required Text")
+
+        # --- MessageParticipant / GetParticipantInput: only ONE of Text/SSML/Media
+        if t in ("MessageParticipant", "GetParticipantInput", "MessageParticipantIteratively"):
+            present = [k for k in ("Text", "SSML", "PromptId", "Media") if k in p]
+            if len(present) > 1:
+                # Keep Text if present, else the first; drop the rest.
+                keep = "Text" if "Text" in present else present[0]
+                for k in present:
+                    if k != keep:
+                        p.pop(k, None)
+                fixes.append(f"[{aid}] {t}: kept only '{keep}' (removed {[k for k in present if k!=keep]})")
+
+        # write params back
+        if pkey in a or p:
+            a[pkey] = p
+
+        # --- Terminal blocks must not carry Transitions / Conditions / Errors
+        if t in NO_TRANSITION_ACTION_TYPES:
+            removed = []
+            for k in ("Transitions", "transitions", "Conditions", "Errors"):
+                if a.get(k):
+                    a.pop(k, None)
+                    removed.append(k)
+                elif k in a:
+                    a.pop(k, None)
+            if removed:
+                fixes.append(f"[{aid}] {t}: removed {removed} (terminal block carries none)")
+
+        # --- Strip Error types that are invalid for this block
+        bad_errs = INVALID_ERRORS_BY_TYPE.get(t)
+        if bad_errs:
+            tr = a.get("Transitions") or a.get("transitions")
+            if isinstance(tr, dict):
+                errs = tr.get("Errors") or tr.get("errors")
+                if isinstance(errs, list):
+                    kept = [e for e in errs if (e.get("ErrorType") or e.get("errorType")) not in bad_errs]
+                    if len(kept) != len(errs):
+                        tr["Errors" if "Errors" in tr else "errors"] = kept
+                        fixes.append(f"[{aid}] {t}: removed invalid Error type(s) {sorted(bad_errs & {e.get('ErrorType') or e.get('errorType') for e in errs})}")
+
+        # --- Inject missing required Error handlers
+        req = REQUIRED_ERRORS_BY_TYPE.get(t)
+        if req and t not in NO_TRANSITION_ACTION_TYPES:
+            tr = a.get("Transitions")
+            trkey = "Transitions"
+            if tr is None:
+                tr = a.get("transitions")
+                trkey = "transitions"
+            if tr is None:
+                tr = {}
+                trkey = "Transitions"
+            errs = tr.get("Errors")
+            if errs is None:
+                errs = tr.get("errors") or []
+            have = {e.get("ErrorType") or e.get("errorType") for e in errs if isinstance(e, dict)}
+            nxt = tr.get("NextAction") or tr.get("nextAction") or fallback
+            added = []
+            for et in req:
+                if et not in have:
+                    errs.append({"ErrorType": et, "NextAction": fallback or nxt})
+                    added.append(et)
+            if added:
+                tr["Errors"] = errs
+                a[trkey] = tr
+                fixes.append(f"[{aid}] {t}: added required Error(s) {added}")
+
+
 def lint_contact_flow(flow_json: str) -> dict:
     """Validate Amazon Connect Contact Flow JSON structural integrity.
 
@@ -670,6 +982,15 @@ def lint_contact_flow(flow_json: str) -> dict:
         else:
             suffix = f" — {hint}" if hint else " (not a valid Amazon Connect flow Action Type)"
             invalid_types.append(f"Action '{a.get('Identifier') or a.get('identifier')}' has invalid Type '{t}'{suffix}")
+
+    # Deterministic parameter normalization: rewrite block Parameters/Transitions
+    # to the exact shapes Connect's CreateContactFlow API accepts (derived from
+    # real InvalidContactFlowException problems). This fixes the param-name and
+    # required-error drift that makes generated flows fail to import.
+    try:
+        _normalize_contact_flow_params(actions, {}, fixes_applied)
+    except Exception as _e:  # never let normalization break linting
+        warnings.append(f"param normalization skipped: {_e}")
 
     flow_json_fixed = _json.dumps(doc, ensure_ascii=False, indent=2) if fixes_applied else flow_json
 

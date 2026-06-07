@@ -367,19 +367,54 @@ Trigger/EntryPoint).** The flow's first executed block is typically
 ### Parameters & Errors by Type
 | Type | Parameters | Required Errors |
 |------|------------|-----------------|
-| `DisconnectParticipant` | `{}` | (none - terminal) |
-| `MessageParticipant` | `Text` | `NoMatchingError` |
-| `TransferContactToQueue` | `QueueId` | `QueueAtCapacity`, `NoMatchingError` |
-| `Compare` | `ComparisonValue` | `NoMatchingCondition` |
+| `DisconnectParticipant` | `{}` | (none — terminal, NO Transitions/Conditions/Errors) |
+| `MessageParticipant` | exactly ONE of `Text`/`SSML`/`PromptId`/`Media` | `NoMatchingError` |
+| `TransferContactToQueue` | `{}` (uses queue set by UpdateContactTargetQueue) | `QueueAtCapacity`, `NoMatchingError` |
+| `UpdateContactTargetQueue` | `QueueId` (string ARN — NOT nested object) | `NoMatchingError` |
+| `Compare` | `ComparisonValue` (valid JSONPath root) | `NoMatchingCondition` ONLY (never `NoMatchingError`) |
 | `Loop` | `LoopCount` | Branches: `Looping`, `Complete` |
 | `Wait` | `WaitTime` (seconds) | `NoMatchingError` |
-| `GetParticipantInput` | `Text`, `DTMFConfiguration` | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
+| `GetParticipantInput` | exactly ONE of `Text`/`SSML`, + `DTMFConfiguration` | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
 | `UpdateContactCallbackNumber` | `CallbackNumber` | `InvalidNumber`, `NotDialable`, `NoMatchingError` |
-| `CheckMetricData` | `{}` | Conditions: `True`, `False` |
+| `CheckHoursOfOperation` | `HoursOfOperationId` (non-null) | `NoMatchingError`; Conditions MUST include BOTH `True` AND `False` |
 | `CheckMetricData` | `QueueId` | `NoMatchingError` |
-| `InvokeLambdaFunction` | `LambdaFunctionARN`, `InvocationTimeLimitSeconds` (max 8) | `NoMatchingError` |
+| `InvokeLambdaFunction` | `LambdaFunctionARN`, `InvocationTimeLimitSeconds` (max 8), `LambdaInvocationAttributes` (NOT `RequestAttributes`), `ResponseValidation.ResponseType`=`STRING_MAP` | `NoMatchingError` |
+| `ConnectParticipantWithLexBot` | `LexV2Bot.AliasArn` + exactly ONE of `Text`/`SSML`/`PromptId`; optional `LexSessionAttributes` | `NoMatchingError`, `NoMatchingCondition` (NEVER `AgentError`) |
+| `UpdateContactTextToSpeechVoice` | `TextToSpeechVoice`, `TextToSpeechEngine` (NOT `VoiceId`/`Engine`/`LanguageCode`) | `NoMatchingError` |
+| `UpdateContactRecordingBehavior` | `RecordingBehavior{RecordedParticipants,IVRRecordingBehavior}` + `AnalyticsBehavior` (NOT `Agent`/`Customer`) | (none) |
+| `UpdateFlowLoggingBehavior` | `FlowLoggingBehavior` (NOT `LoggingBehavior`) | (none) |
 | `CreateWisdomSession` | `WisdomAssistantArn` | `NoMatchingError` |
 | `UpdateContactData` | `WisdomSessionArn` | `NoMatchingError` |
+
+### ⚠️ EXACT PARAMETER NAMES — API-validated (these EXACT mistakes fail import)
+
+These are the precise property-name errors Amazon Connect's `CreateContactFlow`
+API rejects. NEVER emit the ❌ form:
+
+| Block | ❌ NEVER | ✅ ALWAYS |
+|-------|---------|----------|
+| `UpdateContactRecordingBehavior` | `{"Agent":…,"Customer":…}` | `{"RecordingBehavior":{"RecordedParticipants":["Agent","Customer"],"IVRRecordingBehavior":"Enabled"},"AnalyticsBehavior":{…}}` |
+| `UpdateContactTextToSpeechVoice` | `{"VoiceId":…,"Engine":…,"LanguageCode":…}` | `{"TextToSpeechVoice":"Seoyeon","TextToSpeechEngine":"Generative"}` |
+| `UpdateFlowLoggingBehavior` | `{"LoggingBehavior":"Enabled"}` | `{"FlowLoggingBehavior":"Enabled"}` |
+| `UpdateContactTargetQueue` | `{"Queue":…}` or `{"QueueId":{"QueueId":…}}` | `{"QueueId":"<arn-string>"}` |
+| `ConnectParticipantWithLexBot` | `BotAliasArn`, `ParticipantRole`, `SessionAttributes`, `RequestAttributes`, `LexBot.AliasArn` | `{"LexV2Bot":{"AliasArn":…},"Text":…}` (+ optional `LexSessionAttributes`) |
+| `InvokeLambdaFunction` | `RequestAttributes` | `LambdaInvocationAttributes` |
+
+**Hard rules (import-blockers):**
+1. **Terminal blocks** (`DisconnectParticipant`, `EndFlowExecution`,
+   `ReturnFromFlowModule`) carry NO `Transitions`, NO `Conditions`, NO `Errors` —
+   nothing but `Identifier`/`Type`/`Parameters`.
+2. **`Compare`** allows ONLY `NoMatchingCondition` as an Error — never
+   `NoMatchingError`. Its `ComparisonValue` MUST use a real JSONPath root:
+   `$.Attributes.X`, `$.Channel`, `$.Lex.SessionAttributes.X`,
+   `$.CustomerEndpoint.Address`, `$.External.X`, `$.StoredCustomerInput`.
+   There is NO `$.Agent.*` namespace — read agent/bot results from
+   `$.Lex.SessionAttributes.*` or a contact attribute.
+3. **`CheckHoursOfOperation`** needs a non-null `HoursOfOperationId` and Conditions
+   for BOTH `True` and `False`; its only Error is `NoMatchingError`.
+4. **`MessageParticipant`/`GetParticipantInput`** define EXACTLY ONE of
+   `Text`/`SSML`/`PromptId`/`Media` — never both `Text` and `SSML`.
+5. **`ConnectParticipantWithLexBot`** never uses `AgentError` as an Error type.
 
 ---
 
