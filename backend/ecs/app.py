@@ -236,6 +236,48 @@ def get_tools_for_phase(phase: str) -> list:
 
 
 # ========================================
+# Generation auto-continue (one-phase-per-turn without manual clicks)
+# ========================================
+# Ordered generation phases the orchestrator runs after the interview. Each is a
+# SEPARATE agent turn (to avoid WebSocket timeouts / context overflow), but the
+# backend auto-advances between them so the user doesn't have to type "진행"
+# after every phase. The names map to generation_progress asset IDs.
+_AUTO_CONTINUE_SEQUENCE = ["cdk", "lambda", "openapi", "prompt", "contact_flow"]
+
+# Max auto-continue hops in a single user turn — a safety backstop so a confused
+# orchestrator can't loop forever. 5 phases + a little slack.
+_AUTO_CONTINUE_MAX_HOPS = 7
+
+
+def _next_pending_generation_phase(session_id: str) -> str | None:
+    """Return the next core generation asset that is not yet completed, or None
+    if all core generation phases are done.
+
+    Used to decide whether to auto-advance to the next phase after a generation
+    turn ends. Returns None during interview/review (callers gate on phase).
+    """
+    try:
+        state = _get_frontend_progress(session_id) or {}
+    except Exception:
+        return None
+    for asset_id in _AUTO_CONTINUE_SEQUENCE:
+        info = state.get(asset_id)
+        status = info.get("status") if isinstance(info, dict) else None
+        if status != "completed":
+            return asset_id
+    return None
+
+
+# Synthetic user message injected to advance to the next generation phase.
+# Mirrors what a user would type; kept short and explicit so the orchestrator
+# proceeds with the next phase per the ONE-PHASE-PER-TURN workflow.
+_AUTO_CONTINUE_MESSAGE = (
+    "계속 진행해주세요. 다음 생성 단계를 자동으로 이어서 진행하고, "
+    "모든 에셋 생성이 끝나면 멈춰주세요. (자동 진행 / auto-continue)"
+)
+
+
+# ========================================
 # FastAPI Application
 # ========================================
 app = FastAPI(title="AICC Builder ECS", version="2.0.0")
@@ -1721,6 +1763,14 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
 
     session = get_or_create_session(session_id)
 
+    # Auto-continue bookkeeping: a real (human) message resets the hop counter;
+    # the synthetic auto-continue message increments it. This lets the backend
+    # advance through generation phases (one turn each — timeout-safe) without
+    # the user typing "진행" after every phase.
+    _is_auto_continue = isinstance(user_message, str) and user_message.strip() == _AUTO_CONTINUE_MESSAGE.strip()
+    if not _is_auto_continue:
+        session["_auto_continue_hops"] = 0
+
     # Send typing indicator
     if not await safe_send_json(websocket, {"type": "typing", "status": "Agent is thinking..."}):
         return
@@ -2106,6 +2156,34 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             )
             _context_store.save_conversation_history(session_id, session["conversation_history"])
 
+            # ── Auto-continue between generation phases ──
+            # The orchestrator runs ONE phase per turn (timeout safety), then
+            # ends its turn after saying "다음 단계 진행할게요". Instead of making
+            # the user type "진행" after every phase, detect that we're mid-
+            # generation with phases still pending and schedule the next turn
+            # automatically with a synthetic continue message. Each phase remains
+            # a separate stream_async turn loaded from saved history.
+            try:
+                phase_now = _detect_phase(effective_session_id)
+                pending = _next_pending_generation_phase(effective_session_id)
+                hops = int(session.get("_auto_continue_hops", 0))
+                if (
+                    phase_now == "generation"
+                    and pending is not None
+                    and hops < _AUTO_CONTINUE_MAX_HOPS
+                ):
+                    session["_auto_continue_hops"] = hops + 1
+                    session["_auto_continue_pending"] = True
+                    logger.info(
+                        f"[auto-continue] generation phase, next pending='{pending}', "
+                        f"hop {hops + 1}/{_AUTO_CONTINUE_MAX_HOPS} — will advance for {session_id}"
+                    )
+                else:
+                    session["_auto_continue_pending"] = False
+            except Exception as ac_err:
+                logger.warning(f"[auto-continue] planning failed (non-critical): {ac_err}")
+                session["_auto_continue_pending"] = False
+
         except asyncio.CancelledError:
             # User cancelled generation (cancelGeneration action). Preserve any
             # partial work, notify the client, then re-raise so the task is
@@ -2164,6 +2242,26 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             async with _background_tasks_lock:
                 _background_tasks.pop(session_id, None)
             logger.info(f"[BG] Agent task finished for {session_id}")
+
+            # Auto-continue: if a generation phase just finished and more phases
+            # remain, kick off the next turn automatically (no user click). The
+            # current task has now deregistered, so the busy-guard in
+            # handle_send_message_ws won't reject the re-entry. A small delay
+            # lets the frontend render the just-finished phase first.
+            if session.get("_auto_continue_pending"):
+                session["_auto_continue_pending"] = False
+                ws_now = ws_holder.get("ws")
+                if ws_now is not None:
+                    async def _auto_advance():
+                        try:
+                            await asyncio.sleep(1.5)
+                            await handle_send_message_ws(
+                                ws_now, session_id,
+                                {"message": _AUTO_CONTINUE_MESSAGE, "language": ui_language},
+                            )
+                        except Exception as adv_err:
+                            logger.warning(f"[auto-continue] re-dispatch failed (non-critical): {adv_err}")
+                    asyncio.create_task(_auto_advance())
 
     # Register and launch background task (fire-and-forget).
     # We do NOT await the task here — returning immediately lets the main

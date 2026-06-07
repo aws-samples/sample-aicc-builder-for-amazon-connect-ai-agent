@@ -49,6 +49,16 @@ export class KnowledgeBaseStack extends cdk.Stack {
       // TITAN_EMBED_TEXT_V2_1024 → 1024-dimensional embeddings.
       dimension: 1024,
       distanceMetric: s3vectors.VectorIndexDistanceMetric.COSINE,
+      // S3 Vectors caps FILTERABLE metadata at 2048 bytes per vector. Bedrock
+      // stores the full chunk text + its source metadata blob as metadata, which
+      // easily exceeds that — causing "Filterable metadata must have at most
+      // 2048 bytes" and a 100%-failed ingestion. Mark Bedrock's reserved keys as
+      // NON-filterable so they don't count against the limit (they're retrieved,
+      // not used as query filters).
+      nonFilterableMetadataKeys: [
+        "AMAZON_BEDROCK_TEXT",
+        "AMAZON_BEDROCK_METADATA",
+      ],
     });
 
     // Knowledge Base backed by the S3 Vectors index (instead of OpenSearch Serverless).
