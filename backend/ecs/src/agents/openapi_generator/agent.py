@@ -306,6 +306,21 @@ Only change what the modification request asks for.
     except (json.JSONDecodeError, TypeError):
         _all_ops_list = []
 
+    # Fault-tolerance: normalize each entry to a dict. Specs occasionally arrive
+    # double-encoded (a list of JSON strings), which would make `op.get(...)`
+    # raise "'str' object has no attribute 'get'" downstream. Parse-or-drop here
+    # so every consumer (filter, spec table, field schema) sees clean dicts.
+    _normalized_ops = []
+    for _op in _all_ops_list:
+        if isinstance(_op, str):
+            try:
+                _op = json.loads(_op)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if isinstance(_op, dict):
+            _normalized_ops.append(_op)
+    _all_ops_list = _normalized_ops
+
     if mode == "base":
         spec_table = _build_operation_spec_table(_all_ops_list)
         field_schema = build_field_schema_section(_all_ops_list)
@@ -663,6 +678,35 @@ async def openapi_generator_agent(
                     _stream_asset("openapi", "openapi.yaml", code, op_id)
                 result["file_name"] = "openapi.yaml"
                 result["summary"] = f"Generated OpenAPI spec for {api_title}"
+
+                # OpenAPI 3.0 lint gate for FULL mode (≤6 ops path does NOT go
+                # through merge_openapi_fragments, so without this it would skip
+                # validation entirely). Runs AFTER streaming so the preview is
+                # instant; re-streams + re-saves only if the autofix changed the
+                # spec. Fault-tolerant: any failure leaves the streamed spec.
+                try:
+                    from tools.asset_linters import lint_and_autofix_openapi
+                    _lint = lint_and_autofix_openapi(code)
+                    result["lint_available"] = _lint.get("available", False)
+                    result["lint_fixes_applied"] = _lint.get("fixes_applied", [])
+                    result["lint_errors"] = _lint.get("errors", [])[:20]
+                    result["lint_error_count"] = len(_lint.get("errors", []))
+                    if _lint.get("fixes_applied") and _lint["fixed_yaml"] != code:
+                        code = _lint["fixed_yaml"]
+                        logger.info("[OPENAPI] full-mode lint autofix changed spec — re-streaming")
+                        try:
+                            from tools.streaming_callback import clear_asset_preview_cache, get_session_id
+                            from tools.s3_asset_storage import save_asset_to_s3
+                            clear_asset_preview_cache("openapi", "openapi.yaml", op_id)
+                            _stream_asset("openapi", "openapi.yaml", code, op_id)
+                            _sid = get_session_id()
+                            if _sid:
+                                save_asset_to_s3(session_id=_sid, asset_type="openapi",
+                                                 file_name="openapi.yaml", content=code, operation_id=op_id)
+                        except Exception as e:
+                            logger.warning(f"[OPENAPI] full-mode lint re-stream failed (non-fatal): {e}")
+                except Exception as e:
+                    logger.warning(f"[OPENAPI] full-mode lint gate failed (non-fatal): {e}")
 
             _send_progress("completed", api_title)
             yield {"type": "progress", "agent": "openapi_generator",

@@ -251,6 +251,7 @@ def merge_openapi_fragments(api_title: str) -> dict:
     # Split each chunk into paths and schemas, normalizing indentation
     all_paths = []
     all_schemas = []
+    chunks_without_schemas: list[str] = []  # silent-drop backstop (issue #2)
     for chunk_key, chunk_content in chunks.items():
         paths_part, schemas_part = _split_chunk(chunk_content)
         if paths_part:
@@ -259,7 +260,18 @@ def merge_openapi_fragments(api_title: str) -> dict:
         if schemas_part:
             schemas_part = _normalize_indent(schemas_part, schemas_target, r'[A-Z]\w*:\s*$')
             all_schemas.append(schemas_part)
+        else:
+            # A chunk with paths but NO schemas is suspicious — usually means the
+            # SCHEMAS separator was missing and the heuristic split failed,
+            # silently dropping the chunk's component schemas. Record it.
+            if paths_part:
+                chunks_without_schemas.append(chunk_key[:60])
         logger.info(f"[MERGE_OPENAPI] Chunk '{chunk_key[:50]}': paths={len(paths_part)} chars, schemas={len(schemas_part)} chars")
+    if chunks_without_schemas:
+        logger.warning(
+            f"[MERGE_OPENAPI] {len(chunks_without_schemas)} chunk(s) produced NO schemas "
+            f"(possible silent schema drop): {chunks_without_schemas}"
+        )
 
     # Insert paths at PATHS_ANCHOR (replace entire anchor line to avoid prefix leak).
     # NOTE: pass replacement via a lambda so backslash sequences in fragment YAML
@@ -308,6 +320,12 @@ def merge_openapi_fragments(api_title: str) -> dict:
 
     logger.info(f"[MERGE_OPENAPI] Final spec: {len(final_yaml)} chars")
 
+    # NOTE: the OpenAPI lint gate runs AFTER streaming/saving (below). The
+    # validator/YAML round-trip is CPU-bound and blocks the event loop, which
+    # would delay/drop the openapi.yaml asset_preview events. Stream the merged
+    # spec first (instant preview), then lint and re-stream only if changed.
+    lint_result = {"errors": [], "fixes_applied": [], "available": False}
+
     # Stream to frontend + save to S3
     op_id = api_title.replace(" ", "_").lower()
     try:
@@ -334,13 +352,56 @@ def merge_openapi_fragments(api_title: str) -> dict:
     except Exception as e:
         logger.error(f"[MERGE_OPENAPI] Streaming/S3 error: {e}")
 
+    # OpenAPI 3.0 lint gate (post-stream): scrub nulls, add missing responses,
+    # validate. Re-stream + re-save only if the autofix changed the spec.
+    try:
+        from .asset_linters import lint_and_autofix_openapi
+        lint_result = lint_and_autofix_openapi(final_yaml)
+        fixed_yaml = lint_result["fixed_yaml"]
+        if fixed_yaml != final_yaml:
+            final_yaml = fixed_yaml
+            logger.info("[MERGE_OPENAPI] lint autofix changed spec — re-streaming")
+            try:
+                from tools.streaming_callback import stream_asset, clear_asset_preview_cache, get_session_id
+                from tools.s3_asset_storage import save_asset_to_s3
+                clear_asset_preview_cache("openapi", "openapi.yaml", op_id)
+                MAX_CHUNK = 15000
+                for i in range(0, len(final_yaml), MAX_CHUNK):
+                    chunk_end = min(i + MAX_CHUNK, len(final_yaml))
+                    stream_asset("openapi", "openapi.yaml", final_yaml[:chunk_end],
+                                 operation_id=op_id, is_complete=chunk_end >= len(final_yaml))
+                _sid = get_session_id()
+                if _sid:
+                    save_asset_to_s3(session_id=_sid, asset_type="openapi",
+                                     file_name="openapi.yaml", content=final_yaml, operation_id=op_id)
+            except Exception as e:
+                logger.error(f"[MERGE_OPENAPI] lint re-stream/save failed (non-fatal): {e}")
+    except Exception as e:
+        logger.error(f"[MERGE_OPENAPI] openapi lint gate failed (non-fatal): {e}")
+
     # Clean up registry
     clear_fragments(api_title)
 
+    oas_errors = lint_result.get("errors", [])
     return {
         "success": True,
         "api_title": api_title,
         "chunk_count": len(chunks),
         "total_chars": len(final_yaml),
-        "summary": f"Merged {len(chunks)} chunks into openapi.yaml ({len(final_yaml)} chars)",
+        "chunks_without_schemas": chunks_without_schemas,
+        "lint_available": lint_result.get("available", False),
+        "lint_fixes_applied": lint_result.get("fixes_applied", []),
+        "lint_errors": oas_errors[:20],
+        "lint_error_count": len(oas_errors),
+        "summary": (
+            f"Merged {len(chunks)} chunks into openapi.yaml ({len(final_yaml)} chars). "
+            f"OpenAPI 3.0 validation: {len(lint_result.get('fixes_applied', []))} auto-fix(es), "
+            f"{len(oas_errors)} error(s) remaining"
+            + (" — REVIEW/PATCH the lint_errors before deploying." if oas_errors else ".")
+            + (
+                f" ⚠️ {len(chunks_without_schemas)} chunk(s) yielded no schemas — "
+                "verify component schemas weren't dropped."
+                if chunks_without_schemas else ""
+            )
+        ),
     }

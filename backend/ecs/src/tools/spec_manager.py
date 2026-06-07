@@ -9,6 +9,7 @@ conventions from LLMs (e.g., "type" vs "field_type", "rule" vs "description").
 """
 
 import os
+import re
 import json as _json
 import logging
 from typing import Optional, Any, List
@@ -59,10 +60,15 @@ class FieldSpec(FlexibleBaseModel):
     required: bool = Field(default=True, description="Whether this field is required")
     description: Optional[str] = Field(default=None, description="Human-readable description")
 
-    # Validation rules - accept various naming conventions
-    min_length: Optional[int] = Field(default=None, description="Minimum string length")
-    max_length: Optional[int] = Field(default=None, description="Maximum string length")
-    pattern: Optional[str] = Field(default=None, description="Regex pattern for validation")
+    # Validation rules - accept various naming conventions.
+    # ⚠️ Put each customer constraint in the CORRECT field:
+    #   "2~20자" / "max 50 chars" / 길이 제한        → min_length / max_length (integers)
+    #   "숫자 12자리" / "^\\d{12}$" / 형식 패턴        → pattern (regex string)
+    #   "YYYY-MM-DD" / 날짜 형식                       → date_format (ONLY for date/datetime fields)
+    # Do NOT stuff a length/format description into date_format on a non-date field.
+    min_length: Optional[int] = Field(default=None, description="Minimum string length (integer)")
+    max_length: Optional[int] = Field(default=None, description="Maximum string length (integer)")
+    pattern: Optional[str] = Field(default=None, description="Regex pattern for validation (e.g. '^\\d{12}$')")
 
     min_value: Optional[Any] = Field(
         default=None,
@@ -81,7 +87,8 @@ class FieldSpec(FlexibleBaseModel):
     )
     date_format: Optional[str] = Field(
         default=None,
-        description="Expected date format",
+        description="Expected date format for date/datetime fields ONLY (e.g. 'YYYY-MM-DD', 'ISO8601'). "
+                    "Do NOT use for string length/format constraints — those go in max_length/pattern.",
         validation_alias=AliasChoices("date_format", "format", "dateFormat")
     )
 
@@ -346,6 +353,67 @@ class SessionFlowConfig(FlexibleBaseModel):
     )
 
 
+class FlowBehavior(FlexibleBaseModel):
+    """A single customer-requested Contact Flow behavior, mapped to the
+    Amazon Connect blocks that implement it (with dependency ordering).
+
+    This is the unit the Contact Flow generator MUST realize in the flow JSON.
+    """
+
+    behavior: str = Field(
+        description="One of: 'callback', 'queue_transfer', 'business_hours', "
+        "'agent_escalation', 'dtmf_auth', 'language_branch', 'recording', 'custom'",
+    )
+    description: str = Field(default="", description="What the customer asked for, in their words")
+    blocks: list[str] = Field(
+        default=[],
+        description="Ordered Amazon Connect block Types that implement this behavior "
+        "(e.g. ['UpdateContactCallbackNumber','TransferContactToQueue']). "
+        "Order encodes dependency: each block's NextAction points to the next.",
+    )
+    parameters: dict = Field(
+        default={},
+        description="Behavior-specific params, e.g. {'queue':'sales','hours_id':'...','after_hours_message':'...'}",
+    )
+    depends_on: list[str] = Field(
+        default=[],
+        description="Other behaviors/blocks that must precede this one (e.g. 'dtmf_auth' before 'agent_escalation')",
+    )
+
+
+class ContactFlowSpec(FlexibleBaseModel):
+    """Dedicated specification for the Contact Flow generator.
+
+    Unlike OperationSpec (which describes API business operations), this captures
+    the FLOW-level behaviors the customer requested — callback, queue transfers,
+    business-hours branching, escalation, DTMF auth — so the Contact Flow agent
+    builds from an explicit contract instead of inferring from chat. Each
+    behavior names the Connect blocks and their dependency order.
+    """
+
+    flow_name: str = Field(default="main-flow")
+    call_direction: str = Field(default="inbound")
+    include_customer_phone_lookup: bool = Field(default=False)
+    use_native_faq_retrieve: bool = Field(
+        default=True,
+        description="True → rely on Connect AI agent native Retrieve for FAQ "
+        "(NO custom Lambda/API). False only when an external doc API was requested.",
+    )
+    use_native_escalation: bool = Field(
+        default=True,
+        description="True → agent escalation/end-call via native Return to Control "
+        "(flow routing), NOT a custom Lambda/tool.",
+    )
+    behaviors: list[FlowBehavior] = Field(
+        default=[],
+        description="Ordered list of customer-requested flow behaviors to realize.",
+    )
+    welcome_message: Optional[str] = Field(default=None)
+    transfer_message: Optional[str] = Field(default=None)
+    after_hours_message: Optional[str] = Field(default=None)
+    notes: str = Field(default="", description="Free-text design notes for the flow generator")
+
+
 class RdsConfig(FlexibleBaseModel):
     """RDS connection configuration (only when db_type is rds_*)."""
 
@@ -561,6 +629,13 @@ class InfrastructureSpec(FlexibleBaseModel):
         default=False,
         description="Whether to include CustomerLookup + UpdateQSession Lambda resources",
         validation_alias=AliasChoices("include_customer_phone_lookup", "includeCustomerPhoneLookup"),
+    )
+    test_phone_number: Optional[str] = Field(
+        default=None,
+        description="The phone number the user will call into Connect from during testing. "
+        "When set, the sample-data seeder MUST include at least one record keyed to this number "
+        "(normalized to the same format as the phone GSI) so a live test call finds a match.",
+        validation_alias=AliasChoices("test_phone_number", "testPhoneNumber", "test_phone"),
     )
 
     # Tags
@@ -840,7 +915,11 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
             branch_info = ""
             if s.branches:
                 branch_info = " → " + ", ".join(
-                    f"{b.get('condition', '?')}→{b.get('next_step', '?')}" for b in s.branches
+                    (
+                        f"{b.get('condition', '?')}→{b.get('next_step', '?')}"
+                        if isinstance(b, dict) else str(b)
+                    )
+                    for b in s.branches
                 )
             tool_info = f" [tool: {s.tool_call}]" if s.tool_call else ""
             lines.append(f"- {s.step_id}. {s.label}{tool_info}{branch_info}")
@@ -855,17 +934,163 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
     return "\n".join(lines)
 
 
+_LEN_RANGE_RE = re.compile(r'(\d+)\s*[~\-–]\s*(\d+)\s*(?:자|글자|chars?|characters?)?')
+_LEN_MAX_RE = re.compile(r'(?:최대|max(?:imum)?|up to)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
+_LEN_MIN_RE = re.compile(r'(?:최소|min(?:imum)?|at least)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
+_LEN_EXACT_RE = re.compile(r'(\d+)\s*(?:자리|자|글자|digits?|chars?|characters?)')
+_LOOKS_LIKE_DATEFMT_RE = re.compile(r'^\s*(?:[YyMmDdHhSs][\-/:. ]?){2,}\s*$|ISO\s*8601|ISO8601|RFC\s*3339', re.IGNORECASE)
+
+
+def _normalize_field_constraints(data: dict) -> dict:
+    """Re-home obviously-misplaced string constraints into the correct FieldSpec
+    keys so customer-stated rules are honored exactly.
+
+    Handles the common LLM mistake of writing a length/format constraint (e.g.
+    "2~20자", "최대 50자", "숫자 12자리") into ``date_format`` (or ``validation``)
+    on a non-date field. We move it to ``min_length`` / ``max_length`` / ``pattern``
+    only when those targets are still empty (never clobber an explicit value).
+    """
+    if not isinstance(data, dict):
+        return data
+    ftype = (data.get("field_type") or data.get("type") or "").lower()
+    is_date_field = ftype in ("date", "datetime", "time")
+
+    # A date_format value on a NON-date field that doesn't look like a real date
+    # format is almost certainly a misplaced length/format constraint.
+    df = data.get("date_format") or data.get("format") or data.get("dateFormat")
+    if df and isinstance(df, str) and not is_date_field and not _LOOKS_LIKE_DATEFMT_RE.search(df):
+        moved = _apply_length_constraint(data, df)
+        if not moved:
+            # Not a length phrase — it's a FORMAT mask/pattern on a non-date
+            # field (e.g. "010-XXXX-XXXX", "AAA-000"). Move it to `pattern` as a
+            # best-effort regex (only if pattern is empty). Mask chars: X/0/9→\d,
+            # A/a→[A-Za-z]; keep literal separators escaped.
+            if data.get("pattern") is None:
+                data["pattern"] = _mask_to_regex(df)
+            moved = True
+        if moved:
+            # consumed → clear the misplaced date_format
+            for k in ("date_format", "format", "dateFormat"):
+                if k in data:
+                    data[k] = None
+    # If it IS a real date field but date_format holds a length phrase, also fix.
+    elif df and isinstance(df, str) and is_date_field and ("자" in df or "char" in df.lower()):
+        _apply_length_constraint(data, df)
+        for k in ("date_format", "format", "dateFormat"):
+            if k in data and ("자" in str(data.get(k)) or "char" in str(data.get(k)).lower()):
+                data[k] = None
+    return data
+
+
+def _mask_to_regex(mask: str) -> str:
+    """Convert a human format mask to a best-effort anchored regex.
+
+    e.g. "010-XXXX-XXXX" → "^010-\\d{4}-\\d{4}$", "AAA-000" → "^[A-Za-z]{3}-000$".
+    Digit-placeholder chars: X/x/# → digit. Letter-placeholder: A/a → letter.
+    Literal digits (0-9) are kept literal so a real prefix like "010" survives.
+    Falls back to escaping the whole string if it has no placeholder chars.
+    """
+    if not any(c in mask for c in "Xx#Aa"):
+        # No placeholder chars — treat the text itself as a literal pattern.
+        return "^" + re.escape(mask.strip()) + "$"
+    out = ["^"]
+    i = 0
+    n = len(mask)
+    while i < n:
+        c = mask[i]
+        if c in "Xx#":
+            j = i
+            while j < n and mask[j] in "Xx#":
+                j += 1
+            out.append(r"\d{" + str(j - i) + "}")
+            i = j
+        elif c in "Aa":
+            j = i
+            while j < n and mask[j] in "Aa":
+                j += 1
+            out.append(r"[A-Za-z]{" + str(j - i) + "}")
+            i = j
+        else:
+            out.append(re.escape(c))
+            i += 1
+    out.append("$")
+    return "".join(out)
+
+
+def _apply_length_constraint(data: dict, text: str) -> bool:
+    """Parse a length/format phrase and populate min_length/max_length/pattern
+    on `data` (only filling empties). Returns True if something was applied."""
+    applied = False
+    m = _LEN_RANGE_RE.search(text)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if data.get("min_length") is None:
+            data["min_length"] = lo; applied = True
+        if data.get("max_length") is None:
+            data["max_length"] = hi; applied = True
+        return applied
+    mx = _LEN_MAX_RE.search(text)
+    if mx and data.get("max_length") is None:
+        data["max_length"] = int(mx.group(1)); applied = True
+    mn = _LEN_MIN_RE.search(text)
+    if mn and data.get("min_length") is None:
+        data["min_length"] = int(mn.group(1)); applied = True
+    if applied:
+        return True
+    ex = _LEN_EXACT_RE.search(text)
+    if ex:
+        n = int(ex.group(1))
+        # "12자리" exact length → both bounds (and a digit pattern if it says 숫자/digit)
+        if data.get("min_length") is None:
+            data["min_length"] = n; applied = True
+        if data.get("max_length") is None:
+            data["max_length"] = n; applied = True
+        if ("숫자" in text or "digit" in text.lower()) and data.get("pattern") is None:
+            data["pattern"] = r"^\d{" + str(n) + r"}$"
+        return applied
+    return applied
+
+
 def _safe_parse_model(model_class, data: dict):
     """
     Safely parse data into a Pydantic model.
     If validation fails, store the raw dict with extra="allow".
+
+    Fault-tolerance: ``data`` is expected to be a dict, but persisted specs can
+    arrive double-encoded (a JSON string). Recover by parsing once; if it still
+    isn't a dict, fall back to an empty model rather than raising
+    ``'str' object has no attribute ...`` / ``argument of type 'str'``.
     """
+    if isinstance(data, str):
+        try:
+            data = _json.loads(data)
+        except Exception:
+            logger.warning(f"[SpecManager] _safe_parse_model got a non-JSON string for {model_class.__name__}")
+            data = {}
+    if not isinstance(data, dict):
+        logger.warning(f"[SpecManager] _safe_parse_model got {type(data).__name__}, expected dict for {model_class.__name__}")
+        data = {}
+
+    # Deterministic constraint normalization for FieldSpec: customer constraints
+    # must land in the RIGHT structured field (the core "everything is a spec"
+    # philosophy). LLMs sometimes drop a length/format constraint into the wrong
+    # key (e.g. "2~20자" into date_format on a non-date field). Re-home obvious
+    # misplacements so downstream generators read accurate validation.
+    if model_class is FieldSpec:
+        try:
+            data = _normalize_field_constraints(data)
+        except Exception as e:
+            logger.debug(f"[SpecManager] field constraint normalize skipped: {e}")
+
     try:
         return model_class(**data)
     except Exception:
         # If model parsing fails, create instance with just the raw data
         # The extra="allow" config will accept all fields
-        return model_class.model_construct(**data)
+        try:
+            return model_class.model_construct(**data)
+        except Exception:
+            return model_class.model_construct()
 
 
 @tool
@@ -1759,6 +1984,143 @@ def get_session_flow_config_tool() -> dict:
     return {"success": False, "error": "Session flow config not saved yet."}
 
 
+# ── Contact Flow Spec (dedicated flow-behavior contract) ────────────────────
+
+def get_contact_flow_spec() -> Optional[ContactFlowSpec]:
+    """Get the saved ContactFlowSpec (internal use by the contact flow generator).
+
+    Loads from NFS state dir, then S3 workspace, mirroring flow_config handling.
+    Fault-tolerant: any failure returns None.
+    """
+    sid = _get_current_session_id()
+    if not sid:
+        return None
+    # NFS fast-path
+    try:
+        state_dir = _nfs_state_dir(sid)
+        if state_dir is not None:
+            cf_file = state_dir / "contact_flow_spec.json"
+            if cf_file.is_file():
+                data = _json.loads(cf_file.read_text(encoding="utf-8"))
+                return _safe_parse_model(ContactFlowSpec, data)
+    except Exception as e:
+        logger.warning(f"[SpecManager] NFS contact_flow_spec restore failed: {e}")
+    # S3 fallback
+    try:
+        from tools.project_workspace import get_workspace
+        ws = get_workspace()
+        if ws and hasattr(ws, "_load_json"):
+            data = ws._load_json(["contact_flow_spec.json"])
+            if data:
+                return _safe_parse_model(ContactFlowSpec, data)
+    except Exception as e:
+        logger.warning(f"[SpecManager] S3 contact_flow_spec restore failed: {e}")
+    return None
+
+
+@tool
+def save_contact_flow_spec(
+    flow_name: str = "main-flow",
+    call_direction: str = "inbound",
+    include_customer_phone_lookup: bool = False,
+    use_native_faq_retrieve: bool = True,
+    use_native_escalation: bool = True,
+    behaviors: list[dict] = None,
+    welcome_message: str = None,
+    transfer_message: str = None,
+    after_hours_message: str = None,
+    notes: str = "",
+) -> dict:
+    """
+    Save the dedicated Contact Flow specification — the explicit contract the
+    Contact Flow generator builds from.
+
+    Call this during the interview AFTER session flow config is saved, capturing
+    every flow-level behavior the customer requested (callback, queue transfer,
+    business hours branching, DTMF auth, etc.) with the blocks that implement
+    each and their dependency order.
+
+    Args:
+        flow_name: Name for the contact flow.
+        call_direction: 'inbound' or 'outbound'.
+        include_customer_phone_lookup: True if phone-based personalization was requested.
+        use_native_faq_retrieve: True → native Retrieve for FAQ (no custom Lambda/API).
+        use_native_escalation: True → native Return to Control for escalation/end-call.
+        behaviors: List of FlowBehavior dicts. Each:
+            {"behavior": "callback", "description": "...",
+             "blocks": ["UpdateContactCallbackNumber","TransferContactToQueue"],
+             "parameters": {"queue": "..."}, "depends_on": []}
+            behavior ∈ callback|queue_transfer|business_hours|agent_escalation|dtmf_auth|language_branch|recording|custom
+        welcome_message / transfer_message / after_hours_message: custom wording.
+        notes: free-text design notes.
+
+    Returns:
+        Confirmation with saved spec summary.
+    """
+    try:
+        parsed_behaviors = [_safe_parse_model(FlowBehavior, b) for b in (behaviors or [])]
+        spec = ContactFlowSpec(
+            flow_name=flow_name,
+            call_direction=call_direction,
+            include_customer_phone_lookup=include_customer_phone_lookup,
+            use_native_faq_retrieve=use_native_faq_retrieve,
+            use_native_escalation=use_native_escalation,
+            behaviors=parsed_behaviors,
+            welcome_message=welcome_message,
+            transfer_message=transfer_message,
+            after_hours_message=after_hours_message,
+            notes=notes,
+        )
+        sid = _get_current_session_id()
+        if sid:
+            state_dir = _nfs_state_dir(sid)
+            if state_dir is not None:
+                try:
+                    state_dir.mkdir(parents=True, exist_ok=True)
+                    target = state_dir / "contact_flow_spec.json"
+                    tmp = target.with_suffix(".tmp")
+                    tmp.write_text(_json.dumps(spec.model_dump(), ensure_ascii=False, default=str), encoding="utf-8")
+                    tmp.rename(target)
+                except Exception as e:
+                    logger.warning(f"[SpecManager] NFS persist failed for contact_flow_spec: {e}")
+            try:
+                from tools.project_workspace import get_workspace
+                ws = get_workspace()
+                if ws and hasattr(ws, "_save_json"):
+                    ws._save_json(["contact_flow_spec.json"], spec.model_dump())
+            except Exception as e:
+                logger.warning(f"[SpecManager] S3 persist failed for contact_flow_spec: {e}")
+
+        return {
+            "success": True,
+            "message": "Contact Flow spec saved.",
+            "summary": {
+                "flow_name": flow_name,
+                "call_direction": call_direction,
+                "behavior_count": len(parsed_behaviors),
+                "behaviors": [b.behavior for b in parsed_behaviors],
+                "native_faq": use_native_faq_retrieve,
+                "native_escalation": use_native_escalation,
+            },
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"Failed to save contact flow spec: {e}"}
+
+
+@tool
+def get_contact_flow_spec_tool() -> dict:
+    """
+    Retrieve the saved Contact Flow specification.
+
+    Returns:
+        The contact flow spec or error if not yet saved.
+    """
+    spec = get_contact_flow_spec()
+    if spec:
+        return {"success": True, "spec": spec.model_dump()}
+    return {"success": False, "error": "Contact flow spec not saved yet."}
+
+
 @tool
 def save_infrastructure_spec(
     project_name: str,
@@ -1772,6 +2134,7 @@ def save_infrastructure_spec(
     vpc_config: dict = None,
     include_s3_bucket: bool = True,
     include_customer_phone_lookup: bool = False,
+    test_phone_number: str = None,
     tags: dict = None,
     notes: str = None,
 ) -> dict:
@@ -1804,6 +2167,9 @@ def save_infrastructure_spec(
             {"vpc_id": "vpc-...", "subnet_ids": [...], "security_group_ids": [...]}
         include_s3_bucket: Whether to include S3 bucket for FAQ uploads (default: true)
         include_customer_phone_lookup: Whether to include phone lookup Lambda resources
+        test_phone_number: The number the user will call into Connect from during testing.
+            Pass this whenever the interview captured one — the sample-data seeder
+            will key a record to it so a live test call matches a real record.
         tags: AWS resource tags to apply to all resources
         notes: Additional infrastructure notes or constraints
 
@@ -1829,6 +2195,7 @@ def save_infrastructure_spec(
             vpc_config=parsed_vpc,
             include_s3_bucket=include_s3_bucket,
             include_customer_phone_lookup=include_customer_phone_lookup,
+            test_phone_number=test_phone_number,
             tags=tags or {},
             notes=notes,
         )

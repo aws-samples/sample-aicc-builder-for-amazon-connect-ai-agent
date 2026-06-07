@@ -5,7 +5,7 @@
  */
 
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { Send, AlertCircle, Loader2, WifiOff, Wifi, ChevronDown, ChevronUp, CheckCircle2, Circle } from 'lucide-react';
+import { Send, AlertCircle, Loader2, WifiOff, Wifi, ChevronDown, ChevronUp, CheckCircle2, Circle, Square } from 'lucide-react';
 import { useBuilderStore } from '../stores/builderStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -54,7 +54,7 @@ export function ChatWindow() {
   const session = useBuilderStore(s => s.session);
 
   const { currentSessionId, updateSessionTitle, updateSessionActivity, createNewSession, sessions } = useSessionStore();
-  const { sendMessage, sendMessageWithAttachments, connect, switchSession } = useWebSocket();
+  const { sendMessage, sendMessageWithAttachments, connect, switchSession, cancelGeneration } = useWebSocket();
 
   const handleResetSession = useCallback(() => {
     const freshId = `session-${crypto.randomUUID()}`;
@@ -569,19 +569,35 @@ export function ChatWindow() {
               </div>
             )}
           </div>
-          <button
-            type="submit"
-            disabled={!isConnected || isUploadingAttachments || isAtCharLimit || (isLoadingSession && !isSessionReady) || (!inputValue.trim() && attachments.filter(a => a.status === 'ready').length === 0)}
-            className={cn(
-              'p-2.5 lg:p-3 rounded-xl transition-all flex-shrink-0',
-              'bg-primary-600 dark:bg-primary-500 text-white shadow-sm dark:shadow-glow',
-              'hover:bg-primary-700 dark:hover:bg-primary-600 hover:shadow-md',
-              'disabled:bg-surface-300 dark:disabled:bg-surface-700 disabled:shadow-none disabled:cursor-not-allowed',
-              'focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 dark:focus:ring-offset-surface-850'
-            )}
-          >
-            <Send className="w-4 h-4 lg:w-5 lg:h-5" />
-          </button>
+          {isTyping ? (
+            <button
+              type="button"
+              onClick={() => cancelGeneration()}
+              title={language === 'ko-KR' ? '생성 중지' : 'Stop generation'}
+              className={cn(
+                'p-2.5 lg:p-3 rounded-xl transition-all flex-shrink-0',
+                'bg-red-600 dark:bg-red-500 text-white shadow-sm',
+                'hover:bg-red-700 dark:hover:bg-red-600 hover:shadow-md',
+                'focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 dark:focus:ring-offset-surface-850'
+              )}
+            >
+              <Square className="w-4 h-4 lg:w-5 lg:h-5" fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!isConnected || isUploadingAttachments || isAtCharLimit || (isLoadingSession && !isSessionReady) || (!inputValue.trim() && attachments.filter(a => a.status === 'ready').length === 0)}
+              className={cn(
+                'p-2.5 lg:p-3 rounded-xl transition-all flex-shrink-0',
+                'bg-primary-600 dark:bg-primary-500 text-white shadow-sm dark:shadow-glow',
+                'hover:bg-primary-700 dark:hover:bg-primary-600 hover:shadow-md',
+                'disabled:bg-surface-300 dark:disabled:bg-surface-700 disabled:shadow-none disabled:cursor-not-allowed',
+                'focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 dark:focus:ring-offset-surface-850'
+              )}
+            >
+              <Send className="w-4 h-4 lg:w-5 lg:h-5" />
+            </button>
+          )}
         </div>
         <div className="mt-2 flex items-center justify-between">
           <p className="text-xs text-surface-400 dark:text-surface-500">

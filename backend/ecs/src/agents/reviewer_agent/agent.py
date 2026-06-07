@@ -691,8 +691,11 @@ Begin now."""
         last_stream_len = 0
         STREAM_INTERVAL = 500  # Stream every 500 chars of new content
 
-        # Use timestamp-based operation_id so 2nd review creates a new preview
-        review_op_id = f"review-{int(time.time())}"
+        # Stable operation_id so the orchestrator can deterministically RE-READ
+        # the full report (assets/review/latest/review_report.md) on the next
+        # turn instead of re-running the reviewer just to recall the findings.
+        # (Previously timestamped → unfindable → orchestrator re-ran review.)
+        review_op_id = "latest"
         review_file = "review_report.md"
 
         # Create heartbeat manager
@@ -782,14 +785,30 @@ Begin now."""
         critical_count = full_response.count("❌")
         warning_count = full_response.count("⚠️")
 
+        # Return the FULL report (capped) in the completion result, plus the
+        # exact workspace path. This keeps the findings in the orchestrator's
+        # conversation history so it can act on "fix #1" WITHOUT re-running the
+        # reviewer to recall what #1 was (the cause of spurious re-reviews).
+        report_path = f"assets/review/{review_op_id}/{review_file}"
+        MAX_REPORT_IN_RESULT = 12000
+        report_for_result = (
+            full_response if len(full_response) <= MAX_REPORT_IN_RESULT
+            else full_response[:MAX_REPORT_IN_RESULT] + "\n\n... [truncated — read the full report at " + report_path + "]"
+        )
         yield {
             "success": True,
             "session_id": session_id,
             "review_scope": review_scope,
             "critical_issues": critical_count,
             "warnings": warning_count,
-            "report_preview": full_response[:500] if len(full_response) > 500 else full_response,
-            "summary": f"Review completed. Found {critical_count} critical issues, {warning_count} warnings. See review_report.md for details.",
+            "report_path": report_path,
+            "report": report_for_result,
+            "summary": (
+                f"Review completed. Found {critical_count} critical issues, {warning_count} warnings. "
+                f"Full findings are in the `report` field above and saved at {report_path}. "
+                f"To act on specific items later, RE-READ {report_path} with read_workspace_file — "
+                f"do NOT re-run the reviewer just to recall findings."
+            ),
             "_completion_marker": "SUBAGENT_COMPLETE"
         }
 

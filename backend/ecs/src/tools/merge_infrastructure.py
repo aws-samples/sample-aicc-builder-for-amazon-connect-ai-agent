@@ -30,40 +30,49 @@ def _clean_fragment(fragment: str) -> str:
     return stripped
 
 
-def _merge_at_anchor(base_yaml: str, fragments: list[str]) -> str:
-    """Insert all fragments at the anchor comment position in base YAML."""
+def _merge_at_anchor(base_yaml: str, fragments: list[str]) -> tuple[str, dict]:
+    """Insert all fragments at the anchor comment position in base YAML.
+
+    Returns (merged_yaml, info) where info records the insertion strategy used
+    and how many fragments were empty/skipped — so the caller can surface a
+    warning instead of silently producing a structurally-wrong template (the
+    "append to end" fallback in particular usually means the base template was
+    malformed).
+    """
     combined = ""
+    skipped = 0
     for i, frag in enumerate(fragments):
         cleaned = _clean_fragment(frag)
         if not cleaned:
             logger.warning(f"[MERGE] Fragment {i} is empty, skipping")
+            skipped += 1
             continue
         combined += cleaned.rstrip("\n") + "\n\n"
 
     if not combined.strip():
         logger.warning("[MERGE] No valid fragments to merge")
-        return base_yaml
+        return base_yaml, {"strategy": "none", "skipped": skipped, "degraded": True}
 
     anchor_idx = base_yaml.find(ANCHOR_COMMENT)
     if anchor_idx != -1:
         merged = base_yaml[:anchor_idx] + combined + base_yaml[anchor_idx:]
         logger.info(f"[MERGE] Inserted {len(combined)} chars at anchor comment")
-        return merged
+        return merged, {"strategy": "anchor", "skipped": skipped, "degraded": False}
 
     deploy_idx = base_yaml.find("\n  ApiDeployment:")
     if deploy_idx != -1:
         merged = base_yaml[:deploy_idx + 1] + combined + base_yaml[deploy_idx + 1:]
         logger.info(f"[MERGE] Inserted at ApiDeployment fallback")
-        return merged
+        return merged, {"strategy": "apideployment_fallback", "skipped": skipped, "degraded": False}
 
     outputs_idx = base_yaml.find("\nOutputs:")
     if outputs_idx != -1:
         merged = base_yaml[:outputs_idx + 1] + combined + base_yaml[outputs_idx + 1:]
         logger.info(f"[MERGE] Inserted at Outputs fallback")
-        return merged
+        return merged, {"strategy": "outputs_fallback", "skipped": skipped, "degraded": False}
 
-    logger.warning("[MERGE] No insertion point found, appending to end")
-    return base_yaml.rstrip("\n") + "\n\n" + combined
+    logger.warning("[MERGE] No insertion point found, appending to end (DEGRADED — base template likely malformed)")
+    return base_yaml.rstrip("\n") + "\n\n" + combined, {"strategy": "append_eof", "skipped": skipped, "degraded": True}
 
 
 def _remove_anchor_comment(yaml_str: str) -> str:
@@ -71,6 +80,26 @@ def _remove_anchor_comment(yaml_str: str) -> str:
     return "\n".join(
         line for line in yaml_str.split("\n") if ANCHOR_COMMENT not in line
     )
+
+
+# IAM actions for Amazon Connect AI agents (formerly Amazon Q in Connect) live
+# under the `wisdom:` namespace. `qconnect:` is NOT a real IAM namespace and
+# causes AccessDenied at runtime. LLMs recurrently emit `qconnect:` despite the
+# prompt forbidding it (workshop QA caught this repeatedly), so fix it
+# deterministically at merge time rather than relying on the reviewer.
+_QCONNECT_ACTION_RE = re.compile(r'qconnect:([A-Za-z]\w*)')
+
+
+def _fix_qconnect_namespace(yaml_str: str) -> str:
+    """Rewrite `qconnect:Action` IAM actions to `wisdom:Action`.
+
+    Only rewrites the action-namespace form (`qconnect:` followed by an action
+    name), which is always wrong in IAM. Leaves any other occurrence untouched.
+    """
+    new_yaml, n = _QCONNECT_ACTION_RE.subn(r'wisdom:\1', yaml_str)
+    if n:
+        logger.info(f"[MERGE] Rewrote {n}x qconnect: → wisdom: (invalid IAM namespace)")
+    return new_yaml
 
 
 def _fix_common_property_hallucinations(yaml_str: str) -> str:
@@ -365,14 +394,47 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
 
     logger.info(f"[MERGE] Merging {len(fragments)} fragments into base ({len(base_yaml)} chars)")
 
-    merged = _merge_at_anchor(base_yaml, fragments)
+    merged, merge_info = _merge_at_anchor(base_yaml, fragments)
     final_yaml = _remove_anchor_comment(merged)
     final_yaml = _fix_common_property_hallucinations(final_yaml)
+    final_yaml = _fix_qconnect_namespace(final_yaml)
     final_yaml = _deduplicate_resources(final_yaml)
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)
 
     logger.info(f"[MERGE] Final template: {len(final_yaml)} chars")
+
+    # NOTE: cfn-lint runs AFTER streaming/saving (further below). cfn-lint is a
+    # CPU-bound call that blocks the event loop for several seconds on a large
+    # template; running it here (before stream_asset) delayed/dropped the
+    # infrastructure.yaml asset_preview events on the frontend. We stream the
+    # deterministically-merged template first (instant preview, original UX),
+    # then lint and re-stream only if the autofix actually changed something.
+    lint_result = {"errors": [], "warnings": [], "fixes_applied": [], "available": False}
+
+    # --- Completeness verification (silent-failure backstop) ---
+    # Confirm every fragment's top-level logical IDs survived into the final
+    # template. If a fragment got dropped by a bad anchor/dedup, this surfaces it
+    # instead of letting a silently-incomplete template through.
+    missing_resources: list[str] = []
+    try:
+        for fk, frag in zip(fragment_keys, fragments):
+            cleaned = _clean_fragment(frag)
+            frag_ids = re.findall(r'^  (\w+):\s*$', cleaned, re.MULTILINE)
+            for lid in frag_ids:
+                # present as a top-level resource definition in the final yaml?
+                if not re.search(r'^  ' + re.escape(lid) + r':\s*$', final_yaml, re.MULTILINE):
+                    missing_resources.append(f"{fk}:{lid}")
+        if missing_resources:
+            logger.warning(
+                f"[MERGE] {len(missing_resources)} fragment resource(s) missing from "
+                f"final template: {missing_resources[:10]}"
+            )
+    except Exception as e:
+        logger.warning(f"[MERGE] completeness check failed (non-fatal): {e}")
+
+    if merge_info.get("degraded"):
+        logger.warning(f"[MERGE] DEGRADED merge strategy={merge_info.get('strategy')}")
 
     # Stream to frontend + save to S3
     try:
@@ -417,13 +479,73 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     except Exception as e:
         logger.error(f"[MERGE] Streaming/S3 error: {e}")
 
+    # cfn-lint gate (runs AFTER the initial stream/save so the preview is
+    # instant). Auto-fixes recurring syntax issues (e.g. !Sub in a string-only
+    # Description — E1004) and records remaining errors. If the autofix changed
+    # the template, re-stream + re-save the corrected version. Fault-tolerant:
+    # any failure leaves the already-streamed template in place.
+    try:
+        from .asset_linters import lint_and_autofix_cfn
+        lint_result = lint_and_autofix_cfn(final_yaml)
+        fixed_yaml = lint_result["fixed_yaml"]
+        if fixed_yaml != final_yaml:
+            final_yaml = fixed_yaml
+            logger.info("[MERGE] cfn-lint autofix changed template — re-streaming")
+            try:
+                from tools.streaming_callback import stream_asset, clear_asset_preview_cache, get_session_id
+                from tools.s3_asset_storage import save_asset_to_s3
+                clear_asset_preview_cache("cloudformation", "infrastructure.yaml", project_name)
+                MAX_CHUNK = 15000
+                for i in range(0, len(final_yaml), MAX_CHUNK):
+                    chunk_end = min(i + MAX_CHUNK, len(final_yaml))
+                    stream_asset("cloudformation", "infrastructure.yaml", final_yaml[:chunk_end],
+                                 operation_id=project_name, is_complete=chunk_end >= len(final_yaml))
+                _sid = get_session_id()
+                if _sid:
+                    save_asset_to_s3(session_id=_sid, asset_type="cloudformation",
+                                     file_name="infrastructure.yaml", content=final_yaml,
+                                     operation_id=project_name)
+            except Exception as e:
+                logger.error(f"[MERGE] cfn-lint re-stream/save failed (non-fatal): {e}")
+    except Exception as e:
+        logger.error(f"[MERGE] cfn-lint gate failed (non-fatal): {e}")
+
     # Clean up registry
     clear_fragments(project_name)
 
-    return {
+    cfn_errors = lint_result.get("errors", [])
+    merge_degraded = merge_info.get("degraded", False)
+    result = {
         "success": True,
         "project_name": project_name,
         "fragment_count": len(fragments),
         "total_chars": len(final_yaml),
-        "summary": f"Merged {len(fragments)} operation fragments into infrastructure.yaml ({len(final_yaml)} chars)",
+        "merge_strategy": merge_info.get("strategy"),
+        "merge_degraded": merge_degraded,
+        "fragments_skipped": merge_info.get("skipped", 0),
+        "missing_resources": missing_resources[:20],
+        "lint_available": lint_result.get("available", False),
+        "lint_fixes_applied": lint_result.get("fixes_applied", []),
+        "lint_errors": cfn_errors[:20],
+        "lint_error_count": len(cfn_errors),
+        "summary": (
+            f"Merged {len(fragments)} operation fragments into infrastructure.yaml "
+            f"({len(final_yaml)} chars). "
+            f"cfn-lint: {len(lint_result.get('fixes_applied', []))} auto-fix(es), "
+            f"{len(cfn_errors)} error(s) remaining"
+            + (
+                " — REVIEW/PATCH the lint_errors before deploying."
+                if cfn_errors else "."
+            )
+            + (
+                f" ⚠️ {len(missing_resources)} fragment resource(s) MISSING from the "
+                "template — a fragment may have been dropped; inspect before deploying."
+                if missing_resources else ""
+            )
+            + (
+                f" ⚠️ DEGRADED merge ({merge_info.get('strategy')}): base template may be malformed."
+                if merge_degraded else ""
+            )
+        ),
     }
+    return result

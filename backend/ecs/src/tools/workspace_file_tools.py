@@ -357,6 +357,72 @@ def append_workspace_file(session_id: str, path: str, content: str) -> dict[str,
 
 
 @tool
+def copy_workspace_file(
+    session_id: str, source_path: str, dest_path: str, overwrite: bool = True
+) -> dict[str, Any]:
+    """
+    Copy a file from one location to another within the session workspace
+    (the S3 Files / NFS-backed `cp` the orchestrator was previously missing).
+
+    Reads the source file and writes it to the destination, creating parent
+    directories as needed. The destination is mirrored to S3 just like a normal
+    write, so a copied asset is immediately visible to packaging/download.
+
+    Args:
+        session_id: The session identifier
+        source_path: Relative path of the file to copy from
+        dest_path: Relative path to copy to
+        overwrite: If False, fail when the destination already exists (default True)
+
+    Returns:
+        Dict with success, source, dest, and size fields
+    """
+    try:
+        if not _check_nfs_available():
+            return {"success": False, "error": f"NFS mount not available at {_S3FILES_MOUNT}"}
+
+        src = _resolve_safe_path(session_id, source_path)
+        dst = _resolve_safe_path(session_id, dest_path)
+
+        if not src.exists() or not src.is_file():
+            return {"success": False, "error": f"Source file not found: {source_path}"}
+
+        if dst.exists() and not overwrite:
+            return {"success": False, "error": f"Destination already exists: {dest_path}"}
+
+        try:
+            content = src.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Binary file — copy bytes directly, skip preview/mirror text path.
+            os.makedirs(dst.parent, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+            size = dst.stat().st_size
+            _emit_workspace_event("copy", session_id, dest_path, size)
+            return {
+                "success": True,
+                "source": source_path,
+                "dest": dest_path,
+                "size": size,
+                "binary": True,
+                "summary": f"Copied binary {source_path} → {dest_path} ({size} bytes)",
+            }
+
+        # Reuse write_workspace_file so the copy gets atomic write + preview +
+        # S3 mirror behaviour identical to a normal write.
+        result = write_workspace_file(session_id=session_id, path=dest_path, content=content)
+        if result.get("success"):
+            result["source"] = source_path
+            result["dest"] = dest_path
+            result["summary"] = f"Copied {source_path} → {dest_path} ({len(content)} bytes)"
+        return result
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        logger.error(f"[workspace] copy_workspace_file failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@tool
 def list_workspace_dir(session_id: str, path: str = "") -> dict[str, Any]:
     """
     List contents of a directory in the session workspace.
