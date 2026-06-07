@@ -1755,6 +1755,22 @@ CloudFormation, Lambda, and OpenAPI, each operation MUST include these fields:
    - Every Sub-Agent (Lambda, OpenAPI, Prompt, Infrastructure) uses these EXACT names
    - Do NOT use snake_case or other conventions in `input_fields[].name` / `output_fields[].name`
 
+6. **⚠️ Map EVERY customer constraint into the CORRECT FieldSpec key** (the spec
+   must faithfully capture whatever the customer specified — any domain, any rule).
+   Put each constraint where the generators actually read it:
+   | Customer says… | FieldSpec key |
+   |---|---|
+   | length limit ("2~20자", "max 50 chars", "최소 4자") | `min_length` / `max_length` (integers) |
+   | fixed digit/char count ("숫자 12자리", "10-digit") | `min_length`+`max_length` (=N) and `pattern` (`^\\d{N}$`) |
+   | a regex / format pattern ("^[A-Z]{2}\\d{6}$", "대문자2+숫자6") | `pattern` |
+   | allowed set ("CONFIRMED/PENDING/CANCELLED", "둘 중 하나") | `enum_values` |
+   | numeric range ("1~100", "0 이상") | `min_value` / `max_value` |
+   | a DATE format ("YYYY-MM-DD", ISO8601) — date fields ONLY | `date_format` |
+   | required vs optional | `required` |
+   - ❌ Never put a length/format phrase into `date_format` on a non-date field.
+   - If a constraint doesn't fit a structured key, record it in the field
+     `description` or the operation `business_rules` — never drop it silently.
+
 ### Example: Calling Infrastructure Generator (Recommended)
 ```python
 # After interview is complete, generate complete CloudFormation template

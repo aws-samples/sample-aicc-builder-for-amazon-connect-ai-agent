@@ -9,6 +9,7 @@ conventions from LLMs (e.g., "type" vs "field_type", "rule" vs "description").
 """
 
 import os
+import re
 import json as _json
 import logging
 from typing import Optional, Any, List
@@ -59,10 +60,15 @@ class FieldSpec(FlexibleBaseModel):
     required: bool = Field(default=True, description="Whether this field is required")
     description: Optional[str] = Field(default=None, description="Human-readable description")
 
-    # Validation rules - accept various naming conventions
-    min_length: Optional[int] = Field(default=None, description="Minimum string length")
-    max_length: Optional[int] = Field(default=None, description="Maximum string length")
-    pattern: Optional[str] = Field(default=None, description="Regex pattern for validation")
+    # Validation rules - accept various naming conventions.
+    # ⚠️ Put each customer constraint in the CORRECT field:
+    #   "2~20자" / "max 50 chars" / 길이 제한        → min_length / max_length (integers)
+    #   "숫자 12자리" / "^\\d{12}$" / 형식 패턴        → pattern (regex string)
+    #   "YYYY-MM-DD" / 날짜 형식                       → date_format (ONLY for date/datetime fields)
+    # Do NOT stuff a length/format description into date_format on a non-date field.
+    min_length: Optional[int] = Field(default=None, description="Minimum string length (integer)")
+    max_length: Optional[int] = Field(default=None, description="Maximum string length (integer)")
+    pattern: Optional[str] = Field(default=None, description="Regex pattern for validation (e.g. '^\\d{12}$')")
 
     min_value: Optional[Any] = Field(
         default=None,
@@ -81,7 +87,8 @@ class FieldSpec(FlexibleBaseModel):
     )
     date_format: Optional[str] = Field(
         default=None,
-        description="Expected date format",
+        description="Expected date format for date/datetime fields ONLY (e.g. 'YYYY-MM-DD', 'ISO8601'). "
+                    "Do NOT use for string length/format constraints — those go in max_length/pattern.",
         validation_alias=AliasChoices("date_format", "format", "dateFormat")
     )
 
@@ -927,6 +934,80 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
     return "\n".join(lines)
 
 
+_LEN_RANGE_RE = re.compile(r'(\d+)\s*[~\-–]\s*(\d+)\s*(?:자|글자|chars?|characters?)?')
+_LEN_MAX_RE = re.compile(r'(?:최대|max(?:imum)?|up to)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
+_LEN_MIN_RE = re.compile(r'(?:최소|min(?:imum)?|at least)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
+_LEN_EXACT_RE = re.compile(r'(\d+)\s*(?:자리|자|글자|digits?|chars?|characters?)')
+_LOOKS_LIKE_DATEFMT_RE = re.compile(r'^\s*(?:[YyMmDdHhSs][\-/:. ]?){2,}\s*$|ISO\s*8601|ISO8601|RFC\s*3339', re.IGNORECASE)
+
+
+def _normalize_field_constraints(data: dict) -> dict:
+    """Re-home obviously-misplaced string constraints into the correct FieldSpec
+    keys so customer-stated rules are honored exactly.
+
+    Handles the common LLM mistake of writing a length/format constraint (e.g.
+    "2~20자", "최대 50자", "숫자 12자리") into ``date_format`` (or ``validation``)
+    on a non-date field. We move it to ``min_length`` / ``max_length`` / ``pattern``
+    only when those targets are still empty (never clobber an explicit value).
+    """
+    if not isinstance(data, dict):
+        return data
+    ftype = (data.get("field_type") or data.get("type") or "").lower()
+    is_date_field = ftype in ("date", "datetime", "time")
+
+    # A date_format value on a NON-date field that doesn't look like a real date
+    # format is almost certainly a misplaced length/format constraint.
+    df = data.get("date_format") or data.get("format") or data.get("dateFormat")
+    if df and isinstance(df, str) and not is_date_field and not _LOOKS_LIKE_DATEFMT_RE.search(df):
+        moved = _apply_length_constraint(data, df)
+        if moved:
+            # consumed → clear the misplaced date_format
+            for k in ("date_format", "format", "dateFormat"):
+                if k in data:
+                    data[k] = None
+    # If it IS a real date field but date_format holds a length phrase, also fix.
+    elif df and isinstance(df, str) and is_date_field and ("자" in df or "char" in df.lower()):
+        _apply_length_constraint(data, df)
+        for k in ("date_format", "format", "dateFormat"):
+            if k in data and ("자" in str(data.get(k)) or "char" in str(data.get(k)).lower()):
+                data[k] = None
+    return data
+
+
+def _apply_length_constraint(data: dict, text: str) -> bool:
+    """Parse a length/format phrase and populate min_length/max_length/pattern
+    on `data` (only filling empties). Returns True if something was applied."""
+    applied = False
+    m = _LEN_RANGE_RE.search(text)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if data.get("min_length") is None:
+            data["min_length"] = lo; applied = True
+        if data.get("max_length") is None:
+            data["max_length"] = hi; applied = True
+        return applied
+    mx = _LEN_MAX_RE.search(text)
+    if mx and data.get("max_length") is None:
+        data["max_length"] = int(mx.group(1)); applied = True
+    mn = _LEN_MIN_RE.search(text)
+    if mn and data.get("min_length") is None:
+        data["min_length"] = int(mn.group(1)); applied = True
+    if applied:
+        return True
+    ex = _LEN_EXACT_RE.search(text)
+    if ex:
+        n = int(ex.group(1))
+        # "12자리" exact length → both bounds (and a digit pattern if it says 숫자/digit)
+        if data.get("min_length") is None:
+            data["min_length"] = n; applied = True
+        if data.get("max_length") is None:
+            data["max_length"] = n; applied = True
+        if ("숫자" in text or "digit" in text.lower()) and data.get("pattern") is None:
+            data["pattern"] = r"^\d{" + str(n) + r"}$"
+        return applied
+    return applied
+
+
 def _safe_parse_model(model_class, data: dict):
     """
     Safely parse data into a Pydantic model.
@@ -946,6 +1027,18 @@ def _safe_parse_model(model_class, data: dict):
     if not isinstance(data, dict):
         logger.warning(f"[SpecManager] _safe_parse_model got {type(data).__name__}, expected dict for {model_class.__name__}")
         data = {}
+
+    # Deterministic constraint normalization for FieldSpec: customer constraints
+    # must land in the RIGHT structured field (the core "everything is a spec"
+    # philosophy). LLMs sometimes drop a length/format constraint into the wrong
+    # key (e.g. "2~20자" into date_format on a non-date field). Re-home obvious
+    # misplacements so downstream generators read accurate validation.
+    if model_class is FieldSpec:
+        try:
+            data = _normalize_field_constraints(data)
+        except Exception as e:
+            logger.debug(f"[SpecManager] field constraint normalize skipped: {e}")
+
     try:
         return model_class(**data)
     except Exception:
