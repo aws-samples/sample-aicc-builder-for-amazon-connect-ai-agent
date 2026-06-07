@@ -334,8 +334,15 @@ When you need to implement a feature, use ONLY these block combinations:
 
 ## ⚠️ NON-EXISTENT BLOCKS (NEVER USE!)
 
+These block `Type`s DO NOT EXIST in the Amazon Connect flow language. Emitting
+ANY of them makes the flow fail to import with `InvalidContactFlowException`.
+
 | ❌ Wrong | ✅ Correct Alternative |
 |----------|------------------------|
+| `Trigger` / `EntryPoint` | **NONE — there is no entry/trigger block.** A flow simply starts at the action `StartAction` points to. The FIRST real action (e.g. `UpdateFlowLoggingBehavior` or `UpdateContactRecordingBehavior`) IS the start. NEVER emit a `Trigger`/`EntryPoint` wrapper action. |
+| `InvokeAgentAction` | `ConnectParticipantWithLexBot` (AI self-service runs through a Q-in-Connect-enabled **Lex V2 bot** — params are `LexV2Bot.AliasArn` + one of `Text`/`SSML`/`PromptId`. There is NO `AgentAliasArn`, `IdleSessionTimeout`, or `EndConversationPhrase` param.) |
+| `InvokeBedrockAgent` / `InvokeAmazonQConnect` / `InvokeQConnect` | `CreateWisdomSession` (early) + `ConnectParticipantWithLexBot` |
+| `CheckCondition` / `CheckValue` / `Condition` / `CheckAttribute` | `Compare` (params: `ComparisonValue` + `Conditions`) |
 | `SetWorkingQueue` | `UpdateContactTargetQueue` |
 | `SetCallbackNumber` | `UpdateContactCallbackNumber` |
 | `CheckStaffing` | `CheckMetricData` (MetricType: NumberOfAgentsAvailable) |
@@ -344,6 +351,14 @@ When you need to implement a feature, use ONLY these block combinations:
 | `TransferToPhoneNumber` | `TransferParticipantToThirdParty` |
 | `SetContactAttributes` | `UpdateContactAttributes` |
 | `StoreCustomerInput` | `StoreUserInput` |
+| `PlayPrompt` | `MessageParticipant` |
+| `CreateCallbackContact` | `UpdateContactCallbackNumber` + `TransferContactToQueue` |
+| `EndFlow` / `Disconnect` | `DisconnectParticipant` |
+
+**RULE: `StartAction` MUST point at a REAL functional first action (not a
+Trigger/EntryPoint).** The flow's first executed block is typically
+`UpdateFlowLoggingBehavior`, `UpdateContactRecordingBehavior`, or
+`UpdateContactTextToSpeechVoice` — never a synthetic entry wrapper.
 
 ---
 

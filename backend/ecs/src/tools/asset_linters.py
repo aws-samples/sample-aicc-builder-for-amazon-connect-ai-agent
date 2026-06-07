@@ -482,6 +482,72 @@ def lint_lambda(session_id: str = "", operation_id: str = "", file_name: str = "
 # Contact Flow (Amazon Connect flow JSON) — structural integrity
 # ---------------------------------------------------------------------------
 
+# Official Amazon Connect flow-language Action Types (the `Type` field of an
+# Action). Source: Amazon Connect Flow language — flow block / action reference
+# (contact-actions.html + branch/interact/integrate/set/terminate actions).
+# A flow that contains a `Type` NOT in this set FAILS to import with
+# InvalidContactFlowException. Keep this list complete — when adding support for
+# a new block, add its Type here too.
+VALID_CONTACT_FLOW_ACTION_TYPES = frozenset({
+    # Interact
+    "MessageParticipant", "MessageParticipantIteratively", "GetParticipantInput",
+    "ConnectParticipantWithLexBot", "StartMediaStreaming", "StopMediaStreaming",
+    "GetParticipantWithLexV2Bot",
+    # Set
+    "UpdateContactAttributes", "UpdateContactData", "UpdateContactRecordingBehavior",
+    "UpdateContactTextToSpeechVoice", "UpdateContactTargetQueue",
+    "UpdateContactCallbackNumber", "UpdateContactEventHooks",
+    "UpdateContactRoutingBehavior", "UpdateContactRoutingData",
+    "UpdateFlowLoggingBehavior", "UpdateFlowAttributes", "UpdateContactMediaStreamingBehavior",
+    "UpdateContactTextToSpeechManner",
+    # Branch / control
+    "Compare", "Distribute", "Loop", "DistributeByPercentage",
+    "CheckHoursOfOperation", "CheckMetricData", "CheckQueueStatus",
+    # Integrate
+    "InvokeLambdaFunction", "InvokeFlowModule", "CreateWisdomSession",
+    "InvokeAPI", "CreateTask", "AssociateContactToCustomerProfile",
+    "GetCustomerProfile", "PutCustomerProfile", "CreatePersistentContactAssociation",
+    "GetCustomerProfileObject", "UpdateCustomerProfileObject", "TagContact", "UntagContact",
+    # Transfer / terminate
+    "TransferContactToQueue", "TransferToFlow", "TransferToThirdParty",
+    "TransferToAgent", "TransferToPhoneNumber", "DisconnectParticipant",
+    "EndFlowExecution", "ReturnFromFlowModule",
+})
+
+# Known LLM hallucinations / wrong names → the correct official Type (or None
+# when there is no 1:1 replacement and the block must be removed/redesigned).
+# These are blocks the model has actually emitted that break import.
+INVALID_CONTACT_FLOW_TYPE_HINTS = {
+    # There is no "Trigger" / entry-point block — a flow starts at the action
+    # that StartAction points to. Drop the wrapper and start at its NextAction.
+    "Trigger": "(remove — flows start at StartAction, no Trigger block exists)",
+    "EntryPoint": "(remove — flows start at StartAction, no EntryPoint block exists)",
+    # Branch-on-value is `Compare`, not CheckCondition / CheckValue / Condition.
+    "CheckCondition": "Compare",
+    "CheckValue": "Compare",
+    "Condition": "Compare",
+    "CheckAttribute": "Compare",
+    # No "InvokeAgentAction" / Bedrock-agent block exists in the flow language.
+    # AI self-service runs through a Q-in-Connect-enabled Lex V2 bot.
+    "InvokeAgentAction": "ConnectParticipantWithLexBot",
+    "InvokeBedrockAgent": "ConnectParticipantWithLexBot",
+    "InvokeAmazonQConnect": "ConnectParticipantWithLexBot",
+    "InvokeQConnect": "ConnectParticipantWithLexBot",
+    # Common other hallucinations.
+    "PlayPrompt": "MessageParticipant",
+    "GetUserInput": "GetParticipantInput",
+    "SetWorkingQueue": "UpdateContactTargetQueue",
+    "SetCallbackNumber": "UpdateContactCallbackNumber",
+    "SetContactAttributes": "UpdateContactAttributes",
+    "SetRecordingBehavior": "UpdateContactRecordingBehavior",
+    "SetLoggingBehavior": "UpdateFlowLoggingBehavior",
+    "SetVoice": "UpdateContactTextToSpeechVoice",
+    "CreateCallbackContact": "(remove — use UpdateContactCallbackNumber + TransferContactToQueue)",
+    "TransferToQueue": "TransferContactToQueue",
+    "EndFlow": "DisconnectParticipant",
+    "Disconnect": "DisconnectParticipant",
+}
+
 
 def lint_contact_flow(flow_json: str) -> dict:
     """Validate Amazon Connect Contact Flow JSON structural integrity.
@@ -505,7 +571,6 @@ def lint_contact_flow(flow_json: str) -> dict:
         return {"ok": False, "errors": ["Flow root is not an object"], "warnings": [], "fixes_applied": [], "fixed_json": flow_json}
 
     actions = doc.get("Actions") or doc.get("actions") or []
-    start = doc.get("StartAction") or doc.get("startAction")
     errors: list[str] = []
     warnings: list[str] = []
     fixes_applied: list[str] = []
@@ -531,10 +596,89 @@ def lint_contact_flow(flow_json: str) -> dict:
             fixes_applied.append(
                 f"Removed 'RealTime' from Voice.AnalyticsModes (→ {new_modes}) — RealTime breaks Connect import"
             )
+    # Deterministic auto-fix: a `Trigger` / `EntryPoint` block does not exist in
+    # the flow language — a flow starts directly at the action StartAction points
+    # to. The model sometimes emits a no-op Trigger as the StartAction. Rewire
+    # StartAction to the Trigger's NextAction and drop the Trigger block so the
+    # flow imports.
+    _start_id = doc.get("StartAction") or doc.get("startAction")
+    for a in list(actions):
+        if not isinstance(a, dict):
+            continue
+        if (a.get("Type") or a.get("type")) not in ("Trigger", "EntryPoint"):
+            continue
+        aid = a.get("Identifier") or a.get("identifier")
+        trans = a.get("Transitions") or a.get("transitions") or {}
+        nxt = trans.get("NextAction") or trans.get("nextAction")
+        if aid == _start_id and nxt:
+            # Repoint StartAction past the Trigger, then remove the Trigger block.
+            if "StartAction" in doc:
+                doc["StartAction"] = nxt
+            else:
+                doc["startAction"] = nxt
+            actions.remove(a)
+            # Drop its ActionMetadata entry if present.
+            md = doc.get("Metadata") or {}
+            am = md.get("ActionMetadata") if isinstance(md, dict) else None
+            if isinstance(am, dict):
+                am.pop(aid, None)
+            fixes_applied.append(
+                f"Removed invalid '{a.get('Type') or a.get('type')}' block '{aid}'; "
+                f"StartAction → '{nxt}' (no Trigger block exists in flow language)"
+            )
+
+    # Deterministic block-type validation: an Action whose Type is not a real
+    # Amazon Connect flow-language Action Type makes the flow fail to import
+    # (InvalidContactFlowException). The model occasionally hallucinates blocks
+    # like `Trigger`, `CheckCondition`, `InvokeAgentAction`. Catch every such
+    # Type and, for the known 1:1 renames, auto-fix it.
+    invalid_types: list[str] = []
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        t = a.get("Type") or a.get("type")
+        if not t or t in VALID_CONTACT_FLOW_ACTION_TYPES:
+            continue
+        hint = INVALID_CONTACT_FLOW_TYPE_HINTS.get(t)
+        if hint and not hint.startswith("("):
+            # Safe 1:1 rename to a real Type.
+            if "Type" in a:
+                a["Type"] = hint
+            else:
+                a["type"] = hint
+            # When renaming a hallucinated AI block to ConnectParticipantWithLexBot,
+            # the old params (AgentAliasArn / IdleSessionTimeout / EndConversationPhrase)
+            # are invalid for the Lex block and Connect rejects them on import.
+            # Rewrite to the minimum valid shape: LexV2Bot.AliasArn + Text.
+            if hint == "ConnectParticipantWithLexBot":
+                p = a.get("Parameters") or a.get("parameters") or {}
+                if "LexV2Bot" not in p and "LexBot" not in p:
+                    old_arn = p.pop("AgentAliasArn", None) or p.pop("BotAliasArn", None)
+                    phrase = p.pop("EndConversationPhrase", None)
+                    p.pop("IdleSessionTimeout", None)
+                    p["LexV2Bot"] = {"AliasArn": old_arn or "{{LEX_BOT_ALIAS_ARN}}"}
+                    if "Text" not in p and "SSML" not in p and "PromptId" not in p and "Media" not in p:
+                        p["Text"] = phrase or "{{WELCOME_MESSAGE}}"
+                    if "Parameters" in a:
+                        a["Parameters"] = p
+                    else:
+                        a["parameters"] = p
+                    fixes_applied.append(
+                        f"Rewrote '{t}' params → ConnectParticipantWithLexBot (LexV2Bot.AliasArn + Text)"
+                    )
+            fixes_applied.append(f"Renamed invalid block Type '{t}' → '{hint}'")
+        else:
+            suffix = f" — {hint}" if hint else " (not a valid Amazon Connect flow Action Type)"
+            invalid_types.append(f"Action '{a.get('Identifier') or a.get('identifier')}' has invalid Type '{t}'{suffix}")
+
     flow_json_fixed = _json.dumps(doc, ensure_ascii=False, indent=2) if fixes_applied else flow_json
 
     if not actions:
         return {"ok": False, "errors": ["No Actions in flow"], "warnings": []}
+
+    # Read StartAction AFTER the auto-fixes above (the Trigger fix may have
+    # repointed it) so downstream validation reflects the corrected flow.
+    start = doc.get("StartAction") or doc.get("startAction")
 
     ids = set()
     for a in actions:
@@ -594,8 +738,12 @@ def lint_contact_flow(flow_json: str) -> dict:
             warnings.append(f"{len(orphans)} action(s) unreachable from StartAction: {sorted(orphans)[:5]}")
 
     types = {(a.get("Type") or a.get("type")) for a in actions if isinstance(a, dict)}
+    # Re-evaluate terminal block AFTER any Type auto-fixes (e.g. EndFlow→Disconnect).
     if "DisconnectParticipant" not in types:
         warnings.append("No DisconnectParticipant (terminal) block — flow may not end cleanly")
+
+    # Invalid Types that could NOT be auto-renamed are hard import-blockers.
+    errors.extend(invalid_types)
 
     return {"ok": not errors, "errors": errors, "warnings": warnings,
             "fixes_applied": fixes_applied, "fixed_json": flow_json_fixed}
