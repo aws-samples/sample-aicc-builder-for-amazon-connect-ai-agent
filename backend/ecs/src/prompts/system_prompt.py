@@ -1798,6 +1798,14 @@ CloudFormation, Lambda, and OpenAPI, each operation MUST include these fields:
    - ❌ Never put a length/format phrase into `date_format` on a non-date field.
    - If a constraint doesn't fit a structured key, record it in the field
      `description` or the operation `business_rules` — never drop it silently.
+   - **🚨 Apply constraints to EVERY occurrence of the field — input AND output,
+     and nested array `items.properties` / object `properties` — not just the
+     input.** If the customer says `status` is one of BOOKED/DONE/CANCELLED, then
+     EVERY `status` field (input, output, and inside an array of result objects)
+     must carry `enum_values: ["BOOKED","DONE","CANCELLED"]`. A common miss is
+     defining the enum on the input but leaving the output/nested copy bare.
+     Same for length/pattern/format: the field's constraints travel with the
+     field wherever it appears.
 
 ### Example: Calling Infrastructure Generator (Recommended)
 ```python
