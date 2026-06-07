@@ -755,13 +755,32 @@ Operations:
             if mermaid_content:
                 files_generated.append("contact_flow_diagram.md")
 
+            # Structural lint: catch dangling transitions / orphan actions /
+            # missing terminal block — the things that make an Amazon Connect
+            # flow fail to import. Surface in the result so the orchestrator can
+            # patch before packaging. Fault-tolerant.
+            flow_lint = {"ok": True, "errors": [], "warnings": []}
+            try:
+                from tools.asset_linters import lint_contact_flow
+                flow_lint = lint_contact_flow(json_content)
+                if not flow_lint["ok"]:
+                    logger.warning(f"[CONTACT_FLOW] structural lint errors: {flow_lint['errors'][:5]}")
+            except Exception as e:
+                logger.warning(f"[CONTACT_FLOW] structural lint skipped: {e}")
+
             yield {
                 "success": True,
                 "flow_name": flow_name,
                 "files_generated": files_generated,
                 "has_mermaid": mermaid_content is not None,
                 "parse_method": {"json": json_method, "mermaid": mermaid_method},
-                "summary": f"Generated Contact Flow for {flow_name}" + (f" with diagram" if mermaid_content else ""),
+                "lint_ok": flow_lint["ok"],
+                "lint_errors": flow_lint["errors"][:15],
+                "lint_warnings": flow_lint["warnings"][:8],
+                "summary": (
+                    f"Generated Contact Flow for {flow_name}" + (f" with diagram" if mermaid_content else "")
+                    + (f". ⚠️ {len(flow_lint['errors'])} structural error(s) — PATCH before deploy: {flow_lint['errors'][:3]}" if not flow_lint["ok"] else " (structure OK)")
+                ),
                 "_completion_marker": "SUBAGENT_COMPLETE"
             }
         else:

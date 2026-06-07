@@ -72,6 +72,8 @@ from tools import (
     merge_openapi_fragments,
     lint_cloudformation,
     lint_openapi,
+    lint_lambda,
+    lint_contact_flow_asset,
     asset_lookup,
     validate_parameter_consistency,
     read_workspace_file,
@@ -214,6 +216,8 @@ GENERATION_TOOLS = [
     merge_openapi_fragments,
     lint_cloudformation,
     lint_openapi,
+    lint_lambda,
+    lint_contact_flow_asset,
     asset_lookup,
     validate_parameter_consistency,
     # Sub-agents for generation

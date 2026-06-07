@@ -514,13 +514,34 @@ Database: {db_type}{schema_section}{infra_spec_section}{modification_section}
                 "operation_id": operation_id
             }
 
+            # Syntax-check the generated Python (no execution) so a malformed
+            # handler is caught here instead of as a 500 at runtime. Only when
+            # `code` is the actual source string (not the workspace-tools
+            # sentinel). Fault-tolerant.
+            # Lambdas generated here are Python (index.py). The static
+            # update_q_session Node.js handler is added elsewhere, not here.
+            py_lint = {"ok": True, "errors": []}
+            if isinstance(code, str):
+                try:
+                    from tools.asset_linters import lint_python_source
+                    py_lint = lint_python_source(code)
+                    if not py_lint["ok"]:
+                        logger.warning(f"[LAMBDA] Python syntax error in {operation_id}: {py_lint['errors'][:2]}")
+                except Exception as e:
+                    logger.warning(f"[LAMBDA] python lint skipped: {e}")
+
             # Final result for Orchestrator - always yields this
             yield {
                 "success": True,
                 "operation_id": operation_id,
                 "files_generated": ["index.py"],
                 "parse_method": parse_method,
-                "summary": f"Generated index.py for {operation_id}",
+                "syntax_ok": py_lint["ok"],
+                "syntax_errors": py_lint["errors"][:5],
+                "summary": (
+                    f"Generated index.py for {operation_id}"
+                    + ("" if py_lint["ok"] else f" — ⚠️ SYNTAX ERROR (patch before deploy): {py_lint['errors'][0]['message']}")
+                ),
                 "_completion_marker": "SUBAGENT_COMPLETE"  # Explicit completion signal
             }
         else:

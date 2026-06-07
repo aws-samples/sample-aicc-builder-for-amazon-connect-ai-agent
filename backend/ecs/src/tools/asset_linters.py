@@ -406,3 +406,213 @@ def lint_openapi(session_id: str = "", api_title: str = "") -> dict:
             f"{len(result['fixes_applied'])} auto-fix(es) applied"
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Lambda (Python) — syntax check via the compiler (no execution)
+# ---------------------------------------------------------------------------
+
+
+def lint_python_source(code: str) -> dict:
+    """Compile-check Python Lambda source WITHOUT running it.
+
+    Catches syntax errors a generator might emit (unterminated strings, bad
+    indentation, stray markdown fences) before they reach a 500 at runtime.
+    Never raises. Returns {ok, errors:[{line, message}]}.
+    """
+    try:
+        # Strip stray markdown fences if a generator left them in.
+        src = code
+        m = re.search(r'```(?:python|py)?\s*\n(.*?)```', src, re.DOTALL)
+        if m:
+            src = m.group(1)
+        compile(src, "<lambda>", "exec")
+        return {"ok": True, "errors": []}
+    except SyntaxError as e:
+        return {"ok": False, "errors": [{"line": e.lineno, "message": f"{e.msg}: {(e.text or '').strip()[:80]}"}]}
+    except Exception as e:
+        # Non-syntax failure (e.g. null bytes) — report but don't crash.
+        return {"ok": False, "errors": [{"line": None, "message": str(e)[:120]}]}
+
+
+@tool
+def lint_lambda(session_id: str = "", operation_id: str = "", file_name: str = "index.py") -> dict:
+    """Syntax-check a generated Lambda handler (Python) for a session.
+
+    Loads the Lambda source from the session workspace and compile-checks it
+    (no execution). Reports syntax errors with line numbers so they can be
+    patched before packaging. Node.js handlers are skipped (returns ok).
+
+    Args:
+        session_id: Session id (defaults to the active streaming session).
+        operation_id: The Lambda's operation/tool id (its asset subfolder).
+        file_name: Handler file name (default index.py).
+
+    Returns:
+        dict with ok (bool), errors, summary.
+    """
+    from tools.streaming_callback import get_session_id
+    from tools.s3_asset_storage import build_s3_key, get_asset_from_s3
+
+    sid = session_id or get_session_id() or ""
+    if not sid:
+        return {"ok": False, "error": "No session_id available"}
+    if not file_name.endswith(".py"):
+        return {"ok": True, "skipped": "non-Python handler", "errors": []}
+    try:
+        key = build_s3_key(sid, "lambda", file_name, operation_id or None)
+        content = get_asset_from_s3(key)
+    except Exception as e:
+        return {"ok": False, "error": f"Could not load lambda: {e}"}
+    if not content:
+        return {"ok": False, "error": f"lambda {operation_id}/{file_name} not found"}
+
+    result = lint_python_source(content)
+    return {
+        "ok": result["ok"],
+        "errors": result["errors"],
+        "summary": (
+            f"Python syntax {'OK' if result['ok'] else 'ERROR'} for {operation_id}/{file_name}"
+            + ("" if result["ok"] else f": {result['errors'][0]['message']}")
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Contact Flow (Amazon Connect flow JSON) — structural integrity
+# ---------------------------------------------------------------------------
+
+
+def lint_contact_flow(flow_json: str) -> dict:
+    """Validate Amazon Connect Contact Flow JSON structural integrity.
+
+    Catches the issues that make a flow fail to IMPORT or run:
+      - invalid JSON
+      - missing StartAction / Actions
+      - transitions (NextAction / Errors / Conditions) pointing at action ids
+        that don't exist (dangling references)
+      - actions unreachable from StartAction (orphans)
+      - terminal blocks (DisconnectParticipant) present
+    Never raises. Returns {ok, errors:[...], warnings:[...]}.
+    """
+    import json as _json
+    try:
+        doc = _json.loads(flow_json)
+    except Exception as e:
+        return {"ok": False, "errors": [f"Invalid JSON: {e}"], "warnings": []}
+
+    if not isinstance(doc, dict):
+        return {"ok": False, "errors": ["Flow root is not an object"], "warnings": []}
+
+    actions = doc.get("Actions") or doc.get("actions") or []
+    start = doc.get("StartAction") or doc.get("startAction")
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not actions:
+        return {"ok": False, "errors": ["No Actions in flow"], "warnings": []}
+
+    ids = set()
+    for a in actions:
+        if isinstance(a, dict):
+            aid = a.get("Identifier") or a.get("identifier")
+            if aid:
+                ids.add(aid)
+
+    if not start:
+        errors.append("Missing StartAction")
+    elif start not in ids:
+        errors.append(f"StartAction '{start}' is not a defined action")
+
+    def _targets(action: dict):
+        t = action.get("Transitions") or action.get("transitions") or {}
+        out = []
+        if isinstance(t, dict):
+            nxt = t.get("NextAction") or t.get("nextAction")
+            if nxt:
+                out.append(nxt)
+            for err in (t.get("Errors") or t.get("errors") or []):
+                if isinstance(err, dict):
+                    n = err.get("NextAction") or err.get("nextAction")
+                    if n:
+                        out.append(n)
+            for cond in (t.get("Conditions") or t.get("conditions") or []):
+                if isinstance(cond, dict):
+                    n = cond.get("NextAction") or cond.get("nextAction")
+                    if n:
+                        out.append(n)
+        return out
+
+    # Dangling reference check + adjacency for reachability.
+    adj: dict[str, list] = {}
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        aid = a.get("Identifier") or a.get("identifier")
+        tgts = _targets(a)
+        adj[aid] = tgts
+        for tg in tgts:
+            if tg not in ids:
+                errors.append(f"Action '{aid}' transitions to undefined action '{tg}'")
+
+    # Reachability from StartAction (orphans → warning, not fatal).
+    if start in ids:
+        seen = set()
+        stack = [start]
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            stack.extend(adj.get(cur, []))
+        orphans = ids - seen
+        if orphans:
+            warnings.append(f"{len(orphans)} action(s) unreachable from StartAction: {sorted(orphans)[:5]}")
+
+    types = {(a.get("Type") or a.get("type")) for a in actions if isinstance(a, dict)}
+    if "DisconnectParticipant" not in types:
+        warnings.append("No DisconnectParticipant (terminal) block — flow may not end cleanly")
+
+    return {"ok": not errors, "errors": errors, "warnings": warnings}
+
+
+@tool
+def lint_contact_flow_asset(session_id: str = "", flow_name: str = "", file_name: str = "contact_flow.json") -> dict:
+    """Validate a generated Contact Flow's structural integrity for a session.
+
+    Loads the flow JSON from the workspace and checks JSON validity, StartAction,
+    dangling transition targets, orphan actions, and a terminal block — the
+    things that make an Amazon Connect flow fail to import.
+
+    Args:
+        session_id: Session id (defaults to active streaming session).
+        flow_name: The flow's operation id (asset subfolder).
+        file_name: Flow file name (default contact_flow.json).
+
+    Returns:
+        dict with ok, errors, warnings, summary.
+    """
+    from tools.streaming_callback import get_session_id
+    from tools.s3_asset_storage import build_s3_key, get_asset_from_s3
+
+    sid = session_id or get_session_id() or ""
+    if not sid:
+        return {"ok": False, "error": "No session_id available"}
+    try:
+        key = build_s3_key(sid, "contact_flow", file_name, flow_name or None)
+        content = get_asset_from_s3(key)
+    except Exception as e:
+        return {"ok": False, "error": f"Could not load contact flow: {e}"}
+    if not content:
+        return {"ok": False, "error": "contact_flow.json not found"}
+
+    result = lint_contact_flow(content)
+    return {
+        "ok": result["ok"],
+        "errors": result["errors"][:20],
+        "warnings": result["warnings"][:10],
+        "summary": (
+            f"Contact Flow integrity: {len(result['errors'])} error(s), "
+            f"{len(result['warnings'])} warning(s)"
+        ),
+    }

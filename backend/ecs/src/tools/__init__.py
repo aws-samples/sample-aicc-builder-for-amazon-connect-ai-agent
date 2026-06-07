@@ -32,7 +32,7 @@ from .cdk_generator import generate_cdk_infrastructure
 from .stream_fallback_asset import stream_fallback_asset
 from .merge_infrastructure import merge_infrastructure_fragments
 from .merge_openapi import merge_openapi_fragments
-from .asset_linters import lint_cloudformation, lint_openapi
+from .asset_linters import lint_cloudformation, lint_openapi, lint_lambda, lint_contact_flow_asset
 from .incremental_streamer import IncrementalCodeStreamer
 from .asset_lookup import asset_lookup, get_assets_for_review
 from .validate_consistency import validate_parameter_consistency
@@ -116,6 +116,8 @@ __all__ = [
     # Asset linters (CloudFormation cfn-lint / OpenAPI 3.0 validation)
     "lint_cloudformation",
     "lint_openapi",
+    "lint_lambda",
+    "lint_contact_flow_asset",
     # Incremental code streaming
     "IncrementalCodeStreamer",
     # Asset lookup
