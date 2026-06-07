@@ -686,6 +686,15 @@ users and wastes the session. Prevent it:
 - User provides a company URL and wants info gathered
 - User asks to research a specific API or external service (e.g., "find me the address-lookup API spec")
 
+⛔ **research_agent is WEB research about the customer's company/APIs — it is NOT
+how Contact Flows get their block syntax.** Do NOT call research_agent for words
+like "조사/검색/look up/verify" when the subject is Contact Flow blocks, flow
+syntax, or RAG/Knowledge Base. Contact Flow block knowledge comes from the
+Contact Flow generator's OWN built-in RAG tool (`retrieve_contact_flow_knowledge`
+against the curated KB) — to (re)generate a flow using KB/RAG, call
+`contact_flow_generator_agent(..., enable_rag=True)` (and `enable_web_search=True`
+only if you also want live AWS-docs lookup). Never substitute research_agent for that.
+
 **Before calling research_agent, ask the user about research depth (customer-facing line in their language).** Example (Korean):
 "리서치 범위를 어떻게 할까요?
 - 🟢 **가볍게** (~2분): 핵심 정보만 빠르게 (FAQ 1-5개)
