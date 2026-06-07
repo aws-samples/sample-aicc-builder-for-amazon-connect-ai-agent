@@ -813,11 +813,29 @@ async def _generate_base(project_name, industry, operations_str, ops_list,
     except Exception:
         current_date_line = ""
 
+    # Surface the test phone number (if the interview captured one) directly in
+    # the prompt so the sample-data seeder keys a record to it — a live test call
+    # then matches a real record. Pull from the loaded infra spec.
+    test_phone_line = ""
+    try:
+        from tools.spec_manager import get_infrastructure_spec as _gis
+        _ispec = _gis()
+        _tpn = getattr(_ispec, "test_phone_number", None) if _ispec else None
+        if _tpn:
+            test_phone_line = (
+                f"Test Phone Number: {_tpn} — the sample data MUST include at least "
+                f"one record whose phone field equals this value, normalized to the SAME "
+                f"format used by the phone GSI (match the other sample records' format, "
+                f"e.g. with/without leading '+'). This lets a live test call find a match.\n"
+            )
+    except Exception:
+        pass
+
     prompt = f"""BASE MODE - Generate shared infrastructure only.
 
 Project Name: {project_name}
 Industry: {industry}
-{current_date_line}Include Sample Data: {include_sample_data}
+{current_date_line}{test_phone_line}Include Sample Data: {include_sample_data}
 Include Customer Phone Lookup: {include_customer_phone_lookup}
 {infra_spec_section}{spec_table}
 ALL operations (for Schema Summary JSON, DependsOn, and DynamoDB design):

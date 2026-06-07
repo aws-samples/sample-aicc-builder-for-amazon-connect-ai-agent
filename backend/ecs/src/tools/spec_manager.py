@@ -623,6 +623,13 @@ class InfrastructureSpec(FlexibleBaseModel):
         description="Whether to include CustomerLookup + UpdateQSession Lambda resources",
         validation_alias=AliasChoices("include_customer_phone_lookup", "includeCustomerPhoneLookup"),
     )
+    test_phone_number: Optional[str] = Field(
+        default=None,
+        description="The phone number the user will call into Connect from during testing. "
+        "When set, the sample-data seeder MUST include at least one record keyed to this number "
+        "(normalized to the same format as the phone GSI) so a live test call finds a match.",
+        validation_alias=AliasChoices("test_phone_number", "testPhoneNumber", "test_phone"),
+    )
 
     # Tags
     tags: dict = Field(
@@ -1991,6 +1998,7 @@ def save_infrastructure_spec(
     vpc_config: dict = None,
     include_s3_bucket: bool = True,
     include_customer_phone_lookup: bool = False,
+    test_phone_number: str = None,
     tags: dict = None,
     notes: str = None,
 ) -> dict:
@@ -2023,6 +2031,9 @@ def save_infrastructure_spec(
             {"vpc_id": "vpc-...", "subnet_ids": [...], "security_group_ids": [...]}
         include_s3_bucket: Whether to include S3 bucket for FAQ uploads (default: true)
         include_customer_phone_lookup: Whether to include phone lookup Lambda resources
+        test_phone_number: The number the user will call into Connect from during testing.
+            Pass this whenever the interview captured one — the sample-data seeder
+            will key a record to it so a live test call matches a real record.
         tags: AWS resource tags to apply to all resources
         notes: Additional infrastructure notes or constraints
 
@@ -2048,6 +2059,7 @@ def save_infrastructure_spec(
             vpc_config=parsed_vpc,
             include_s3_bucket=include_s3_bucket,
             include_customer_phone_lookup=include_customer_phone_lookup,
+            test_phone_number=test_phone_number,
             tags=tags or {},
             notes=notes,
         )

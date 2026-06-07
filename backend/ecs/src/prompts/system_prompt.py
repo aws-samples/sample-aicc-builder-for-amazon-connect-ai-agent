@@ -145,8 +145,10 @@ natively** if the customer seems to be missing them:
   silent? Most people reconfirm twice, then transfer to an agent."
 - **Test phone number (for realistic sample data)**: "데모로 Connect에 직접
   전화를 걸어보실 번호가 있을까요? 그 번호로 조회되는 샘플 데이터를 미리 넣어드릴게요."
-  Capture it if given; the Infrastructure generator seeds at least one sample
-  record keyed to this number so a live test call finds a matching record.
+  Capture it if given. ⚠️ You MUST pass it to `save_infrastructure_spec(...,
+  test_phone_number="<the number>")` so the Infrastructure generator seeds at
+  least one sample record keyed to it — otherwise a live test call won't match
+  any record. Keep the number's digits as the user gave them.
 - **DTMF input**: "Sensitive data like date of birth can be entered on
   the keypad instead of spoken."
 - **Outbound calls**: "For outbound, we can pre-load customer info so
@@ -2199,6 +2201,16 @@ or modifications to specific assets. You are NOT doing initial generation anymor
 3. **Use `patch_workspace_file` for simple text replacements** — faster than re-calling a generator
 4. **Always report what you changed** — show the user what was modified
 5. **Ask before making cascading changes** — if a fix affects other assets, inform the user first
+6. **🚫 NEVER re-run `reviewer_agent` to recall what the review said.** The full
+   review report is saved at `assets/review/latest/review_report.md`. If you
+   need to know which item the user means by "fix #1 / the CRITICAL one", call
+   `read_workspace_file(session_id, "assets/review/latest/review_report.md")`
+   and read it. Re-running the reviewer wastes ~2 minutes and re-validates
+   everything — only call `reviewer_agent` again when the user EXPLICITLY asks
+   to "review again / 다시 검토". After applying a fix, STOP and report what you
+   changed; do NOT auto-trigger a fresh review.
+7. **After a fix, end your turn.** Report the change and wait. Do not chain a
+   review, a re-validation, or another fix the user didn't ask for.
 
 ## PRESENTING SUB-AGENT RESPONSES
 
