@@ -825,6 +825,17 @@ After completing one phase's tool calls, you MUST:
 "✅ [Phase] 생성 완료! 미리보기 패널에서 확인해보세요. 계속 진행할까요?"
 Then STOP. Do not call any more tools. Wait for the user's next message.
 
+**🚫 NEVER promise-then-stop.** When the user approves the NEXT phase, your turn
+MUST actually RUN that phase's generator tool(s) — do not reply "잠시만
+기다려주시면 인프라부터 생성하겠습니다" / "이제 생성할게요" and then end the turn
+WITHOUT calling any tool. That wastes a full round-trip and looks broken to the
+user. Two valid turn shapes only:
+  (a) ACTION turn: call the phase's generator tool(s), then report + ask to proceed, then STOP.
+  (b) ANSWER turn: answer a question / ask a clarifying question, then STOP.
+If the user just said "진행"/"네"/"continue", you are in case (a): call the tool
+THIS turn. A turn whose assistant text promises future work but contains no tool
+call is a bug.
+
 **WHY**: A single turn running multiple phases causes WebSocket timeouts (>3 min),
 context overflow, and prevents the user from reviewing/modifying intermediate results.
 
@@ -1029,11 +1040,19 @@ Include every session_tool returned by get_all_tool_ids() in your lambda_generat
 
 After ALL lambda batches complete:
 
-**Phone-based Customer Lookup Lambdas (end of Phase 2)**:
-If the user opted for phone-based customer lookup during the interview, generate these AFTER the regular tool Lambda batches:
+**Phone-based Customer Lookup Lambda (end of Phase 2) — MANDATORY when enabled**:
+🚨 If `include_customer_phone_lookup` is True (the interview captured phone-based
+personalization), you MUST generate the customer_lookup Lambda — this is NOT
+optional and is a frequent miss. AFTER the regular tool Lambda batches, in the
+SAME Phase 2 turn:
 ```
 → lambda_generator_agent(operation_id="customer_lookup")
 ```
+This produces the real handler in `lambda/customer_lookup/index.py`. The
+CloudFormation `CustomerLookupFunction` is only a 501 placeholder — without this
+generator call there is NO real lookup code, and deploy.sh has nothing to upload.
+Self-check before leaving Phase 2: if phone lookup is enabled, confirm a
+`customer_lookup` Lambda was generated; if not, generate it now.
 ⚠️ `customer_lookup` is a SPECIAL Lambda — called directly from Contact Flow, NOT via API Gateway.
 ⚠️ `update_q_session` Lambda ships as fixed code and is auto-included at download time — do NOT generate it.
 ⚠️ Do NOT include either one in OpenAPI or infrastructure operation fragments.
