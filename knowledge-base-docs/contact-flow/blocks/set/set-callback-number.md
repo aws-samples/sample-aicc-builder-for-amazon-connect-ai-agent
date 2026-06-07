@@ -1,16 +1,16 @@
-# SetCallbackNumber Block
+# UpdateContactCallbackNumber Block
 
 ## Question
-How do I use the SetCallbackNumber block for queue callbacks in Amazon Connect Contact Flow?
+How do I use the UpdateContactCallbackNumber block for queue callbacks in Amazon Connect Contact Flow?
 
 ## Answer
-The SetCallbackNumber block sets the phone number to use when creating a callback contact. This is used with TransferContactToQueue to implement queue callback functionality.
+The UpdateContactCallbackNumber block sets the phone number to use when creating a callback contact. This is used with TransferContactToQueue to implement queue callback functionality.
 
 ### JSON Structure
 ```json
 {
   "Identifier": "set-callback",
-  "Type": "SetCallbackNumber",
+  "Type": "UpdateContactCallbackNumber",
   "Parameters": {
     "CallbackNumber": "$.CustomerEndpoint.Address"
   },
@@ -75,7 +75,7 @@ The SetCallbackNumber block sets the phone number to use when creating a callbac
  "Transitions": {"NextAction": "set-callback",
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "set-callback"}]}}
 
-{"Identifier": "set-callback", "Type": "SetCallbackNumber",
+{"Identifier": "set-callback", "Type": "UpdateContactCallbackNumber",
  "Parameters": {"CallbackNumber": "$.CustomerEndpoint.Address"},
  "Transitions": {"NextAction": "transfer-callback",
    "Errors": [
@@ -105,7 +105,7 @@ The SetCallbackNumber block sets the phone number to use when creating a callbac
 
 ### NON-EXISTENT Block Warning
 There is NO `CreateCallbackContact` block type. Callbacks are created by:
-1. SetCallbackNumber (set the number)
+1. UpdateContactCallbackNumber (set the number)
 2. TransferContactToQueue (creates the callback in queue)
 
 #### WRONG
@@ -115,18 +115,18 @@ There is NO `CreateCallbackContact` block type. Callbacks are created by:
 
 #### CORRECT
 ```json
-{"Type": "SetCallbackNumber"}
+{"Type": "UpdateContactCallbackNumber"}
 // followed by
 {"Type": "TransferContactToQueue"}
 ```
 
 ## Related Topics
 - TransferContactToQueue
-- SetWorkingQueue
+- UpdateContactTargetQueue
 - Queue Overflow Handling Pattern
 
 ---
 **Metadata**
 - Category: Set
-- BlockType: SetCallbackNumber
+- BlockType: UpdateContactCallbackNumber
 - Keywords: callback, queue callback, InvalidNumber, NotDialable, phone number

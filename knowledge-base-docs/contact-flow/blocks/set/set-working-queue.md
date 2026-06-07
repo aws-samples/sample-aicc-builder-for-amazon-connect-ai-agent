@@ -1,16 +1,16 @@
-# SetWorkingQueue Block
+# UpdateContactTargetQueue Block
 
 ## Question
-How do I use the SetWorkingQueue block in Amazon Connect Contact Flow?
+How do I use the UpdateContactTargetQueue block in Amazon Connect Contact Flow?
 
 ## Answer
-The SetWorkingQueue block sets the active queue for subsequent queue-related operations like TransferContactToQueue and CheckStaffing.
+The UpdateContactTargetQueue block sets the active queue for subsequent queue-related operations like TransferContactToQueue and CheckStaffing.
 
 ### JSON Structure
 ```json
 {
   "Identifier": "set-queue",
-  "Type": "SetWorkingQueue",
+  "Type": "UpdateContactTargetQueue",
   "Parameters": {
     "QueueId": "{{QUEUE_ARN}}"
   },
@@ -57,7 +57,7 @@ arn:aws:connect:us-east-1:123456789012:instance/xxx/queue/yyy
 
 ### Common Pattern: Queue with Staffing Check
 ```json
-{"Identifier": "set-queue", "Type": "SetWorkingQueue",
+{"Identifier": "set-queue", "Type": "UpdateContactTargetQueue",
  "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
  "Transitions": {"NextAction": "check-staffing", "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]}}
 
@@ -86,5 +86,5 @@ arn:aws:connect:us-east-1:123456789012:instance/xxx/queue/yyy
 ---
 **Metadata**
 - Category: Set
-- BlockType: SetWorkingQueue
+- BlockType: UpdateContactTargetQueue
 - Keywords: queue, working queue, routing, set queue

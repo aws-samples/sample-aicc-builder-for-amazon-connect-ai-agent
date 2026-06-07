@@ -16,7 +16,7 @@ Contact Flow import failures are usually caused by incorrect JSON syntax, missin
 | Logging | SetLoggingBehavior | UpdateFlowLoggingBehavior |
 | Set Attributes | SetContactAttributes | UpdateContactAttributes |
 | Store Input | StoreCustomerInput | StoreUserInput |
-| Create Callback | CreateCallbackContact | SetCallbackNumber + TransferContactToQueue |
+| Create Callback | CreateCallbackContact | UpdateContactCallbackNumber + TransferContactToQueue |
 | Check Metrics | CheckMetricData | GetQueueMetrics + Compare |
 
 Fix: Use the correct block type names as listed in AWS documentation.
@@ -243,7 +243,7 @@ Before importing, verify:
 | Recording | UpdateContactRecordingBehavior |
 | Voice | UpdateContactTextToSpeechVoice |
 | Attributes | UpdateContactAttributes |
-| Queue | SetWorkingQueue |
+| Queue | UpdateContactTargetQueue |
 | Transfer | TransferContactToQueue |
 | Staffing | CheckStaffing |
 | Hours | CheckHoursOfOperation |
@@ -251,7 +251,7 @@ Before importing, verify:
 | Lambda | InvokeLambdaFunction |
 | Profile | GetCustomerProfile |
 | Associate | AssociateContactToCustomerProfile |
-| Callback | SetCallbackNumber |
+| Callback | UpdateContactCallbackNumber |
 | Input | GetParticipantInput |
 | Store | StoreUserInput |
 | Message | MessageParticipant |

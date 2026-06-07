@@ -25,7 +25,7 @@ The CheckStaffing block checks if agents are available in the working queue. Use
 ```
 
 ### Required Parameters
-None - uses the working queue set by SetWorkingQueue
+None - uses the working queue set by UpdateContactTargetQueue
 
 ### Condition Values
 - **True**: At least one agent is available in the queue
@@ -35,7 +35,7 @@ None - uses the working queue set by SetWorkingQueue
 - **NoMatchingError**: Unable to check staffing (no working queue set, permissions issue)
 
 ### CRITICAL Requirements
-1. MUST call `SetWorkingQueue` before using CheckStaffing
+1. MUST call `UpdateContactTargetQueue` before using CheckStaffing
 2. MUST have `Conditions` array with both "True" and "False" conditions
 3. MUST have `Errors` array with `NoMatchingError`
 4. Condition values are strings: `"True"` and `"False"` (not booleans)
@@ -71,7 +71,7 @@ None - uses the working queue set by SetWorkingQueue
 
 ### Complete Pattern: Staffing Check with Fallback
 ```json
-{"Identifier": "set-queue", "Type": "SetWorkingQueue",
+{"Identifier": "set-queue", "Type": "UpdateContactTargetQueue",
  "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
  "Transitions": {"NextAction": "check-staffing",
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]}}
@@ -113,10 +113,10 @@ None - uses the working queue set by SetWorkingQueue
 - **GetQueueMetrics**: Need queue size, wait times, or other details
 
 ## Related Topics
-- SetWorkingQueue
+- UpdateContactTargetQueue
 - TransferContactToQueue
 - GetQueueMetrics
-- SetCallbackNumber
+- UpdateContactCallbackNumber
 
 ---
 **Metadata**
