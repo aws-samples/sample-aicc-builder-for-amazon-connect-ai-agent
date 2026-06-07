@@ -499,15 +499,39 @@ def lint_contact_flow(flow_json: str) -> dict:
     try:
         doc = _json.loads(flow_json)
     except Exception as e:
-        return {"ok": False, "errors": [f"Invalid JSON: {e}"], "warnings": []}
+        return {"ok": False, "errors": [f"Invalid JSON: {e}"], "warnings": [], "fixes_applied": [], "fixed_json": flow_json}
 
     if not isinstance(doc, dict):
-        return {"ok": False, "errors": ["Flow root is not an object"], "warnings": []}
+        return {"ok": False, "errors": ["Flow root is not an object"], "warnings": [], "fixes_applied": [], "fixed_json": flow_json}
 
     actions = doc.get("Actions") or doc.get("actions") or []
     start = doc.get("StartAction") or doc.get("startAction")
     errors: list[str] = []
     warnings: list[str] = []
+    fixes_applied: list[str] = []
+
+    # Deterministic auto-fix: `RealTime` in a Voice AnalyticsModes list breaks
+    # Amazon Connect import (InvalidContactFlowException on
+    # AnalyticsBehavior.ChannelConfiguration.Voice) unless real-time Contact Lens
+    # preconditions are met. Drop it (keep PostContact / others) so the flow
+    # always imports. Verified against create-contact-flow.
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        if (a.get("Type") or a.get("type")) != "UpdateContactRecordingBehavior":
+            continue
+        params = a.get("Parameters") or a.get("parameters") or {}
+        ab = params.get("AnalyticsBehavior") or {}
+        cc = ab.get("ChannelConfiguration") or {}
+        voice = cc.get("Voice") or {}
+        modes = voice.get("AnalyticsModes")
+        if isinstance(modes, list) and "RealTime" in modes:
+            new_modes = [m for m in modes if m != "RealTime"] or ["PostContact"]
+            voice["AnalyticsModes"] = new_modes
+            fixes_applied.append(
+                f"Removed 'RealTime' from Voice.AnalyticsModes (→ {new_modes}) — RealTime breaks Connect import"
+            )
+    flow_json_fixed = _json.dumps(doc, ensure_ascii=False, indent=2) if fixes_applied else flow_json
 
     if not actions:
         return {"ok": False, "errors": ["No Actions in flow"], "warnings": []}
@@ -573,7 +597,8 @@ def lint_contact_flow(flow_json: str) -> dict:
     if "DisconnectParticipant" not in types:
         warnings.append("No DisconnectParticipant (terminal) block — flow may not end cleanly")
 
-    return {"ok": not errors, "errors": errors, "warnings": warnings}
+    return {"ok": not errors, "errors": errors, "warnings": warnings,
+            "fixes_applied": fixes_applied, "fixed_json": flow_json_fixed}
 
 
 @tool
