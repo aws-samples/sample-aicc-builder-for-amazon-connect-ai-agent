@@ -679,6 +679,35 @@ async def openapi_generator_agent(
                 result["file_name"] = "openapi.yaml"
                 result["summary"] = f"Generated OpenAPI spec for {api_title}"
 
+                # OpenAPI 3.0 lint gate for FULL mode (≤6 ops path does NOT go
+                # through merge_openapi_fragments, so without this it would skip
+                # validation entirely). Runs AFTER streaming so the preview is
+                # instant; re-streams + re-saves only if the autofix changed the
+                # spec. Fault-tolerant: any failure leaves the streamed spec.
+                try:
+                    from tools.asset_linters import lint_and_autofix_openapi
+                    _lint = lint_and_autofix_openapi(code)
+                    result["lint_available"] = _lint.get("available", False)
+                    result["lint_fixes_applied"] = _lint.get("fixes_applied", [])
+                    result["lint_errors"] = _lint.get("errors", [])[:20]
+                    result["lint_error_count"] = len(_lint.get("errors", []))
+                    if _lint.get("fixes_applied") and _lint["fixed_yaml"] != code:
+                        code = _lint["fixed_yaml"]
+                        logger.info("[OPENAPI] full-mode lint autofix changed spec — re-streaming")
+                        try:
+                            from tools.streaming_callback import clear_asset_preview_cache, get_session_id
+                            from tools.s3_asset_storage import save_asset_to_s3
+                            clear_asset_preview_cache("openapi", "openapi.yaml", op_id)
+                            _stream_asset("openapi", "openapi.yaml", code, op_id)
+                            _sid = get_session_id()
+                            if _sid:
+                                save_asset_to_s3(session_id=_sid, asset_type="openapi",
+                                                 file_name="openapi.yaml", content=code, operation_id=op_id)
+                        except Exception as e:
+                            logger.warning(f"[OPENAPI] full-mode lint re-stream failed (non-fatal): {e}")
+                except Exception as e:
+                    logger.warning(f"[OPENAPI] full-mode lint gate failed (non-fatal): {e}")
+
             _send_progress("completed", api_title)
             yield {"type": "progress", "agent": "openapi_generator",
                    "status": "completed", "api_title": api_title}
