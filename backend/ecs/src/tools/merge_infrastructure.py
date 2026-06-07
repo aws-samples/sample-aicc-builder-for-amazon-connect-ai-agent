@@ -82,6 +82,26 @@ def _remove_anchor_comment(yaml_str: str) -> str:
     )
 
 
+# IAM actions for Amazon Connect AI agents (formerly Amazon Q in Connect) live
+# under the `wisdom:` namespace. `qconnect:` is NOT a real IAM namespace and
+# causes AccessDenied at runtime. LLMs recurrently emit `qconnect:` despite the
+# prompt forbidding it (workshop QA caught this repeatedly), so fix it
+# deterministically at merge time rather than relying on the reviewer.
+_QCONNECT_ACTION_RE = re.compile(r'qconnect:([A-Za-z]\w*)')
+
+
+def _fix_qconnect_namespace(yaml_str: str) -> str:
+    """Rewrite `qconnect:Action` IAM actions to `wisdom:Action`.
+
+    Only rewrites the action-namespace form (`qconnect:` followed by an action
+    name), which is always wrong in IAM. Leaves any other occurrence untouched.
+    """
+    new_yaml, n = _QCONNECT_ACTION_RE.subn(r'wisdom:\1', yaml_str)
+    if n:
+        logger.info(f"[MERGE] Rewrote {n}x qconnect: → wisdom: (invalid IAM namespace)")
+    return new_yaml
+
+
 def _fix_common_property_hallucinations(yaml_str: str) -> str:
     """Fix common LLM-hallucinated CloudFormation property names.
 
@@ -377,6 +397,7 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     merged, merge_info = _merge_at_anchor(base_yaml, fragments)
     final_yaml = _remove_anchor_comment(merged)
     final_yaml = _fix_common_property_hallucinations(final_yaml)
+    final_yaml = _fix_qconnect_namespace(final_yaml)
     final_yaml = _deduplicate_resources(final_yaml)
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)
