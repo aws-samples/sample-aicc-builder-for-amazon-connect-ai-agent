@@ -960,6 +960,14 @@ def _normalize_field_constraints(data: dict) -> dict:
     df = data.get("date_format") or data.get("format") or data.get("dateFormat")
     if df and isinstance(df, str) and not is_date_field and not _LOOKS_LIKE_DATEFMT_RE.search(df):
         moved = _apply_length_constraint(data, df)
+        if not moved:
+            # Not a length phrase — it's a FORMAT mask/pattern on a non-date
+            # field (e.g. "010-XXXX-XXXX", "AAA-000"). Move it to `pattern` as a
+            # best-effort regex (only if pattern is empty). Mask chars: X/0/9→\d,
+            # A/a→[A-Za-z]; keep literal separators escaped.
+            if data.get("pattern") is None:
+                data["pattern"] = _mask_to_regex(df)
+            moved = True
         if moved:
             # consumed → clear the misplaced date_format
             for k in ("date_format", "format", "dateFormat"):
@@ -972,6 +980,41 @@ def _normalize_field_constraints(data: dict) -> dict:
             if k in data and ("자" in str(data.get(k)) or "char" in str(data.get(k)).lower()):
                 data[k] = None
     return data
+
+
+def _mask_to_regex(mask: str) -> str:
+    """Convert a human format mask to a best-effort anchored regex.
+
+    e.g. "010-XXXX-XXXX" → "^010-\\d{4}-\\d{4}$", "AAA-000" → "^[A-Za-z]{3}-000$".
+    Digit-placeholder chars: X/x/# → digit. Letter-placeholder: A/a → letter.
+    Literal digits (0-9) are kept literal so a real prefix like "010" survives.
+    Falls back to escaping the whole string if it has no placeholder chars.
+    """
+    if not any(c in mask for c in "Xx#Aa"):
+        # No placeholder chars — treat the text itself as a literal pattern.
+        return "^" + re.escape(mask.strip()) + "$"
+    out = ["^"]
+    i = 0
+    n = len(mask)
+    while i < n:
+        c = mask[i]
+        if c in "Xx#":
+            j = i
+            while j < n and mask[j] in "Xx#":
+                j += 1
+            out.append(r"\d{" + str(j - i) + "}")
+            i = j
+        elif c in "Aa":
+            j = i
+            while j < n and mask[j] in "Aa":
+                j += 1
+            out.append(r"[A-Za-z]{" + str(j - i) + "}")
+            i = j
+        else:
+            out.append(re.escape(c))
+            i += 1
+    out.append("$")
+    return "".join(out)
 
 
 def _apply_length_constraint(data: dict, text: str) -> bool:
