@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useBuilderStore } from "../stores/builderStore";
 import { useAuthStore } from "../stores/authStore";
+import { useSessionStore } from "../stores/sessionStore";
 import type { WebSocketMessage, SubagentActivity, SubagentToolCall, AttachedFile, MessageAttachment, AttachmentData, AssetPreview, BuilderPhase } from "../types";
 import { PHASE_LABELS } from "../types";
 import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type StoredAsset, type ConversationMessage } from "../services/sessions";
@@ -2514,6 +2515,19 @@ export function useWebSocket() {
       // Update the global session ID
       const sub = await getUserSub();
       setCurrentSessionId(newSessionId, sub);
+
+      // Keep the zustand session store in lock-step with the WebSocket session.
+      // FileExplorer (and other components) read currentSessionId from this store,
+      // NOT from useWebSocket's global. Without this sync the store could lag on a
+      // previous session, so the workspace tree rendered a DIFFERENT (often empty)
+      // session's files than the active chat — assets appeared "missing" even
+      // though the backend had them. switchSession is the single chokepoint every
+      // session change flows through, so syncing here covers create/switch/rotate.
+      try {
+        useSessionStore.getState().setCurrentSession(newSessionId);
+      } catch (e) {
+        console.warn("[useWebSocket] failed to sync sessionStore:", e);
+      }
 
       // Close existing connection - mark as intentional to prevent auto-reconnect
       if (globalWs?.readyState === WebSocket.OPEN) {
