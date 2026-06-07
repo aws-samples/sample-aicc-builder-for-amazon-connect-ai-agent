@@ -2095,11 +2095,34 @@ export function useWebSocket() {
               fetchNfsDiagnostics(currentId),
               getSessionHistory(currentId).catch(() => null),
             ]);
-            const nfsMissing =
+            // Authoritative: prefer the backend's exact per-session existence
+            // check. `recent_sessions` is a truncated top-10-by-mtime list, so
+            // an older-but-valid session is absent from it — using that as the
+            // signal wrongly rotates the user onto a fresh session and discards
+            // completed work (observed: a generation-phase session got reset to
+            // a brand-new interview session on reload).
+            let nfsMissing: boolean;
+            if (diag && "session_exists" in diag && diag.session_exists !== null && diag.session_exists !== undefined) {
+              nfsMissing = diag.session_exists === false;
+            } else if (
               diag &&
               "recent_sessions" in diag &&
-              Array.isArray(diag.recent_sessions) &&
-              !diag.recent_sessions.includes(currentId);
+              Array.isArray(diag.recent_sessions)
+            ) {
+              // Legacy fallback (old backend without session_exists): only treat
+              // as missing when the sessions dir is non-empty yet this id is
+              // absent AND the dir count is small enough that the top-10 list is
+              // actually exhaustive — otherwise we cannot conclude "missing".
+              const count =
+                "session_dirs_count" in diag && typeof diag.session_dirs_count === "number"
+                  ? diag.session_dirs_count
+                  : Infinity;
+              nfsMissing =
+                count <= diag.recent_sessions.length &&
+                !diag.recent_sessions.includes(currentId);
+            } else {
+              nfsMissing = false;
+            }
             const historyEmpty = !history || history.length === 0;
             if (nfsMissing && historyEmpty && switchSessionRef.current) {
               const lang = useBuilderStore.getState().language;

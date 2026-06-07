@@ -1210,8 +1210,16 @@ def _build_tree(directory: str, current_depth: int = 0, max_depth: int = 3) -> l
 
 
 @app.get("/api/debug/nfs")
-async def debug_nfs():
-    """NFS mount diagnostics — no auth required for quick debugging."""
+async def debug_nfs(session_id: str = ""):
+    """NFS mount diagnostics — no auth required for quick debugging.
+
+    When `session_id` is provided, also returns an AUTHORITATIVE existence
+    check for that exact session dir (`session_exists`). Callers MUST prefer
+    `session_exists` over membership in `recent_sessions`: the latter is a
+    truncated top-10-by-mtime list, so an older-but-valid session is absent
+    from it. Treating that absence as "session is dead" wrongly rotates the
+    user onto a fresh session and discards completed work.
+    """
     s3files_mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
     mount_exists = os.path.isdir(s3files_mount)
     sessions_dir = os.path.join(s3files_mount, "sessions")
@@ -1230,6 +1238,12 @@ async def debug_nfs():
             session_count = -1
             session_ids = [f"error: {e}"]
 
+    # Authoritative per-session existence check (not bounded by the top-10 list).
+    session_exists = None
+    if session_id:
+        safe_id = session_id.replace("..", "_").replace("/", "_")
+        session_exists = os.path.isdir(os.path.join(sessions_dir, safe_id))
+
     # Check mount contents at root level
     mount_contents: list = []
     if mount_exists:
@@ -1245,6 +1259,8 @@ async def debug_nfs():
         "sessions_dir_exists": sessions_exists,
         "session_dirs_count": session_count,
         "recent_sessions": session_ids,
+        "queried_session_id": session_id or None,
+        "session_exists": session_exists,
     })
 
 
