@@ -16,8 +16,12 @@ Contact Flow import failures are usually caused by incorrect JSON syntax, missin
 | Logging | SetLoggingBehavior | UpdateFlowLoggingBehavior |
 | Set Attributes | SetContactAttributes | UpdateContactAttributes |
 | Store Input | StoreCustomerInput | StoreUserInput |
-| Create Callback | CreateCallbackContact | SetCallbackNumber + TransferContactToQueue |
-| Check Metrics | CheckMetricData | GetQueueMetrics + Compare |
+| Create Callback | CreateCallbackContact | UpdateContactCallbackNumber + TransferContactToQueue |
+| Queue metrics | GetQueueMetrics | CheckMetricData |
+| Staffing | CheckStaffing | CheckMetricData (MetricType: NumberOfAgentsAvailable) |
+| Entry/trigger | Trigger / EntryPoint | (none — flow starts at StartAction's target) |
+| AI agent | InvokeAgentAction / InvokeBedrockAgent | ConnectParticipantWithLexBot |
+| Condition | CheckCondition / CheckValue | Compare |
 
 Fix: Use the correct block type names as listed in AWS documentation.
 
@@ -79,6 +83,108 @@ CORRECT:
   "Parameters": {"FlowLoggingBehavior": "Enabled"}
 }
 ```
+
+### 2b. API-Validated Parameter Name Errors (exact property names)
+
+These are the EXACT `InvalidContactFlowException` problems Amazon Connect's
+`CreateContactFlow` API returns. The API validator is stricter than the console
+preview — a flow that looks fine can still be rejected for these. Each fix below
+was confirmed by a real successful import.
+
+#### UpdateContactRecordingBehavior — `Agent`/`Customer` are not valid
+**API error**: `Invalid Action property name. Path: …Parameters.Agent` /
+`Action is missing required property. Path: …Parameters.RecordingBehavior`
+
+WRONG:
+```json
+{"Type": "UpdateContactRecordingBehavior", "Parameters": {"Agent": "Enabled", "Customer": "Enabled"}}
+```
+CORRECT:
+```json
+{"Type": "UpdateContactRecordingBehavior",
+ "Parameters": {
+   "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
+   "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "ko-KR",
+     "ChannelConfiguration": {"Chat": {"AnalyticsModes": ["ContactLens"]}, "Voice": {"AnalyticsModes": ["PostContact"]}}}}}
+```
+
+#### UpdateContactTextToSpeechVoice — `VoiceId`/`Engine`/`LanguageCode` are not valid
+**API error**: `Invalid Action property name. Path: …Parameters.VoiceId` /
+`Action is missing required property. Path: …Parameters.TextToSpeechVoice`
+
+WRONG: `{"VoiceId": "Seoyeon", "Engine": "Generative", "LanguageCode": "ko-KR"}`
+CORRECT: `{"TextToSpeechVoice": "Seoyeon", "TextToSpeechEngine": "Generative"}`
+(Set the language in `ActionMetadata`, not in Parameters.)
+
+#### UpdateContactTargetQueue — `QueueId` must be a string, not nested
+**API error**: `Invalid Action property value. Path: …Parameters.QueueId`
+
+WRONG: `{"Queue": "arn:…"}` or `{"QueueId": {"QueueId": "arn:…"}}`
+CORRECT: `{"QueueId": "arn:aws:connect:…:queue/…"}`
+
+#### InvokeLambdaFunction — `RequestAttributes` is not valid
+**API error**: `Invalid Action property name. Path: …Parameters.RequestAttributes`
+
+WRONG: `{"RequestAttributes": {"phone": "$.CustomerEndpoint.Address"}}`
+CORRECT: `{"LambdaInvocationAttributes": {"phone": "$.CustomerEndpoint.Address"}}`
+Also: `ResponseValidation.ResponseType` must be `STRING_MAP`.
+
+#### ConnectParticipantWithLexBot — only `LexV2Bot.AliasArn` + one message
+**API errors**: `Invalid Action property name. …Parameters.BotAliasArn` /
+`…ParticipantRole` / `…SessionAttributes`; `Action is missing required property.
+…Parameters.LexBot`; `At least one of [Text, SSML, PromptId, Media, LexInitializationData] must be set`.
+
+WRONG: `{"BotAliasArn": "arn:…", "ParticipantRole": "…", "SessionAttributes": {…}}`
+or `{"LexBot": {"AliasArn": "arn:…"}}`
+CORRECT:
+```json
+{"Type": "ConnectParticipantWithLexBot",
+ "Parameters": {"Text": "안녕하세요…", "LexV2Bot": {"AliasArn": "arn:aws:lex:…:bot-alias/…/…"},
+                "LexSessionAttributes": {"key": "value"}},
+ "Transitions": {"NextAction": "check-result",
+   "Errors": [{"ErrorType": "NoMatchingCondition", "NextAction": "check-result"},
+              {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]}}
+```
+Its valid Error types are `NoMatchingError` and `NoMatchingCondition` — NEVER `AgentError`.
+
+#### Compare — `NoMatchingError` is not a valid Error; ComparisonValue needs a real root
+**API errors**: `Invalid Action error. Error: NoMatchingError, Path: …` /
+`Invalid Action property value. Path: …Parameters.ComparisonValue`
+
+- `Compare` branches via `Conditions`; its ONLY Error is `NoMatchingCondition`.
+- `ComparisonValue` MUST use a real JSONPath root: `$.Attributes.X`, `$.Channel`,
+  `$.Lex.SessionAttributes.X`, `$.CustomerEndpoint.Address`, `$.External.X`,
+  `$.StoredCustomerInput`. There is NO `$.Agent.*` namespace — read AI/bot
+  results from `$.Lex.SessionAttributes.*` or a contact attribute you set.
+
+#### CheckHoursOfOperation — needs id + BOTH True/False branches
+**API errors**: `Invalid Action property value. …Transitions.Conditions` /
+`Action is missing required error. Error: NoMatchingError`
+
+- `HoursOfOperationId` must be a non-null ARN/id.
+- `Transitions.Conditions` MUST include BOTH a `True` and a `False` operand.
+- The only valid Error is `NoMatchingError` (NOT `NoMatchingCondition`).
+
+```json
+{"Type": "CheckHoursOfOperation",
+ "Parameters": {"HoursOfOperationId": "arn:aws:connect:…:operating-hours/…"},
+ "Transitions": {"NextAction": "after-hours",
+   "Conditions": [
+     {"Condition": {"Operator": "Equals", "Operands": ["True"]},  "NextAction": "open"},
+     {"Condition": {"Operator": "Equals", "Operands": ["False"]}, "NextAction": "after-hours"}],
+   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "after-hours"}]}}
+```
+
+#### Terminal blocks carry NOTHING but Parameters
+`DisconnectParticipant` / `EndFlowExecution` / `ReturnFromFlowModule` must NOT
+have `Transitions`, `Conditions`, OR `Errors` (not even empty ones as stray
+top-level keys). **API error**: `Action does not support transitions. Path: …`
+
+#### MessageParticipant — exactly ONE message property
+**API error**: `Only one of these properties may be defined. Properties: [Text, SSML]`
+
+Provide exactly ONE of `Text` / `SSML` / `PromptId` / `Media` — never both
+`Text` and `SSML` on the same block.
 
 ### 3. Transition Errors
 
@@ -243,15 +349,14 @@ Before importing, verify:
 | Recording | UpdateContactRecordingBehavior |
 | Voice | UpdateContactTextToSpeechVoice |
 | Attributes | UpdateContactAttributes |
-| Queue | SetWorkingQueue |
+| Queue | UpdateContactTargetQueue |
 | Transfer | TransferContactToQueue |
-| Staffing | CheckStaffing |
+| Staffing / Metrics | CheckMetricData |
 | Hours | CheckHoursOfOperation |
-| Metrics | GetQueueMetrics |
 | Lambda | InvokeLambdaFunction |
 | Profile | GetCustomerProfile |
 | Associate | AssociateContactToCustomerProfile |
-| Callback | SetCallbackNumber |
+| Callback | UpdateContactCallbackNumber |
 | Input | GetParticipantInput |
 | Store | StoreUserInput |
 | Message | MessageParticipant |

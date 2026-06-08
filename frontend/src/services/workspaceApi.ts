@@ -69,6 +69,10 @@ export interface NfsDiagnostics {
   sessions_dir_exists: boolean;
   session_dirs_count: number;
   recent_sessions: string[];
+  /** Authoritative existence of the queried session dir (when session_id passed).
+   *  Prefer this over `recent_sessions` membership — the latter is truncated. */
+  queried_session_id?: string | null;
+  session_exists?: boolean | null;
 }
 
 /** Fallback diagnostics gathered without /api/debug/nfs endpoint */
@@ -86,9 +90,14 @@ export async function fetchNfsDiagnostics(
 ): Promise<NfsDiagnostics | FallbackDiagnostics | null> {
   const base = getApiBase();
 
-  // Try the dedicated debug endpoint first
+  // Try the dedicated debug endpoint first. Pass session_id so the backend
+  // returns an authoritative `session_exists` for THIS session (not just the
+  // truncated top-10 recent_sessions list).
   try {
-    const res = await fetch(`${base}/api/debug/nfs`);
+    const url = sessionId
+      ? `${base}/api/debug/nfs?session_id=${encodeURIComponent(sessionId)}`
+      : `${base}/api/debug/nfs`;
+    const res = await fetch(url);
     if (res.ok) {
       return await res.json();
     }

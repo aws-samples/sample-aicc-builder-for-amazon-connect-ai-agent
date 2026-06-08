@@ -52,7 +52,10 @@ The ConnectParticipantWithLexBot block connects the contact to a Lex V2 bot for 
 3. MUST include `Errors` with `NoMatchingError`. Include `NoMatchingCondition` when you
    branch on Intent, and `InputTimeLimitExceeded` when using `LexTimeoutSeconds`.
 4. For voice, set up `UpdateContactTextToSpeechVoice` BEFORE this block.
-5. For voice, enable Contact Lens RealTime for Q in Connect.
+5. For voice, set `UpdateContactRecordingBehavior` with Voice `AnalyticsModes: ["PostContact"]`
+   (do NOT use `RealTime` — Connect rejects it on import unless real-time Contact Lens
+   preconditions are met; Q in Connect assistance is driven by the Lex/Wisdom session, not
+   by real-time voice analytics in this block).
 
 ### Lex V2 Bot Alias ARN Format
 ```
@@ -106,8 +109,9 @@ After the Lex interaction, these attributes are available:
 
 {"Identifier": "set-recording", "Type": "UpdateContactRecordingBehavior",
  "Parameters": {
-   "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"]},
-   "AnalyticsBehavior": {"Enabled": "True", "AnalyticsMode": "RealTime"}
+   "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
+   "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
+     "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["PostContact"]}}}
  },
  "Transitions": {"NextAction": "lex-bot"}}
 

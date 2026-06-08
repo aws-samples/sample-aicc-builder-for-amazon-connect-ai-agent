@@ -1210,25 +1210,42 @@ def _build_tree(directory: str, current_depth: int = 0, max_depth: int = 3) -> l
 
 
 @app.get("/api/debug/nfs")
-async def debug_nfs():
-    """NFS mount diagnostics — no auth required for quick debugging."""
+async def debug_nfs(session_id: str = ""):
+    """NFS mount diagnostics — no auth required for quick debugging.
+
+    When `session_id` is provided, also returns an AUTHORITATIVE existence
+    check for that exact session dir (`session_exists`). Callers MUST prefer
+    `session_exists` over membership in `recent_sessions`: the latter is a
+    truncated top-10-by-mtime list, so an older-but-valid session is absent
+    from it. Treating that absence as "session is dead" wrongly rotates the
+    user onto a fresh session and discards completed work.
+    """
     s3files_mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
     mount_exists = os.path.isdir(s3files_mount)
     sessions_dir = os.path.join(s3files_mount, "sessions")
     sessions_exists = os.path.isdir(sessions_dir)
     session_count = 0
     session_ids: list = []
+    all_dirs: list = []
     if sessions_exists:
         try:
-            dirs = os.listdir(sessions_dir)
-            session_count = len(dirs)
+            all_dirs = os.listdir(sessions_dir)
+            session_count = len(all_dirs)
             # Show last 10 session dirs (sorted by modification time, newest first)
-            full_paths = [(d, os.path.getmtime(os.path.join(sessions_dir, d))) for d in dirs]
+            full_paths = [(d, os.path.getmtime(os.path.join(sessions_dir, d))) for d in all_dirs]
             full_paths.sort(key=lambda x: x[1], reverse=True)
             session_ids = [d for d, _ in full_paths[:10]]
         except OSError as e:
             session_count = -1
             session_ids = [f"error: {e}"]
+
+    # Authoritative per-session existence check (not bounded by the top-10 list).
+    # Path-injection-safe (CodeQL py/path-injection): the user-provided session_id
+    # is NEVER used to build a filesystem path. We only test membership against
+    # the already-listed directory names (derived solely from the trusted mount).
+    session_exists = None
+    if session_id:
+        session_exists = session_id in all_dirs
 
     # Check mount contents at root level
     mount_contents: list = []
@@ -1245,6 +1262,8 @@ async def debug_nfs():
         "sessions_dir_exists": sessions_exists,
         "session_dirs_count": session_count,
         "recent_sessions": session_ids,
+        "queried_session_id": session_id or None,
+        "session_exists": session_exists,
     })
 
 

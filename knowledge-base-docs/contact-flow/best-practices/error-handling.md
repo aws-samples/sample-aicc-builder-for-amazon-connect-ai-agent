@@ -16,7 +16,7 @@ Proper error handling ensures customers aren't left stranded when issues occur. 
 | UpdateContactTextToSpeechVoice | NoMatchingError |
 | UpdateContactRecordingBehavior | (Success only) |
 | UpdateFlowLoggingBehavior | (Success only) |
-| SetWorkingQueue | NoMatchingError |
+| UpdateContactTargetQueue | NoMatchingError |
 | InvokeLambdaFunction | NoMatchingError |
 | Wait | NoMatchingError |
 
@@ -29,7 +29,7 @@ Proper error handling ensures customers aren't left stranded when issues occur. 
 | CheckStaffing | NoMatchingError (+ True/False conditions) |
 | CheckHoursOfOperation | NoMatchingError (+ True/False conditions) |
 | GetParticipantInput | InputTimeLimitExceeded, NoMatchingCondition, NoMatchingError |
-| SetCallbackNumber | InvalidNumber, NotDialable, NoMatchingError |
+| UpdateContactCallbackNumber | InvalidNumber, NotDialable, NoMatchingError |
 | GetCustomerProfile | MultipleFoundError, NoneFoundError, NoMatchingError |
 
 ### Terminal Blocks (No Errors)
@@ -88,8 +88,8 @@ Use Loop block for retryable errors:
   "Parameters": {"LoopCount": "3"},
   "Transitions": {
     "Conditions": [
-      {"Condition": {"Operator": "Equals", "Operands": ["Looping"]}, "NextAction": "retry-action"},
-      {"Condition": {"Operator": "Equals", "Operands": ["Complete"]}, "NextAction": "max-retries"}
+      {"Condition": {"Operator": "Equals", "Operands": ["ContinueLooping"]}, "NextAction": "retry-action"},
+      {"Condition": {"Operator": "Equals", "Operands": ["DoneLooping"]}, "NextAction": "max-retries"}
     ],
     "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
   }
@@ -123,7 +123,7 @@ CORRECT:
 ```
 
 ### Mistake 2: Missing Required Error Types
-WRONG (SetCallbackNumber):
+WRONG (UpdateContactCallbackNumber):
 ```json
 {
   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error"}]
@@ -198,7 +198,7 @@ Before deploying a Contact Flow, verify:
 - DisconnectParticipant
 - Loop Block
 - GetParticipantInput
-- SetCallbackNumber
+- UpdateContactCallbackNumber
 
 ---
 **Metadata**

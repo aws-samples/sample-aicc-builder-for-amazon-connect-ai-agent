@@ -759,10 +759,19 @@ Operations:
             # missing terminal block — the things that make an Amazon Connect
             # flow fail to import. Surface in the result so the orchestrator can
             # patch before packaging. Fault-tolerant.
-            flow_lint = {"ok": True, "errors": [], "warnings": []}
+            flow_lint = {"ok": True, "errors": [], "warnings": [], "fixes_applied": []}
             try:
                 from tools.asset_linters import lint_contact_flow
                 flow_lint = lint_contact_flow(json_content)
+                # Apply deterministic auto-fixes (e.g. RealTime→PostContact in
+                # Voice AnalyticsModes, which otherwise breaks Connect import).
+                if flow_lint.get("fixes_applied") and flow_lint.get("fixed_json") and flow_lint["fixed_json"] != json_content:
+                    json_content = flow_lint["fixed_json"]
+                    logger.info(f"[CONTACT_FLOW] applied import-safety auto-fixes: {flow_lint['fixes_applied']}")
+                    try:
+                        _stream_asset("contact_flow", json_file_name, json_content, flow_name)
+                    except Exception as e:
+                        logger.warning(f"[CONTACT_FLOW] re-stream after autofix failed: {e}")
                 if not flow_lint["ok"]:
                     logger.warning(f"[CONTACT_FLOW] structural lint errors: {flow_lint['errors'][:5]}")
             except Exception as e:
@@ -777,6 +786,7 @@ Operations:
                 "lint_ok": flow_lint["ok"],
                 "lint_errors": flow_lint["errors"][:15],
                 "lint_warnings": flow_lint["warnings"][:8],
+                "lint_fixes_applied": flow_lint.get("fixes_applied", []),
                 "summary": (
                     f"Generated Contact Flow for {flow_name}" + (f" with diagram" if mermaid_content else "")
                     + (f". ⚠️ {len(flow_lint['errors'])} structural error(s) — PATCH before deploy: {flow_lint['errors'][:3]}" if not flow_lint["ok"] else " (structure OK)")

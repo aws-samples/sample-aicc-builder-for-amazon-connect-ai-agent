@@ -334,16 +334,42 @@ When you need to implement a feature, use ONLY these block combinations:
 
 ## ⚠️ NON-EXISTENT BLOCKS (NEVER USE!)
 
+These block `Type`s DO NOT EXIST in the Amazon Connect flow language. Emitting
+ANY of them makes the flow fail to import with `InvalidContactFlowException`.
+
 | ❌ Wrong | ✅ Correct Alternative |
 |----------|------------------------|
+| `Trigger` / `EntryPoint` | **NONE — there is no entry/trigger block.** A flow simply starts at the action `StartAction` points to. The FIRST real action (e.g. `UpdateFlowLoggingBehavior` or `UpdateContactRecordingBehavior`) IS the start. NEVER emit a `Trigger`/`EntryPoint` wrapper action. |
+| `InvokeAgentAction` | `ConnectParticipantWithLexBot` (AI self-service runs through a Q-in-Connect-enabled **Lex V2 bot** — params are `LexV2Bot.AliasArn` + one of `Text`/`SSML`/`PromptId`. There is NO `AgentAliasArn`, `IdleSessionTimeout`, or `EndConversationPhrase` param.) |
+| `InvokeBedrockAgent` / `InvokeAmazonQConnect` / `InvokeQConnect` | `CreateWisdomSession` (early) + `ConnectParticipantWithLexBot` |
+| `CheckCondition` / `CheckValue` / `Condition` / `CheckAttribute` | `Compare` (params: `ComparisonValue` + `Conditions`) |
 | `SetWorkingQueue` | `UpdateContactTargetQueue` |
 | `SetCallbackNumber` | `UpdateContactCallbackNumber` |
-| `CheckStaffing` | `CheckMetricData` (MetricType: NumberOfAgentsAvailable) |
-| `GetQueueMetrics` | `CheckMetricData` (MetricType: NumberOfContactsInQueue) |
-| `TransferToAgent` | `TransferContactToAgent` |
-| `TransferToPhoneNumber` | `TransferParticipantToThirdParty` |
+| `CheckStaffing` / `CheckQueueStatus` | `CheckMetricData` (MetricType: `AgentsAvailable` / `ContactsInQueue`) |
+| `GetQueueMetrics` | `CheckMetricData` or `GetMetricData` |
+| `TransferToAgent` | `TransferContactToQueue` |
+| `TransferToPhoneNumber` / `TransferToThirdParty` | `TransferParticipantToThirdParty` |
 | `SetContactAttributes` | `UpdateContactAttributes` |
-| `StoreCustomerInput` | `StoreUserInput` |
+| `StoreCustomerInput` / `StoreUserInput` | `GetParticipantInput` (with `StoreInput:"True"`) |
+| `PlayPrompt` | `MessageParticipant` |
+| `Distribute` | `DistributeByPercentage` |
+| `StartMediaStreaming` / `StopMediaStreaming` | `UpdateContactMediaStreamingBehavior` |
+| `ReturnFromFlowModule` | `EndFlowExecution` |
+| `InvokeAPI` | `InvokeLambdaFunction` |
+| `SetLoggingBehavior` | `UpdateFlowLoggingBehavior` |
+| `CreateCallbackContact` | `UpdateContactCallbackNumber` + `TransferContactToQueue` |
+| `EndFlow` / `Disconnect` | `DisconnectParticipant` |
+
+> ✅ **All mappings above are API-verified (CreateContactFlow, 2026-06-08).** The
+> WRONG names previously listed (`TransferContactToAgent`, `StoreUserInput`) were
+> themselves invalid — these corrected targets are the ones that actually import.
+> Full verified Type list + console-name mapping is in the KB doc
+> `_VERIFIED-block-type-reference.md` (retrieve it when unsure of a Type).
+
+**RULE: `StartAction` MUST point at a REAL functional first action (not a
+Trigger/EntryPoint).** The flow's first executed block is typically
+`UpdateFlowLoggingBehavior`, `UpdateContactRecordingBehavior`, or
+`UpdateContactTextToSpeechVoice` — never a synthetic entry wrapper.
 
 ---
 
@@ -352,19 +378,54 @@ When you need to implement a feature, use ONLY these block combinations:
 ### Parameters & Errors by Type
 | Type | Parameters | Required Errors |
 |------|------------|-----------------|
-| `DisconnectParticipant` | `{}` | (none - terminal) |
-| `MessageParticipant` | `Text` | `NoMatchingError` |
-| `TransferContactToQueue` | `QueueId` | `QueueAtCapacity`, `NoMatchingError` |
-| `Compare` | `ComparisonValue` | `NoMatchingCondition` |
+| `DisconnectParticipant` | `{}` | (none — terminal, NO Transitions/Conditions/Errors) |
+| `MessageParticipant` | exactly ONE of `Text`/`SSML`/`PromptId`/`Media` | `NoMatchingError` |
+| `TransferContactToQueue` | `{}` (uses queue set by UpdateContactTargetQueue) | `QueueAtCapacity`, `NoMatchingError` |
+| `UpdateContactTargetQueue` | `QueueId` (string ARN — NOT nested object) | `NoMatchingError` |
+| `Compare` | `ComparisonValue` (valid JSONPath root) | `NoMatchingCondition` ONLY (never `NoMatchingError`) |
 | `Loop` | `LoopCount` | Branches: `Looping`, `Complete` |
 | `Wait` | `WaitTime` (seconds) | `NoMatchingError` |
-| `GetParticipantInput` | `Text`, `DTMFConfiguration` | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
+| `GetParticipantInput` | exactly ONE of `Text`/`SSML`, + `DTMFConfiguration` | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
 | `UpdateContactCallbackNumber` | `CallbackNumber` | `InvalidNumber`, `NotDialable`, `NoMatchingError` |
-| `CheckMetricData` | `{}` | Conditions: `True`, `False` |
+| `CheckHoursOfOperation` | `HoursOfOperationId` (non-null) | `NoMatchingError`; Conditions MUST include BOTH `True` AND `False` |
 | `CheckMetricData` | `QueueId` | `NoMatchingError` |
-| `InvokeLambdaFunction` | `LambdaFunctionARN`, `InvocationTimeLimitSeconds` (max 8) | `NoMatchingError` |
+| `InvokeLambdaFunction` | `LambdaFunctionARN`, `InvocationTimeLimitSeconds` (max 8), `LambdaInvocationAttributes` (NOT `RequestAttributes`), `ResponseValidation.ResponseType`=`STRING_MAP` | `NoMatchingError` |
+| `ConnectParticipantWithLexBot` | `LexV2Bot.AliasArn` + exactly ONE of `Text`/`SSML`/`PromptId`; optional `LexSessionAttributes` | `NoMatchingError`, `NoMatchingCondition` (NEVER `AgentError`) |
+| `UpdateContactTextToSpeechVoice` | `TextToSpeechVoice`, `TextToSpeechEngine` (NOT `VoiceId`/`Engine`/`LanguageCode`) | `NoMatchingError` |
+| `UpdateContactRecordingBehavior` | `RecordingBehavior{RecordedParticipants,IVRRecordingBehavior}` + `AnalyticsBehavior` (NOT `Agent`/`Customer`) | (none) |
+| `UpdateFlowLoggingBehavior` | `FlowLoggingBehavior` (NOT `LoggingBehavior`) | (none) |
 | `CreateWisdomSession` | `WisdomAssistantArn` | `NoMatchingError` |
 | `UpdateContactData` | `WisdomSessionArn` | `NoMatchingError` |
+
+### ⚠️ EXACT PARAMETER NAMES — API-validated (these EXACT mistakes fail import)
+
+These are the precise property-name errors Amazon Connect's `CreateContactFlow`
+API rejects. NEVER emit the ❌ form:
+
+| Block | ❌ NEVER | ✅ ALWAYS |
+|-------|---------|----------|
+| `UpdateContactRecordingBehavior` | `{"Agent":…,"Customer":…}` | `{"RecordingBehavior":{"RecordedParticipants":["Agent","Customer"],"IVRRecordingBehavior":"Enabled"},"AnalyticsBehavior":{…}}` |
+| `UpdateContactTextToSpeechVoice` | `{"VoiceId":…,"Engine":…,"LanguageCode":…}` | `{"TextToSpeechVoice":"Seoyeon","TextToSpeechEngine":"Generative"}` |
+| `UpdateFlowLoggingBehavior` | `{"LoggingBehavior":"Enabled"}` | `{"FlowLoggingBehavior":"Enabled"}` |
+| `UpdateContactTargetQueue` | `{"Queue":…}` or `{"QueueId":{"QueueId":…}}` | `{"QueueId":"<arn-string>"}` |
+| `ConnectParticipantWithLexBot` | `BotAliasArn`, `ParticipantRole`, `SessionAttributes`, `RequestAttributes`, `LexBot.AliasArn` | `{"LexV2Bot":{"AliasArn":…},"Text":…}` (+ optional `LexSessionAttributes`) |
+| `InvokeLambdaFunction` | `RequestAttributes` | `LambdaInvocationAttributes` |
+
+**Hard rules (import-blockers):**
+1. **Terminal blocks** (`DisconnectParticipant`, `EndFlowExecution`,
+   `ReturnFromFlowModule`) carry NO `Transitions`, NO `Conditions`, NO `Errors` —
+   nothing but `Identifier`/`Type`/`Parameters`.
+2. **`Compare`** allows ONLY `NoMatchingCondition` as an Error — never
+   `NoMatchingError`. Its `ComparisonValue` MUST use a real JSONPath root:
+   `$.Attributes.X`, `$.Channel`, `$.Lex.SessionAttributes.X`,
+   `$.CustomerEndpoint.Address`, `$.External.X`, `$.StoredCustomerInput`.
+   There is NO `$.Agent.*` namespace — read agent/bot results from
+   `$.Lex.SessionAttributes.*` or a contact attribute.
+3. **`CheckHoursOfOperation`** needs a non-null `HoursOfOperationId` and Conditions
+   for BOTH `True` and `False`; its only Error is `NoMatchingError`.
+4. **`MessageParticipant`/`GetParticipantInput`** define EXACTLY ONE of
+   `Text`/`SSML`/`PromptId`/`Media` — never both `Text` and `SSML`.
+5. **`ConnectParticipantWithLexBot`** never uses `AgentError` as an Error type.
 
 ---
 
@@ -397,11 +458,18 @@ Voice recording (when channel is VOICE):
  "Parameters": {
    "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
    "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
-     "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["RealTime", "PostContact"]}},
+     "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["PostContact"]}},
      "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
      "SentimentConfiguration": {"Enabled": "True"}}},
  "Transitions": {"NextAction": "next_block"}}
 ```
+⚠️ **Voice `AnalyticsModes` MUST be `["PostContact"]` (NOT `["RealTime", ...]`).**
+`RealTime` in `Voice.AnalyticsModes` is rejected by Amazon Connect on import
+(`InvalidContactFlowException: Invalid Action property value ... ChannelConfiguration.Voice`)
+unless the instance/flow meets real-time Contact Lens preconditions — it breaks
+import for everyone. Use `PostContact`. (Q in Connect real-time assistance does
+NOT require RealTime voice *analytics* in this block — the Lex/Wisdom session
+drives the assistant; post-contact analytics is the safe, always-importable choice.)
 Chat recording (when channel is CHAT):
 ```json
 {"Identifier": "chat-recording", "Type": "UpdateContactRecordingBehavior",
@@ -589,7 +657,7 @@ The workshop uses a 3-module structure. Your generated flow MUST include these p
 - **UpdateFlowLoggingBehavior**: Enable flow logging (REQUIRED - often missing!)
 - **Compare**: Check channel (VOICE vs CHAT) for recording settings
 - **UpdateContactRecordingBehavior**:
-  - VOICE: Record Agent+Customer, Contact Lens RealTime
+  - VOICE: Record Agent+Customer, Voice `AnalyticsModes: ["PostContact"]` (NOT RealTime — import-safe)
   - CHAT: No recording, Contact Lens only
 
 Reference: `static/contact-flows/basic-setting-configurations.json`

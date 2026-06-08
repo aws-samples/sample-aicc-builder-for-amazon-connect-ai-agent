@@ -105,8 +105,9 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
       "Identifier": "voice-recording",
       "Type": "UpdateContactRecordingBehavior",
       "Parameters": {
-        "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"]},
-        "AnalyticsBehavior": {"Enabled": "True", "AnalyticsMode": "RealTime"}
+        "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
+        "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
+          "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["PostContact"]}}}
       },
       "Transitions": {"NextAction": "get-profile"}
     },
@@ -115,7 +116,8 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
       "Type": "UpdateContactRecordingBehavior",
       "Parameters": {
         "RecordingBehavior": {"RecordedParticipants": []},
-        "AnalyticsBehavior": {"Enabled": "True", "AnalyticsMode": "PostContact"}
+        "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
+          "ChannelConfiguration": {"Chat": {"AnalyticsModes": ["ContactLens"]}, "Voice": {"AnalyticsModes": []}}}
       },
       "Transitions": {"NextAction": "get-profile"}
     },
@@ -292,8 +294,11 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
 | Feature | VOICE | CHAT |
 |---------|-------|------|
 | Recording | Agent + Customer | None |
-| Contact Lens | RealTime | PostContact |
+| Contact Lens (AnalyticsModes) | Voice: `["PostContact"]` | Chat: `["ContactLens"]` |
 | Profile Lookup | _phone | _email |
+
+> ⚠️ Do NOT use `RealTime` in Voice `AnalyticsModes` — Amazon Connect rejects it on
+> import unless real-time Contact Lens preconditions are met. Use `["PostContact"]`.
 
 ### Lex Session Attributes for Escalation
 The Lex bot should set these attributes:

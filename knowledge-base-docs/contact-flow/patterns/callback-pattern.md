@@ -8,11 +8,11 @@ The callback pattern allows customers to receive a callback instead of waiting o
 
 ## Key Components
 
-1. **SetCallbackNumber** - Sets the phone number for callback
+1. **UpdateContactCallbackNumber** - Sets the phone number for callback
 2. **TransferContactToQueue** - Creates the callback contact in the queue
 
 ## CRITICAL: There is NO CreateCallbackContact Block!
-Callbacks are created by calling SetCallbackNumber followed by TransferContactToQueue.
+Callbacks are created by calling UpdateContactCallbackNumber followed by TransferContactToQueue.
 
 ## Complete Pattern Implementation
 
@@ -116,7 +116,7 @@ Callbacks are created by calling SetCallbackNumber followed by TransferContactTo
     },
     {
       "Identifier": "set-callback",
-      "Type": "SetCallbackNumber",
+      "Type": "UpdateContactCallbackNumber",
       "Parameters": {"CallbackNumber": "$.CustomerEndpoint.Address"},
       "Transitions": {
         "NextAction": "create-callback",
@@ -176,9 +176,9 @@ Callbacks are created by calling SetCallbackNumber followed by TransferContactTo
 }
 ```
 
-## SetCallbackNumber Error Handling
+## UpdateContactCallbackNumber Error Handling
 
-CRITICAL: SetCallbackNumber requires handling THREE error types:
+CRITICAL: UpdateContactCallbackNumber requires handling THREE error types:
 
 ```json
 {
@@ -205,7 +205,7 @@ WRONG:
 
 CORRECT:
 ```json
-{"Type": "SetCallbackNumber"}  // Step 1: Set the number
+{"Type": "UpdateContactCallbackNumber"}  // Step 1: Set the number
 // followed by
 {"Type": "TransferContactToQueue"}  // Step 2: Creates the callback
 ```
@@ -235,7 +235,7 @@ If you want to allow customers to enter a different callback number:
 
 {
   "Identifier": "set-custom-callback",
-  "Type": "SetCallbackNumber",
+  "Type": "UpdateContactCallbackNumber",
   "Parameters": {"CallbackNumber": "$.StoredCustomerInput"},
   "Transitions": {
     "NextAction": "create-callback",
@@ -249,7 +249,7 @@ If you want to allow customers to enter a different callback number:
 ```
 
 ## Related Topics
-- SetCallbackNumber
+- UpdateContactCallbackNumber
 - TransferContactToQueue
 - CheckStaffing
 - GetParticipantInput
@@ -257,4 +257,4 @@ If you want to allow customers to enter a different callback number:
 ---
 **Metadata**
 - Category: Pattern
-- Keywords: callback, queue callback, SetCallbackNumber, InvalidNumber, NotDialable
+- Keywords: callback, queue callback, UpdateContactCallbackNumber, InvalidNumber, NotDialable

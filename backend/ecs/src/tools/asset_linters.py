@@ -482,6 +482,486 @@ def lint_lambda(session_id: str = "", operation_id: str = "", file_name: str = "
 # Contact Flow (Amazon Connect flow JSON) — structural integrity
 # ---------------------------------------------------------------------------
 
+# Official Amazon Connect flow-language Action Types (the `Type` field of an
+# Action). VERIFIED against a real Amazon Connect console export (all 43 block
+# types) PLUS individual CreateContactFlow API probes (2026-06-08). A flow whose
+# `Type` is NOT in this set FAILS to import with InvalidContactFlowException.
+# Source of truth: knowledge-base-docs/contact-flow/_reference-console-export-all-blocks.json
+# Do NOT add a Type here without confirming it imports via the API — guessed
+# names (TransferToAgent, TransferToPhoneNumber, CheckQueueStatus, ...) were the
+# cause of import failures and are listed as invalid below.
+VALID_CONTACT_FLOW_ACTION_TYPES = frozenset({
+    # Interact
+    "MessageParticipant", "MessageParticipantIteratively", "GetParticipantInput",
+    "ConnectParticipantWithLexBot", "RenderMessageTemplate",
+    # Set / update
+    "UpdateContactAttributes", "UpdateContactData", "UpdateContactRecordingBehavior",
+    "UpdateContactRecordingAndAnalyticsBehavior", "UpdateContactTextToSpeechVoice",
+    "UpdateContactTargetQueue", "UpdateContactCallbackNumber", "UpdateContactEventHooks",
+    "UpdateContactRoutingBehavior", "UpdateContactRoutingCriteria",
+    "UpdateFlowLoggingBehavior", "UpdateFlowAttributes",
+    "UpdateContactMediaStreamingBehavior", "UpdatePreviousContactParticipantState",
+    "TagContact", "UntagContact",
+    # Branch / control
+    "Compare", "Loop", "Wait", "DistributeByPercentage",
+    "CheckHoursOfOperation", "CheckMetricData", "GetMetricData", "CheckOutboundCallStatus",
+    "EvaluateDataTableValues",
+    # Integrate
+    "InvokeLambdaFunction", "InvokeFlowModule", "CreateWisdomSession",
+    "CreateTask", "CreateCase", "CreateContact", "StartOutboundEmailContact",
+    "AssociateContactToCustomerProfile", "GetCustomerProfile", "GetCustomerProfileObject",
+    "CreatePersistentContactAssociation", "LoadContactContent",
+    "AuthenticateParticipant", "ShowView", "ResumeContact",
+    # Transfer / terminate
+    "TransferContactToQueue", "TransferParticipantToThirdParty", "TransferToFlow",
+    "DisconnectParticipant", "EndFlowExecution",
+})
+
+# Known LLM hallucinations / wrong names → the correct official Type (or None
+# when there is no 1:1 replacement and the block must be removed/redesigned).
+# These are blocks the model has actually emitted that break import.
+INVALID_CONTACT_FLOW_TYPE_HINTS = {
+    # There is no "Trigger" / entry-point block — a flow starts at the action
+    # that StartAction points to. Drop the wrapper and start at its NextAction.
+    "Trigger": "(remove — flows start at StartAction, no Trigger block exists)",
+    "EntryPoint": "(remove — flows start at StartAction, no EntryPoint block exists)",
+    # Branch-on-value is `Compare`, not CheckCondition / CheckValue / Condition.
+    "CheckCondition": "Compare",
+    "CheckValue": "Compare",
+    "Condition": "Compare",
+    "CheckAttribute": "Compare",
+    # No "InvokeAgentAction" / Bedrock-agent block exists in the flow language.
+    # AI self-service runs through a Q-in-Connect-enabled Lex V2 bot.
+    "InvokeAgentAction": "ConnectParticipantWithLexBot",
+    "InvokeBedrockAgent": "ConnectParticipantWithLexBot",
+    "InvokeAmazonQConnect": "ConnectParticipantWithLexBot",
+    "InvokeQConnect": "ConnectParticipantWithLexBot",
+    # Common other hallucinations.
+    "PlayPrompt": "MessageParticipant",
+    "GetUserInput": "GetParticipantInput",
+    "SetWorkingQueue": "UpdateContactTargetQueue",
+    "SetCallbackNumber": "UpdateContactCallbackNumber",
+    "SetContactAttributes": "UpdateContactAttributes",
+    "SetRecordingBehavior": "UpdateContactRecordingBehavior",
+    "SetLoggingBehavior": "UpdateFlowLoggingBehavior",
+    "SetVoice": "UpdateContactTextToSpeechVoice",
+    "CreateCallbackContact": "(remove — use UpdateContactCallbackNumber + TransferContactToQueue)",
+    "TransferToQueue": "TransferContactToQueue",
+    "EndFlow": "DisconnectParticipant",
+    "Disconnect": "DisconnectParticipant",
+    # API-confirmed INVALID Types (2026-06-08) — these returned "Invalid Action
+    # type" from CreateContactFlow. Map to the real Type the console export uses.
+    "TransferToAgent": "TransferContactToQueue",
+    "TransferToPhoneNumber": "TransferParticipantToThirdParty",
+    "TransferToThirdParty": "TransferParticipantToThirdParty",
+    "CheckQueueStatus": "CheckMetricData",
+    "CheckStaffing": "CheckMetricData",
+    "Distribute": "DistributeByPercentage",
+    "StartMediaStreaming": "UpdateContactMediaStreamingBehavior",
+    "StopMediaStreaming": "UpdateContactMediaStreamingBehavior",
+    "ReturnFromFlowModule": "EndFlowExecution",
+    "InvokeAPI": "InvokeLambdaFunction",
+    "GetParticipantWithLexV2Bot": "ConnectParticipantWithLexBot",
+    "PutCustomerProfile": "(use Customer Profiles integration / UpdateContactData)",
+    "UpdateCustomerProfileObject": "(use Customer Profiles integration)",
+    "UpdateContactRoutingData": "UpdateContactRoutingCriteria",
+    "UpdateContactTextToSpeechManner": "UpdateContactTextToSpeechVoice",
+    "SetRecordingAndAnalyticsBehavior": "UpdateContactRecordingAndAnalyticsBehavior",
+}
+
+
+# Action Types that are TERMINAL — they end flow execution and MUST NOT carry
+# Transitions. Connect rejects "Action does not support transitions" otherwise.
+TERMINAL_ACTION_TYPES = frozenset({
+    "DisconnectParticipant", "EndFlowExecution", "ReturnFromFlowModule",
+    "TransferToFlow", "TransferContactToQueue", "TransferToAgent",
+})
+# TransferContactToQueue/TransferToAgent DO support transitions (queue-full etc.)
+# so keep only the truly terminal ones for the no-transitions rule.
+NO_TRANSITION_ACTION_TYPES = frozenset({
+    "DisconnectParticipant", "EndFlowExecution", "ReturnFromFlowModule",
+})
+
+# Required Error handlers per Action Type (Connect import enforces these).
+# Required Error handlers per Action Type — all verified against the real
+# CreateContactFlow API (instance 5bf5005e, ap-northeast-2, 2026-06-08).
+# NOTE: GetParticipantInput is intentionally absent — its required errors depend
+# on mode (menu vs store) and are handled in the dedicated normalizer above.
+REQUIRED_ERRORS_BY_TYPE = {
+    "MessageParticipant": ["NoMatchingError"],
+    "Compare": ["NoMatchingCondition"],
+    "ConnectParticipantWithLexBot": ["NoMatchingError", "NoMatchingCondition"],
+    "InvokeLambdaFunction": ["NoMatchingError"],
+    "CreateWisdomSession": ["NoMatchingError"],
+    "UpdateContactData": ["NoMatchingError"],
+    "TransferContactToQueue": ["QueueAtCapacity", "NoMatchingError"],
+    "UpdateContactTargetQueue": ["NoMatchingError"],
+    "UpdateContactAttributes": ["NoMatchingError"],   # API-verified: required
+    "CheckHoursOfOperation": ["NoMatchingError"],     # branches via True/False Conditions; needs NoMatchingError
+    "UpdateContactCallbackNumber": ["NoMatchingError"],  # API-verified: InvalidNumber/NotDialable are NOT valid here
+}
+
+# Error types that are NOT valid for a given block — strip them on import.
+INVALID_ERRORS_BY_TYPE = {
+    "ConnectParticipantWithLexBot": {"AgentError"},
+    "CheckHoursOfOperation": {"NoMatchingCondition"},
+    # Compare branches via Conditions; its only valid Error is NoMatchingCondition.
+    "Compare": {"NoMatchingError"},
+}
+
+# Canonical AI-bot tool-result vocabulary (see SUBAGENT_TERMINOLOGY_AND_ESCALATION).
+# The bot returns exactly `Complete` (end call) or `Escalate` (human transfer);
+# the flow's Compare branches on these. Map common LLM synonyms back to canonical.
+# Keys are upper-cased for case-insensitive matching. Spec-driven extensions like
+# `OutOfHoursComplete` / `EscalateBilling` are intentionally NOT remapped.
+_CANONICAL_TOOL_RESULT = {
+    "COMPLETE": "Complete",
+    "END_CALL": "Complete",
+    "ENDCALL": "Complete",
+    "END_CONVERSATION": "Complete",
+    "ENDCONVERSATION": "Complete",
+    "DONE": "Complete",
+    "FINISH": "Complete",
+    "FINISHED": "Complete",
+    "HANGUP": "Complete",
+    "DISCONNECT": "Complete",
+    "ESCALATE": "Escalate",
+    "ESCALATION": "Escalate",
+    "TRANSFER": "Escalate",
+    "TRANSFER_TO_AGENT": "Escalate",
+    "AGENT": "Escalate",
+    "HUMAN": "Escalate",
+    "HANDOFF": "Escalate",
+}
+
+# Valid JSONPath root namespaces for Compare.ComparisonValue / attribute refs.
+# The model sometimes invents roots like `$.Agent.ReturnControlEvent.Type`.
+_VALID_JSONPATH_ROOTS = (
+    "$.Attributes.", "$.Channel", "$.CustomerEndpoint", "$.SystemEndpoint",
+    "$.Lex.", "$.Customer.", "$.External.", "$.StoredCustomerInput",
+    "$.Media.", "$.ContactId", "$.InitialContactId", "$.Queue.",
+    "$.Metadata.", "$.FlowAttributes.",
+)
+
+
+def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: list) -> None:
+    """Rewrite block Parameters/Transitions to the shapes Amazon Connect's
+    CreateContactFlow API actually accepts. Mutates `actions` in place and
+    appends human-readable notes to `fixes`.
+
+    Every rule here was derived from real InvalidContactFlowException `problems`
+    returned by the Connect API (the strict validator the console import uses):
+      - UpdateContactRecordingBehavior: {Agent,Customer} → {RecordingBehavior,…}
+      - UpdateContactTextToSpeechVoice: {VoiceId,Engine,LanguageCode} → {TextToSpeechVoice,TextToSpeechEngine}
+      - UpdateFlowLoggingBehavior:      {LoggingBehavior} → {FlowLoggingBehavior}
+      - UpdateContactTargetQueue:       {Queue} → {QueueId}
+      - ConnectParticipantWithLexBot:   {BotAliasArn,LexBot{AliasArn},Participant…} → {LexV2Bot{AliasArn},Text}
+      - terminal blocks:                strip Transitions
+      - MessageParticipant:             only ONE of Text/SSML/Media
+      - missing required Error handlers: injected, routed to a safe fallback
+    """
+    # A safe fallback target for injected error transitions: prefer an existing
+    # disconnect/terminal block, else the first action.
+    fallback = None
+    for a in actions:
+        if isinstance(a, dict) and (a.get("Type") or a.get("type")) == "DisconnectParticipant":
+            fallback = a.get("Identifier") or a.get("identifier")
+            break
+    if not fallback and actions:
+        fallback = actions[0].get("Identifier") or actions[0].get("identifier")
+
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        t = a.get("Type") or a.get("type")
+        p = a.get("Parameters")
+        if p is None:
+            p = a.get("parameters")
+        if p is None:
+            p = {}
+        pkey = "Parameters" if "Parameters" in a or "parameters" not in a else "parameters"
+        aid = a.get("Identifier") or a.get("identifier")
+
+        # --- UpdateContactRecordingBehavior: {Agent, Customer} → RecordingBehavior
+        if t == "UpdateContactRecordingBehavior":
+            if "RecordingBehavior" not in p:
+                p.pop("Agent", None)
+                p.pop("Customer", None)
+                p["RecordingBehavior"] = {
+                    "RecordedParticipants": ["Agent", "Customer"],
+                    "IVRRecordingBehavior": "Enabled",
+                }
+                p.setdefault("AnalyticsBehavior", {
+                    "Enabled": "True",
+                    "AnalyticsLanguage": "ko-KR",
+                    "ChannelConfiguration": {
+                        "Chat": {"AnalyticsModes": ["ContactLens"]},
+                        "Voice": {"AnalyticsModes": ["PostContact"]},
+                    },
+                })
+                fixes.append(f"[{aid}] UpdateContactRecordingBehavior: rebuilt RecordingBehavior (removed Agent/Customer)")
+
+        # --- UpdateContactTextToSpeechVoice: {VoiceId,Engine,LanguageCode} → {TextToSpeechVoice,Engine}
+        elif t == "UpdateContactTextToSpeechVoice":
+            if "TextToSpeechVoice" not in p:
+                voice = p.pop("VoiceId", None) or "Seoyeon"
+                eng = p.pop("Engine", None) or "Generative"
+                p.pop("LanguageCode", None)
+                p["TextToSpeechVoice"] = voice
+                p["TextToSpeechEngine"] = eng
+                p.setdefault("TextToSpeechStyle", "None")
+                fixes.append(f"[{aid}] UpdateContactTextToSpeechVoice: VoiceId/Engine/LanguageCode → TextToSpeechVoice/TextToSpeechEngine")
+
+        # --- UpdateFlowLoggingBehavior: {LoggingBehavior} → {FlowLoggingBehavior}
+        elif t == "UpdateFlowLoggingBehavior":
+            if "FlowLoggingBehavior" not in p and "LoggingBehavior" in p:
+                p["FlowLoggingBehavior"] = p.pop("LoggingBehavior")
+                fixes.append(f"[{aid}] UpdateFlowLoggingBehavior: LoggingBehavior → FlowLoggingBehavior")
+
+        # --- UpdateContactTargetQueue: {Queue} → {QueueId}; flatten nested QueueId
+        elif t == "UpdateContactTargetQueue":
+            if "QueueId" not in p and "Queue" in p:
+                p["QueueId"] = p.pop("Queue")
+                fixes.append(f"[{aid}] UpdateContactTargetQueue: Queue → QueueId")
+            # QueueId must be a string ARN/id, not a nested object {"QueueId": "..."}
+            if isinstance(p.get("QueueId"), dict):
+                inner = p["QueueId"].get("QueueId") or p["QueueId"].get("Id") or next(iter(p["QueueId"].values()), None)
+                p["QueueId"] = inner or "{{QUEUE_ARN}}"
+                fixes.append(f"[{aid}] UpdateContactTargetQueue: flattened nested QueueId → string")
+
+        # --- InvokeLambdaFunction: RequestAttributes → LambdaInvocationAttributes
+        elif t == "InvokeLambdaFunction":
+            if "RequestAttributes" in p:
+                p.setdefault("LambdaInvocationAttributes", p.pop("RequestAttributes"))
+                fixes.append(f"[{aid}] InvokeLambdaFunction: RequestAttributes → LambdaInvocationAttributes")
+            # ResponseValidation.ResponseType must be STRING_MAP (JSON is not accepted)
+            rv = p.get("ResponseValidation")
+            if isinstance(rv, dict) and rv.get("ResponseType") not in ("STRING_MAP", "JSON_OBJECT"):
+                rv["ResponseType"] = "STRING_MAP"
+                fixes.append(f"[{aid}] InvokeLambdaFunction: ResponseValidation.ResponseType → STRING_MAP")
+
+        # --- CheckHoursOfOperation: null/missing HoursOfOperationId → placeholder
+        elif t == "CheckHoursOfOperation":
+            if not p.get("HoursOfOperationId"):
+                p["HoursOfOperationId"] = "{{HOURS_OF_OPERATION_ID}}"
+                fixes.append(f"[{aid}] CheckHoursOfOperation: filled missing HoursOfOperationId placeholder")
+            # Must branch on BOTH True and False conditions.
+            tr = a.get("Transitions") or a.get("transitions") or {}
+            conds = tr.get("Conditions") or tr.get("conditions") or []
+            operands = {str(c.get("Condition", {}).get("Operands", [None])[0])
+                        for c in conds if isinstance(c, dict)}
+            nxt = tr.get("NextAction") or tr.get("nextAction") or fallback
+            true_target = next((c.get("NextAction") for c in conds
+                                if isinstance(c, dict) and str(c.get("Condition", {}).get("Operands", [None])[0]) == "True"), None)
+            if "False" not in operands:
+                conds.append({"Condition": {"Operator": "Equals", "Operands": ["False"]},
+                              "NextAction": nxt})
+                fixes.append(f"[{aid}] CheckHoursOfOperation: added missing 'False' branch")
+            if "True" not in operands:
+                conds.insert(0, {"Condition": {"Operator": "Equals", "Operands": ["True"]},
+                                 "NextAction": true_target or nxt})
+                fixes.append(f"[{aid}] CheckHoursOfOperation: added missing 'True' branch")
+            tr["Conditions"] = conds
+            a["Transitions" if "Transitions" in a or "transitions" not in a else "transitions"] = tr
+
+        # --- Compare: ComparisonValue must use a valid JSONPath root
+        elif t == "Compare":
+            cv = p.get("ComparisonValue")
+            if isinstance(cv, str) and cv.startswith("$.") and not cv.startswith(_VALID_JSONPATH_ROOTS):
+                # Re-home an invented root (e.g. $.Agent.ReturnControlEvent.Type)
+                # to a contact attribute, which is where flow logic should read.
+                leaf = cv.rstrip(".").split(".")[-1]
+                p["ComparisonValue"] = f"$.Attributes.{leaf}"
+                fixes.append(f"[{aid}] Compare: ComparisonValue '{cv}' → '$.Attributes.{leaf}' (invalid JSONPath root)")
+            # Canonical AI-bot tool-result vocabulary: when this Compare branches on
+            # the bot's Tool result, the operands MUST be `Complete`/`Escalate`
+            # (see SUBAGENT_TERMINOLOGY_AND_ESCALATION). Normalize known wrong
+            # synonyms so the flow's branch matches what the bot actually returns.
+            cv2 = p.get("ComparisonValue") or ""
+            if isinstance(cv2, str) and (".Tool" in cv2 or "actionType" in cv2 or ".toolResult" in cv2 or ".Tool." in cv2):
+                tr = a.get("Transitions") or a.get("transitions") or {}
+                for cond in (tr.get("Conditions") or tr.get("conditions") or []):
+                    if not isinstance(cond, dict):
+                        continue
+                    ops = cond.get("Condition", {}).get("Operands")
+                    if not isinstance(ops, list):
+                        continue
+                    for i_op, val in enumerate(ops):
+                        canon = _CANONICAL_TOOL_RESULT.get(str(val).strip().upper())
+                        if canon and val != canon:
+                            ops[i_op] = canon
+                            fixes.append(f"[{aid}] Compare: tool-result operand '{val}' → '{canon}' (canonical Complete/Escalate vocabulary)")
+
+        # --- ConnectParticipantWithLexBot: normalize to LexV2Bot.AliasArn + one message
+        elif t == "ConnectParticipantWithLexBot":
+            # Collect any ARN the model produced under various wrong keys.
+            arn = (p.pop("BotAliasArn", None)
+                   or p.pop("AgentAliasArn", None)
+                   or (isinstance(p.get("LexBot"), dict) and p["LexBot"].get("AliasArn"))
+                   or (isinstance(p.get("LexV2Bot"), dict) and p["LexV2Bot"].get("AliasArn")))
+            # Drop non-existent params.
+            for bad in ("ParticipantRole", "SessionAttributes", "RequestAttributes",
+                        "IdleSessionTimeout", "EndConversationPhrase"):
+                if bad in p and bad != "SessionAttributes":
+                    p.pop(bad, None)
+            # Migrate LexSessionAttributes-style key if present under SessionAttributes.
+            if "SessionAttributes" in p:
+                p.setdefault("LexSessionAttributes", p.pop("SessionAttributes"))
+            # Remove a malformed LexBot (V1 requires Name+Region+Alias; we use V2).
+            lexbot = p.get("LexBot")
+            if isinstance(lexbot, dict) and not all(k in lexbot for k in ("Name", "Region", "Alias")):
+                p.pop("LexBot", None)
+            if "LexV2Bot" not in p and "LexBot" not in p:
+                p["LexV2Bot"] = {"AliasArn": arn or "{{LEX_BOT_ALIAS_ARN}}"}
+                fixes.append(f"[{aid}] ConnectParticipantWithLexBot: normalized to LexV2Bot.AliasArn")
+            # Must have exactly one message property.
+            msg_keys = [k for k in ("Text", "SSML", "PromptId", "Media", "LexInitializationData") if k in p]
+            if not msg_keys:
+                p["Text"] = "{{WELCOME_MESSAGE}}"
+                fixes.append(f"[{aid}] ConnectParticipantWithLexBot: added required Text")
+
+        # --- GetParticipantInput: two distinct API-verified modes.
+        #   MENU mode  (branches via Conditions): StoreInput=False, NO
+        #     DTMFConfiguration, errors must be NoMatchingCondition +
+        #     InputTimeLimitExceeded + NoMatchingError.
+        #   STORE mode (captures input to an attribute): StoreInput=True,
+        #     requires InputValidation.CustomValidation.MaximumLength, optional
+        #     DTMFConfiguration{DisableCancelKey} (NEVER InputTerminationSequence),
+        #     errors = NoMatchingError only.
+        # (Both verified against CreateContactFlow; the empty/guessed forms the
+        #  model emits otherwise fail import with misleading "Invalid Action type".)
+        if t == "GetParticipantInput":
+            tr_gp = a.get("Transitions") or a.get("transitions") or {}
+            conds_gp = tr_gp.get("Conditions") or tr_gp.get("conditions") or []
+            is_menu = bool(conds_gp)
+            if is_menu:
+                if str(p.get("StoreInput")) != "False":
+                    p["StoreInput"] = "False"
+                    fixes.append(f"[{aid}] GetParticipantInput(menu): StoreInput=False")
+                if "DTMFConfiguration" in p:
+                    p.pop("DTMFConfiguration", None)
+                    fixes.append(f"[{aid}] GetParticipantInput(menu): removed DTMFConfiguration")
+                p.pop("InputValidation", None)
+            else:
+                if str(p.get("StoreInput")) != "True":
+                    p["StoreInput"] = "True"
+                    fixes.append(f"[{aid}] GetParticipantInput(store): StoreInput=True")
+                # DTMFConfiguration in store mode accepts ONLY DisableCancelKey.
+                # Any other key (InputTerminationSequence, InputTimeLimitSeconds,
+                # FinishKey, ...) is rejected — InputTimeLimitSeconds belongs at the
+                # Parameters root, not inside DTMFConfiguration.
+                dtmf = p.get("DTMFConfiguration")
+                if isinstance(dtmf, dict):
+                    bad = [k for k in list(dtmf.keys()) if k != "DisableCancelKey"]
+                    if bad:
+                        # InputTimeLimitSeconds is a real top-level param — re-home it.
+                        if "InputTimeLimitSeconds" in dtmf and "InputTimeLimitSeconds" not in p:
+                            p["InputTimeLimitSeconds"] = dtmf["InputTimeLimitSeconds"]
+                        for k in bad:
+                            dtmf.pop(k, None)
+                        dtmf.setdefault("DisableCancelKey", "False")
+                        fixes.append(f"[{aid}] GetParticipantInput(store): stripped invalid DTMFConfiguration keys {bad}")
+                if "InputValidation" not in p:
+                    p["InputValidation"] = {"CustomValidation": {"MaximumLength": "6"}}
+                    fixes.append(f"[{aid}] GetParticipantInput(store): added required InputValidation")
+                # Store mode: ONLY NoMatchingError is valid (no Conditions → no
+                # NoMatchingCondition; InputTimeLimitExceeded is rejected here).
+                tr_st = a.get("Transitions") or a.get("transitions")
+                if isinstance(tr_st, dict):
+                    errs = tr_st.get("Errors") or tr_st.get("errors") or []
+                    nxt = tr_st.get("NextAction") or tr_st.get("nextAction")
+                    bad_err = [e for e in errs if (e.get("ErrorType") or e.get("errorType")) != "NoMatchingError"]
+                    if bad_err:
+                        kept = [e for e in errs if (e.get("ErrorType") or e.get("errorType")) == "NoMatchingError"]
+                        if not kept:
+                            kept = [{"ErrorType": "NoMatchingError", "NextAction": nxt}]
+                        tr_st["Errors" if "Errors" in tr_st else "errors"] = kept
+                        fixes.append(f"[{aid}] GetParticipantInput(store): kept only NoMatchingError (removed {[e.get('ErrorType') for e in bad_err]})")
+
+        # --- Loop: condition operands are DoneLooping/ContinueLooping (NOT Looping/Complete)
+        if t == "Loop":
+            tr_lp = a.get("Transitions") or a.get("transitions") or {}
+            for c in (tr_lp.get("Conditions") or tr_lp.get("conditions") or []):
+                if not isinstance(c, dict):
+                    continue
+                ops = c.get("Condition", {}).get("Operands")
+                if isinstance(ops, list):
+                    for i_o, v in enumerate(ops):
+                        lv = str(v).strip().lower()
+                        if lv in ("looping", "continue", "continuelooping"):
+                            if ops[i_o] != "ContinueLooping":
+                                ops[i_o] = "ContinueLooping"
+                                fixes.append(f"[{aid}] Loop: operand → ContinueLooping")
+                        elif lv in ("complete", "done", "donelooping"):
+                            if ops[i_o] != "DoneLooping":
+                                ops[i_o] = "DoneLooping"
+                                fixes.append(f"[{aid}] Loop: operand → DoneLooping")
+
+        # --- MessageParticipant / GetParticipantInput: only ONE of Text/SSML/Media
+        if t in ("MessageParticipant", "GetParticipantInput", "MessageParticipantIteratively"):
+            present = [k for k in ("Text", "SSML", "PromptId", "Media") if k in p]
+            if len(present) > 1:
+                # Keep Text if present, else the first; drop the rest.
+                keep = "Text" if "Text" in present else present[0]
+                for k in present:
+                    if k != keep:
+                        p.pop(k, None)
+                fixes.append(f"[{aid}] {t}: kept only '{keep}' (removed {[k for k in present if k!=keep]})")
+
+        # write params back
+        if pkey in a or p:
+            a[pkey] = p
+
+        # --- Terminal blocks must not carry Transitions / Conditions / Errors
+        if t in NO_TRANSITION_ACTION_TYPES:
+            removed = []
+            for k in ("Transitions", "transitions", "Conditions", "Errors"):
+                if a.get(k):
+                    a.pop(k, None)
+                    removed.append(k)
+                elif k in a:
+                    a.pop(k, None)
+            if removed:
+                fixes.append(f"[{aid}] {t}: removed {removed} (terminal block carries none)")
+
+        # --- Strip Error types that are invalid for this block
+        bad_errs = INVALID_ERRORS_BY_TYPE.get(t)
+        if bad_errs:
+            tr = a.get("Transitions") or a.get("transitions")
+            if isinstance(tr, dict):
+                errs = tr.get("Errors") or tr.get("errors")
+                if isinstance(errs, list):
+                    kept = [e for e in errs if (e.get("ErrorType") or e.get("errorType")) not in bad_errs]
+                    if len(kept) != len(errs):
+                        tr["Errors" if "Errors" in tr else "errors"] = kept
+                        fixes.append(f"[{aid}] {t}: removed invalid Error type(s) {sorted(bad_errs & {e.get('ErrorType') or e.get('errorType') for e in errs})}")
+
+        # --- Inject missing required Error handlers
+        req = REQUIRED_ERRORS_BY_TYPE.get(t)
+        if req and t not in NO_TRANSITION_ACTION_TYPES:
+            tr = a.get("Transitions")
+            trkey = "Transitions"
+            if tr is None:
+                tr = a.get("transitions")
+                trkey = "transitions"
+            if tr is None:
+                tr = {}
+                trkey = "Transitions"
+            errs = tr.get("Errors")
+            if errs is None:
+                errs = tr.get("errors") or []
+            have = {e.get("ErrorType") or e.get("errorType") for e in errs if isinstance(e, dict)}
+            nxt = tr.get("NextAction") or tr.get("nextAction") or fallback
+            added = []
+            for et in req:
+                if et not in have:
+                    errs.append({"ErrorType": et, "NextAction": fallback or nxt})
+                    added.append(et)
+            if added:
+                tr["Errors"] = errs
+                a[trkey] = tr
+                fixes.append(f"[{aid}] {t}: added required Error(s) {added}")
+
 
 def lint_contact_flow(flow_json: str) -> dict:
     """Validate Amazon Connect Contact Flow JSON structural integrity.
@@ -499,18 +979,129 @@ def lint_contact_flow(flow_json: str) -> dict:
     try:
         doc = _json.loads(flow_json)
     except Exception as e:
-        return {"ok": False, "errors": [f"Invalid JSON: {e}"], "warnings": []}
+        return {"ok": False, "errors": [f"Invalid JSON: {e}"], "warnings": [], "fixes_applied": [], "fixed_json": flow_json}
 
     if not isinstance(doc, dict):
-        return {"ok": False, "errors": ["Flow root is not an object"], "warnings": []}
+        return {"ok": False, "errors": ["Flow root is not an object"], "warnings": [], "fixes_applied": [], "fixed_json": flow_json}
 
     actions = doc.get("Actions") or doc.get("actions") or []
-    start = doc.get("StartAction") or doc.get("startAction")
     errors: list[str] = []
     warnings: list[str] = []
+    fixes_applied: list[str] = []
+
+    # Deterministic auto-fix: `RealTime` in a Voice AnalyticsModes list breaks
+    # Amazon Connect import (InvalidContactFlowException on
+    # AnalyticsBehavior.ChannelConfiguration.Voice) unless real-time Contact Lens
+    # preconditions are met. Drop it (keep PostContact / others) so the flow
+    # always imports. Verified against create-contact-flow.
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        if (a.get("Type") or a.get("type")) != "UpdateContactRecordingBehavior":
+            continue
+        params = a.get("Parameters") or a.get("parameters") or {}
+        ab = params.get("AnalyticsBehavior") or {}
+        cc = ab.get("ChannelConfiguration") or {}
+        voice = cc.get("Voice") or {}
+        modes = voice.get("AnalyticsModes")
+        if isinstance(modes, list) and "RealTime" in modes:
+            new_modes = [m for m in modes if m != "RealTime"] or ["PostContact"]
+            voice["AnalyticsModes"] = new_modes
+            fixes_applied.append(
+                f"Removed 'RealTime' from Voice.AnalyticsModes (→ {new_modes}) — RealTime breaks Connect import"
+            )
+    # Deterministic auto-fix: a `Trigger` / `EntryPoint` block does not exist in
+    # the flow language — a flow starts directly at the action StartAction points
+    # to. The model sometimes emits a no-op Trigger as the StartAction. Rewire
+    # StartAction to the Trigger's NextAction and drop the Trigger block so the
+    # flow imports.
+    _start_id = doc.get("StartAction") or doc.get("startAction")
+    for a in list(actions):
+        if not isinstance(a, dict):
+            continue
+        if (a.get("Type") or a.get("type")) not in ("Trigger", "EntryPoint"):
+            continue
+        aid = a.get("Identifier") or a.get("identifier")
+        trans = a.get("Transitions") or a.get("transitions") or {}
+        nxt = trans.get("NextAction") or trans.get("nextAction")
+        if aid == _start_id and nxt:
+            # Repoint StartAction past the Trigger, then remove the Trigger block.
+            if "StartAction" in doc:
+                doc["StartAction"] = nxt
+            else:
+                doc["startAction"] = nxt
+            actions.remove(a)
+            # Drop its ActionMetadata entry if present.
+            md = doc.get("Metadata") or {}
+            am = md.get("ActionMetadata") if isinstance(md, dict) else None
+            if isinstance(am, dict):
+                am.pop(aid, None)
+            fixes_applied.append(
+                f"Removed invalid '{a.get('Type') or a.get('type')}' block '{aid}'; "
+                f"StartAction → '{nxt}' (no Trigger block exists in flow language)"
+            )
+
+    # Deterministic block-type validation: an Action whose Type is not a real
+    # Amazon Connect flow-language Action Type makes the flow fail to import
+    # (InvalidContactFlowException). The model occasionally hallucinates blocks
+    # like `Trigger`, `CheckCondition`, `InvokeAgentAction`. Catch every such
+    # Type and, for the known 1:1 renames, auto-fix it.
+    invalid_types: list[str] = []
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        t = a.get("Type") or a.get("type")
+        if not t or t in VALID_CONTACT_FLOW_ACTION_TYPES:
+            continue
+        hint = INVALID_CONTACT_FLOW_TYPE_HINTS.get(t)
+        if hint and not hint.startswith("("):
+            # Safe 1:1 rename to a real Type.
+            if "Type" in a:
+                a["Type"] = hint
+            else:
+                a["type"] = hint
+            # When renaming a hallucinated AI block to ConnectParticipantWithLexBot,
+            # the old params (AgentAliasArn / IdleSessionTimeout / EndConversationPhrase)
+            # are invalid for the Lex block and Connect rejects them on import.
+            # Rewrite to the minimum valid shape: LexV2Bot.AliasArn + Text.
+            if hint == "ConnectParticipantWithLexBot":
+                p = a.get("Parameters") or a.get("parameters") or {}
+                if "LexV2Bot" not in p and "LexBot" not in p:
+                    old_arn = p.pop("AgentAliasArn", None) or p.pop("BotAliasArn", None)
+                    phrase = p.pop("EndConversationPhrase", None)
+                    p.pop("IdleSessionTimeout", None)
+                    p["LexV2Bot"] = {"AliasArn": old_arn or "{{LEX_BOT_ALIAS_ARN}}"}
+                    if "Text" not in p and "SSML" not in p and "PromptId" not in p and "Media" not in p:
+                        p["Text"] = phrase or "{{WELCOME_MESSAGE}}"
+                    if "Parameters" in a:
+                        a["Parameters"] = p
+                    else:
+                        a["parameters"] = p
+                    fixes_applied.append(
+                        f"Rewrote '{t}' params → ConnectParticipantWithLexBot (LexV2Bot.AliasArn + Text)"
+                    )
+            fixes_applied.append(f"Renamed invalid block Type '{t}' → '{hint}'")
+        else:
+            suffix = f" — {hint}" if hint else " (not a valid Amazon Connect flow Action Type)"
+            invalid_types.append(f"Action '{a.get('Identifier') or a.get('identifier')}' has invalid Type '{t}'{suffix}")
+
+    # Deterministic parameter normalization: rewrite block Parameters/Transitions
+    # to the exact shapes Connect's CreateContactFlow API accepts (derived from
+    # real InvalidContactFlowException problems). This fixes the param-name and
+    # required-error drift that makes generated flows fail to import.
+    try:
+        _normalize_contact_flow_params(actions, {}, fixes_applied)
+    except Exception as _e:  # never let normalization break linting
+        warnings.append(f"param normalization skipped: {_e}")
+
+    flow_json_fixed = _json.dumps(doc, ensure_ascii=False, indent=2) if fixes_applied else flow_json
 
     if not actions:
         return {"ok": False, "errors": ["No Actions in flow"], "warnings": []}
+
+    # Read StartAction AFTER the auto-fixes above (the Trigger fix may have
+    # repointed it) so downstream validation reflects the corrected flow.
+    start = doc.get("StartAction") or doc.get("startAction")
 
     ids = set()
     for a in actions:
@@ -570,10 +1161,15 @@ def lint_contact_flow(flow_json: str) -> dict:
             warnings.append(f"{len(orphans)} action(s) unreachable from StartAction: {sorted(orphans)[:5]}")
 
     types = {(a.get("Type") or a.get("type")) for a in actions if isinstance(a, dict)}
+    # Re-evaluate terminal block AFTER any Type auto-fixes (e.g. EndFlow→Disconnect).
     if "DisconnectParticipant" not in types:
         warnings.append("No DisconnectParticipant (terminal) block — flow may not end cleanly")
 
-    return {"ok": not errors, "errors": errors, "warnings": warnings}
+    # Invalid Types that could NOT be auto-renamed are hard import-blockers.
+    errors.extend(invalid_types)
+
+    return {"ok": not errors, "errors": errors, "warnings": warnings,
+            "fixes_applied": fixes_applied, "fixed_json": flow_json_fixed}
 
 
 @tool

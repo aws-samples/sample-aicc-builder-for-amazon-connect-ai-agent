@@ -95,7 +95,7 @@ arn:aws:connect:us-east-1:123456789012:instance/xxx/operating-hours/yyy
 ### Without HoursOfOperationId (Using Queue's Hours)
 If you omit the HoursOfOperationId, it uses the hours configured on the working queue:
 ```json
-{"Identifier": "set-queue", "Type": "SetWorkingQueue",
+{"Identifier": "set-queue", "Type": "UpdateContactTargetQueue",
  "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
  "Transitions": {"NextAction": "check-queue-hours",
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]}}
@@ -112,9 +112,9 @@ If you omit the HoursOfOperationId, it uses the hours configured on the working 
 ```
 
 ## Related Topics
-- SetWorkingQueue
+- UpdateContactTargetQueue
 - GetParticipantInput
-- SetCallbackNumber
+- UpdateContactCallbackNumber
 
 ---
 **Metadata**

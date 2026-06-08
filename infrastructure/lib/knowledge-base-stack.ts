@@ -69,6 +69,30 @@ export class KnowledgeBaseStack extends cdk.Stack {
       instruction: "Use this knowledge base to answer questions about Amazon Connect contact flow blocks, patterns, and best practices.",
     });
 
+    // The cdklabs construct grants the KB role PutVectors/GetVectors/QueryVectors
+    // but NOT DeleteVectors. Re-ingestion (after docs change) must delete the old
+    // vectors first, so without this the FIRST ingest works but every UPDATE
+    // fails with AccessDenied on s3vectors:DeleteVectors. Grant the full vector
+    // read/write/delete set on this index + bucket explicitly.
+    kb.role.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "s3vectors:PutVectors",
+          "s3vectors:GetVectors",
+          "s3vectors:QueryVectors",
+          "s3vectors:DeleteVectors",
+          "s3vectors:ListVectors",
+          "s3vectors:GetIndex",
+          "s3vectors:GetVectorBucket",
+        ],
+        resources: [
+          vectorBucket.vectorBucketArn,
+          `${vectorBucket.vectorBucketArn}/*`,
+          vectorIndex.vectorIndexArn,
+        ],
+      })
+    );
+
     // S3 Data Source
     const dataSource = new bedrock.S3DataSource(this, "ContactFlowDataSource", {
       bucket: docsBucket,

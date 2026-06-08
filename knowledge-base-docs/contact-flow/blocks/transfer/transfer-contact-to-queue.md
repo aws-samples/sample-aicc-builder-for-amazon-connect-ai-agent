@@ -27,7 +27,7 @@ The TransferContactToQueue block transfers the contact to a queue for agent hand
 ### Required Parameters
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| QueueId | String | The ARN or ID of the target queue (optional if SetWorkingQueue was called first) |
+| QueueId | String | The ARN or ID of the target queue (optional if UpdateContactTargetQueue was called first) |
 
 ### Error Types
 - **QueueAtCapacity**: The queue has reached its maximum contact limit
@@ -37,14 +37,14 @@ The TransferContactToQueue block transfers the contact to a queue for agent hand
 1. MUST have `NextAction` in Transitions - this is where the flow continues after successful transfer
 2. MUST handle `QueueAtCapacity` error for production flows
 3. MUST handle `NoMatchingError` for robustness
-4. If `QueueId` is not specified, you MUST call `SetWorkingQueue` before this block
+4. If `QueueId` is not specified, you MUST call `UpdateContactTargetQueue` before this block
 5. The `NextAction` typically points to a `DisconnectParticipant` block
 
 ### Common Patterns
 
-#### With SetWorkingQueue (Recommended)
+#### With UpdateContactTargetQueue (Recommended)
 ```json
-{"Identifier": "set-queue", "Type": "SetWorkingQueue",
+{"Identifier": "set-queue", "Type": "UpdateContactTargetQueue",
  "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
  "Transitions": {"NextAction": "transfer-queue", "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]}}
 
@@ -65,10 +65,10 @@ The TransferContactToQueue block transfers the contact to a queue for agent hand
 ```
 
 ## Related Topics
-- SetWorkingQueue
+- UpdateContactTargetQueue
 - CheckStaffing
 - GetQueueMetrics
-- SetCallbackNumber (for callback when queue is full)
+- UpdateContactCallbackNumber (for callback when queue is full)
 
 ---
 **Metadata**

@@ -184,6 +184,34 @@ SUBAGENT_TERMINOLOGY_AND_ESCALATION = """
   — do not hard-code "built on Nova Sonic" into generated prompts unless the
   user specified it.
 
+## AI-BOT ↔ CONTACT-FLOW TOOL-RESULT CONTRACT (canonical, do not improvise)
+
+The AI agent (Lex/Q-in-Connect bot) communicates its decision back to the
+Contact Flow through ONE session attribute: **`$.Lex.SessionAttributes.Tool`**.
+The flow's `Compare` block branches on its value. The vocabulary is FIXED:
+
+- **`Complete`** — the conversation is finished; end the call. (Self-service
+  done, customer satisfied, or graceful close.) Flow → goodbye → Disconnect.
+- **`Escalate`** — connect the customer to a human agent. Flow → set escalation
+  context → UpdateContactTargetQueue → TransferContactToQueue.
+
+These TWO values are the REQUIRED baseline. NEVER invent alternates like
+`END_CALL`, `END_CONVERSATION`, `ESCALATE` (wrong case), `TRANSFER`, `DONE`, or
+`actionType`. The prompt_generator MUST teach the bot to set exactly `Complete`
+or `Escalate`; the contact_flow_generator MUST `Compare` on exactly those.
+
+**Permitted extensions** (only when the spec/requirements call for distinct
+downstream handling — e.g. routing to a different queue or passing extra context
+to a Connect 1P/MCP agent transfer):
+- Additional ESCALATE-family values that still route to a human but differ in
+  context/queue: e.g. `EscalateBilling`, `EscalateTechnical`.
+- Additional COMPLETE-family values that still end the call but differ in
+  closing handling: e.g. `OutOfHoursComplete`, `CallbackScheduledComplete`.
+
+Even with extensions, the base `Complete` and `Escalate` MUST exist and be the
+default branches. Any extra value MUST be matched by a corresponding `Compare`
+condition in the flow AND documented in the bot prompt — never one side only.
+
 ## SPEC-LEVEL MODIFICATION ESCALATION (applies when modification_request is set)
 
 Before patching a file, classify the request:
@@ -232,11 +260,35 @@ def _render_field_tree(field: dict, indent: int = 0) -> list:
     but always emitted when nested inside items/properties (context matters).
     """
     lines = []
+    # Fault-tolerance: a field may arrive as a JSON string (double-encoded) or a
+    # bare string field name. Recover/skip rather than crashing downstream with
+    # "'str' object has no attribute 'get'".
+    if isinstance(field, str):
+        try:
+            import json as _json
+            parsed = _json.loads(field)
+            if isinstance(parsed, dict):
+                field = parsed
+            else:
+                return [f"{'  ' * indent}- `{field}`: string"]
+        except Exception:
+            return [f"{'  ' * indent}- `{field}`: string"]
+    if not isinstance(field, dict):
+        return lines
     name = field.get("name", "?")
     ftype = (field.get("field_type") or field.get("type") or "string")
     enum_values = field.get("enum_values") or field.get("enum") or field.get("allowed_values") or field.get("options")
     items = field.get("items") or field.get("item") or field.get("element")
     properties = field.get("properties") or field.get("sub_fields") or field.get("fields")
+    # items may be a JSON string; normalize to dict or None
+    if isinstance(items, str):
+        try:
+            import json as _json
+            items = _json.loads(items)
+        except Exception:
+            items = None
+        if not isinstance(items, dict):
+            items = None
 
     pad = "  " * indent
     suffix = ""
@@ -249,15 +301,35 @@ def _render_field_tree(field: dict, indent: int = 0) -> list:
     if items is not None:
         lines.append(f"{pad}  items:")
         lines.extend(_render_field_tree(items, indent + 2))
-    if properties:
+    # properties may be a JSON string; normalize to a list before iterating
+    if isinstance(properties, str):
+        try:
+            import json as _json
+            properties = _json.loads(properties)
+        except Exception:
+            properties = None
+    if properties and isinstance(properties, (list, tuple)):
         lines.append(f"{pad}  properties:")
         for sub in properties:
             lines.extend(_render_field_tree(sub, indent + 2))
     return lines
 
 
-def _field_has_nested_structure(field: dict) -> bool:
-    """True if this field carries nested / enum info worth surfacing."""
+def _field_has_nested_structure(field) -> bool:
+    """True if this field carries nested / enum info worth surfacing.
+
+    Tolerates a non-dict `field` (e.g. a bare string field name or a
+    double-encoded JSON string) — returns False rather than raising.
+    """
+    if isinstance(field, str):
+        try:
+            import json as _json
+            parsed = _json.loads(field)
+            field = parsed if isinstance(parsed, dict) else None
+        except Exception:
+            field = None
+    if not isinstance(field, dict):
+        return False
     if field.get("enum_values") or field.get("enum") or field.get("allowed_values") or field.get("options"):
         return True
     if field.get("items") or field.get("item") or field.get("element"):
