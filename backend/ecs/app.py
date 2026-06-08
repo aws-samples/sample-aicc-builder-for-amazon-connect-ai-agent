@@ -1226,12 +1226,13 @@ async def debug_nfs(session_id: str = ""):
     sessions_exists = os.path.isdir(sessions_dir)
     session_count = 0
     session_ids: list = []
+    all_dirs: list = []
     if sessions_exists:
         try:
-            dirs = os.listdir(sessions_dir)
-            session_count = len(dirs)
+            all_dirs = os.listdir(sessions_dir)
+            session_count = len(all_dirs)
             # Show last 10 session dirs (sorted by modification time, newest first)
-            full_paths = [(d, os.path.getmtime(os.path.join(sessions_dir, d))) for d in dirs]
+            full_paths = [(d, os.path.getmtime(os.path.join(sessions_dir, d))) for d in all_dirs]
             full_paths.sort(key=lambda x: x[1], reverse=True)
             session_ids = [d for d, _ in full_paths[:10]]
         except OSError as e:
@@ -1239,20 +1240,12 @@ async def debug_nfs(session_id: str = ""):
             session_ids = [f"error: {e}"]
 
     # Authoritative per-session existence check (not bounded by the top-10 list).
-    # Strictly allowlist the session_id to a safe charset BEFORE using it in a
-    # path expression (defeats path-injection / traversal — CodeQL py/path-injection).
-    # Then verify the resolved path stays inside sessions_dir as defense in depth.
+    # Path-injection-safe (CodeQL py/path-injection): the user-provided session_id
+    # is NEVER used to build a filesystem path. We only test membership against
+    # the already-listed directory names (derived solely from the trusted mount).
     session_exists = None
     if session_id:
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", session_id) or session_id in (".", ".."):
-            session_exists = False
-        else:
-            sessions_root = os.path.realpath(sessions_dir)
-            candidate = os.path.realpath(os.path.join(sessions_root, session_id))
-            if candidate == sessions_root or os.path.commonpath([sessions_root, candidate]) != sessions_root:
-                session_exists = False
-            else:
-                session_exists = os.path.isdir(candidate)
+        session_exists = session_id in all_dirs
 
     # Check mount contents at root level
     mount_contents: list = []
