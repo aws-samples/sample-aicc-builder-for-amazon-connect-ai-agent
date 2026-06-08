@@ -51,6 +51,10 @@ if (enableKnowledgeBase) {
   new KnowledgeBaseStack(app, `AiccBuilderKnowledgeBase${suffix}`, {
     env,
     description: "AICC Builder Knowledge Base - RAG for Contact Flow generation",
+    // Pass the resolved region as a concrete string so the KB execution role
+    // name can be made unique per region (IAM roles are global; same stack name
+    // across regions would otherwise collide). See knowledge-base-stack.ts.
+    resolvedRegion: env.region,
   });
 }
 

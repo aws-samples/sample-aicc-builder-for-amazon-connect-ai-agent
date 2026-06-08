@@ -19,11 +19,21 @@ import { bedrock, s3vectors } from "@cdklabs/generative-ai-cdk-constructs";
  * source sync. The dimension (1024) must match the embeddings model
  * (TITAN_EMBED_TEXT_V2_1024).
  */
+export interface KnowledgeBaseStackProps extends cdk.StackProps {
+  /**
+   * The concrete deploy region (e.g. "ap-northeast-1"), passed from app.ts so the
+   * KB execution role name can be made unique per region. IAM roles are global,
+   * and the cdklabs construct derives the role name from the construct path only
+   * (no region), so identical stack names across regions would collide.
+   */
+  resolvedRegion?: string;
+}
+
 export class KnowledgeBaseStack extends cdk.Stack {
   public readonly docsBucketName: cdk.CfnOutput;
   public readonly agentCoreKbPolicyArn: cdk.CfnOutput;
 
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props?: KnowledgeBaseStackProps) {
     super(scope, id, props);
 
     // S3 Bucket for Knowledge Base Documents
@@ -68,6 +78,21 @@ export class KnowledgeBaseStack extends cdk.Stack {
       description: "Curated Amazon Connect Contact Flow documentation for RAG-enhanced generation",
       instruction: "Use this knowledge base to answer questions about Amazon Connect contact flow blocks, patterns, and best practices.",
     });
+
+    // MULTI-REGION FIX: the cdklabs construct derives the KB execution role name
+    // from the construct path (stack id + construct id) only — NOT the region.
+    // Since the stack name is identical across regions (AiccBuilderKnowledgeBase-<stage>),
+    // Seoul and Tokyo would generate the SAME global IAM role name. IAM roles are
+    // global, so the second region collides with the first region's role — whose
+    // trust policy pins aws:SourceArn to the first region — and Bedrock then can't
+    // assume it ("unable to assume the given role"). Make the role name unique per
+    // region so each region owns its own correctly-scoped role.
+    const roleRegion = props?.resolvedRegion || cdk.Stack.of(this).region;
+    const cfnKbRole = kb.role.node.defaultChild as iam.CfnRole;
+    cfnKbRole.addPropertyOverride(
+      "RoleName",
+      `AmazonBedrockExecKB-${id}-${roleRegion}`.slice(0, 64),
+    );
 
     // The cdklabs construct grants the KB role PutVectors/GetVectors/QueryVectors
     // but NOT DeleteVectors. Re-ingestion (after docs change) must delete the old
