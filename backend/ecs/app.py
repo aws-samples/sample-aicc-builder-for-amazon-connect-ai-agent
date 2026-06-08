@@ -1239,10 +1239,20 @@ async def debug_nfs(session_id: str = ""):
             session_ids = [f"error: {e}"]
 
     # Authoritative per-session existence check (not bounded by the top-10 list).
+    # Strictly allowlist the session_id to a safe charset BEFORE using it in a
+    # path expression (defeats path-injection / traversal — CodeQL py/path-injection).
+    # Then verify the resolved path stays inside sessions_dir as defense in depth.
     session_exists = None
     if session_id:
-        safe_id = session_id.replace("..", "_").replace("/", "_")
-        session_exists = os.path.isdir(os.path.join(sessions_dir, safe_id))
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", session_id) or session_id in (".", ".."):
+            session_exists = False
+        else:
+            sessions_root = os.path.realpath(sessions_dir)
+            candidate = os.path.realpath(os.path.join(sessions_root, session_id))
+            if candidate == sessions_root or os.path.commonpath([sessions_root, candidate]) != sessions_root:
+                session_exists = False
+            else:
+                session_exists = os.path.isdir(candidate)
 
     # Check mount contents at root level
     mount_contents: list = []
