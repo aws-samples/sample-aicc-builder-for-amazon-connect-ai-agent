@@ -282,3 +282,28 @@ def test_lex_bot_v1_and_wrong_keys_normalized():
     # required errors injected
     types = {e["ErrorType"] for e in a["Transitions"]["Errors"]}
     assert {"NoMatchingError", "NoMatchingCondition"} <= types
+
+
+def test_getparticipantinput_store_mode_strips_invalid_dtmf_and_errors():
+    # Store mode (no Conditions): DTMFConfiguration may carry ONLY DisableCancelKey;
+    # InputTimeLimitSeconds belongs at the root; only NoMatchingError is valid.
+    flow = _valid_flow()
+    flow["Actions"].insert(1, {
+        "Identifier": "auth", "Type": "GetParticipantInput",
+        "Parameters": {"Text": "Enter 6 digits", "StoreInput": "True",
+                       "DTMFConfiguration": {"InputTimeLimitSeconds": "8", "FinishKey": "#", "DisableCancelKey": "False"}},
+        "Transitions": {"NextAction": "end",
+                        "Errors": [{"ErrorType": "InputTimeLimitExceeded", "NextAction": "end"},
+                                   {"ErrorType": "NoMatchingCondition", "NextAction": "end"},
+                                   {"ErrorType": "NoMatchingError", "NextAction": "end"}]}})
+    flow["Actions"][0]["Transitions"]["NextAction"] = "auth"
+    a, _ = _fixed_action(flow, "auth")
+    # DTMFConfiguration reduced to DisableCancelKey only
+    assert set(a["Parameters"]["DTMFConfiguration"].keys()) == {"DisableCancelKey"}
+    # InputTimeLimitSeconds re-homed to root
+    assert a["Parameters"].get("InputTimeLimitSeconds") == "8"
+    # InputValidation added
+    assert "InputValidation" in a["Parameters"]
+    # only NoMatchingError remains
+    types = {e["ErrorType"] for e in a["Transitions"]["Errors"]}
+    assert types == {"NoMatchingError"}

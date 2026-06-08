@@ -846,14 +846,37 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
                 if str(p.get("StoreInput")) != "True":
                     p["StoreInput"] = "True"
                     fixes.append(f"[{aid}] GetParticipantInput(store): StoreInput=True")
+                # DTMFConfiguration in store mode accepts ONLY DisableCancelKey.
+                # Any other key (InputTerminationSequence, InputTimeLimitSeconds,
+                # FinishKey, ...) is rejected — InputTimeLimitSeconds belongs at the
+                # Parameters root, not inside DTMFConfiguration.
                 dtmf = p.get("DTMFConfiguration")
-                if isinstance(dtmf, dict) and "InputTerminationSequence" in dtmf:
-                    dtmf.pop("InputTerminationSequence", None)
-                    dtmf.setdefault("DisableCancelKey", "False")
-                    fixes.append(f"[{aid}] GetParticipantInput(store): dropped invalid DTMFConfiguration.InputTerminationSequence")
+                if isinstance(dtmf, dict):
+                    bad = [k for k in list(dtmf.keys()) if k != "DisableCancelKey"]
+                    if bad:
+                        # InputTimeLimitSeconds is a real top-level param — re-home it.
+                        if "InputTimeLimitSeconds" in dtmf and "InputTimeLimitSeconds" not in p:
+                            p["InputTimeLimitSeconds"] = dtmf["InputTimeLimitSeconds"]
+                        for k in bad:
+                            dtmf.pop(k, None)
+                        dtmf.setdefault("DisableCancelKey", "False")
+                        fixes.append(f"[{aid}] GetParticipantInput(store): stripped invalid DTMFConfiguration keys {bad}")
                 if "InputValidation" not in p:
                     p["InputValidation"] = {"CustomValidation": {"MaximumLength": "6"}}
                     fixes.append(f"[{aid}] GetParticipantInput(store): added required InputValidation")
+                # Store mode: ONLY NoMatchingError is valid (no Conditions → no
+                # NoMatchingCondition; InputTimeLimitExceeded is rejected here).
+                tr_st = a.get("Transitions") or a.get("transitions")
+                if isinstance(tr_st, dict):
+                    errs = tr_st.get("Errors") or tr_st.get("errors") or []
+                    nxt = tr_st.get("NextAction") or tr_st.get("nextAction")
+                    bad_err = [e for e in errs if (e.get("ErrorType") or e.get("errorType")) != "NoMatchingError"]
+                    if bad_err:
+                        kept = [e for e in errs if (e.get("ErrorType") or e.get("errorType")) == "NoMatchingError"]
+                        if not kept:
+                            kept = [{"ErrorType": "NoMatchingError", "NextAction": nxt}]
+                        tr_st["Errors" if "Errors" in tr_st else "errors"] = kept
+                        fixes.append(f"[{aid}] GetParticipantInput(store): kept only NoMatchingError (removed {[e.get('ErrorType') for e in bad_err]})")
 
         # --- Loop: condition operands are DoneLooping/ContinueLooping (NOT Looping/Complete)
         if t == "Loop":
