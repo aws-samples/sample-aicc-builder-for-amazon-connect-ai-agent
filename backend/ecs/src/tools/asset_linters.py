@@ -483,35 +483,38 @@ def lint_lambda(session_id: str = "", operation_id: str = "", file_name: str = "
 # ---------------------------------------------------------------------------
 
 # Official Amazon Connect flow-language Action Types (the `Type` field of an
-# Action). Source: Amazon Connect Flow language — flow block / action reference
-# (contact-actions.html + branch/interact/integrate/set/terminate actions).
-# A flow that contains a `Type` NOT in this set FAILS to import with
-# InvalidContactFlowException. Keep this list complete — when adding support for
-# a new block, add its Type here too.
+# Action). VERIFIED against a real Amazon Connect console export (all 43 block
+# types) PLUS individual CreateContactFlow API probes (2026-06-08). A flow whose
+# `Type` is NOT in this set FAILS to import with InvalidContactFlowException.
+# Source of truth: knowledge-base-docs/contact-flow/_reference-console-export-all-blocks.json
+# Do NOT add a Type here without confirming it imports via the API — guessed
+# names (TransferToAgent, TransferToPhoneNumber, CheckQueueStatus, ...) were the
+# cause of import failures and are listed as invalid below.
 VALID_CONTACT_FLOW_ACTION_TYPES = frozenset({
     # Interact
     "MessageParticipant", "MessageParticipantIteratively", "GetParticipantInput",
-    "ConnectParticipantWithLexBot", "StartMediaStreaming", "StopMediaStreaming",
-    "GetParticipantWithLexV2Bot",
-    # Set
+    "ConnectParticipantWithLexBot", "RenderMessageTemplate",
+    # Set / update
     "UpdateContactAttributes", "UpdateContactData", "UpdateContactRecordingBehavior",
-    "UpdateContactTextToSpeechVoice", "UpdateContactTargetQueue",
-    "UpdateContactCallbackNumber", "UpdateContactEventHooks",
-    "UpdateContactRoutingBehavior", "UpdateContactRoutingData",
-    "UpdateFlowLoggingBehavior", "UpdateFlowAttributes", "UpdateContactMediaStreamingBehavior",
-    "UpdateContactTextToSpeechManner",
+    "UpdateContactRecordingAndAnalyticsBehavior", "UpdateContactTextToSpeechVoice",
+    "UpdateContactTargetQueue", "UpdateContactCallbackNumber", "UpdateContactEventHooks",
+    "UpdateContactRoutingBehavior", "UpdateContactRoutingCriteria",
+    "UpdateFlowLoggingBehavior", "UpdateFlowAttributes",
+    "UpdateContactMediaStreamingBehavior", "UpdatePreviousContactParticipantState",
+    "TagContact", "UntagContact",
     # Branch / control
-    "Compare", "Distribute", "Loop", "DistributeByPercentage",
-    "CheckHoursOfOperation", "CheckMetricData", "CheckQueueStatus",
+    "Compare", "Loop", "Wait", "DistributeByPercentage",
+    "CheckHoursOfOperation", "CheckMetricData", "GetMetricData", "CheckOutboundCallStatus",
+    "EvaluateDataTableValues",
     # Integrate
     "InvokeLambdaFunction", "InvokeFlowModule", "CreateWisdomSession",
-    "InvokeAPI", "CreateTask", "AssociateContactToCustomerProfile",
-    "GetCustomerProfile", "PutCustomerProfile", "CreatePersistentContactAssociation",
-    "GetCustomerProfileObject", "UpdateCustomerProfileObject", "TagContact", "UntagContact",
+    "CreateTask", "CreateCase", "CreateContact", "StartOutboundEmailContact",
+    "AssociateContactToCustomerProfile", "GetCustomerProfile", "GetCustomerProfileObject",
+    "CreatePersistentContactAssociation", "LoadContactContent",
+    "AuthenticateParticipant", "ShowView", "ResumeContact",
     # Transfer / terminate
-    "TransferContactToQueue", "TransferToFlow", "TransferToThirdParty",
-    "TransferToAgent", "TransferToPhoneNumber", "DisconnectParticipant",
-    "EndFlowExecution", "ReturnFromFlowModule",
+    "TransferContactToQueue", "TransferParticipantToThirdParty", "TransferToFlow",
+    "DisconnectParticipant", "EndFlowExecution",
 })
 
 # Known LLM hallucinations / wrong names → the correct official Type (or None
@@ -546,6 +549,24 @@ INVALID_CONTACT_FLOW_TYPE_HINTS = {
     "TransferToQueue": "TransferContactToQueue",
     "EndFlow": "DisconnectParticipant",
     "Disconnect": "DisconnectParticipant",
+    # API-confirmed INVALID Types (2026-06-08) — these returned "Invalid Action
+    # type" from CreateContactFlow. Map to the real Type the console export uses.
+    "TransferToAgent": "TransferContactToQueue",
+    "TransferToPhoneNumber": "TransferParticipantToThirdParty",
+    "TransferToThirdParty": "TransferParticipantToThirdParty",
+    "CheckQueueStatus": "CheckMetricData",
+    "CheckStaffing": "CheckMetricData",
+    "Distribute": "DistributeByPercentage",
+    "StartMediaStreaming": "UpdateContactMediaStreamingBehavior",
+    "StopMediaStreaming": "UpdateContactMediaStreamingBehavior",
+    "ReturnFromFlowModule": "EndFlowExecution",
+    "InvokeAPI": "InvokeLambdaFunction",
+    "GetParticipantWithLexV2Bot": "ConnectParticipantWithLexBot",
+    "PutCustomerProfile": "(use Customer Profiles integration / UpdateContactData)",
+    "UpdateCustomerProfileObject": "(use Customer Profiles integration)",
+    "UpdateContactRoutingData": "UpdateContactRoutingCriteria",
+    "UpdateContactTextToSpeechManner": "UpdateContactTextToSpeechVoice",
+    "SetRecordingAndAnalyticsBehavior": "UpdateContactRecordingAndAnalyticsBehavior",
 }
 
 
@@ -562,9 +583,12 @@ NO_TRANSITION_ACTION_TYPES = frozenset({
 })
 
 # Required Error handlers per Action Type (Connect import enforces these).
+# Required Error handlers per Action Type — all verified against the real
+# CreateContactFlow API (instance 5bf5005e, ap-northeast-2, 2026-06-08).
+# NOTE: GetParticipantInput is intentionally absent — its required errors depend
+# on mode (menu vs store) and are handled in the dedicated normalizer above.
 REQUIRED_ERRORS_BY_TYPE = {
     "MessageParticipant": ["NoMatchingError"],
-    "GetParticipantInput": ["NoMatchingError", "InputTimeLimitExceeded", "NoMatchingCondition"],
     "Compare": ["NoMatchingCondition"],
     "ConnectParticipantWithLexBot": ["NoMatchingError", "NoMatchingCondition"],
     "InvokeLambdaFunction": ["NoMatchingError"],
@@ -572,8 +596,9 @@ REQUIRED_ERRORS_BY_TYPE = {
     "UpdateContactData": ["NoMatchingError"],
     "TransferContactToQueue": ["QueueAtCapacity", "NoMatchingError"],
     "UpdateContactTargetQueue": ["NoMatchingError"],
-    "CheckHoursOfOperation": ["NoMatchingError"],   # branches via True/False Conditions; needs NoMatchingError
-    "UpdateContactCallbackNumber": ["InvalidNumber", "NotDialable", "NoMatchingError"],
+    "UpdateContactAttributes": ["NoMatchingError"],   # API-verified: required
+    "CheckHoursOfOperation": ["NoMatchingError"],     # branches via True/False Conditions; needs NoMatchingError
+    "UpdateContactCallbackNumber": ["NoMatchingError"],  # API-verified: InvalidNumber/NotDialable are NOT valid here
 }
 
 # Error types that are NOT valid for a given block — strip them on import.
@@ -794,6 +819,60 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
             if not msg_keys:
                 p["Text"] = "{{WELCOME_MESSAGE}}"
                 fixes.append(f"[{aid}] ConnectParticipantWithLexBot: added required Text")
+
+        # --- GetParticipantInput: two distinct API-verified modes.
+        #   MENU mode  (branches via Conditions): StoreInput=False, NO
+        #     DTMFConfiguration, errors must be NoMatchingCondition +
+        #     InputTimeLimitExceeded + NoMatchingError.
+        #   STORE mode (captures input to an attribute): StoreInput=True,
+        #     requires InputValidation.CustomValidation.MaximumLength, optional
+        #     DTMFConfiguration{DisableCancelKey} (NEVER InputTerminationSequence),
+        #     errors = NoMatchingError only.
+        # (Both verified against CreateContactFlow; the empty/guessed forms the
+        #  model emits otherwise fail import with misleading "Invalid Action type".)
+        if t == "GetParticipantInput":
+            tr_gp = a.get("Transitions") or a.get("transitions") or {}
+            conds_gp = tr_gp.get("Conditions") or tr_gp.get("conditions") or []
+            is_menu = bool(conds_gp)
+            if is_menu:
+                if str(p.get("StoreInput")) != "False":
+                    p["StoreInput"] = "False"
+                    fixes.append(f"[{aid}] GetParticipantInput(menu): StoreInput=False")
+                if "DTMFConfiguration" in p:
+                    p.pop("DTMFConfiguration", None)
+                    fixes.append(f"[{aid}] GetParticipantInput(menu): removed DTMFConfiguration")
+                p.pop("InputValidation", None)
+            else:
+                if str(p.get("StoreInput")) != "True":
+                    p["StoreInput"] = "True"
+                    fixes.append(f"[{aid}] GetParticipantInput(store): StoreInput=True")
+                dtmf = p.get("DTMFConfiguration")
+                if isinstance(dtmf, dict) and "InputTerminationSequence" in dtmf:
+                    dtmf.pop("InputTerminationSequence", None)
+                    dtmf.setdefault("DisableCancelKey", "False")
+                    fixes.append(f"[{aid}] GetParticipantInput(store): dropped invalid DTMFConfiguration.InputTerminationSequence")
+                if "InputValidation" not in p:
+                    p["InputValidation"] = {"CustomValidation": {"MaximumLength": "6"}}
+                    fixes.append(f"[{aid}] GetParticipantInput(store): added required InputValidation")
+
+        # --- Loop: condition operands are DoneLooping/ContinueLooping (NOT Looping/Complete)
+        if t == "Loop":
+            tr_lp = a.get("Transitions") or a.get("transitions") or {}
+            for c in (tr_lp.get("Conditions") or tr_lp.get("conditions") or []):
+                if not isinstance(c, dict):
+                    continue
+                ops = c.get("Condition", {}).get("Operands")
+                if isinstance(ops, list):
+                    for i_o, v in enumerate(ops):
+                        lv = str(v).strip().lower()
+                        if lv in ("looping", "continue", "continuelooping"):
+                            if ops[i_o] != "ContinueLooping":
+                                ops[i_o] = "ContinueLooping"
+                                fixes.append(f"[{aid}] Loop: operand → ContinueLooping")
+                        elif lv in ("complete", "done", "donelooping"):
+                            if ops[i_o] != "DoneLooping":
+                                ops[i_o] = "DoneLooping"
+                                fixes.append(f"[{aid}] Loop: operand → DoneLooping")
 
         # --- MessageParticipant / GetParticipantInput: only ONE of Text/SSML/Media
         if t in ("MessageParticipant", "GetParticipantInput", "MessageParticipantIteratively"):
