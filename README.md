@@ -29,7 +29,9 @@ https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
 
 ## What's New in v2.1
 
-Reliability & quality hardening from a live workshop QA round:
+Reliability & quality hardening from live workshop QA rounds — including a
+deep Contact Flow import-safety pass verified against the real Amazon Connect
+`CreateContactFlow` API:
 
 **Validation gates (deterministic, fault-tolerant)**
 - **CloudFormation lint gate** — `cfn-lint` runs after the merge and auto-fixes recurring syntax issues (e.g. `!Sub` in a string-only `Description`); remaining errors are surfaced for patching. Lint runs *after* streaming the asset so the live preview is never delayed.
@@ -37,6 +39,14 @@ Reliability & quality hardening from a live workshop QA round:
 - **Lambda + Contact Flow lint** — generated Python handlers are compile-checked (no execution) and Contact Flow JSON is validated for structural integrity (dangling transitions, orphan actions, missing terminal block) — catching import-time failures deterministically.
 - **qconnect → wisdom** — the invalid `qconnect:` IAM namespace is rewritten to `wisdom:` at merge time (was a frequent AccessDenied cause).
 - **Merge robustness** — infrastructure/OpenAPI merges detect and report dropped fragments and degraded merge strategies instead of failing silently.
+
+**Contact Flow import-safety (API-verified against `CreateContactFlow`)**
+- **Block-type whitelist from ground truth** — the valid Amazon Connect flow block `Type` set was rebuilt from a real console export of every block plus per-type `CreateContactFlow` probes. Hallucinated/guessed types (`Trigger`, `InvokeAgentAction`, `CheckCondition`, `TransferToAgent`, `TransferToPhoneNumber`, `CheckStaffing`, `Distribute`, …) are deterministically rejected and auto-mapped to the real type (e.g. `TransferToPhoneNumber` → `TransferParticipantToThirdParty`, `CheckStaffing` → `CheckMetricData`).
+- **Per-block parameter normalization** — the linter rewrites each block to the exact shape the API accepts: recording (`RecordingBehavior`/`AnalyticsBehavior`, no `RealTime`), TTS (`TextToSpeechVoice`/`Engine`), logging (`FlowLoggingBehavior`), queue (`UpdateContactTargetQueue` string `QueueId`; `TransferContactToQueue` carries none), Lex (`LexV2Bot.AliasArn` + one message, no `AgentError`), Lambda (`LambdaInvocationAttributes`), `CheckHoursOfOperation` (True/False branches), terminal blocks (no transitions), and **`GetParticipantInput`'s two modes** (menu: `StoreInput=False`, no `DTMFConfiguration`; store: `StoreInput=True` + `InputValidation`).
+- **Loop operands** corrected to `ContinueLooping`/`DoneLooping`; **`Trigger` entry-wrappers** removed with `StartAction` repointed to the first real action.
+- **Canonical AI-bot ↔ flow contract** — the bot returns exactly `Complete` (end) / `Escalate` (human) via `$.Lex.SessionAttributes.Tool`; the linter normalizes synonyms (`END_CALL`, `END_CONVERSATION`, …) so the flow's `Compare` branch always matches.
+- **RAG corrected & re-ingested** — the KB docs that taught wrong block schemas (and the new verified block-type reference) were corrected and re-indexed; the KB role gained `s3vectors:DeleteVectors` so re-ingestion actually replaces stale vectors.
+- Net effect: freshly-generated flows — even complex ones (multi-step DTMF auth, business-hours, grade routing, amount thresholds, escalation) — **import into Amazon Connect cleanly**, verified end-to-end via the real API.
 
 **Spec fidelity ("everything is a spec")**
 - **Constraint mapping** — customer-stated rules (length, digit count, format masks like `010-XXXX-XXXX`, enums, ranges, date formats) are placed in the correct FieldSpec key, and applied to **every** occurrence of a field — input, output, and nested array/object properties.
