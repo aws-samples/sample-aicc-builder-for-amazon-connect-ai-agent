@@ -88,8 +88,8 @@ Use Loop block for retryable errors:
   "Parameters": {"LoopCount": "3"},
   "Transitions": {
     "Conditions": [
-      {"Condition": {"Operator": "Equals", "Operands": ["Looping"]}, "NextAction": "retry-action"},
-      {"Condition": {"Operator": "Equals", "Operands": ["Complete"]}, "NextAction": "max-retries"}
+      {"Condition": {"Operator": "Equals", "Operands": ["ContinueLooping"]}, "NextAction": "retry-action"},
+      {"Condition": {"Operator": "Equals", "Operands": ["DoneLooping"]}, "NextAction": "max-retries"}
     ],
     "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
   }
