@@ -345,15 +345,26 @@ ANY of them makes the flow fail to import with `InvalidContactFlowException`.
 | `CheckCondition` / `CheckValue` / `Condition` / `CheckAttribute` | `Compare` (params: `ComparisonValue` + `Conditions`) |
 | `SetWorkingQueue` | `UpdateContactTargetQueue` |
 | `SetCallbackNumber` | `UpdateContactCallbackNumber` |
-| `CheckStaffing` | `CheckMetricData` (MetricType: NumberOfAgentsAvailable) |
-| `GetQueueMetrics` | `CheckMetricData` (MetricType: NumberOfContactsInQueue) |
-| `TransferToAgent` | `TransferContactToAgent` |
-| `TransferToPhoneNumber` | `TransferParticipantToThirdParty` |
+| `CheckStaffing` / `CheckQueueStatus` | `CheckMetricData` (MetricType: `AgentsAvailable` / `ContactsInQueue`) |
+| `GetQueueMetrics` | `CheckMetricData` or `GetMetricData` |
+| `TransferToAgent` | `TransferContactToQueue` |
+| `TransferToPhoneNumber` / `TransferToThirdParty` | `TransferParticipantToThirdParty` |
 | `SetContactAttributes` | `UpdateContactAttributes` |
-| `StoreCustomerInput` | `StoreUserInput` |
+| `StoreCustomerInput` / `StoreUserInput` | `GetParticipantInput` (with `StoreInput:"True"`) |
 | `PlayPrompt` | `MessageParticipant` |
+| `Distribute` | `DistributeByPercentage` |
+| `StartMediaStreaming` / `StopMediaStreaming` | `UpdateContactMediaStreamingBehavior` |
+| `ReturnFromFlowModule` | `EndFlowExecution` |
+| `InvokeAPI` | `InvokeLambdaFunction` |
+| `SetLoggingBehavior` | `UpdateFlowLoggingBehavior` |
 | `CreateCallbackContact` | `UpdateContactCallbackNumber` + `TransferContactToQueue` |
 | `EndFlow` / `Disconnect` | `DisconnectParticipant` |
+
+> ✅ **All mappings above are API-verified (CreateContactFlow, 2026-06-08).** The
+> WRONG names previously listed (`TransferContactToAgent`, `StoreUserInput`) were
+> themselves invalid — these corrected targets are the ones that actually import.
+> Full verified Type list + console-name mapping is in the KB doc
+> `_VERIFIED-block-type-reference.md` (retrieve it when unsure of a Type).
 
 **RULE: `StartAction` MUST point at a REAL functional first action (not a
 Trigger/EntryPoint).** The flow's first executed block is typically

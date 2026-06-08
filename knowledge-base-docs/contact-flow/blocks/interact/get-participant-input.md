@@ -6,18 +6,23 @@ How do I use the GetParticipantInput block to collect DTMF input in Amazon Conne
 ## Answer
 The GetParticipantInput block plays a message and collects DTMF (touch-tone) input from the customer. Use this for menu selections, account numbers, and other numeric input.
 
-### JSON Structure
+> ✅ **API-verified (2026-06-08).** `GetParticipantInput` has TWO DISTINCT modes
+> with different required schemas. Mixing them fails import (often with a
+> misleading "Invalid Action type" message).
+
+### MODE 1 — MENU (branch on the pressed key via Conditions)
+- `StoreInput` MUST be `"False"`.
+- MUST NOT include `DTMFConfiguration`.
+- Required errors: `NoMatchingCondition` + `InputTimeLimitExceeded` + `NoMatchingError`.
+
 ```json
 {
   "Identifier": "get-menu-input",
   "Type": "GetParticipantInput",
   "Parameters": {
     "Text": "Press 1 for sales, press 2 for support, or press 3 to speak with an agent.",
-    "InputTimeLimitSeconds": "5",
-    "DTMFConfiguration": {
-      "InputTerminationSequence": "#",
-      "DisableCancelKey": false
-    }
+    "StoreInput": "False",
+    "InputTimeLimitSeconds": "5"
   },
   "Transitions": {
     "NextAction": "invalid-input",
@@ -27,31 +32,42 @@ The GetParticipantInput block plays a message and collects DTMF (touch-tone) inp
       {"Condition": {"Operator": "Equals", "Operands": ["3"]}, "NextAction": "agent-transfer"}
     ],
     "Errors": [
-      {"ErrorType": "InputTimeLimitExceeded", "NextAction": "timeout-handler"},
       {"ErrorType": "NoMatchingCondition", "NextAction": "invalid-input"},
+      {"ErrorType": "InputTimeLimitExceeded", "NextAction": "timeout-handler"},
       {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
     ]
   }
 }
 ```
 
-### Required Parameters
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| Text | String | Message to play before collecting input |
-| InputTimeLimitSeconds | String | Seconds to wait for input (1-180) |
-| DTMFConfiguration | Object | DTMF input settings |
+### MODE 2 — STORE (capture digits to a contact attribute)
+- `StoreInput` MUST be `"True"`.
+- Requires `InputValidation.CustomValidation.MaximumLength`.
+- `DTMFConfiguration` may carry `DisableCancelKey` only — NEVER `InputTerminationSequence`.
+- Only error: `NoMatchingError`. No Conditions.
 
-### DTMFConfiguration Options
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| InputTerminationSequence | String | Key to end input (e.g., "#") | None |
-| DisableCancelKey | Boolean | Disable * key cancel | false |
+```json
+{
+  "Identifier": "collect-account",
+  "Type": "GetParticipantInput",
+  "Parameters": {
+    "Text": "Please enter your 6-digit account number.",
+    "StoreInput": "True",
+    "InputTimeLimitSeconds": "8",
+    "DTMFConfiguration": {"DisableCancelKey": "False"},
+    "InputValidation": {"CustomValidation": {"MaximumLength": "6"}}
+  },
+  "Transitions": {
+    "NextAction": "lookup-account",
+    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
+  }
+}
+```
 
 ### Error Types
-- **InputTimeLimitExceeded**: Customer didn't provide input within timeout
-- **NoMatchingCondition**: Input didn't match any condition
-- **NoMatchingError**: General error (playback failed, etc.)
+- **InputTimeLimitExceeded**: no input within timeout (menu mode)
+- **NoMatchingCondition**: input matched no condition (menu mode)
+- **NoMatchingError**: general error (both modes)
 
 ### CRITICAL Requirements
 1. MUST have all THREE error types for production flows

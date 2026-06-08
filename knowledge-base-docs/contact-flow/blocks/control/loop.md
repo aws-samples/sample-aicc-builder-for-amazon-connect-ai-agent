@@ -16,8 +16,8 @@ The Loop block repeats a section of the flow a specified number of times. It's u
   },
   "Transitions": {
     "Conditions": [
-      {"Condition": {"Operator": "Equals", "Operands": ["Looping"]}, "NextAction": "action-to-retry"},
-      {"Condition": {"Operator": "Equals", "Operands": ["Complete"]}, "NextAction": "max-retries-reached"}
+      {"Condition": {"Operator": "Equals", "Operands": ["ContinueLooping"]}, "NextAction": "action-to-retry"},
+      {"Condition": {"Operator": "Equals", "Operands": ["DoneLooping"]}, "NextAction": "max-retries-reached"}
     ],
     "Errors": [
       {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
@@ -31,19 +31,22 @@ The Loop block repeats a section of the flow a specified number of times. It's u
 |-----------|------|-------------|
 | LoopCount | String | Number of iterations (e.g., "3") |
 
+> ✅ **API-verified (2026-06-08):** operands are `ContinueLooping` / `DoneLooping`.
+> The names `Looping`/`Complete` are WRONG and make the flow fail import.
+
 ### Condition Values
-- **Looping**: Loop is still iterating (hasn't reached LoopCount)
-- **Complete**: Loop has completed all iterations
+- **ContinueLooping**: Loop is still iterating (hasn't reached LoopCount)
+- **DoneLooping**: Loop has completed all iterations
 
 ### Error Types
 - **NoMatchingError**: General error
 
 ### CRITICAL Requirements
-1. MUST have `Conditions` for both "Looping" and "Complete"
+1. MUST have `Conditions` for both "ContinueLooping" and "DoneLooping"
 2. `LoopCount` must be a string ("3"), not a number
 3. MUST have `Errors` with `NoMatchingError`
-4. The "Looping" path should eventually return to the Loop block
-5. The "Complete" path handles max retries exceeded
+4. The "ContinueLooping" path should eventually return to the Loop block
+5. The "DoneLooping" path handles max retries exceeded
 
 ### Loop Counter Access
 You can access the current loop index:
@@ -56,7 +59,7 @@ You can access the current loop index:
 {
   "Transitions": {
     "Conditions": [
-      {"Condition": {"Operator": "Equals", "Operands": ["Looping"]}, "NextAction": "retry-action"}
+      {"Condition": {"Operator": "Equals", "Operands": ["ContinueLooping"]}, "NextAction": "retry-action"}
     ]
   }
 }
@@ -67,8 +70,8 @@ You can access the current loop index:
 {
   "Transitions": {
     "Conditions": [
-      {"Condition": {"Operator": "Equals", "Operands": ["Looping"]}, "NextAction": "retry-action"},
-      {"Condition": {"Operator": "Equals", "Operands": ["Complete"]}, "NextAction": "max-retries"}
+      {"Condition": {"Operator": "Equals", "Operands": ["ContinueLooping"]}, "NextAction": "retry-action"},
+      {"Condition": {"Operator": "Equals", "Operands": ["DoneLooping"]}, "NextAction": "max-retries"}
     ],
     "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
   }
@@ -81,8 +84,8 @@ You can access the current loop index:
  "Parameters": {"LoopCount": "3"},
  "Transitions": {
    "Conditions": [
-     {"Condition": {"Operator": "Equals", "Operands": ["Looping"]}, "NextAction": "get-input"},
-     {"Condition": {"Operator": "Equals", "Operands": ["Complete"]}, "NextAction": "max-attempts"}
+     {"Condition": {"Operator": "Equals", "Operands": ["ContinueLooping"]}, "NextAction": "get-input"},
+     {"Condition": {"Operator": "Equals", "Operands": ["DoneLooping"]}, "NextAction": "max-attempts"}
    ],
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
  }}
@@ -138,8 +141,8 @@ You can access the current loop index:
  "Parameters": {"LoopCount": "5"},
  "Transitions": {
    "Conditions": [
-     {"Condition": {"Operator": "Equals", "Operands": ["Looping"]}, "NextAction": "wait-30s"},
-     {"Condition": {"Operator": "Equals", "Operands": ["Complete"]}, "NextAction": "offer-callback"}
+     {"Condition": {"Operator": "Equals", "Operands": ["ContinueLooping"]}, "NextAction": "wait-30s"},
+     {"Condition": {"Operator": "Equals", "Operands": ["DoneLooping"]}, "NextAction": "offer-callback"}
    ],
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
  }}

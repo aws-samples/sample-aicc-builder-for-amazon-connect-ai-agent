@@ -1,28 +1,40 @@
-# CheckStaffing Block
+# Check Staffing / Queue Metrics (CheckMetricData)
+
+> ⛔ **API-verified correction (2026-06-08):** there is **NO `CheckStaffing`
+> Type** — it fails import with "Invalid Action type". The real block is
+> **`CheckMetricData`** (console "Check staffing" / "Get metrics").
 
 ## Question
-How do I use the CheckStaffing block to check agent availability in Amazon Connect Contact Flow?
+How do I check agent availability / queue metrics in Amazon Connect Contact Flow?
 
 ## Answer
-The CheckStaffing block checks if agents are available in the working queue. Use this before TransferContactToQueue to provide better customer experience when no agents are available.
+Use **`CheckMetricData`**: it reads a real-time metric (`MetricType`) for the
+working queue and branches via `Conditions`. Use before `TransferContactToQueue`
+to handle the no-agents case.
 
-### JSON Structure
+### JSON Structure (API-verified)
 ```json
 {
   "Identifier": "check-staffing",
-  "Type": "CheckStaffing",
-  "Parameters": {},
+  "Type": "CheckMetricData",
+  "Parameters": {
+    "MetricType": "AgentsAvailable"
+  },
   "Transitions": {
+    "NextAction": "agents-available",
     "Conditions": [
-      {"Condition": {"Operator": "Equals", "Operands": ["True"]}, "NextAction": "agents-available"},
-      {"Condition": {"Operator": "Equals", "Operands": ["False"]}, "NextAction": "no-agents"}
+      {"Condition": {"Operator": "NumberGreaterThan", "Operands": ["0"]}, "NextAction": "agents-available"}
     ],
     "Errors": [
+      {"ErrorType": "NoMatchingCondition", "NextAction": "no-agents"},
       {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
     ]
   }
 }
 ```
+
+Real `MetricType` values: `AgentsAvailable`, `OldestContactInQueueAgeSeconds`,
+`ContactsInQueue`. Required errors: `NoMatchingCondition` + `NoMatchingError`.
 
 ### Required Parameters
 None - uses the working queue set by UpdateContactTargetQueue
