@@ -284,6 +284,10 @@ export function useWebSocket() {
   >(null);
   // Buffered outbound message awaiting a fresh session after liveness-triggered rotation
   const pendingOutboundRef = useRef<{ message: string } | null>(null);
+  // Same idea for an importAsset payload: in dev the hook can double-mount and the
+  // first socket gets superseded mid-send, dropping the import. Buffer it and flush
+  // it once the fresh session's socket reports ready (session_created handler).
+  const pendingImportRef = useRef<{ assetType: string; content: string; name: string; imageFormat?: string } | null>(null);
   const streamingMessageIdRef = useRef<string | null>(null);
   const streamTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastStreamContentRef = useRef<string>(""); // Track last content to detect duplicates
@@ -1563,6 +1567,21 @@ export function useWebSocket() {
             }));
             console.log("[useWebSocket] Flushed buffered message after session rotation");
           }
+          // Flush a buffered importAsset onto the now-ready socket.
+          if (pendingImportRef.current && globalWs?.readyState === WebSocket.OPEN) {
+            const imp = pendingImportRef.current;
+            pendingImportRef.current = null;
+            globalWs.send(JSON.stringify({
+              action: "importAsset",
+              assetType: imp.assetType,
+              content: imp.content,
+              name: imp.name,
+              ...(imp.imageFormat ? { imageFormat: imp.imageFormat } : {}),
+              language: useBuilderStore.getState().language,
+              model: useBuilderStore.getState().selectedModel,
+            }));
+            console.log("[useWebSocket] Flushed buffered importAsset after session rotation");
+          }
           break;
 
         case "context_injected":
@@ -2446,22 +2465,36 @@ export function useWebSocket() {
    * `asset_imported` event carrying the lint summary.
    */
   const importAsset = useCallback(
-    (assetType: 'contact_flow' | 'prompt', content: string, name: string): boolean => {
-      if (globalWs?.readyState !== WebSocket.OPEN) {
-        console.error("[useWebSocket] WebSocket is not connected for importAsset");
-        return false;
+    (
+      assetType: 'contact_flow' | 'prompt' | 'contact_flow_image',
+      content: string,
+      name: string,
+      imageFormat?: string,
+    ): boolean => {
+      console.log("[useWebSocket] Queuing importAsset:", assetType, name, `(${content.length} chars)`);
+      // Buffer the import and send it via a single, race-free path. Import always
+      // follows a fresh switchSession, so a session_created event is guaranteed and
+      // its handler flushes the buffer onto the correct, ready socket. (In dev the
+      // hook can double-mount, superseding the socket open at call time; sending
+      // inline would land on a dying socket and be lost — buffering avoids that.)
+      pendingImportRef.current = { assetType, content, name, imageFormat };
+      // If a socket is already open AND we're not mid-switch, send immediately too
+      // (covers importing into an already-established session with no rotation).
+      if (globalWs?.readyState === WebSocket.OPEN && useBuilderStore.getState().isSessionReady) {
+        pendingImportRef.current = null;
+        globalWs.send(
+          JSON.stringify({
+            action: "importAsset",
+            assetType,
+            content,
+            name,
+            ...(imageFormat ? { imageFormat } : {}),
+            language: useBuilderStore.getState().language,
+            model: useBuilderStore.getState().selectedModel,
+          })
+        );
+        console.log("[useWebSocket] Sent importAsset on ready session");
       }
-      console.log("[useWebSocket] Importing asset:", assetType, name, `(${content.length} chars)`);
-      globalWs.send(
-        JSON.stringify({
-          action: "importAsset",
-          assetType,
-          content,
-          name,
-          language: useBuilderStore.getState().language,
-          model: useBuilderStore.getState().selectedModel,
-        })
-      );
       return true;
     },
     []

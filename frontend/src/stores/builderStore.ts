@@ -41,7 +41,9 @@ export const DEFAULT_MODEL_ID = 'global.anthropic.claude-opus-4-8';
 export type StartMode = 'full' | 'segment' | 'improve';
 export type SegmentType = 'contact_flow' | 'prompt' | 'faq';
 // Asset types that can be imported & edited from an external file.
-export type ImportAssetType = 'contact_flow' | 'prompt';
+// 'contact_flow_image' = a whiteboard/sketch photo the backend transcribes (via
+// vision) into a draft Contact Flow before the normal lint/seed import path.
+export type ImportAssetType = 'contact_flow' | 'prompt' | 'contact_flow_image';
 
 /** Lint summary returned by the backend after `importAsset`. */
 export interface ImportLintResult {

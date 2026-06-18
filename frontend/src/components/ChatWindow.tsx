@@ -58,7 +58,7 @@ export function ChatWindow() {
   const setSegment = useBuilderStore(s => s.setSegment);
 
   const { currentSessionId, updateSessionTitle, updateSessionActivity, createNewSession, sessions } = useSessionStore();
-  const { sendMessage, sendMessageWithAttachments, importAsset, connect, switchSession, cancelGeneration } = useWebSocket();
+  const { sendMessage, sendMessageWithAttachments, importAsset, connect, switchSession, cancelGeneration, getCurrentSessionId } = useWebSocket();
 
   const handleResetSession = useCallback(() => {
     const freshId = `session-${crypto.randomUUID()}`;
@@ -338,13 +338,20 @@ export function ChatWindow() {
   const placeholderText = inputHint?.placeholder?.trim() || defaultPlaceholderText;
 
   // Wait for the session to be ready (session_created) then run `fn`.
-  const whenSessionReady = useCallback((fn: () => void, attempt = 0) => {
-    if (useBuilderStore.getState().isSessionReady) {
+  // Run `fn` once the session is ready. When `expectSessionId` is given, also
+  // wait until THAT session is the active one — guards against a send firing on a
+  // superseded socket during a session switch (isSessionReady can still read true
+  // from the prior session for a tick after switchSession starts). This race was
+  // observed dropping a large importAsset payload onto a closing socket.
+  const whenSessionReady = useCallback((fn: () => void, expectSessionId?: string, attempt = 0) => {
+    const ready = useBuilderStore.getState().isSessionReady;
+    const onExpected = !expectSessionId || getCurrentSessionId() === expectSessionId;
+    if (ready && onExpected) {
       fn();
-    } else if (attempt < 60) {
-      setTimeout(() => whenSessionReady(fn, attempt + 1), 250);
+    } else if (attempt < 80) {
+      setTimeout(() => whenSessionReady(fn, expectSessionId, attempt + 1), 250);
     }
-  }, []);
+  }, [getCurrentSessionId]);
 
   // Start a full build or single-segment run from the mode-first start screen.
   // We set the scope in the store (read by switchSession when it sends
@@ -379,17 +386,19 @@ export function ChatWindow() {
           updateSessionTitle(currentSessionId, description.trim() || kickoff);
           updateSessionActivity(currentSessionId, 1);
         }
-      });
+      }, freshId);
     },
     [setScope, sendMessage, switchSession, currentSessionId, updateSessionTitle, updateSessionActivity, whenSessionReady, language]
   );
 
   // Import an external asset file for editing (Improve Existing mode).
   const handleImport = useCallback(
-    async (assetType: ImportAssetType, content: string, name: string) => {
+    async (assetType: ImportAssetType, content: string, name: string, imageFormat?: string) => {
       const freshId = `session-${crypto.randomUUID()}`;
       await switchSession(freshId, true);
-      whenSessionReady(() => importAsset(assetType, content, name));
+      // importAsset buffers itself if the socket isn't open yet and is flushed by
+      // the session_created handler, so this survives the session-switch churn.
+      whenSessionReady(() => importAsset(assetType, content, name, imageFormat), freshId);
     },
     [importAsset, switchSession, whenSessionReady]
   );

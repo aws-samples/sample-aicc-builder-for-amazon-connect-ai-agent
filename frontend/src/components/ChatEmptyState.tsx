@@ -37,8 +37,9 @@ interface ChatEmptyStateProps {
   language: Language;
   /** Start a full build (scope=[]) or single-segment run (scope=[segment]) with a description. */
   onStart: (mode: StartMode, segment: SegmentType | null, description: string) => void;
-  /** Import an external asset file for editing. */
-  onImport: (assetType: ImportAssetType, content: string, name: string) => void;
+  /** Import an external asset file for editing. `imageFormat` is set for
+   * contact_flow_image (whiteboard photo) imports, where `content` is base64. */
+  onImport: (assetType: ImportAssetType, content: string, name: string, imageFormat?: string) => void;
 }
 
 const STRINGS: Record<Language, Record<string, string>> = {
@@ -53,7 +54,7 @@ const STRINGS: Record<Language, Record<string, string>> = {
     cf: 'Contact Flow',
     prompt: 'AI Prompt',
     faq: 'FAQ',
-    dropHint: 'Drop a .json flow or .yaml prompt here, or click to browse',
+    dropHint: 'Drop a .json flow, .yaml prompt, or a whiteboard photo of a flow — or click to browse',
     dropBrowse: 'Browse files',
     descPlaceholder: 'Describe what you want to build…',
     descPlaceholderSegment: 'Describe this segment…',
@@ -63,7 +64,7 @@ const STRINGS: Record<Language, Record<string, string>> = {
     lintBlocks: 'blocks',
     lintFixed: 'fixed',
     lintErrors: 'issue(s)',
-    unsupported: 'Unsupported file. Use a .json Contact Flow or a .yaml/.yml AI Prompt.',
+    unsupported: 'Unsupported file. Use a .json Contact Flow, a .yaml/.yml AI Prompt, or an image (.png/.jpg) of a flow diagram.',
   },
   'ko-KR': {
     heading: '무엇을 만들고 싶으신가요?',
@@ -76,7 +77,7 @@ const STRINGS: Record<Language, Record<string, string>> = {
     cf: 'Contact Flow',
     prompt: 'AI 프롬프트',
     faq: 'FAQ',
-    dropHint: '.json 플로우 또는 .yaml 프롬프트를 끌어다 놓거나 클릭해 선택하세요',
+    dropHint: '.json 플로우, .yaml 프롬프트, 또는 손으로 그린 플로우 사진을 끌어다 놓거나 클릭해 선택하세요',
     dropBrowse: '파일 선택',
     descPlaceholder: '무엇을 만들지 설명해 주세요…',
     descPlaceholderSegment: '이 세그먼트를 설명해 주세요…',
@@ -86,7 +87,7 @@ const STRINGS: Record<Language, Record<string, string>> = {
     lintBlocks: '블록',
     lintFixed: '수정',
     lintErrors: '건의 문제',
-    unsupported: '지원되지 않는 파일입니다. .json Contact Flow 또는 .yaml/.yml AI 프롬프트를 사용하세요.',
+    unsupported: '지원되지 않는 파일입니다. .json Contact Flow, .yaml/.yml AI 프롬프트, 또는 플로우 다이어그램 이미지(.png/.jpg)를 사용하세요.',
   },
   'ja-JP': {
     heading: '何を構築しますか?',
@@ -99,7 +100,7 @@ const STRINGS: Record<Language, Record<string, string>> = {
     cf: 'Contact Flow',
     prompt: 'AIプロンプト',
     faq: 'FAQ',
-    dropHint: '.jsonフローまたは.yamlプロンプトをドロップ、またはクリックして選択',
+    dropHint: '.jsonフロー、.yamlプロンプト、または手書きフロー図の写真をドロップ、またはクリックして選択',
     dropBrowse: 'ファイルを選択',
     descPlaceholder: '構築したい内容を説明してください…',
     descPlaceholderSegment: 'このセグメントを説明してください…',
@@ -109,7 +110,7 @@ const STRINGS: Record<Language, Record<string, string>> = {
     lintBlocks: 'ブロック',
     lintFixed: '修正',
     lintErrors: '件の問題',
-    unsupported: 'サポートされていないファイルです。.json Contact Flowまたは.yaml/.yml AIプロンプトを使用してください。',
+    unsupported: 'サポートされていないファイルです。.json Contact Flow、.yaml/.yml AIプロンプト、またはフロー図の画像(.png/.jpg)を使用してください。',
   },
 };
 
@@ -140,12 +141,29 @@ export function ChatEmptyState({ language, onStart, onImport }: ChatEmptyStatePr
   const [isImporting, setIsImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+
   const detectAssetType = (file: File): ImportAssetType | null => {
     const name = file.name.toLowerCase();
     if (name.endsWith('.json')) return 'contact_flow';
     if (name.endsWith('.yaml') || name.endsWith('.yml')) return 'prompt';
+    if (IMAGE_EXTS.some((e) => name.endsWith(e)) || file.type.startsWith('image/')) {
+      return 'contact_flow_image'; // whiteboard / sketch photo → vision-transcribed flow
+    }
     return null;
   };
+
+  // Read an image File as a bare base64 string (no data: prefix).
+  const readAsBase64 = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const res = String(reader.result || '');
+        resolve(res.includes(',') ? res.split(',', 2)[1] : res);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -157,12 +175,19 @@ export function ChatEmptyState({ language, onStart, onImport }: ChatEmptyStatePr
       }
       setIsImporting(true);
       try {
-        const content = await file.text();
-        onImport(assetType, content, file.name);
+        if (assetType === 'contact_flow_image') {
+          const b64 = await readAsBase64(file);
+          const fmt = (file.name.toLowerCase().split('.').pop() || 'png').replace('jpg', 'jpeg');
+          onImport(assetType, b64, file.name, fmt);
+        } else {
+          const content = await file.text();
+          onImport(assetType, content, file.name);
+        }
       } finally {
         // The backend reply (asset_imported) drives the transition; release the
-        // local spinner shortly after the send so the UI doesn't get stuck.
-        setTimeout(() => setIsImporting(false), 1500);
+        // local spinner shortly after the send so the UI doesn't get stuck. Vision
+        // transcription takes longer than a text import, so give it more time.
+        setTimeout(() => setIsImporting(false), assetType === 'contact_flow_image' ? 8000 : 1500);
       }
     },
     [onImport, t.unsupported]
@@ -324,7 +349,7 @@ export function ChatEmptyState({ language, onStart, onImport }: ChatEmptyStatePr
             <input
               ref={fileInputRef}
               type="file"
-              accept=".json,.yaml,.yml"
+              accept=".json,.yaml,.yml,.png,.jpg,.jpeg,.webp,.gif,image/*"
               className="hidden"
               aria-label={t.dropBrowse}
               onChange={(e) => {

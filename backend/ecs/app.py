@@ -2762,6 +2762,36 @@ async def handle_import_asset_ws(websocket: WebSocket, session_id: str, data: Di
     content = data.get("content") or ""
     raw_name = (data.get("name") or "").strip()
 
+    # Whiteboard / sketch photo → Contact Flow. A vision model transcribes the
+    # image into a draft flow JSON, then we fall through to the normal contact_flow
+    # import path (lint/repair + seed + post_generation). `content` here is the
+    # base64 image; `imageFormat` is png/jpeg/etc.
+    if asset_type == "contact_flow_image":
+        await safe_send_json(websocket, {"type": "tool_status", "content": "Reading your flow diagram…"})
+        try:
+            import base64 as _b64
+            img_b64 = content
+            if "," in img_b64:  # strip a data: URL prefix if present
+                img_b64 = img_b64.split(",", 1)[1]
+            img_bytes = _b64.b64decode(img_b64)
+            from agents.contact_flow_generator.vision_import import draft_flow_from_image
+            vres = draft_flow_from_image(
+                img_bytes,
+                image_format=(data.get("imageFormat") or "png"),
+                company_name=data.get("companyName", ""),
+                hint=data.get("hint", ""),
+            )
+            if not vres.get("ok") or not vres.get("flow_json"):
+                await safe_send_json(websocket, {"type": "error", "content": f"Couldn't read a flow from that image: {vres.get('error') or 'no flow detected'}"})
+                return
+            # Continue as a normal contact_flow import with the drafted JSON.
+            asset_type = "contact_flow"
+            content = vres["flow_json"]
+        except Exception as _ve:
+            logger.error(f"[importAsset] vision import failed: {_ve}")
+            await safe_send_json(websocket, {"type": "error", "content": "Failed to transcribe the flow image."})
+            return
+
     # Map asset type → (file name, tool name for completion recording, default op id)
     _IMPORT_MAP = {
         "contact_flow": ("contact_flow.json", "contact_flow_generator_agent", "imported_flow"),
