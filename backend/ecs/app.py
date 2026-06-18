@@ -2734,11 +2734,18 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
     except Exception as _me:
         logger.warning(f"[createNewSession] set model failed: {_me}")
 
+    # Echo a UI-facing scope: [] for a full build (so the frontend shows all 12
+    # progress steps), the proper produced-asset subset for a scoped single-segment
+    # run. get_generation_scope() defaults to the FULL asset set when nothing was
+    # set, so we must collapse that back to [] here — otherwise the progress panel
+    # would mistake a full build for a 6-asset "scope" and trim interview/review.
+    _resolved_scope = _get_generation_scope(_eff_for_state)
+    _ui_scope = [] if set(_resolved_scope) >= set(_FULL_ASSET_SET) else _resolved_scope
     await safe_send_json(websocket, {
         "type": "session_created",
         "sessionId": session_id,
         "phase": _detect_phase(session_id),
-        "scope": _get_generation_scope(_eff_for_state),
+        "scope": _ui_scope,
         "selectedModel": _get_selected_model(_eff_for_state) or resolve_model_id(),
     })
 

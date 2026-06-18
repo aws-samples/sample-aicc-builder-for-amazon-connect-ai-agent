@@ -195,18 +195,21 @@ export function ProgressSidebar() {
   const [activeTab, setActiveTab] = useState<TabType>('assets');
   const [isExpanded, setIsExpanded] = useState(false);
 
-  // Scope-aware partition.
+  // Scope-aware partition (G1: the count must match what ACTUALLY runs).
   // - Full build (no scope): show all 12 steps.
-  // - Single-segment scope: show ONLY the in-scope generation lane(s) plus the
-  //   final 'ready' (package/download) step. The interview/research/review steps
-  //   (database/operations/requirements/research/review) don't apply to a focused
-  //   single-asset run, so they're moved to the muted "Not in this run" section —
-  //   the progress bar reflects just the one asset the user asked for.
+  // - Single-segment scope: a scoped run STILL runs the interview (it gathers
+  //   only what the in-scope asset needs) and STILL runs review/packaging — only
+  //   the OUT-OF-SCOPE generation lanes (e.g. lambda/openapi/cdk for a flow-only
+  //   run) don't execute. So we keep the interview + review + packaging steps
+  //   visible and trim only the generation lanes that won't run. A flow-only run
+  //   therefore shows ~7 honest steps, not a misleading 1–2.
   const inScopeProgressIds = scope
-    ? new Set([...scope.map((s) => SCOPE_TO_PROGRESS_ID[s] || s), 'ready'])
+    ? new Set([...scope.map((s) => SCOPE_TO_PROGRESS_ID[s] || s)])
     : null;
+  // Steps that run regardless of scope (interview gathering + review + package).
+  const ALWAYS_IN_SCOPE = new Set(['database', 'operations', 'requirements', 'research', 'review', 'ready']);
   const isStepInScope = (item: ProgressItem) =>
-    !inScopeProgressIds || inScopeProgressIds.has(item.id);
+    !inScopeProgressIds || ALWAYS_IN_SCOPE.has(item.id) || inScopeProgressIds.has(item.id);
 
   const inScopeSteps = progress.filter(isStepInScope);
   const outOfScopeSteps = inScopeProgressIds ? progress.filter((p) => !isStepInScope(p)) : [];
