@@ -17,6 +17,8 @@ Phase-based prompt splitting:
 - CONNECT_GUIDE: Amazon Connect AI Agent integration guide
 """
 
+from typing import Optional
+
 # =============================================================================
 # COMMON_PROMPT — Always loaded in every phase
 # Role, PM mindset, Rules 1-4, User Guidance Principle
@@ -2381,11 +2383,97 @@ SYSTEM_PROMPT = "\n\n".join([
 ])
 
 
-def get_phase_system_prompt(phase: str) -> list:
-    """Return phase-specific system prompt sections with cachePoint for Bedrock prompt caching."""
+# Connect-centric segments a user may scope a run to. The full run produces all
+# six asset families; a scoped run produces only these (each is the asset id the
+# orchestrator and detect_phase reason about). NOTE: these are PRODUCED-ASSET ids
+# (the same space get_generation_scope returns), so FAQ is "knowledge_base", not
+# "faq" — keep this aligned with _SCOPE_TO_ASSET / _GENERATOR_TOOL_TO_ASSET.
+SCOPED_GENERATION_ASSETS = {"contact_flow", "prompt", "knowledge_base"}
+
+# Everything the full pipeline can produce (produced-asset id space). A scope equal
+# to (or a superset of) this set means a full build, not a scoped run.
+_FULL_PRODUCED_ASSETS = {"cdk", "lambda", "openapi", "prompt", "contact_flow", "knowledge_base"}
+
+# Per-segment guidance keyed by PRODUCED-ASSET id: which generator tool to run and
+# the one-line "what this segment needs" the scoped prompt surfaces so the
+# orchestrator does NOT reach for the full 5-phase pipeline.
+_SCOPED_SEGMENT_GUIDE = {
+    "contact_flow": "Contact Flow — call `contact_flow_generator_agent`. It needs the session flow config and contact-flow behaviors only; it does NOT need a generated Lambda, OpenAPI spec, or infrastructure schema.",
+    "prompt": "AI Prompt — call `prompt_generator_agent`. It needs the agent persona, greetings, and dialogue flow; the infrastructure schema is optional (omit it if not in scope).",
+    "knowledge_base": "FAQ / Knowledge Base — call `faq_generator_agent` (optionally `research_agent` first for source material). It is fully standalone — no upstream assets required.",
+}
+
+
+def _build_scoped_generation_prompt(scope: list) -> str:
+    """Compose a scoped variant of GENERATION_PROMPT for a partial run.
+
+    *scope* is a list of produced-asset ids. Restates the ONE-PHASE-PER-TURN /
+    HARD-STOP discipline (so it stays at the same cached-system-prompt altitude as
+    the original mandate) but with a phase table that contains ONLY the in-scope
+    generators and an explicit instruction NOT to generate the excluded assets.
+    """
+    in_scope = [a for a in scope if a in SCOPED_GENERATION_ASSETS]
+    lines = "\n".join(f"- {_SCOPED_SEGMENT_GUIDE[a]}" for a in in_scope)
+    excluded = sorted(_FULL_PRODUCED_ASSETS - set(in_scope))
+    return f"""
+## ⛔ SCOPED GENERATION MODE — ONE PHASE PER TURN, HARD STOP
+
+**THIS RUN IS SCOPED.** The user asked to generate ONLY the following Connect
+asset(s). You MUST NOT generate anything else.
+
+**IN SCOPE — generate these, one per turn:**
+{lines}
+
+**OUT OF SCOPE — do NOT generate, do NOT call their generators this run:**
+{", ".join(excluded) if excluded else "(none)"}
+
+The out-of-scope generator tools are NOT available to you this run; do not plan
+around them, do not tell the user you will build them, and do not block a scoped
+asset waiting on one. If the user explicitly asks to add an out-of-scope asset,
+tell them to start a Full Build or add that segment from the start screen.
+
+**TURN DISCIPLINE (unchanged from full generation):**
+- Each in-scope segment is its own LLM turn: run its generator tool(s), report the
+  result, ask if they want to continue/refine, then **END YOUR RESPONSE**.
+- Never run two segment generators in the same turn.
+- Never promise-then-stop: if the user says "진행"/"네"/"continue", actually call
+  the generator tool THIS turn.
+
+**WHY**: Scoped runs let the user iterate fast on a single Connect asset (e.g. a
+Contact Flow) without the cost and latency of the full bundle.
+"""
+
+
+def get_phase_system_prompt(phase: str, scope: Optional[list] = None) -> list:
+    """Return phase-specific system prompt sections with cachePoint for Bedrock prompt caching.
+
+    When ``phase == "generation"`` and ``scope`` is a proper subset of the scoped
+    segments (i.e. a partial run), the forceful full-pipeline GENERATION_PROMPT is
+    swapped for a scoped variant that only permits the in-scope generators.
+    """
     if phase == "interview":
         from prompts.interview_agent_prompt import get_interview_agent_prompt
         return get_interview_agent_prompt()
+
+    if phase == "generation" and scope:
+        scope_set = set(scope)
+        # Scoped run = contains a scoped segment AND is missing at least one
+        # full-pipeline asset (i.e. it's not a full build). Compared in
+        # produced-asset id space (knowledge_base, not faq).
+        is_scoped = (
+            bool(scope_set & SCOPED_GENERATION_ASSETS)
+            and not _FULL_PRODUCED_ASSETS.issubset(scope_set)
+        )
+        if is_scoped:
+            sections = [
+                COMMON_PROMPT, TERMINOLOGY_FACTS,
+                _build_scoped_generation_prompt(scope),
+                TOOLS_REFERENCE, SCHEMA_REFERENCE, CONNECT_GUIDE,
+            ]
+            return [
+                {"text": "\n\n".join(sections)},
+                {"cachePoint": {"type": "default"}},
+            ]
 
     sections = PHASE_PROMPTS.get(phase, PHASE_PROMPTS["generation"])
     combined = "\n\n".join(sections)
