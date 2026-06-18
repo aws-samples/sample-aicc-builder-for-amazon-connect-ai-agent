@@ -40,6 +40,37 @@ _TEXT_EXTENSIONS = {'.py', '.ts', '.js', '.json', '.yaml', '.yml', '.md', '.txt'
                     '.html', '.css', '.sh', '.sql', '.xml', '.toml', '.cfg', '.ini'}
 
 
+# Asset-type folders the right-hand Asset Workspace renders as tabs. Maps the
+# workspace folder name to the canonical assetType the frontend keys on.
+_ASSET_FOLDER_TO_TYPE = {
+    "contact_flow": "contact_flow",
+    "prompt": "prompt",
+    "openapi": "openapi",
+    "lambda": "lambda",
+    "cloudformation": "cdk",
+    "cdk": "cdk",
+    "faq": "faq",
+}
+
+
+def _canonical_asset_from_path(path: str):
+    """If *path* is a generated-asset file (assets/{type}/{op}/{file}), return
+    (canonical_assetType, operation_id, file_name) so callers can emit a canonical
+    asset_preview that updates the right-hand Asset Workspace tab. Else None.
+    """
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    if len(parts) >= 3 and parts[0] == "assets":
+        folder = parts[1]
+        c_type = _ASSET_FOLDER_TO_TYPE.get(folder)
+        if not c_type:
+            return None
+        file_name = parts[-1]
+        # operation_id is the segment between the type folder and the file (if any)
+        op = parts[2] if len(parts) >= 4 else ""
+        return c_type, op, file_name
+    return None
+
+
 def _should_show_preview(path: str, content_size: int) -> bool:
     """Decide whether to show inline preview for a workspace file."""
     if content_size < _MIN_PREVIEW_SIZE:
@@ -69,6 +100,24 @@ def _emit_file_preview(action: str, session_id: str, path: str, content: str):
             message_index=get_message_index(),
             download_data=None,
         )
+
+        # If this file is a known generated asset (assets/{type}/{op}/{file}), ALSO
+        # emit a canonical asset_preview so the right-hand Asset Workspace reloads
+        # the latest content after an edit — same as the left File Explorer does.
+        # Without this the asset pane keeps showing stale pre-edit content.
+        canon = _canonical_asset_from_path(path)
+        if canon:
+            c_type, c_op, c_file = canon
+            callback(
+                asset_type=c_type,
+                content=content,  # full updated content, not the truncated preview
+                operation_id=c_op,
+                file_name=c_file,
+                is_complete=True,
+                s3_key=None,
+                message_index=get_message_index(),
+                download_data=None,
+            )
     except Exception as e:
         logger.debug(f"[workspace] file preview failed (non-critical): {e}")
 
