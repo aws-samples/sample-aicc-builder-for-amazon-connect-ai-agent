@@ -772,15 +772,16 @@ Operations:
                     try:
                         # Force a FULL re-stream: the incremental streamer already
                         # pushed the UNREPAIRED content into the frontend's asset
-                        # preview cache (keyed by type/op/file). Without clearing it,
-                        # the diff-based stream suppresses the corrected full content
-                        # and the user downloads/imports the broken flow (e.g.
-                        # GetParticipantInput missing StoreInput / stray
-                        # DTMFConfiguration). Clear the cache so the repaired JSON
-                        # fully replaces the preview, matching what we persisted to
-                        # NFS + S3.
-                        from tools.streaming_callback import stream_asset as _stream_full, clear_asset_preview_cache as _clear_cache
-                        _clear_cache("contact_flow", json_file_name, flow_name)
+                        # preview cache (keyed by type/op/file). force_full clears
+                        # the backend send-cache so this goes out as a non-delta
+                        # full event (isDelta=False), and the frontend store treats
+                        # a non-delta full event as authoritative — replacing the
+                        # broken longer content even though the linted JSON is
+                        # SHORTER (it strips invalid DTMFConfiguration / duplicate
+                        # SSML). Without this the user downloaded/imported the broken
+                        # flow (e.g. GetParticipantInput missing StoreInput). Matches
+                        # what we persist to NFS + S3.
+                        from tools.streaming_callback import stream_asset as _stream_full
                         _stream_full("contact_flow", json_file_name, json_content,
                                      operation_id=flow_name, is_complete=True, force_full=True)
                     except Exception as e:

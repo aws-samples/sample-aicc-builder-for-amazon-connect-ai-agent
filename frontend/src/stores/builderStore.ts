@@ -577,10 +577,22 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         const completePreview = state.assetPreviews[completeKey];
         newPreview.createdAt = completePreview.createdAt || Date.now();
         newPreview.messageIndex = completePreview.messageIndex ?? state.messages.length;
-        // Preserve existing content when incoming is a delta or shorter — prevents duplicate
-        // late-delivered events (race in backend pending_ws_events flush) from clobbering
-        // the fully accumulated content. Observed on cloudformation (many chunks → higher race).
-        if (preview.isDelta || !preview.content || (preview.content.length < (completePreview.content || '').length)) {
+        // Preserve existing content when incoming is a delta or empty — prevents
+        // late-delivered delta events (race in backend pending_ws_events flush)
+        // from clobbering the fully accumulated content. Observed on
+        // cloudformation (many chunks → higher race).
+        //
+        // EXCEPTION: an authoritative FULL replacement (isDelta === false) that
+        // is legitimately SHORTER must be allowed through. The contact-flow
+        // import-safety auto-fix re-streams the linted JSON full + non-delta,
+        // and the repaired flow is shorter than the raw one (it strips invalid
+        // DTMFConfiguration / duplicate SSML keys). The old "shorter ⇒ reject"
+        // rule silently kept the broken longer version, so the user downloaded
+        // a flow that fails CreateContactFlow. Only a non-delta full event may
+        // shrink the content; a delta/empty event never can.
+        const isAuthoritativeFull = preview.isDelta === false && !!preview.content;
+        if (preview.isDelta || !preview.content ||
+            (!isAuthoritativeFull && preview.content.length < (completePreview.content || '').length)) {
           newPreview.content = completePreview.content;
         }
       } else {
