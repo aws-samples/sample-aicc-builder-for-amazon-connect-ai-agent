@@ -26,6 +26,7 @@ from strands.models import BedrockModel
 from botocore.config import Config as BotocoreConfig
 
 from .system_prompt import RESEARCH_AGENT_SYSTEM_PROMPT
+from tools.model_selection import resolve_model_id, build_model_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -488,14 +489,13 @@ Focus on: services, policies, FAQ-worthy info, contact information.
     pages_fetched = []
 
     try:
-        # Use Opus for Research (consistent quality)
-        model_id = "global.anthropic.claude-opus-4-6-v1"
+        # Model follows the session selection (consistent quality across agents)
         region = os.environ.get("AWS_REGION", "ap-northeast-1")
 
-        model = BedrockModel(
-            model_id=model_id,
+        model = BedrockModel(**build_model_kwargs(
+            resolve_model_id(),
             region_name=region,
-            temperature=0.5,
+            # temperature omitted (None) — only applied on models that accept it
             max_tokens=128000,
             streaming=True,
             # cache_prompt removed - using cachePoint in system_prompt instead
@@ -504,7 +504,7 @@ Focus on: services, policies, FAQ-worthy info, contact information.
                 read_timeout=600,
                 retries={"max_attempts": 2, "mode": "adaptive"},
             ),
-        )
+        ))
 
         # Convert history to Strands format
         recent_history = history[-10:] if len(history) > 10 else history

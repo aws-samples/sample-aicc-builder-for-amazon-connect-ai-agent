@@ -39,6 +39,13 @@ current_session_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextV
     "current_session_id", default=None
 )
 
+# The Bedrock Claude model id selected for this request (frontend-driven).
+# Resolved/validated by tools.model_selection; None means "fall back to the
+# persisted/env/default model".
+current_selected_model: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_selected_model", default=None
+)
+
 current_streaming_callback: contextvars.ContextVar[Optional[Callable]] = contextvars.ContextVar(
     "current_streaming_callback", default=None
 )
@@ -260,6 +267,7 @@ async def session_scope(
     session has truly ended (e.g. on ``createNewSession``).
     """
     tok_sid = current_session_id.set(session_id)
+    tok_model = current_selected_model.set(current_selected_model.get())
     tok_cb = current_callback_handler.set(callback_handler)
     tok_sc = current_streaming_callback.set(streaming_callback)
     tok_mi = current_message_index.set(message_index)
@@ -269,6 +277,7 @@ async def session_scope(
         current_message_index.reset(tok_mi)
         current_streaming_callback.reset(tok_sc)
         current_callback_handler.reset(tok_cb)
+        current_selected_model.reset(tok_model)
         current_session_id.reset(tok_sid)
 
 

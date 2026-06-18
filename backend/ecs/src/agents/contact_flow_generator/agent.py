@@ -21,6 +21,7 @@ from botocore.config import Config as BotocoreConfig
 
 from .system_prompt import CONTACT_FLOW_GENERATOR_SYSTEM_PROMPT, RAG_SEARCH_INSTRUCTION
 from tools.workspace_tools_for_subagent import detect_spec_escalation
+from tools.model_selection import resolve_model_id, build_model_kwargs
 from .retrieve_tool import retrieve_contact_flow_knowledge
 
 logger = logging.getLogger(__name__)
@@ -543,15 +544,15 @@ Operations:
 {search_section}"""
 
     try:
-        model = BedrockModel(
-            model_id=os.environ.get("MODEL_ID", "global.anthropic.claude-opus-4-6-v1"),
+        model = BedrockModel(**build_model_kwargs(
+            resolve_model_id(),
             region_name=os.environ.get("AWS_REGION", "us-east-1"),
-            temperature=0,
+            # temperature omitted (None) — only applied on models that accept it
             max_tokens=128000,
             # cache_prompt removed - using cachePoint in system_prompt instead
             cache_tools="default",   # Cache tool definitions (web search tools)
             boto_client_config=BotocoreConfig(read_timeout=600),
-        )
+        ))
 
         # Conditionally add RAG and web search tools
         tools = []

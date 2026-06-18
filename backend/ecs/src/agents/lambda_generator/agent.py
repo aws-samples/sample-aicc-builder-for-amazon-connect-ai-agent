@@ -21,6 +21,7 @@ HEARTBEAT_INTERVAL_SECONDS = 10
 from .system_prompt import LAMBDA_GENERATOR_SYSTEM_PROMPT
 from agents._consistency_rules import build_field_schema_section
 from tools.workspace_tools_for_subagent import detect_spec_escalation
+from tools.model_selection import resolve_model_id, build_model_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -354,14 +355,14 @@ Database: {db_type}{schema_section}{infra_spec_section}{modification_section}
 """
 
     try:
-        model = BedrockModel(
-            model_id=os.environ.get("MODEL_ID", "global.anthropic.claude-opus-4-6-v1"),
+        model = BedrockModel(**build_model_kwargs(
+            resolve_model_id(),
             region_name=os.environ.get("AWS_REGION", "us-east-1"),
-            temperature=0,  # Deterministic output for consistent formatting
+            # temperature omitted (None) — only applied on models that accept it
             max_tokens=128000,
             # cache_prompt removed - using cachePoint in system_prompt instead
             boto_client_config=BotocoreConfig(read_timeout=600),
-        )
+        ))
 
         agent = Agent(
             model=model,
