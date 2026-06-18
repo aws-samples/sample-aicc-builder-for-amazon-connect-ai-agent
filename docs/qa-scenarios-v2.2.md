@@ -88,8 +88,24 @@ These are **not yet resolved**; document the intended behavior, then test it.
 
 ---
 
-## Execution log (fill per run)
+## Execution log
+
+Run: 2026-06-18, deployed dev (`d3olm94xcw70gf.cloudfront.net`), Playwright + CloudWatch + Connect API.
 
 | Scenario | Env | Result | Evidence | Notes |
 |----------|-----|--------|----------|-------|
-| (to be filled during the QA pass) | | | | |
+| A1 model dropdown | deployed | ✅ PASS | header + start-screen show 4.8/4.7/4.6; 4.8 default checked | screenshot qa-A1 |
+| A2 model→backend | deployed | ✅ PASS | log `[selected_model] … -> global.anthropic.claude-opus-4-6-v1` (exact `-v1`) | |
+| A3 temperature branch | deployed | ✅ PASS | 4.6 run completed, no Bedrock 400/ValidationException | |
+| A4 model persists | deployed | ✅ PASS | header chip stayed Opus 4.6 across the run | |
+| B full-build progress | deployed | ✅ PASS (after fix) | new chat shows **0/12** with interview+review restored | regression found+fixed: full build had echoed the full asset set as a "scope" → showed 0/7. Fixed `session_created` to echo `[]` for full builds. |
+| C1 scoped interview | deployed | ✅ PASS | flow-only run asked ONLY flow questions; log `scope=['contact_flow']`, scoped interview prompt | |
+| C4 segment requires desc | deployed | ✅ PASS | 시작 disabled until description typed | |
+| C5 / G4 segment asset visible | deployed | ✅ PASS | generated flow streamed into right Asset Workspace (tabs, copy, download, fullscreen) | |
+| C5 flow → Connect API | deployed | ⚠️→✅ | **real bug found**: generated menu `GetParticipantInput` had `DTMFConfiguration` + no `StoreInput` → `CreateContactFlow` rejected (missing `StoreInput`, then invalid `DTMFConfiguration`). After linter repair + ARN substitution → **ACCEPTED** (`ContactFlowId` created, deleted). Root cause: generator PROMPT taught wrong menu schema, and linter autofix wasn't reaching the UI. Both fixed (commit 7b3b7da). | create→delete cleanup verified |
+| G1 scoped progress count | deployed | ✅ PASS (after fix) | flow-only shows **0/7** (interview 4 + flow + review + package); out-of-scope lanes under "이번 실행에 포함되지 않음" | reverted earlier over-trim that hid interview/review |
+| F1 dark timeline | deployed | ✅ PASS | bubbles/tools/assets theme-consistent | screenshot qa-00 |
+| F6 collapsed tool calls | deployed | ✅ PASS | tool calls render collapsed with one-line summary | |
+| KB ingestion (deploy) | deployed | ✅ PASS (after fix) | `sync-kb-docs.sh` had committed merge-conflict markers → KB sync failed every deploy. Fixed (commit d916f01); 21 docs synced, ingestion COMPLETE. | |
+
+Pending (next): re-verify C5 flow imports WITHOUT manual lint on the redeployed backend; C2/C3 (prompt/FAQ scopes); D1–D5 (file import); E1–E3 (whiteboard image); D5 edit-after-import reload (verifies the asset-reload fix).
