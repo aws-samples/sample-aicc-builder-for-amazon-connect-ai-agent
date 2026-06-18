@@ -26,6 +26,12 @@ import { useSessionStore } from '../stores/sessionStore';
 import { fetchWorkspaceTree, fetchNfsDiagnostics, type FileNode, type NfsDiagnostics, type FallbackDiagnostics } from '../services/workspaceApi';
 import { FileViewer } from './FileViewer';
 
+// NFS-debug panel is dev-only by default. Opt in for production builds via
+// VITE_ENABLE_NFS_DEBUG=true. (Repo convention: read env via `import.meta as any`.)
+const NFS_DEBUG_ENABLED: boolean =
+  !!(import.meta as any).env?.DEV ||
+  (import.meta as any).env?.VITE_ENABLE_NFS_DEBUG === 'true';
+
 function getFileIcon(name: string) {
   if (name.endsWith('.py')) return <FileCode className="w-4 h-4 text-yellow-500 flex-shrink-0" />;
   if (name.endsWith('.yaml') || name.endsWith('.yml')) return <FileCode className="w-4 h-4 text-blue-500 flex-shrink-0" />;
@@ -139,8 +145,9 @@ export function FileExplorer({ sessionId: propSessionId, language, variant = 'li
     try {
       const data = await fetchWorkspaceTree(effectiveSessionId);
       setTree(data);
-      // Auto-fetch diagnostics when tree is empty (helps debug NFS issues)
-      if (data.length === 0) {
+      // Auto-fetch diagnostics when tree is empty (helps debug NFS issues) —
+      // dev-only, gated behind the same flag as the Debug toggle.
+      if (data.length === 0 && NFS_DEBUG_ENABLED) {
         loadDiagnostics();
       }
     } catch (e) {
@@ -206,9 +213,13 @@ export function FileExplorer({ sessionId: propSessionId, language, variant = 'li
         ) : tree.length === 0 ? (
           <div className={cn('px-3 py-4 text-xs text-center', isDark ? 'text-surface-500' : 'text-surface-400 dark:text-surface-500')}>
             <div>{ko ? '아직 파일이 없습니다' : 'No files yet'}</div>
-            {/* NFS Diagnostics toggle */}
+            {/* NFS Diagnostics toggle — dev-only (off by default in production builds).
+                Enable in prod by setting VITE_ENABLE_NFS_DEBUG=true. */}
+            {NFS_DEBUG_ENABLED && (
             <button
               onClick={() => { setShowDiag(v => !v); if (!diag && !diagLoading) loadDiagnostics(); }}
+              aria-expanded={showDiag}
+              aria-label={showDiag ? 'Hide NFS diagnostics' : 'Show NFS diagnostics'}
               className={cn(
                 'mt-2 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded transition-colors',
                 isDark
@@ -219,6 +230,7 @@ export function FileExplorer({ sessionId: propSessionId, language, variant = 'li
               <Bug className="w-3 h-3" />
               {showDiag ? 'Hide' : 'Debug'}
             </button>
+            )}
             {showDiag && (
               <div className={cn(
                 'mt-2 mx-1 p-2 rounded text-[10px] text-left font-mono leading-relaxed',

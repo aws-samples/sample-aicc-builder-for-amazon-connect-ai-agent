@@ -21,11 +21,11 @@ export interface FileNode {
  * Falls back to localhost for local development.
  */
 function getApiBase(): string {
-  // Same-origin in production (CloudFront proxies /api/* to ALB)
-  if (typeof window !== "undefined" && window.location.hostname !== "localhost") {
-    return "";
-  }
-  return "http://localhost:8080";
+  // Always same-origin: in production CloudFront proxies /api/* to the ALB; in
+  // local dev the Vite dev server proxies /api → localhost:8080 (see
+  // vite.config.ts). Using an absolute localhost URL here would bypass the proxy
+  // and trip CORS, so we always return "" and rely on relative /api paths.
+  return "";
 }
 
 async function getAuthHeaders(): Promise<HeadersInit> {

@@ -13,7 +13,7 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { cn, formatDate } from '../lib/utils';
 import type { Message, BuilderPhase } from '../types';
 import { PHASE_LABELS, PHASE_ICONS } from '../types';
-import { Copy, Check, Wrench, Loader2, CheckCircle2, XCircle, Brain, ChevronDown, ChevronRight, FileCode, FileText, Workflow, Server, BookOpen, Package } from 'lucide-react';
+import { Copy, Check, Wrench, Loader2, CheckCircle2, XCircle, Brain, ChevronDown, ChevronRight, FileCode, FileText, Workflow, Server, BookOpen, Package, PanelRight } from 'lucide-react';
 import { useBuilderStore } from '../stores/builderStore';
 import { AssetPreviewBubble } from './AssetPreviewBubble';
 import { SubagentBubble } from './SubagentBubble';
@@ -225,7 +225,7 @@ function createMarkdownComponents(isUser: boolean) {
         <code
           className={cn(
             'px-1.5 py-0.5 rounded text-sm font-mono',
-            isUser ? 'bg-primary-700 text-primary-100' : 'bg-gray-200 text-gray-800'
+            isUser ? 'bg-primary-700 text-primary-100' : 'bg-surface-200 dark:bg-surface-700 text-surface-800 dark:text-surface-200'
           )}
           {...props}
         >
@@ -238,7 +238,7 @@ function createMarkdownComponents(isUser: boolean) {
     ol({ children }: any) { return <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>; },
     strong({ children }: any) {
       return (
-        <strong className={cn('font-semibold', isUser ? 'text-white' : 'text-gray-900')}>
+        <strong className={cn('font-semibold', isUser ? 'text-white' : 'text-surface-900 dark:text-surface-100')}>
           {children}
         </strong>
       );
@@ -251,24 +251,24 @@ function createMarkdownComponents(isUser: boolean) {
       );
     },
     thead({ children }: any) {
-      return <thead className={cn(isUser ? 'bg-primary-700' : 'bg-gray-200')}>{children}</thead>;
+      return <thead className={cn(isUser ? 'bg-primary-700' : 'bg-surface-200 dark:bg-surface-700')}>{children}</thead>;
     },
     th({ children }: any) {
       return (
-        <th className={cn('px-3 py-2 text-left font-semibold border', isUser ? 'border-primary-500 text-white' : 'border-gray-300 text-gray-900')}>
+        <th className={cn('px-3 py-2 text-left font-semibold border', isUser ? 'border-primary-500 text-white' : 'border-surface-300 dark:border-surface-600 text-surface-900 dark:text-surface-100')}>
           {children}
         </th>
       );
     },
     td({ children }: any) {
       return (
-        <td className={cn('px-3 py-2 border', isUser ? 'border-primary-500 text-primary-100' : 'border-gray-300 text-gray-700')}>
+        <td className={cn('px-3 py-2 border', isUser ? 'border-primary-500 text-primary-100' : 'border-surface-300 dark:border-surface-600 text-surface-700 dark:text-surface-300')}>
           {children}
         </td>
       );
     },
     tr({ children }: any) {
-      return <tr className={cn('even:bg-opacity-50', isUser ? 'even:bg-primary-700' : 'even:bg-gray-100')}>{children}</tr>;
+      return <tr className={cn('even:bg-opacity-50', isUser ? 'even:bg-primary-700' : 'even:bg-surface-100 dark:even:bg-surface-800/50')}>{children}</tr>;
     },
   };
 }
@@ -339,11 +339,11 @@ export const MessageBubble = memo(function MessageBubble({ message }: MessageBub
           isUser
             ? 'bg-primary-600 text-white'
             : isSystem
-            ? 'bg-amber-50 text-amber-900 border border-amber-200'
-            : 'bg-gray-100 text-gray-900'
+            ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-900 dark:text-amber-200 border border-amber-200 dark:border-amber-800'
+            : 'bg-surface-100 dark:bg-surface-800 text-surface-900 dark:text-surface-100'
         )}
       >
-        <div className={cn('prose prose-sm max-w-none', isUser && 'prose-invert')}>
+        <div className={cn('prose prose-sm max-w-none dark:prose-invert', isUser && 'prose-invert')}>
           <ReactMarkdown
             components={isUser ? userMarkdownComponents : assistantMarkdownComponents}
             remarkPlugins={[remarkGfm]}
@@ -365,7 +365,7 @@ export const MessageBubble = memo(function MessageBubble({ message }: MessageBub
         <div
           className={cn(
             'text-xs mt-2',
-            isUser ? 'text-primary-200' : 'text-gray-500'
+            isUser ? 'text-primary-200' : 'text-surface-500 dark:text-surface-400'
           )}
         >
           {formatDate(message.timestamp)}
@@ -395,10 +395,13 @@ const CodeBlock = memo(function CodeBlock({ language, code }: CodeBlockProps) {
       <div className="absolute right-2 top-2 z-10">
         <button
           onClick={handleCopy}
+          aria-label={copied ? 'Copied' : 'Copy code'}
           className={cn(
             'p-1.5 rounded-md transition-all',
             'bg-gray-700 hover:bg-gray-600',
-            'opacity-0 group-hover:opacity-100',
+            // E7: keyboard/touch reachable — visible on hover OR focus, and on
+            // touch (no hover) it stays reachable via the always-tappable target.
+            'opacity-60 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-primary-500',
             'text-gray-300 hover:text-white'
           )}
           title="Copy code"
@@ -439,19 +442,19 @@ function PatchResultView({ search, replace, count, changedLines }: {
   search?: string; replace?: string; count?: number; changedLines?: number[];
 }) {
   return (
-    <div className="text-xs font-mono bg-gray-50 rounded p-2 space-y-1 overflow-x-auto">
+    <div className="text-xs font-mono bg-surface-50 dark:bg-surface-800 rounded p-2 space-y-1 overflow-x-auto">
       {search && (
-        <div className="text-red-600 whitespace-pre-wrap">
+        <div className="text-red-600 dark:text-red-400 whitespace-pre-wrap">
           <span className="select-none text-red-400">- </span>{typeof search === 'string' ? search.slice(0, 500) : ''}
         </div>
       )}
       {replace && (
-        <div className="text-green-600 whitespace-pre-wrap">
+        <div className="text-green-600 dark:text-green-400 whitespace-pre-wrap">
           <span className="select-none text-green-400">+ </span>{typeof replace === 'string' ? replace.slice(0, 500) : ''}
         </div>
       )}
       {(count !== undefined || (changedLines && changedLines.length > 0)) && (
-        <div className="text-gray-500 pt-1 border-t border-gray-200 mt-1">
+        <div className="text-surface-500 dark:text-surface-400 pt-1 border-t border-surface-200 dark:border-surface-700 mt-1">
           {count !== undefined && <span>{count} replacement(s)</span>}
           {changedLines && changedLines.length > 0 && (
             <span className="ml-2">Lines: {changedLines.join(', ')}</span>
@@ -472,15 +475,15 @@ function SearchResultsView({ results, pattern }: {
   return (
     <div className="text-xs space-y-0.5 max-h-60 overflow-y-auto">
       {shown.map((r, i) => (
-        <div key={i} className="flex gap-2 py-0.5 hover:bg-gray-50 rounded">
-          <span className="text-blue-600 font-mono whitespace-nowrap shrink-0">
+        <div key={i} className="flex gap-2 py-0.5 hover:bg-surface-50 dark:hover:bg-surface-800 rounded">
+          <span className="text-blue-600 dark:text-blue-400 font-mono whitespace-nowrap shrink-0">
             {r.path.split('/').pop()}:{r.line_number}
           </span>
-          <span className="text-gray-700 truncate">{r.line}</span>
+          <span className="text-surface-700 dark:text-surface-300 truncate">{r.line}</span>
         </div>
       ))}
       {results.length > maxShow && (
-        <div className="text-gray-400 pt-1">({results.length} total results{pattern ? ` for "${pattern}"` : ''})</div>
+        <div className="text-surface-400 dark:text-surface-500 pt-1">({results.length} total results{pattern ? ` for "${pattern}"` : ''})</div>
       )}
     </div>
   );
@@ -493,9 +496,9 @@ function SpecUpdateView({ operationId, fields }: {
   return (
     <div className="text-xs space-y-1">
       {operationId && (
-        <div className="font-medium text-green-700">{operationId} updated:</div>
+        <div className="font-medium text-green-700 dark:text-green-400">{operationId} updated:</div>
       )}
-      <ul className="list-disc list-inside text-gray-700 space-y-0.5">
+      <ul className="list-disc list-inside text-surface-700 dark:text-surface-300 space-y-0.5">
         {fields.map((f, i) => <li key={i}>{f}</li>)}
       </ul>
     </div>
@@ -508,12 +511,12 @@ function ContentPreviewView({ content, size }: { content: string; size?: number 
   const previewLines = lines.slice(0, 5);
   const hasMore = lines.length > 5;
   return (
-    <div className="text-xs font-mono bg-gray-50 rounded p-2 space-y-1 overflow-x-auto max-h-40 overflow-y-auto">
+    <div className="text-xs font-mono bg-surface-50 dark:bg-surface-800 rounded p-2 space-y-1 overflow-x-auto max-h-40 overflow-y-auto">
       {previewLines.map((line, i) => (
-        <div key={i} className="text-gray-700 whitespace-pre-wrap">{line}</div>
+        <div key={i} className="text-surface-700 dark:text-surface-300 whitespace-pre-wrap">{line}</div>
       ))}
       {hasMore && (
-        <div className="text-gray-400 pt-1 border-t border-gray-200 mt-1">
+        <div className="text-surface-400 dark:text-surface-500 pt-1 border-t border-surface-200 dark:border-surface-700 mt-1">
           ... ({size ? `${size.toLocaleString()} bytes` : `${lines.length} lines`} total)
         </div>
       )}
@@ -577,7 +580,7 @@ function renderToolResult(toolName: string, result: unknown, input?: Record<stri
 
   // Default: JSON
   return (
-    <pre className="text-xs bg-gray-100 p-2 rounded overflow-x-auto max-h-60 overflow-y-auto">
+    <pre className="text-xs bg-surface-100 dark:bg-surface-800 text-surface-800 dark:text-surface-200 p-2 rounded overflow-x-auto max-h-60 overflow-y-auto">
       {typeof result === 'string' ? result : JSON.stringify(result, null, 2)}
     </pre>
   );
@@ -603,15 +606,12 @@ function ToolCallBubble({ message }: MessageBubbleProps) {
   const hasInput = !!(toolCall.input && Object.keys(toolCall.input).length > 0);
   const hasResult = !!toolCall.result;
 
-  // Auto-expand when running to show real-time JSON generation
-  const [isExpanded, setIsExpanded] = useState(isRunning && hasInput);
+  // E3: Default collapsed (one-line summary). Only auto-expand on error.
+  const [isExpanded, setIsExpanded] = useState(isError);
 
-  // Auto-expand when tool starts running with input
   useEffect(() => {
-    if (isRunning && hasInput) {
-      setIsExpanded(true);
-    }
-  }, [isRunning, hasInput]);
+    if (isError) setIsExpanded(true);
+  }, [isError]);
 
   // Get tool-specific summary for better visibility
   const toolSummary = getToolSummary(toolCall.tool, toolCall.input, toolCall.result);
@@ -621,9 +621,9 @@ function ToolCallBubble({ message }: MessageBubbleProps) {
       <div
         className={cn(
           'max-w-[80%] rounded-2xl px-4 py-3 border',
-          isRunning && 'bg-blue-50 border-blue-200',
-          isCompleted && 'bg-green-50 border-green-200',
-          isError && 'bg-red-50 border-red-200'
+          isRunning && 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800',
+          isCompleted && 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800',
+          isError && 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
         )}
       >
         {/* Tool header */}
@@ -631,40 +631,40 @@ function ToolCallBubble({ message }: MessageBubbleProps) {
           <div
             className={cn(
               'w-8 h-8 rounded-full flex items-center justify-center',
-              isRunning && 'bg-blue-100',
-              isCompleted && 'bg-green-100',
-              isError && 'bg-red-100'
+              isRunning && 'bg-blue-100 dark:bg-blue-800/50',
+              isCompleted && 'bg-green-100 dark:bg-green-800/50',
+              isError && 'bg-red-100 dark:bg-red-800/50'
             )}
           >
             {isRunning ? (
-              <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+              <Loader2 className="w-4 h-4 text-blue-600 dark:text-blue-400 animate-spin" />
             ) : isCompleted ? (
-              <CheckCircle2 className="w-4 h-4 text-green-600" />
+              <CheckCircle2 className="w-4 h-4 text-green-600 dark:text-green-400" />
             ) : (
-              <XCircle className="w-4 h-4 text-red-600" />
+              <XCircle className="w-4 h-4 text-red-600 dark:text-red-400" />
             )}
           </div>
           <div className="flex-1">
             <div className="flex items-center gap-2">
-              <Wrench className="w-3.5 h-3.5 text-gray-500" />
+              <Wrench className="w-3.5 h-3.5 text-surface-500 dark:text-surface-400" />
               <span
                 className={cn(
                   'text-sm font-medium',
-                  isRunning && 'text-blue-700',
-                  isCompleted && 'text-green-700',
-                  isError && 'text-red-700'
+                  isRunning && 'text-blue-700 dark:text-blue-300',
+                  isCompleted && 'text-green-700 dark:text-green-300',
+                  isError && 'text-red-700 dark:text-red-300'
                 )}
               >
                 {toolInfo.name}
               </span>
               {/* Show tool summary inline when available */}
               {toolSummary && (
-                <span className="text-xs text-gray-600 font-normal">
+                <span className="text-xs text-surface-600 dark:text-surface-400 font-normal">
                   - {toolSummary}
                 </span>
               )}
             </div>
-            <p className="text-xs text-gray-500 mt-0.5">
+            <p className="text-xs text-surface-500 dark:text-surface-400 mt-0.5">
               {isRunning ? toolInfo.description : isError ? (isKo ? '오류가 발생했습니다' : 'An error occurred') : getCompletedStatusText(toolCall, isKo)}
             </p>
           </div>
@@ -672,12 +672,14 @@ function ToolCallBubble({ message }: MessageBubbleProps) {
           {(hasInput || hasResult || toolCall.error || isRunning) && (
             <button
               onClick={() => setIsExpanded(!isExpanded)}
-              className="p-1 hover:bg-gray-200 rounded transition-colors"
+              aria-expanded={isExpanded}
+              aria-label={isExpanded ? (isKo ? '도구 상세 접기' : 'Collapse tool details') : (isKo ? '도구 상세 펼치기' : 'Expand tool details')}
+              className="p-1 hover:bg-surface-200 dark:hover:bg-surface-700 rounded transition-colors"
             >
               {isExpanded ? (
-                <ChevronDown className="w-4 h-4 text-gray-500" />
+                <ChevronDown className="w-4 h-4 text-surface-500 dark:text-surface-400" />
               ) : (
-                <ChevronRight className="w-4 h-4 text-gray-500" />
+                <ChevronRight className="w-4 h-4 text-surface-500 dark:text-surface-400" />
               )}
             </button>
           )}
@@ -685,12 +687,12 @@ function ToolCallBubble({ message }: MessageBubbleProps) {
 
         {/* Expanded details */}
         {isExpanded && (
-          <div className="mt-3 pt-3 border-t border-gray-200 space-y-3">
+          <div className="mt-3 pt-3 border-t border-surface-200 dark:border-surface-700 space-y-3">
             {/* Input */}
             {hasInput && (
               <div>
-                <div className="text-xs font-medium text-gray-500 mb-1">Input / 입력</div>
-                <pre className="text-xs bg-gray-100 p-2 rounded overflow-x-auto max-h-40 overflow-y-auto">
+                <div className="text-xs font-medium text-surface-500 dark:text-surface-400 mb-1">Input / 입력</div>
+                <pre className="text-xs bg-surface-100 dark:bg-surface-800 text-surface-800 dark:text-surface-200 p-2 rounded overflow-x-auto max-h-40 overflow-y-auto">
                   {JSON.stringify(toolCall.input, null, 2)}
                 </pre>
               </div>
@@ -698,15 +700,15 @@ function ToolCallBubble({ message }: MessageBubbleProps) {
             {/* Result */}
             {hasResult && (
               <div>
-                <div className="text-xs font-medium text-gray-500 mb-1">Result / 결과</div>
+                <div className="text-xs font-medium text-surface-500 dark:text-surface-400 mb-1">Result / 결과</div>
                 {renderToolResult(toolCall.tool, toolCall.result, toolCall.input)}
               </div>
             )}
             {/* Error */}
             {toolCall.error && (
               <div>
-                <div className="text-xs font-medium text-red-500 mb-1">Error / 오류</div>
-                <pre className="text-xs bg-red-100 text-red-700 p-2 rounded overflow-x-auto">
+                <div className="text-xs font-medium text-red-500 dark:text-red-400 mb-1">Error / 오류</div>
+                <pre className="text-xs bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 p-2 rounded overflow-x-auto">
                   {toolCall.error}
                 </pre>
               </div>
@@ -715,7 +717,7 @@ function ToolCallBubble({ message }: MessageBubbleProps) {
         )}
 
         {/* Timestamp */}
-        <div className="text-xs text-gray-400 mt-2">
+        <div className="text-xs text-surface-400 dark:text-surface-500 mt-2">
           {formatDate(message.timestamp)}
         </div>
       </div>
@@ -735,36 +737,40 @@ function ThinkingBubble({ message }: MessageBubbleProps) {
 
   return (
     <div className="flex justify-start animate-fade-in">
-      <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-purple-50 border border-purple-200">
+      <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-primary-50 dark:bg-primary-900/20 border border-primary-200 dark:border-primary-800">
         {/* Header */}
         <div
           className="flex items-center gap-2 cursor-pointer"
           onClick={() => setIsExpanded(!isExpanded)}
         >
-          <div className="w-8 h-8 rounded-full bg-purple-100 flex items-center justify-center">
-            <Brain className="w-4 h-4 text-purple-600" />
+          <div className="w-8 h-8 rounded-full bg-primary-100 dark:bg-primary-800/50 flex items-center justify-center">
+            <Brain className="w-4 h-4 text-primary-600 dark:text-primary-400" />
           </div>
           <div className="flex-1">
-            <span className="text-sm font-medium text-purple-700">{isKo ? '에이전트 사고 과정' : 'Agent Thinking'}</span>
+            <span className="text-sm font-medium text-primary-700 dark:text-primary-300">{isKo ? '에이전트 사고 과정' : 'Agent Thinking'}</span>
           </div>
-          <button className="p-1 hover:bg-purple-100 rounded transition-colors">
+          <button
+            aria-expanded={isExpanded}
+            aria-label={isExpanded ? (isKo ? '접기' : 'Collapse') : (isKo ? '펼치기' : 'Expand')}
+            className="p-1 hover:bg-primary-100 dark:hover:bg-primary-800/50 rounded transition-colors"
+          >
             {isExpanded ? (
-              <ChevronDown className="w-4 h-4 text-purple-500" />
+              <ChevronDown className="w-4 h-4 text-primary-500 dark:text-primary-400" />
             ) : (
-              <ChevronRight className="w-4 h-4 text-purple-500" />
+              <ChevronRight className="w-4 h-4 text-primary-500 dark:text-primary-400" />
             )}
           </button>
         </div>
 
         {/* Content */}
         {isExpanded && message.content && (
-          <div className="mt-3 pt-3 border-t border-purple-200">
-            <p className="text-sm text-purple-800 whitespace-pre-wrap">{message.content}</p>
+          <div className="mt-3 pt-3 border-t border-primary-200 dark:border-primary-800">
+            <p className="text-sm text-primary-800 dark:text-primary-200 whitespace-pre-wrap">{message.content}</p>
           </div>
         )}
 
         {/* Timestamp */}
-        <div className="text-xs text-purple-400 mt-2">
+        <div className="text-xs text-primary-400 dark:text-primary-500/70 mt-2">
           {formatDate(message.timestamp)}
         </div>
       </div>
@@ -791,21 +797,21 @@ function getAssetIcon(assetType: string) {
 }
 
 /**
- * Get color classes for asset type
+ * Get color classes for asset type (theme-aware: light + dark variants)
  */
 function getAssetColors(assetType: string): { bg: string; border: string; icon: string; text: string } {
   const colorMap: Record<string, { bg: string; border: string; icon: string; text: string }> = {
-    lambda: { bg: 'bg-orange-50', border: 'border-orange-200', icon: 'text-orange-600', text: 'text-orange-700' },
-    openapi: { bg: 'bg-blue-50', border: 'border-blue-200', icon: 'text-blue-600', text: 'text-blue-700' },
-    prompt: { bg: 'bg-violet-50', border: 'border-violet-200', icon: 'text-violet-600', text: 'text-violet-700' },
-    contact_flow: { bg: 'bg-teal-50', border: 'border-teal-200', icon: 'text-teal-600', text: 'text-teal-700' },
-    cdk: { bg: 'bg-slate-50', border: 'border-slate-200', icon: 'text-slate-600', text: 'text-slate-700' },
-    faq: { bg: 'bg-emerald-50', border: 'border-emerald-200', icon: 'text-emerald-600', text: 'text-emerald-700' },
-    research: { bg: 'bg-cyan-50', border: 'border-cyan-200', icon: 'text-cyan-600', text: 'text-cyan-700' },
-    package: { bg: 'bg-indigo-50', border: 'border-indigo-200', icon: 'text-indigo-600', text: 'text-indigo-700' },
-    workspace_file: { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'text-amber-600', text: 'text-amber-700' },
+    lambda: { bg: 'bg-orange-50 dark:bg-orange-900/20', border: 'border-orange-200 dark:border-orange-800', icon: 'text-orange-600 dark:text-orange-400', text: 'text-orange-700 dark:text-orange-300' },
+    openapi: { bg: 'bg-blue-50 dark:bg-blue-900/20', border: 'border-blue-200 dark:border-blue-800', icon: 'text-blue-600 dark:text-blue-400', text: 'text-blue-700 dark:text-blue-300' },
+    prompt: { bg: 'bg-violet-50 dark:bg-violet-900/20', border: 'border-violet-200 dark:border-violet-800', icon: 'text-violet-600 dark:text-violet-400', text: 'text-violet-700 dark:text-violet-300' },
+    contact_flow: { bg: 'bg-teal-50 dark:bg-teal-900/20', border: 'border-teal-200 dark:border-teal-800', icon: 'text-teal-600 dark:text-teal-400', text: 'text-teal-700 dark:text-teal-300' },
+    cdk: { bg: 'bg-slate-50 dark:bg-surface-800', border: 'border-slate-200 dark:border-surface-600', icon: 'text-slate-600 dark:text-surface-300', text: 'text-slate-700 dark:text-surface-200' },
+    faq: { bg: 'bg-emerald-50 dark:bg-emerald-900/20', border: 'border-emerald-200 dark:border-emerald-800', icon: 'text-emerald-600 dark:text-emerald-400', text: 'text-emerald-700 dark:text-emerald-300' },
+    research: { bg: 'bg-cyan-50 dark:bg-cyan-900/20', border: 'border-cyan-200 dark:border-cyan-800', icon: 'text-cyan-600 dark:text-cyan-400', text: 'text-cyan-700 dark:text-cyan-300' },
+    package: { bg: 'bg-indigo-50 dark:bg-indigo-900/20', border: 'border-indigo-200 dark:border-indigo-800', icon: 'text-indigo-600 dark:text-indigo-400', text: 'text-indigo-700 dark:text-indigo-300' },
+    workspace_file: { bg: 'bg-amber-50 dark:bg-amber-900/20', border: 'border-amber-200 dark:border-amber-800', icon: 'text-amber-600 dark:text-amber-400', text: 'text-amber-700 dark:text-amber-300' },
   };
-  return colorMap[assetType] || { bg: 'bg-gray-50', border: 'border-gray-200', icon: 'text-gray-600', text: 'text-gray-700' };
+  return colorMap[assetType] || { bg: 'bg-gray-50 dark:bg-surface-800', border: 'border-gray-200 dark:border-surface-600', icon: 'text-gray-600 dark:text-surface-300', text: 'text-gray-700 dark:text-surface-200' };
 }
 
 /**
@@ -823,6 +829,7 @@ function AssetBubble({ message }: MessageBubbleProps) {
   // Get the full asset preview from store
   const assetPreviews = useBuilderStore(state => state.assetPreviews);
   const language = useBuilderStore(state => state.language);
+  const setActiveAssetKey = useBuilderStore(state => state.setActiveAssetKey);
 
   // Build asset base key to match store key format
   // Store keys have timestamp suffix (e.g., "lambda-opId-handler.py-1707123456789")
@@ -839,26 +846,31 @@ function AssetBubble({ message }: MessageBubbleProps) {
   })();
 
   // Find matching asset preview by prefix (keys have timestamp suffix)
-  const fullPreview = (() => {
-    // Try exact match first
-    if (assetPreviews[assetBaseKey]) return assetPreviews[assetBaseKey];
-    // Prefix match — pick the latest (highest timestamp suffix)
-    const matchingKey = Object.keys(assetPreviews)
+  const matchedKey = (() => {
+    if (assetPreviews[assetBaseKey]) return assetBaseKey;
+    return Object.keys(assetPreviews)
       .filter(k => k.startsWith(`${assetBaseKey}-`))
       .sort()
       .pop();
-    return matchingKey ? assetPreviews[matchingKey] : undefined;
   })();
+  const fullPreview = matchedKey ? assetPreviews[matchedKey] : undefined;
 
   // Build display label
-  const assetLabel = message.content || `${assetRef.assetType} - ${assetRef.fileName || assetRef.operationId || ''}`;
+  const rawLabel = message.content || `${assetRef.assetType} - ${assetRef.fileName || assetRef.operationId || ''}`;
+  const ko = language === 'ko-KR';
+  const assetLabel = ko ? `생성됨: ${rawLabel}` : `Generated ${rawLabel}`;
+
+  const openInWorkspace = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (matchedKey) setActiveAssetKey(matchedKey);
+  };
 
   return (
     <div className="flex flex-col justify-start animate-fade-in">
-      {/* Clickable marker */}
+      {/* Compact marker — click to expand inline, or "Open" in the workspace pane */}
       <div
         className={cn(
-          'max-w-[60%] rounded-xl px-3 py-2 border flex items-center gap-2 cursor-pointer hover:shadow-sm transition-shadow',
+          'max-w-[70%] rounded-xl px-3 py-2 border flex items-center gap-2 cursor-pointer hover:shadow-sm transition-shadow',
           colors.bg,
           colors.border
         )}
@@ -872,10 +884,24 @@ function AssetBubble({ message }: MessageBubbleProps) {
           <span className={cn('text-sm font-medium truncate block', colors.text)}>
             {assetLabel}
           </span>
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-surface-400 dark:text-surface-500">
             {formatDate(message.timestamp)}
           </span>
         </div>
+        {fullPreview && (
+          <button
+            onClick={openInWorkspace}
+            className={cn(
+              'flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium transition-colors',
+              'bg-white/60 dark:bg-white/10 hover:bg-white/90 dark:hover:bg-white/20',
+              colors.text
+            )}
+            aria-label={ko ? '워크스페이스에서 열기' : 'Open in workspace'}
+          >
+            <PanelRight className="w-3.5 h-3.5" />
+            {ko ? '열기' : 'Open'}
+          </button>
+        )}
         <ChevronDown className={cn(
           'w-4 h-4 transition-transform',
           colors.icon,
@@ -883,7 +909,7 @@ function AssetBubble({ message }: MessageBubbleProps) {
         )} />
       </div>
 
-      {/* Expanded preview */}
+      {/* Expanded preview (inline fallback) */}
       {isExpanded && fullPreview && (
         <div className="mt-2 w-full">
           <AssetPreviewBubble

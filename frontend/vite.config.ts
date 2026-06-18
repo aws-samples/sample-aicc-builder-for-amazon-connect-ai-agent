@@ -16,6 +16,15 @@ export default defineConfig({
   server: {
     port: 3000,
     open: true,
+    // Local dev: proxy backend routes to the FastAPI server started by
+    // backend/ecs/local-dev.sh (port 8080). Lets the same-origin
+    // ws://localhost:3000/ws + /api calls reach the backend without CORS or
+    // mixed-content issues. No effect on production builds.
+    proxy: {
+      '/ws': { target: 'ws://localhost:8080', ws: true },
+      '/api': { target: 'http://localhost:8080', changeOrigin: true },
+      '/invocations': { target: 'http://localhost:8080', changeOrigin: true },
+    },
   },
   build: {
     outDir: 'dist',

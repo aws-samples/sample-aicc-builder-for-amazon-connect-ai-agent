@@ -9,7 +9,7 @@ import { useEffect, useState, useCallback, Component, type ErrorInfo, type React
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Header } from './components/Header';
 import { ChatWindow } from './components/ChatWindow';
-import { ProgressSidebar } from './components/ProgressSidebar';
+import { RightPane } from './components/RightPane';
 import { SessionSidebar } from './components/SessionSidebar';
 import { LoginPage } from './pages/LoginPage';
 import { useBuilderStore } from './stores/builderStore';
@@ -221,10 +221,8 @@ function BuilderPage() {
             <ChatWindow />
           </div>
 
-          {/* Progress Sidebar - hidden on small screens, flex-shrink-0 ensures it never shrinks */}
-          <div className="hidden lg:block flex-shrink-0">
-            <ProgressSidebar />
-          </div>
+          {/* Right pane (Progress / Assets) - peer views, hidden on small screens */}
+          <RightPane />
         </div>
       </div>
     </main>

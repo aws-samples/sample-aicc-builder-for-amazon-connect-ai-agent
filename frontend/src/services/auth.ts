@@ -17,6 +17,25 @@ const userPoolId = (import.meta as any).env?.VITE_USER_POOL_ID || "";
 const clientId = (import.meta as any).env?.VITE_USER_POOL_CLIENT_ID || "";
 const region = (import.meta as any).env?.VITE_COGNITO_REGION || "ap-northeast-1";
 
+// ── Dev-only auth bypass (local E2E) ──────────────────────────────────────
+// When VITE_DEV_AUTH=1 AND running a dev build, skip Cognito entirely so the
+// app can be driven locally (e.g. Playwright) against a backend that has no
+// USER_POOL_ID set (local-dev.sh bypasses auth server-side too). NEVER active
+// in a production build: `import.meta.env.DEV` is false under `vite build`.
+export const DEV_AUTH_BYPASS: boolean =
+  Boolean((import.meta as any).env?.DEV) &&
+  String((import.meta as any).env?.VITE_DEV_AUTH || "") === "1";
+const DEV_FAKE_EMAIL = "dev@local.test";
+const DEV_FAKE_SUB = "dev-local-sub";
+// A syntactically-valid (unsigned) JWT the local backend accepts when no
+// USER_POOL_ID is configured (it only parses, never verifies, in that mode).
+const DEV_FAKE_TOKEN = "dev-local-token";
+
+if (DEV_AUTH_BYPASS) {
+  // eslint-disable-next-line no-console
+  console.warn("[auth] DEV_AUTH_BYPASS active — Cognito skipped (local dev only).");
+}
+
 // Initialize Cognito User Pool
 const poolData = {
   UserPoolId: userPoolId,
@@ -241,6 +260,7 @@ export async function getCurrentSession(): Promise<CognitoUserSession | null> {
  * Get the current ID token (for API authentication)
  */
 export async function getIdToken(): Promise<string | null> {
+  if (DEV_AUTH_BYPASS) return DEV_FAKE_TOKEN;
   const session = await getCurrentSession();
   if (!session || !session.isValid()) {
     return null;
@@ -263,6 +283,7 @@ export async function getAccessToken(): Promise<string | null> {
  * Check if the user is authenticated
  */
 export async function isAuthenticated(): Promise<boolean> {
+  if (DEV_AUTH_BYPASS) return true;
   const session = await getCurrentSession();
   return session !== null && session.isValid();
 }
@@ -271,6 +292,7 @@ export async function isAuthenticated(): Promise<boolean> {
  * Get current user's email
  */
 export function getCurrentUserEmail(): string | null {
+  if (DEV_AUTH_BYPASS) return DEV_FAKE_EMAIL;
   try {
     const pool = getUserPool();
     const currentUser = pool.getCurrentUser();
@@ -285,6 +307,7 @@ export function getCurrentUserEmail(): string | null {
  * This is stable across sessions and can be used as an actor ID
  */
 export async function getCurrentUserSub(): Promise<string | null> {
+  if (DEV_AUTH_BYPASS) return DEV_FAKE_SUB;
   const session = await getCurrentSession();
   if (!session || !session.isValid()) {
     return null;

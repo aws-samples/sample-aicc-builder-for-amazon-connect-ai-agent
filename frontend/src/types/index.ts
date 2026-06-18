@@ -133,6 +133,8 @@ export interface ProgressItem {
   subSteps?: ProgressSubStep[];
   /** Timestamp when status last changed */
   updatedAt?: number;
+  /** Which of the 4 phases this step belongs to (for grouped display) */
+  phase?: BuilderPhase;
 }
 
 export interface AssetPreview {
@@ -168,7 +170,7 @@ export interface ErrorDebugInfo {
 }
 
 export interface WebSocketMessage {
-  type: 'message' | 'typing' | 'error' | 'attachment_error' | 'session_update' | 'assets' | 'progress' | 'stream' | 'stream_end' | 'tool_status' | 'progress_update' | 'questionnaire_status' | 'template' | 'tool_start' | 'tool_end' | 'tool_input_update' | 'thinking' | 'asset_preview' | 'asset_generating' | 'asset_complete' | 'download_ready' | 'history' | 'history_injected' | 'context_injected' | 'session_created' | 'subagent_progress' | 'subagent_tool_use' | 'subagent_tool_result' | 'subagent_stream' | 'subagent_error' | 'heartbeat' | 'pong' | 'connected' | 'background_task_active' | 'phase_changed' | 'input_hint' | 'generation_cancelled' | 'generation_cancel_noop';
+  type: 'message' | 'typing' | 'error' | 'attachment_error' | 'session_update' | 'assets' | 'progress' | 'stream' | 'stream_end' | 'tool_status' | 'progress_update' | 'questionnaire_status' | 'template' | 'tool_start' | 'tool_end' | 'tool_input_update' | 'thinking' | 'asset_preview' | 'asset_generating' | 'asset_complete' | 'asset_imported' | 'download_ready' | 'history' | 'history_injected' | 'context_injected' | 'session_created' | 'subagent_progress' | 'subagent_tool_use' | 'subagent_tool_result' | 'subagent_stream' | 'subagent_error' | 'heartbeat' | 'pong' | 'connected' | 'background_task_active' | 'phase_changed' | 'input_hint' | 'generation_cancelled' | 'generation_cancel_noop';
   // Chat-input placeholder hint (backend-computed)
   placeholder?: string;
   role?: 'user' | 'assistant';
@@ -235,6 +237,16 @@ export interface WebSocketMessage {
   api_title?: string;
   flow_name?: string;
   files_count?: number;
+  // Generation scope + selected model (carried on session_created / connected)
+  scope?: string[];
+  selectedModel?: string;
+  // asset_imported: result of an importAsset action
+  lint?: {
+    ok: boolean;
+    errors: string[];
+    warnings: string[];
+    fixesApplied: number;
+  };
 }
 
 export type Language = 'en-US' | 'ko-KR' | 'ja-JP';

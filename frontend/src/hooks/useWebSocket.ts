@@ -166,7 +166,11 @@ async function getWebSocketUrl(
   idToken: string,
   sessionId: string
 ): Promise<string> {
-  const baseUrl = `wss://${window.location.host}/ws`;
+  // Match the page protocol: wss on https (prod / CloudFront), ws on http
+  // (local Vite dev server, which proxies /ws → the backend). Hardcoding wss
+  // breaks the local dev connection over plain http.
+  const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
+  const baseUrl = `${wsScheme}://${window.location.host}/ws`;
   const params = new URLSearchParams({
     token: idToken,
     sessionId: sessionId,
@@ -1409,6 +1413,59 @@ export function useWebSocket() {
           }
           break;
 
+        case "asset_imported": {
+          // Backend acknowledged an imported (and lint-repaired) asset.
+          // Store the lint summary + transition the UI into edit mode.
+          const importedType = data.assetType as 'contact_flow' | 'prompt' | undefined;
+          const lint = data.lint;
+          if (importedType) {
+            useBuilderStore.getState().setImportedAsset({
+              assetType: importedType,
+              operationId: (data.operationId || data.operation_id || '') as string,
+              fileName: (data.fileName || '') as string,
+              lint: lint
+                ? {
+                    ok: !!lint.ok,
+                    errors: lint.errors || [],
+                    warnings: lint.warnings || [],
+                    fixesApplied: lint.fixesApplied ?? 0,
+                  }
+                : { ok: true, errors: [], warnings: [], fixesApplied: 0 },
+              phase: data.phase,
+            });
+            // Scope this run to the imported asset type so progress reflects it.
+            useBuilderStore.getState().setScope([importedType]);
+            // The import lands the session in modification/post_generation mode.
+            if (data.phase) {
+              useBuilderStore.getState().setCurrentPhase(data.phase as BuilderPhase);
+            }
+            // Mark session ready so the user can immediately request edits.
+            disarmSessionReadyWatchdog();
+            useBuilderStore.getState().setSessionReady(true);
+            useBuilderStore.getState().setLoadingSession(false);
+
+            // Surface a lint summary line in the chat timeline.
+            const ko = useBuilderStore.getState().language === 'ko-KR';
+            const fixes = lint?.fixesApplied ?? 0;
+            const errCount = lint?.errors?.length ?? 0;
+            const label = importedType === 'contact_flow'
+              ? (ko ? 'Contact Flow' : 'Contact Flow')
+              : (ko ? 'AI 프롬프트' : 'AI Prompt');
+            let summary: string;
+            if (errCount > 0) {
+              summary = ko
+                ? `${label} 가져오기 완료 — 검증 오류 ${errCount}건 (자동 수정 ${fixes}건)`
+                : `Imported ${label} — ${errCount} validation issue(s), ${fixes} auto-fixed`;
+            } else {
+              summary = ko
+                ? `${label} 가져오기 및 검증 완료 (자동 수정 ${fixes}건)`
+                : `Imported & validated ${label} (${fixes} fix${fixes === 1 ? '' : 'es'} applied)`;
+            }
+            addMessage({ role: 'system', content: summary });
+          }
+          break;
+        }
+
         case "download_ready":
           // Set download URL for packaged assets (handle both snake_case and camelCase)
           const downloadUrl = data.downloadUrl || (data as any).download_url;
@@ -1484,7 +1541,15 @@ export function useWebSocket() {
           if (data.phase) {
             useBuilderStore.getState().setCurrentPhase(data.phase as BuilderPhase);
           }
-          console.log("[useWebSocket] New session created:", data.sessionId, "phase:", data.phase || "interview", "- session NOW ready");
+          // Store the active generation scope + selected model echoed by the backend.
+          // scope = [] (or full asset set) means a full build; a proper subset is a scoped run.
+          if (Array.isArray(data.scope)) {
+            useBuilderStore.getState().setScope(data.scope.length > 0 ? data.scope : null);
+          }
+          if (typeof data.selectedModel === "string" && data.selectedModel) {
+            useBuilderStore.getState().setSelectedModel(data.selectedModel);
+          }
+          console.log("[useWebSocket] New session created:", data.sessionId, "phase:", data.phase || "interview", "scope:", data.scope, "- session NOW ready");
           // Flush any outbound message the liveness probe had buffered while rotating
           if (pendingOutboundRef.current && globalWs?.readyState === WebSocket.OPEN) {
             const buffered = pendingOutboundRef.current;
@@ -1494,6 +1559,7 @@ export function useWebSocket() {
               action: "sendMessage",
               message: buffered.message,
               language: useBuilderStore.getState().language,
+              model: useBuilderStore.getState().selectedModel,
             }));
             console.log("[useWebSocket] Flushed buffered message after session rotation");
           }
@@ -1514,6 +1580,14 @@ export function useWebSocket() {
           // Restore phase from backend
           if (data.phase) {
             useBuilderStore.getState().setCurrentPhase(data.phase as BuilderPhase);
+          }
+          // Restore the active scope + selected model from the backend handshake
+          // (survives reconnect / pod restart since the backend persists them to NFS).
+          if (Array.isArray(data.scope)) {
+            useBuilderStore.getState().setScope(data.scope.length > 0 ? data.scope : null);
+          }
+          if (typeof data.selectedModel === "string" && data.selectedModel) {
+            useBuilderStore.getState().setSelectedModel(data.selectedModel);
           }
           // Restore progress from NFS-backed progressState
           if (data.progressState) {
@@ -2152,6 +2226,7 @@ export function useWebSocket() {
           action: "sendMessage",
           message,
           language: useBuilderStore.getState().language,
+          model: useBuilderStore.getState().selectedModel,
         })
       );
 
@@ -2307,6 +2382,7 @@ export function useWebSocket() {
               message,
               s3Attachments,
               language: useBuilderStore.getState().language,
+              model: useBuilderStore.getState().selectedModel,
             })
           );
 
@@ -2350,6 +2426,7 @@ export function useWebSocket() {
               message,
               attachments: attachmentData,
               language: useBuilderStore.getState().language,
+              model: useBuilderStore.getState().selectedModel,
             })
           );
 
@@ -2361,6 +2438,33 @@ export function useWebSocket() {
       }
     },
     [addMessage]
+  );
+
+  /**
+   * Import an existing asset (Contact Flow JSON / AI Prompt YAML) for editing.
+   * The backend lints/repairs it, seeds the workspace, and replies with an
+   * `asset_imported` event carrying the lint summary.
+   */
+  const importAsset = useCallback(
+    (assetType: 'contact_flow' | 'prompt', content: string, name: string): boolean => {
+      if (globalWs?.readyState !== WebSocket.OPEN) {
+        console.error("[useWebSocket] WebSocket is not connected for importAsset");
+        return false;
+      }
+      console.log("[useWebSocket] Importing asset:", assetType, name, `(${content.length} chars)`);
+      globalWs.send(
+        JSON.stringify({
+          action: "importAsset",
+          assetType,
+          content,
+          name,
+          language: useBuilderStore.getState().language,
+          model: useBuilderStore.getState().selectedModel,
+        })
+      );
+      return true;
+    },
+    []
   );
 
   const requestAssets = useCallback(() => {
@@ -2549,9 +2653,13 @@ export function useWebSocket() {
         const waitForWsAndCreateSession = () => {
           if (globalWs?.readyState === WebSocket.OPEN) {
             console.log("[useWebSocket] Sending createNewSession to backend");
+            const st = useBuilderStore.getState();
             globalWs.send(
               JSON.stringify({
                 action: "createNewSession",
+                // Scope = [] for full build, [segment] for a single segment.
+                scope: st.scope ?? [],
+                model: st.selectedModel,
               })
             );
             // DO NOT set isSessionReady here!
@@ -2984,6 +3092,7 @@ export function useWebSocket() {
     disconnect,
     sendMessage,
     sendMessageWithAttachments,
+    importAsset,
     requestAssets,
     requestProgress,
     cancelGeneration,

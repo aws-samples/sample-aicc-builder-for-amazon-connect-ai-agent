@@ -19,6 +19,47 @@ const MAX_ASSET_PREVIEWS = 50;      // Keep last 50 asset previews
 
 export type Theme = 'light' | 'dark' | 'system';
 
+// ── Model selection ──────────────────────────────────────────────────────
+// Top Bedrock Claude models the user can pick from. Default 4.8.
+// The id is sent to the backend on every outbound WS message (mirrors `language`).
+export interface ModelOption {
+  id: string;
+  label: string;
+}
+
+export const MODELS: ModelOption[] = [
+  { id: 'global.anthropic.claude-opus-4-8', label: 'Opus 4.8' },
+  { id: 'global.anthropic.claude-opus-4-7', label: 'Opus 4.7' },
+  // NOTE: 4.6 carries the `-v1` suffix in Bedrock (verified ACTIVE inference
+  // profile in ap-northeast-2); 4.7/4.8 do not. Must match the backend allowlist.
+  { id: 'global.anthropic.claude-opus-4-6-v1', label: 'Opus 4.6' },
+];
+
+export const DEFAULT_MODEL_ID = 'global.anthropic.claude-opus-4-8';
+
+// ── Start-screen mode / generation scope ─────────────────────────────────
+export type StartMode = 'full' | 'segment' | 'improve';
+export type SegmentType = 'contact_flow' | 'prompt' | 'faq';
+// Asset types that can be imported & edited from an external file.
+export type ImportAssetType = 'contact_flow' | 'prompt';
+
+/** Lint summary returned by the backend after `importAsset`. */
+export interface ImportLintResult {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  fixesApplied: number;
+}
+
+/** Result of an `asset_imported` event from the backend. */
+export interface ImportedAssetInfo {
+  assetType: ImportAssetType;
+  operationId: string;
+  fileName: string;
+  lint: ImportLintResult;
+  phase?: string;
+}
+
 interface BuilderState {
   // Theme
   theme: Theme;
@@ -69,6 +110,26 @@ interface BuilderState {
   // Language
   language: Language;
 
+  // Selected Claude model (sent on every outbound WS message)
+  selectedModel: string;
+
+  // Start-screen mode + active generation scope
+  startMode: StartMode;
+  segment: SegmentType | null;
+  // Active scope for this run (from session_created / asset_imported).
+  // null = full build (all assets). A non-null list = scoped run.
+  scope: string[] | null;
+  // Most recent imported-asset info (for the lint summary strip)
+  importedAsset: ImportedAssetInfo | null;
+
+  // Split-view asset workspace
+  // Which right-pane view is active: progress sidebar or the asset workspace.
+  rightPaneView: 'progress' | 'assets';
+  // When set, the asset workspace is open and focused on this asset key.
+  activeAssetKey: string | null;
+  // Fullscreen modal for an asset (zoom). null = closed.
+  fullscreenAssetKey: string | null;
+
   // Phase tracking
   currentPhase: BuilderPhase;
 
@@ -101,6 +162,14 @@ interface BuilderState {
   setCurrentPhase: (phase: BuilderPhase) => void;
   setInputHint: (hint: { placeholder: string; phase?: string } | null) => void;
   setLanguage: (language: Language) => void;
+  setSelectedModel: (modelId: string) => void;
+  setStartMode: (mode: StartMode) => void;
+  setSegment: (segment: SegmentType | null) => void;
+  setScope: (scope: string[] | null) => void;
+  setImportedAsset: (info: ImportedAssetInfo | null) => void;
+  setRightPaneView: (view: 'progress' | 'assets') => void;
+  setActiveAssetKey: (key: string | null) => void;
+  setFullscreenAssetKey: (key: string | null) => void;
   setTheme: (theme: Theme) => void;
   clearMessages: () => void;
   setMessages: (messages: Array<Omit<Message, 'id' | 'timestamp'> & { id?: string; timestamp?: Date }>) => void;
@@ -109,6 +178,9 @@ interface BuilderState {
   reset: () => void;
 }
 
+// The 12 progress steps, each tagged with the phase it belongs to so the
+// sidebar can group them under the 4-phase stepper (interview / generation /
+// review / post_generation).
 const initialProgress: ProgressItem[] = [
   {
     id: 'database',
@@ -116,6 +188,7 @@ const initialProgress: ProgressItem[] = [
     labelKo: '데이터베이스 분석',
     status: 'pending',
     progress: 0,
+    phase: 'interview',
   },
   {
     id: 'operations',
@@ -123,6 +196,7 @@ const initialProgress: ProgressItem[] = [
     labelKo: '작업 사양 정의',
     status: 'pending',
     progress: 0,
+    phase: 'interview',
   },
   {
     id: 'requirements',
@@ -130,48 +204,7 @@ const initialProgress: ProgressItem[] = [
     labelKo: '요구사항 분석',
     status: 'pending',
     progress: 0,
-  },
-  {
-    id: 'lambda',
-    label: 'Lambda Functions',
-    labelKo: 'Lambda 함수',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'prompt',
-    label: 'AI Prompt',
-    labelKo: 'AI 프롬프트',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'openapi',
-    label: 'OpenAPI Spec',
-    labelKo: 'OpenAPI 스펙',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'contact_flow',
-    label: 'Contact Flow',
-    labelKo: 'Contact Flow',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'cdk',
-    label: 'Infrastructure',
-    labelKo: '인프라',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'knowledge_base',
-    label: 'Knowledge Base',
-    labelKo: 'Knowledge Base',
-    status: 'pending',
-    progress: 0,
+    phase: 'interview',
   },
   {
     id: 'research',
@@ -179,6 +212,55 @@ const initialProgress: ProgressItem[] = [
     labelKo: '리서치',
     status: 'pending',
     progress: 0,
+    phase: 'interview',
+  },
+  {
+    id: 'lambda',
+    label: 'Lambda Functions',
+    labelKo: 'Lambda 함수',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'prompt',
+    label: 'AI Prompt',
+    labelKo: 'AI 프롬프트',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'openapi',
+    label: 'OpenAPI Spec',
+    labelKo: 'OpenAPI 스펙',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'contact_flow',
+    label: 'Contact Flow',
+    labelKo: 'Contact Flow',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'cdk',
+    label: 'Infrastructure',
+    labelKo: '인프라',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'knowledge_base',
+    label: 'Knowledge Base',
+    labelKo: 'Knowledge Base',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
   },
   {
     id: 'review',
@@ -186,6 +268,7 @@ const initialProgress: ProgressItem[] = [
     labelKo: '검증',
     status: 'pending',
     progress: 0,
+    phase: 'review',
   },
   {
     id: 'ready',
@@ -193,8 +276,17 @@ const initialProgress: ProgressItem[] = [
     labelKo: '패키징 & 다운로드',
     status: 'pending',
     progress: 0,
+    phase: 'post_generation',
   },
 ];
+
+// Map a scope id (contact_flow / prompt / faq) to the progress-step id it drives.
+// FAQ maps to knowledge_base (the FAQ generator's progress lane).
+export const SCOPE_TO_PROGRESS_ID: Record<string, string> = {
+  contact_flow: 'contact_flow',
+  prompt: 'prompt',
+  faq: 'knowledge_base',
+};
 
 const initialSession: SessionState = {
   companyName: null,
@@ -227,6 +319,17 @@ const getInitialLanguage = (): Language => {
   return 'ko-KR';
 };
 
+// Get initial selected model from localStorage (defaults to Opus 4.8)
+const getInitialModel = (): string => {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('selectedModel');
+    if (stored && MODELS.some((m) => m.id === stored)) {
+      return stored;
+    }
+  }
+  return DEFAULT_MODEL_ID;
+};
+
 export const useBuilderStore = create<BuilderState>((set) => ({
   // Initial state
   theme: getInitialTheme(),
@@ -249,6 +352,14 @@ export const useBuilderStore = create<BuilderState>((set) => ({
   stillProcessingCount: 0,
   workspaceRefreshTrigger: 0,
   language: getInitialLanguage(),
+  selectedModel: getInitialModel(),
+  startMode: 'full',
+  segment: null,
+  scope: null,
+  importedAsset: null,
+  rightPaneView: 'progress',
+  activeAssetKey: null,
+  fullscreenAssetKey: null,
   currentPhase: 'interview' as BuilderPhase,
   inputHint: null,
 
@@ -483,6 +594,11 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         [key]: newPreview,
       };
 
+      // Track the latest asset as the workspace's active asset so the pane has
+      // something to show when the user opens it. We do NOT force the pane open
+      // here (that would interrupt the user) — the chat marker / tab does that.
+      const nextActiveAssetKey = key;
+
       // Limit asset previews to prevent memory issues
       const keys = Object.keys(newAssetPreviews);
       if (keys.length > MAX_ASSET_PREVIEWS) {
@@ -498,7 +614,7 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         );
       }
 
-      return { assetPreviews: newAssetPreviews };
+      return { assetPreviews: newAssetPreviews, activeAssetKey: nextActiveAssetKey };
     }),
 
   completeAssetPreview: (assetKey) =>
@@ -544,6 +660,37 @@ export const useBuilderStore = create<BuilderState>((set) => ({
     }
     return set({ language });
   },
+
+  setSelectedModel: (modelId) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('selectedModel', modelId);
+    }
+    return set({ selectedModel: modelId });
+  },
+
+  setStartMode: (mode) =>
+    set((state) => ({
+      startMode: mode,
+      // Leaving segment mode clears any chosen segment.
+      segment: mode === 'segment' ? state.segment : null,
+    })),
+
+  setSegment: (segment) => set({ segment }),
+
+  setScope: (scope) => set({ scope }),
+
+  setImportedAsset: (info) => set({ importedAsset: info }),
+
+  setRightPaneView: (view) => set({ rightPaneView: view }),
+
+  setActiveAssetKey: (key) =>
+    set((state) => ({
+      activeAssetKey: key,
+      // Opening an asset always reveals the asset workspace pane.
+      rightPaneView: key ? 'assets' : state.rightPaneView,
+    })),
+
+  setFullscreenAssetKey: (key) => set({ fullscreenAssetKey: key }),
 
   setTheme: (theme) => {
     // Persist to localStorage
@@ -608,7 +755,13 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       inputHint: null,
       stillProcessingCount: 0,
       connectionError: null,
-      // Keep language as it's a user preference
+      // Scope/imported state is per-session — clear it on switch.
+      scope: null,
+      importedAsset: null,
+      activeAssetKey: null,
+      fullscreenAssetKey: null,
+      rightPaneView: 'progress',
+      // Keep language and selectedModel as user preferences
     }),
 
   reset: () =>
@@ -629,5 +782,10 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       inputHint: null,
       stillProcessingCount: 0,
       connectionError: null,
+      scope: null,
+      importedAsset: null,
+      activeAssetKey: null,
+      fullscreenAssetKey: null,
+      rightPaneView: 'progress',
     }),
 }));
