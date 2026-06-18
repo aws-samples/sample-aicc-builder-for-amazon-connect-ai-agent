@@ -2853,6 +2853,24 @@ async def handle_import_asset_ws(websocket: WebSocket, session_id: str, data: Di
     except Exception as _pe:
         logger.warning(f"[importAsset] progress seed failed: {_pe}")
 
+    # 4. Push the imported asset into the right-hand asset workspace, exactly like
+    #    normal generation does — otherwise the user only sees a toast and the pane
+    #    stays empty ("nothing was made"). This mirrors the asset_preview event the
+    #    generators stream on completion.
+    _lang = "json" if asset_type == "contact_flow" else "yaml"
+    await safe_send_json(websocket, {
+        "type": "asset_preview",
+        "sessionId": session_id,
+        "assetPreview": {
+            "assetType": asset_type,
+            "fileName": file_name,
+            "operationId": op_id,
+            "content": final_content,
+            "language": _lang,
+            "isComplete": True,
+        },
+    })
+
     await safe_send_json(websocket, {
         "type": "asset_imported",
         "sessionId": session_id,

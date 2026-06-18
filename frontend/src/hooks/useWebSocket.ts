@@ -1439,6 +1439,10 @@ export function useWebSocket() {
             });
             // Scope this run to the imported asset type so progress reflects it.
             useBuilderStore.getState().setScope([importedType]);
+            // Reveal the imported asset in the right-hand asset workspace (the
+            // preceding asset_preview event populated it) — otherwise the user
+            // only sees a toast and the pane stays on Progress.
+            useBuilderStore.getState().setRightPaneView('assets');
             // The import lands the session in modification/post_generation mode.
             if (data.phase) {
               useBuilderStore.getState().setCurrentPhase(data.phase as BuilderPhase);
