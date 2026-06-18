@@ -19,6 +19,33 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ENV_LOCAL="$SCRIPT_DIR/.env.local"
 
 # ========================================
+# Failure handling — with `set -e` a mid-deploy failure otherwise exits with no
+# context. Track the current step and, on error, print a consolidated summary
+# pointing at what failed and where to look, instead of a bare stack-trace.
+# ========================================
+CURRENT_STEP="startup"
+_on_error() {
+    local exit_code=$?
+    local line=$1
+    echo ""
+    echo -e "${RED}==========================================${NC}"
+    echo -e "${RED}  Deployment FAILED${NC}"
+    echo -e "${RED}==========================================${NC}"
+    echo -e "  Step:      ${YELLOW}${CURRENT_STEP}${NC}"
+    echo -e "  Exit code: ${YELLOW}${exit_code}${NC} (deploy.sh line ${line})"
+    echo -e "  Stage/Region: ${YELLOW}${STAGE:-dev}${NC} / ${YELLOW}${AWS_DEFAULT_REGION:-ap-northeast-2}${NC}"
+    echo ""
+    echo -e "  Common next steps:"
+    echo -e "    • Re-run with the same flags — most steps are hash-cached and resume cheaply."
+    echo -e "    • CDK failures: check the CloudFormation console for the failing resource's status reason."
+    echo -e "    • Image/ECR failures: confirm Docker is running and you can push to ECR."
+    echo -e "    • Use ${CYAN}--backend-only${NC} / ${CYAN}--frontend-only${NC} / ${CYAN}--infra-only${NC} to retry just one component."
+    echo ""
+    exit "$exit_code"
+}
+trap '_on_error $LINENO' ERR
+
+# ========================================
 # Docker Runtime Setup
 # ========================================
 setup_docker() {
@@ -398,6 +425,7 @@ ECR_REPO_NAME="$(echo "$ECS_STACK_NAME" | tr '[:upper:]' '[:lower:]')-repo"
 ECR_REPO_URI=""
 
 if [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
+    CURRENT_STEP="ECR image build & push (Step 0.5)"
     echo -e "\n${YELLOW}Step 0.5: Pre-creating ECR repository & pushing Docker image...${NC}"
 
     # 0.5a) Create ECR repo if it doesn't exist
@@ -477,6 +505,7 @@ fi
 # Step 1: Deploy CDK Infrastructure (AFTER ECR image is ready)
 # ========================================
 if [ "$DEPLOY_INFRA" = true ]; then
+    CURRENT_STEP="CDK infrastructure deploy (Step 1)"
     echo -e "\n${YELLOW}Step 1: Deploying CDK Infrastructure...${NC}"
     cd "$SCRIPT_DIR/infrastructure"
 
@@ -542,6 +571,7 @@ if [ "$DEPLOY_INFRA" = true ] && [ "$ENABLE_KNOWLEDGE_BASE" != "false" ]; then
 
         # Sync KB documents if docs directory exists
         if [ -d "$SCRIPT_DIR/knowledge-base-docs/contact-flow" ] && [ -x "$SCRIPT_DIR/scripts/sync-kb-docs.sh" ]; then
+            CURRENT_STEP="Knowledge Base doc sync (Step 1.1)"
             echo -e "${YELLOW}Step 1.1: Syncing Knowledge Base documents...${NC}"
             # Run in a subshell with `set +e` so a KB sync failure never kills
             # the whole deploy — KB is non-critical and can be retried via
@@ -572,6 +602,7 @@ fi
 ALB_DNS_NAME=""
 
 if [ "$DEPLOY_BACKEND" = true ]; then
+    CURRENT_STEP="ECS backend deploy (Step 3)"
     echo -e "\n${YELLOW}Step 3: Configuring ECS Fargate Backend...${NC}"
 
     # Extract ECS outputs (ECR_REPO_URI may already be set from Step 0.5)
@@ -697,6 +728,7 @@ fi
 # Step 4: Build and Deploy Frontend
 # ========================================
 if [ "$DEPLOY_FRONTEND" = true ]; then
+    CURRENT_STEP="Frontend build & deploy (Step 4)"
     echo -e "\n${YELLOW}Step 4: Building Frontend...${NC}"
     cd "$SCRIPT_DIR/frontend"
 

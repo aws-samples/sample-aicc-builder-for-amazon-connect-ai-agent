@@ -27,6 +27,42 @@ https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
 
 ---
 
+## What's New in v2.2
+
+Frontend model choice, segment-scoped generation, import-and-improve, a redesigned
+UI, and a contact-flow correctness pass re-verified against the live Amazon Connect
+`CreateContactFlow` API.
+
+**Choose your Claude model (all agents)**
+- A model selector in the header (switchable mid-session) and on the start screen lets you pick among the top Bedrock Claude models — **Opus 4.8** (default), **4.7**, and **4.6** — applied to the orchestrator *and* every sub-agent.
+- **API-correct per model:** Opus 4.6 still accepts `temperature`; 4.7/4.8 removed it (sending it is a 400). A central `build_model_kwargs` includes `temperature` only for models that accept it. Verified end-to-end: `temperature` is sent for 4.6 and omitted for 4.7/4.8, and all three produce flows the real Connect API accepts.
+- Model ids are the exact Bedrock inference-profile strings (4.6 carries the `-v1` suffix; 4.7/4.8 do not) and are allowlisted server-side; the selection persists per session (survives reconnect).
+
+**Generate one segment, not the whole bundle**
+- A **mode-first start screen**: *Full Build* (the classic interview → 6-asset bundle), *Single Segment* (generate just a **Contact Flow**, **AI Prompt**, or **FAQ**), or *Improve Existing*.
+- Scoped runs are enforced two ways: the orchestrator's tool list is **trimmed** to the in-scope generators (a tool it can't call can't be misused) *and* it gets a scoped system prompt. A scoped interview gathers only what the chosen asset needs.
+- Progress UI adapts: only the in-scope steps are shown; the rest are muted under "Not in this run". FAQ-only / Prompt-only / Flow-only all reach a sensible terminal state.
+
+**Improve an asset the tool didn't generate**
+- Upload an external **Contact Flow JSON** or **AI Prompt YAML**; it's validated/auto-repaired (flows via the API-verified linter), seeded into the workspace, and dropped straight into patch-only edit mode — no full interview required.
+
+**UI/UX redesign (same violet/zinc theme, calmer tone)**
+- Dark-mode is now first-class across the whole chat timeline (message/tool/thinking/sub-agent/asset bubbles were previously light-only on a dark app).
+- A **split-view asset workspace** (resizable, with an asset-tab switcher and fullscreen/zoom) opens as assets stream, instead of fragmenting them across the chat, a narrow tab, and the file tree.
+- Progress promoted to a first-class tab grouped by the 4 phases; "jump to latest" in long chats; collapsed-by-default tool calls; real download lifecycle (packaging → ready → error/retry); reskinned + localized login; broad a11y + localization pass.
+
+**Contact Flow correctness — re-verified against the live `CreateContactFlow` API**
+- Live-API validation (create → inspect `problems` → delete, on a workshop instance) caught defects the internal linter had **wrong**, now fixed and re-confirmed accepted:
+  - `UpdateContactCallbackNumber` requires exactly `InvalidCallbackNumber` + `CallbackNumberNotDialable` and rejects `NoMatchingError`/`InvalidNumber`/`NotDialable` (the linter previously believed `NoMatchingError` was valid here).
+  - `TransferContactToQueue` takes **no** queue parameter — the queue is set by a preceding `UpdateContactTargetQueue`; a `QueueId`/`QueueArn` on the transfer is rejected. The linter now strips it.
+- **RAG made robust against deploy timing:** `deploy.sh` already injects `CONTACT_FLOW_KB_ID` into the ECS task from the KB stack's CDK output, but when that output isn't resolvable at backend-deploy time (KB stack deployed separately/after, or a stale outputs file) it injects an **empty** value and RAG silently falls back to off. v2.2 adds a second, order-independent path: the KB stack publishes its id to SSM and the ECS task resolves `CONTACT_FLOW_KB_ID` from SSM at startup, so RAG turns on regardless of deploy ordering. With RAG on, freshly-generated flows import into Connect with **zero** structural fixes across Opus 4.6/4.7/4.8; the linter fixes above are the deterministic backstop for when RAG is unavailable (e.g. local dev).
+
+**Verified end-to-end (real backend + live Connect API)**
+- Full Build to completion: all 6 asset families generated and validated (Lambda compile-check, OpenAPI 3.0 schema, CloudFormation, prompt YAML, FAQ docs, Contact Flow accepted by the real API).
+- Single-Segment Prompt-only and FAQ-only runs completed; Improve-Existing import→repair→edit cycle works; model selection, scoped generation, and the temperature branch confirmed against the running app via Playwright.
+
+---
+
 ## What's New in v2.1
 
 Reliability & quality hardening from live workshop QA rounds — including a
@@ -227,7 +263,7 @@ Runtime highlights:
 - Model: **Claude Opus 4.6** on Amazon Bedrock (`global.anthropic.claude-opus-4-6-v1`) for the orchestrator and every sub-agent, with cross-region inference + prompt caching
 - WebSocket: ALB with Cognito JWT (sticky sessions, 4h idle timeout), proxied same-origin through CloudFront
 - Session storage: 3-tier — in-memory → S3 Files NFS (`/mnt/s3/`) → DynamoDB
-- Contact Flow RAG: Bedrock Knowledge Base backed by **Amazon S3 Vectors** (replaced OpenSearch Serverless in v2.1 — far lower idle cost for a small, infrequently-queried corpus)
+- Contact Flow RAG: Bedrock Knowledge Base backed by **Amazon S3 Vectors** (replaced OpenSearch Serverless in v2.1 — far lower idle cost for a small, infrequently-queried corpus). The ECS task gets `CONTACT_FLOW_KB_ID` two ways: `deploy.sh` injects it from the KB stack output, and (v2.2) the KB stack also publishes it to SSM for the task to resolve at startup — so RAG stays on even when the deploy-time output isn't resolvable (e.g. KB stack deployed separately)
 - File I/O: Direct NFS access via `/mnt/s3/` — agents read/write/patch files like a local filesystem
 - Scaling: Auto-scaling (1–10 tasks) on the `ActiveWebSocketConnections` CloudWatch metric
 
