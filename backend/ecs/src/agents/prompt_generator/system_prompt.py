@@ -119,6 +119,12 @@ messages:
    - `{{$.toolConfigurationList}}` - MCP tools list (auto-injected)
    - `{{$.Custom.firstName}}`, `{{$.Custom.customerId}}`, `{{$.Custom.email}}` - Customer info
 
+   ⛔ **EACH VARIABLE MAY APPEAR INSIDE `{{ }}` ONLY ONCE in the entire prompt.**
+   The Amazon Connect AI-prompt API rejects a prompt that references the same
+   variable inside `{{ }}` twice ("Each variable may only appear once."). If you
+   need to mention a variable again, write it WITHOUT braces (plain text). E.g.
+   first use `{{$.Custom.firstName}}`, any later mention is just `firstName`.
+
 3. **Messages Section** (REQUIRED at end)
    ```yaml
    messages:

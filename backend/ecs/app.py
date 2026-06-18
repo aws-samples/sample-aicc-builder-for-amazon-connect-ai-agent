@@ -2818,7 +2818,7 @@ async def handle_import_asset_ws(websocket: WebSocket, session_id: str, data: Di
 
     lint_summary = None
     final_content = content
-    # 1. Validate + repair contact flows against the CreateContactFlow API.
+    # 1. Validate + repair imported assets against the real Connect import APIs.
     if asset_type == "contact_flow":
         try:
             from tools.asset_linters import lint_contact_flow
@@ -2833,6 +2833,23 @@ async def handle_import_asset_ws(websocket: WebSocket, session_id: str, data: Di
             }
         except Exception as _le:
             logger.warning(f"[importAsset] lint failed (non-critical): {_le}")
+    elif asset_type == "prompt":
+        # Enforce the qconnect CreateAIPrompt rule: each variable may appear
+        # inside {{ }} only once. Strip braces from duplicates so the imported
+        # prompt imports cleanly.
+        try:
+            from tools.asset_linters import lint_ai_prompt
+            result = lint_ai_prompt(content)
+            if result.get("fixed_text"):
+                final_content = result["fixed_text"]
+            lint_summary = {
+                "ok": result.get("ok", True),
+                "errors": result.get("errors", []),
+                "warnings": result.get("warnings", []),
+                "fixesApplied": result.get("fixes_applied", []),
+            }
+        except Exception as _le:
+            logger.warning(f"[importAsset] prompt lint failed (non-critical): {_le}")
 
     # 2. Seed the file into the workspace at the canonical asset path.
     ws_path = get_asset_workspace_path(eff_sid, asset_type, file_name, operation_id=op_id)

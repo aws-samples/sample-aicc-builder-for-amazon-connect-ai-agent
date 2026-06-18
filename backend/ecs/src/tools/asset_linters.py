@@ -1230,3 +1230,60 @@ def lint_contact_flow_asset(session_id: str = "", flow_name: str = "", file_name
             f"{len(result['warnings'])} warning(s)"
         ),
     }
+
+
+# Matches an Amazon Connect AI-prompt interpolation token: {{ $.something }} or
+# {{ foo }}. Captures the inner expression (trimmed) so we can detect duplicates.
+_AI_PROMPT_VAR_RE = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+
+
+def lint_ai_prompt(prompt_text: str) -> dict:
+    """Validate an Amazon Connect AI-agent prompt against the qconnect
+    CreateAIPrompt import rules. Never raises.
+
+    The one rule the real API enforces that the generator can silently violate:
+    **each variable may appear inside `{{ }}` only ONCE per prompt.** Verified
+    against qconnect create-ai-prompt: a second `{{$.Custom.firstName}}` ->
+    ValidationException "Each variable may only appear once." A bare reference
+    (no braces) is just literal text and is always fine.
+
+    Auto-fix: keep the FIRST `{{var}}` occurrence; strip the braces from every
+    later occurrence of the SAME variable (leaving the inner expression as plain
+    text), which the API accepts. Returns {ok, errors, warnings, fixes_applied,
+    fixed_text}.
+    """
+    if not isinstance(prompt_text, str) or not prompt_text:
+        return {"ok": False, "errors": ["Empty prompt text"], "warnings": [],
+                "fixes_applied": [], "fixed_text": prompt_text or ""}
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    fixes_applied: list[str] = []
+
+    seen: set[str] = set()
+
+    def _dedupe(m: "re.Match") -> str:
+        inner = m.group(1).strip()
+        if inner in seen:
+            # Subsequent reference — strip braces so it becomes literal text,
+            # which the API accepts. This is the documented "use the bare token
+            # after the first {{...}}" behavior.
+            fixes_applied.append(
+                f"AI prompt: variable '{inner}' referenced more than once with "
+                f"{{{{ }}}} — stripped braces on the duplicate (API allows each "
+                f"variable inside {{{{ }}}} only once)"
+            )
+            return inner
+        seen.add(inner)
+        return m.group(0)
+
+    fixed_text = _AI_PROMPT_VAR_RE.sub(_dedupe, prompt_text)
+
+    ok = not errors
+    return {
+        "ok": ok,
+        "errors": errors,
+        "warnings": warnings,
+        "fixes_applied": fixes_applied,
+        "fixed_text": fixed_text,
+    }

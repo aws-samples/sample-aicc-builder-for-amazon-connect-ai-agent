@@ -470,6 +470,29 @@ Operations:
                 elif not streamer.found_code_block:
                     _stream_asset("prompt", file_name, yaml_content, agent_name)
 
+            # Import-safety lint: the Amazon Connect qconnect CreateAIPrompt API
+            # rejects a prompt where the SAME variable appears inside {{ }} more
+            # than once ("Each variable may only appear once."). The model can
+            # silently emit a duplicate. Auto-fix: keep the first {{var}}, strip
+            # braces from later duplicates (the API accepts a bare reference).
+            # Verified against the real API. Re-stream force_full so the corrected
+            # (shorter) content replaces the broken preview on the frontend.
+            ai_lint = {"ok": True, "fixes_applied": []}
+            try:
+                from tools.asset_linters import lint_ai_prompt
+                ai_lint = lint_ai_prompt(yaml_content)
+                if ai_lint.get("fixes_applied") and ai_lint.get("fixed_text") and ai_lint["fixed_text"] != yaml_content:
+                    yaml_content = ai_lint["fixed_text"]
+                    logger.info(f"[PROMPT] applied import-safety auto-fixes: {ai_lint['fixes_applied']}")
+                    try:
+                        from tools.streaming_callback import stream_asset as _stream_full
+                        _stream_full("prompt", file_name, yaml_content,
+                                     operation_id=agent_name, is_complete=True, force_full=True)
+                    except Exception as e:
+                        logger.warning(f"[PROMPT] re-stream after autofix failed: {e}")
+            except Exception as e:
+                logger.warning(f"[PROMPT] AI-prompt lint skipped: {e}")
+
             _send_progress("completed", agent_name)
             yield {
                 "type": "progress",
@@ -483,7 +506,12 @@ Operations:
                 "agent_name": agent_name,
                 "file_name": file_name,
                 "parse_method": parse_method,
-                "summary": f"Generated AI prompt for {agent_name}",
+                "lint_fixes_applied": ai_lint.get("fixes_applied", []),
+                "summary": (
+                    f"Generated AI prompt for {agent_name}"
+                    + (f" (applied {len(ai_lint['fixes_applied'])} import-safety fix(es))"
+                       if ai_lint.get("fixes_applied") else "")
+                ),
                 "_completion_marker": "SUBAGENT_COMPLETE"
             }
         else:
