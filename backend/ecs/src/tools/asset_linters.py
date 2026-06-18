@@ -598,7 +598,9 @@ REQUIRED_ERRORS_BY_TYPE = {
     "UpdateContactTargetQueue": ["NoMatchingError"],
     "UpdateContactAttributes": ["NoMatchingError"],   # API-verified: required
     "CheckHoursOfOperation": ["NoMatchingError"],     # branches via True/False Conditions; needs NoMatchingError
-    "UpdateContactCallbackNumber": ["NoMatchingError"],  # API-verified: InvalidNumber/NotDialable are NOT valid here
+    # API-verified (2026-06-18): UpdateContactCallbackNumber requires BOTH of these
+    # and rejects NoMatchingError / InvalidNumber / NotDialable.
+    "UpdateContactCallbackNumber": ["InvalidCallbackNumber", "CallbackNumberNotDialable"],
 }
 
 # Error types that are NOT valid for a given block — strip them on import.
@@ -607,6 +609,11 @@ INVALID_ERRORS_BY_TYPE = {
     "CheckHoursOfOperation": {"NoMatchingCondition"},
     # Compare branches via Conditions; its only valid Error is NoMatchingCondition.
     "Compare": {"NoMatchingError"},
+    # API-verified (CreateContactFlow problems, 2026-06-18): UpdateContactCallbackNumber
+    # accepts ONLY InvalidCallbackNumber + CallbackNumberNotDialable (both required).
+    # It rejects NoMatchingError AND the outbound-dial types (InvalidNumber/NotDialable)
+    # the LLM tends to hallucinate here — all of which trip InvalidContactFlowException.
+    "UpdateContactCallbackNumber": {"InvalidNumber", "NotDialable", "NoMatchingError"},
 }
 
 # Canonical AI-bot tool-result vocabulary (see SUBAGENT_TERMINOLOGY_AND_ESCALATION).
@@ -728,6 +735,17 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
                 inner = p["QueueId"].get("QueueId") or p["QueueId"].get("Id") or next(iter(p["QueueId"].values()), None)
                 p["QueueId"] = inner or "{{QUEUE_ARN}}"
                 fixes.append(f"[{aid}] UpdateContactTargetQueue: flattened nested QueueId → string")
+
+        # --- TransferContactToQueue: takes NO queue parameter (API-verified
+        # 2026-06-18). The target queue is set by a preceding UpdateContactTargetQueue;
+        # any QueueId/QueueArn/Queue here is rejected as "Invalid Action property name".
+        # The LLM frequently re-specifies the queue on the transfer block — strip it.
+        elif t == "TransferContactToQueue":
+            removed_q = [k for k in ("QueueId", "QueueArn", "Queue") if k in p]
+            for k in removed_q:
+                p.pop(k, None)
+            if removed_q:
+                fixes.append(f"[{aid}] TransferContactToQueue: removed invalid queue param(s) {removed_q} (queue is set via UpdateContactTargetQueue)")
 
         # --- InvokeLambdaFunction: RequestAttributes → LambdaInvocationAttributes
         elif t == "InvokeLambdaFunction":
