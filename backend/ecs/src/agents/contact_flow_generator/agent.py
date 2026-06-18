@@ -770,9 +770,25 @@ Operations:
                     json_content = flow_lint["fixed_json"]
                     logger.info(f"[CONTACT_FLOW] applied import-safety auto-fixes: {flow_lint['fixes_applied']}")
                     try:
-                        _stream_asset("contact_flow", json_file_name, json_content, flow_name)
+                        # Force a FULL re-stream: the incremental streamer already
+                        # pushed the UNREPAIRED content into the frontend's asset
+                        # preview cache (keyed by type/op/file). Without clearing it,
+                        # the diff-based stream suppresses the corrected full content
+                        # and the user downloads/imports the broken flow (e.g.
+                        # GetParticipantInput missing StoreInput / stray
+                        # DTMFConfiguration). Clear the cache so the repaired JSON
+                        # fully replaces the preview, matching what we persisted to
+                        # NFS + S3.
+                        from tools.streaming_callback import stream_asset as _stream_full, clear_asset_preview_cache as _clear_cache
+                        _clear_cache("contact_flow", json_file_name, flow_name)
+                        _stream_full("contact_flow", json_file_name, json_content,
+                                     operation_id=flow_name, is_complete=True, force_full=True)
                     except Exception as e:
                         logger.warning(f"[CONTACT_FLOW] re-stream after autofix failed: {e}")
+                        try:
+                            _stream_asset("contact_flow", json_file_name, json_content, flow_name)
+                        except Exception:
+                            pass
                 if not flow_lint["ok"]:
                     logger.warning(f"[CONTACT_FLOW] structural lint errors: {flow_lint['errors'][:5]}")
             except Exception as e:

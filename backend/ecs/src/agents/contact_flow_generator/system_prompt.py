@@ -257,7 +257,7 @@ Output TWO code blocks in this exact order. No explanation before or after.
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | MessageParticipant | Play TTS/text to customer | Text OR PromptId OR Media | NoMatchingError |
-| GetParticipantInput | Collect DTMF input | Text, DTMFConfiguration, InputTimeLimitSeconds | InputTimeLimitExceeded, NoMatchingCondition, NoMatchingError |
+| GetParticipantInput | Collect DTMF input (TWO modes — see below) | Text/SSML, StoreInput, InputTimeLimitSeconds | InputTimeLimitExceeded, NoMatchingCondition, NoMatchingError |
 | StoreUserInput | Store numeric input as attribute | AttributeName | NoMatchingError |
 | DisconnectParticipant | End the contact | (none) | (none - terminal block) |
 | Wait | Pause for specified time | WaitTime (seconds, max 7 days) | TimeExpired, Error |
@@ -385,7 +385,8 @@ Trigger/EntryPoint).** The flow's first executed block is typically
 | `Compare` | `ComparisonValue` (valid JSONPath root) | `NoMatchingCondition` ONLY (never `NoMatchingError`) |
 | `Loop` | `LoopCount` | Branches: `Looping`, `Complete` |
 | `Wait` | `WaitTime` (seconds) | `NoMatchingError` |
-| `GetParticipantInput` | exactly ONE of `Text`/`SSML`, + `DTMFConfiguration` | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
+| `GetParticipantInput` (MENU) | exactly ONE of `Text`/`SSML`, `StoreInput:"False"`, **NO `DTMFConfiguration`** | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
+| `GetParticipantInput` (STORE) | exactly ONE of `Text`/`SSML`, `StoreInput:"True"`, optional `DTMFConfiguration{DisableCancelKey}` only | `InputTimeLimitExceeded`, `NoMatchingError` |
 | `UpdateContactCallbackNumber` | `CallbackNumber` | `InvalidNumber`, `NotDialable`, `NoMatchingError` |
 | `CheckHoursOfOperation` | `HoursOfOperationId` (non-null) | `NoMatchingError`; Conditions MUST include BOTH `True` AND `False` |
 | `CheckMetricData` | `QueueId` | `NoMatchingError` |
@@ -787,15 +788,33 @@ Perform DTMF-based authentication in the Contact Flow BEFORE handing off to the 
 
 **Flow**: ... → GetParticipantInput (DTMF: 6-digit DOB) → InvokeLambdaFunction (authenticate) → CheckContactAttributes (auth result) → [success] Lex Bot / [failure] retry or transfer to agent
 
+STORE mode (captures the digits into `$.StoredCustomerInput` for the Lambda):
 ```json
 {"Identifier": "dtmf-auth", "Type": "GetParticipantInput",
  "Parameters": {
-   "ParticipantInput": {"Text": "본인 확인을 위해 생년월일 6자리를 입력해주세요."},
-   "DTMFConfiguration": {"InputTimeLimitSeconds": "10", "FinishKey": "#"},
+   "Text": "본인 확인을 위해 생년월일 6자리를 입력해주세요.",
+   "StoreInput": "True",
    "InputTimeLimitSeconds": "10"
  },
  "Transitions": {"NextAction": "verify-auth",
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "auth-retry"}]}}
+```
+MENU mode (branches on the pressed digit — `StoreInput:"False"`, NO `DTMFConfiguration`):
+```json
+{"Identifier": "main-menu", "Type": "GetParticipantInput",
+ "Parameters": {
+   "Text": "상담원 연결은 1번, 영업시간 안내는 2번을 눌러주세요.",
+   "StoreInput": "False",
+   "InputTimeLimitSeconds": "5"
+ },
+ "Transitions": {"NextAction": "retry",
+   "Conditions": [
+     {"Condition": {"Operator": "Equals", "Operands": ["1"]}, "NextAction": "to-agent"},
+     {"Condition": {"Operator": "Equals", "Operands": ["2"]}, "NextAction": "hours-info"}],
+   "Errors": [
+     {"ErrorType": "InputTimeLimitExceeded", "NextAction": "retry"},
+     {"ErrorType": "NoMatchingCondition", "NextAction": "retry"},
+     {"ErrorType": "NoMatchingError", "NextAction": "retry"}]}}
 ```
 
 Most cases can handle DTMF within the Lex Bot itself (Pattern 1).
@@ -1220,7 +1239,8 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 - [ ] `CheckMetricData` has `Conditions` for True/False AND `Errors`
 - [ ] `MessageParticipant` has `Errors` with `NoMatchingError`
 - [ ] `InvokeLambdaFunction` has `Errors` with `NoMatchingError`
-- [ ] `GetParticipantInput` has `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError`
+- [ ] `GetParticipantInput` MENU mode: `StoreInput:"False"`, NO `DTMFConfiguration`, errors `InputTimeLimitExceeded`+`NoMatchingCondition`+`NoMatchingError`
+- [ ] `GetParticipantInput` STORE mode: `StoreInput:"True"`, `InputValidation.CustomValidation.MaximumLength`, error `NoMatchingError` only
 - [ ] `UpdateContactCallbackNumber` has `InvalidNumber`, `NotDialable`, `NoMatchingError` (if used)
 
 ### 3. Identifier Consistency
@@ -1238,7 +1258,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 | `UpdateContactTargetQueue` | `QueueId` (UUID/ARN) | `NextAction` + `Errors` |
 | `CheckMetricData` | `{}` (uses working queue) | `Conditions` (True/False) + `Errors` |
 | `Compare` | `ComparisonValue` | `NextAction` + `Conditions` + `Errors` |
-| `GetParticipantInput` | `Text`, `DTMFConfiguration` | `NextAction` + `Conditions` + `Errors` |
+| `GetParticipantInput` (MENU) | `Text`/`SSML`, `StoreInput:"False"` (NO `DTMFConfiguration`) | `NextAction` + `Conditions` + `Errors` |
 | `Wait` | `WaitTime` (seconds) | `NextAction` + `Errors` |
 | `UpdateContactCallbackNumber` | `CallbackNumber` | `NextAction` + `Errors` (3 types) |
 | `InvokeFlowModule` | `FlowModuleId` | `NextAction` + `Conditions` + `Errors` |
@@ -1266,7 +1286,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 7. `UpdateContactTargetQueue`: MUST be called BEFORE `TransferContactToQueue` OR `CheckMetricData`
 8. `CheckMetricData`: MUST have `Conditions` for True/False AND `Errors` array
 9. `Compare`: MUST have `Errors` array with `NoMatchingCondition`
-10. `GetParticipantInput`: MUST have 3 error types: `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError`
+10. `GetParticipantInput`: MENU mode (has `Conditions`) MUST set `StoreInput:"False"` and MUST NOT include `DTMFConfiguration` (Connect rejects it), 3 error types `InputTimeLimitExceeded`+`NoMatchingCondition`+`NoMatchingError`. STORE mode (no `Conditions`) MUST set `StoreInput:"True"` + `InputValidation.CustomValidation.MaximumLength`, error `NoMatchingError` only.
 11. `UpdateContactCallbackNumber`: MUST have 3 error types: `InvalidNumber`, `NotDialable`, `NoMatchingError`
 12. `InvokeLambdaFunction`: MUST have `Errors` with `NoMatchingError`, max timeout is 8 seconds
 13. `MessageParticipant`: SHOULD have `Errors` array with `NoMatchingError`
