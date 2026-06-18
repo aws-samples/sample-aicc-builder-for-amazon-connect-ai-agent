@@ -43,9 +43,6 @@ import { cn } from '../lib/utils';
 import type { ProgressItem, ProgressSubStep, BuilderPhase } from '../types';
 import { PHASE_LABELS, PHASE_ORDER } from '../types';
 
-// Progress steps that are always relevant regardless of scope (interview +
-// review + packaging). Scope only trims the per-asset generation lanes.
-const ALWAYS_IN_SCOPE = new Set(['database', 'operations', 'requirements', 'research', 'review', 'ready']);
 import { useWebSocket } from '../hooks/useWebSocket';
 import { fetchAssetDownloadUrl } from '../services/workspaceApi';
 import { createZip, downloadBlob } from '../lib/zipUtils';
@@ -198,14 +195,18 @@ export function ProgressSidebar() {
   const [activeTab, setActiveTab] = useState<TabType>('assets');
   const [isExpanded, setIsExpanded] = useState(false);
 
-  // Scope-aware partition: when a scope is active, the in-scope generation
-  // lanes plus the always-relevant steps are shown; everything else is muted
-  // under "Not in this run".
+  // Scope-aware partition.
+  // - Full build (no scope): show all 12 steps.
+  // - Single-segment scope: show ONLY the in-scope generation lane(s) plus the
+  //   final 'ready' (package/download) step. The interview/research/review steps
+  //   (database/operations/requirements/research/review) don't apply to a focused
+  //   single-asset run, so they're moved to the muted "Not in this run" section —
+  //   the progress bar reflects just the one asset the user asked for.
   const inScopeProgressIds = scope
-    ? new Set(scope.map((s) => SCOPE_TO_PROGRESS_ID[s] || s))
+    ? new Set([...scope.map((s) => SCOPE_TO_PROGRESS_ID[s] || s), 'ready'])
     : null;
   const isStepInScope = (item: ProgressItem) =>
-    !inScopeProgressIds || ALWAYS_IN_SCOPE.has(item.id) || inScopeProgressIds.has(item.id);
+    !inScopeProgressIds || inScopeProgressIds.has(item.id);
 
   const inScopeSteps = progress.filter(isStepInScope);
   const outOfScopeSteps = inScopeProgressIds ? progress.filter((p) => !isStepInScope(p)) : [];
