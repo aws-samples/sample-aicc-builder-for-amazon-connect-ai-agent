@@ -25,6 +25,10 @@ const env = {
 const mainStackId = `AiccBuilderStack${suffix}`;
 const ecsStackId = `AiccBuilderEcs${suffix}`;
 const albDnsSsmParamName = `/aicc-builder${suffix}/alb-dns`;
+// KB id published by KnowledgeBaseStack, read by the ECS task to enable Contact
+// Flow RAG (CONTACT_FLOW_KB_ID). SSM decouples the optional, later-deployed KB
+// stack from the ECS stack (same pattern as albDnsSsmParamName).
+const contactFlowKbIdSsmParamName = `/aicc-builder${suffix}/contact-flow-kb-id`;
 
 // Main AICC Builder Stack first — owns AssetsBucket, Cognito, CloudFront, Lambda API.
 // CloudFront reads ALB DNS via SSM dynamic reference (no CFN cross-stack edge).
@@ -43,6 +47,7 @@ new EcsStack(app, ecsStackId, {
   ecrRepoName,
   assetsBucket: mainStack.assetsBucket,
   albDnsSsmParamName,
+  contactFlowKbIdSsmParamName,
 });
 
 // Knowledge Base Stack for Contact Flow Generator RAG
@@ -55,6 +60,8 @@ if (enableKnowledgeBase) {
     // name can be made unique per region (IAM roles are global; same stack name
     // across regions would otherwise collide). See knowledge-base-stack.ts.
     resolvedRegion: env.region,
+    // Publish the KB id to SSM for the ECS task to consume (RAG enablement).
+    kbIdSsmParamName: contactFlowKbIdSsmParamName,
   });
 }
 
