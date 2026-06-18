@@ -50,6 +50,13 @@ _ASSET_FOLDER_TO_TYPE = {
     "cloudformation": "cdk",
     "cdk": "cdk",
     "faq": "faq",
+    # FAQ docs are written under knowledge-base/ (hyphen) or knowledge_base/.
+    # The frontend Asset Workspace renders these under the "faq" tab, so map
+    # them to "faq" — otherwise an FAQ written via a workspace-file tool (rather
+    # than save_faq_document) shows in the left File Explorer + chat but the
+    # right Asset Workspace stays empty.
+    "knowledge-base": "faq",
+    "knowledge_base": "faq",
 }
 
 
