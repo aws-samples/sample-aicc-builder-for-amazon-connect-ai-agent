@@ -9,7 +9,7 @@
  * SyntaxHighlighter only for completed JSON view.
  */
 
-import { useState, useRef, useMemo, lazy, Suspense } from 'react';
+import { useState, useRef, useMemo, useEffect, lazy, Suspense } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import {
   Workflow,
@@ -66,6 +66,10 @@ function parseContactFlowContent(content: string): ParsedContent {
 
 export function ContactFlowPreview({ preview, language = 'ko-KR' }: ContactFlowPreviewProps) {
   const [copied, setCopied] = useState(false);
+  // Default to the diagram tab, but fall back to JSON when there's no mermaid
+  // (e.g. a rehydrated or imported flow that is pure JSON). Otherwise the body
+  // renders nothing — the diagram tab/content is gated on parsedContent.mermaid,
+  // so an activeTab of 'diagram' with no diagram shows an empty card.
   const [activeTab, setActiveTab] = useState<string>('diagram');
   const contentRef = useRef<HTMLDivElement>(null);
   const setFullscreenAssetKey = useBuilderStore((s) => s.setFullscreenAssetKey);
@@ -75,6 +79,15 @@ export function ContactFlowPreview({ preview, language = 'ko-KR' }: ContactFlowP
   const isLazyLoading = !!(preview.s3Key && !preview.content);
 
   const parsedContent = useMemo(() => parseContactFlowContent(preview.content), [preview.content]);
+
+  // If the active tab is 'diagram' but this flow has no mermaid diagram, switch
+  // to the JSON tab so content is actually visible. Runs when content/parse
+  // changes (covers async lazy-loaded content too).
+  useEffect(() => {
+    if (activeTab === 'diagram' && !parsedContent.mermaid) {
+      setActiveTab('json');
+    }
+  }, [activeTab, parsedContent.mermaid]);
 
   // Use content directly - no typewriter animation
   const content = preview.content;
