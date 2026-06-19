@@ -632,6 +632,14 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         newPreview.messageIndex = preview.messageIndex ?? state.messages.length;
       }
 
+      // Preserve a previously-merged mermaid diagram: a later event for the same
+      // contact_flow (e.g. the message-log replay re-emitting the original
+      // generation event after rehydration already merged the diagram) must not
+      // drop diagramContent. Carry it forward unless the incoming event sets one.
+      if (!newPreview.diagramContent && state.assetPreviews[key]?.diagramContent) {
+        newPreview.diagramContent = state.assetPreviews[key].diagramContent;
+      }
+
       let newAssetPreviews = {
         ...state.assetPreviews,
         [key]: newPreview,
