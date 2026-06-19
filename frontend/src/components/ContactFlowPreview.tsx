@@ -80,14 +80,28 @@ export function ContactFlowPreview({ preview, language = 'ko-KR' }: ContactFlowP
 
   const parsedContent = useMemo(() => parseContactFlowContent(preview.content), [preview.content]);
 
-  // If the active tab is 'diagram' but this flow has no mermaid diagram, switch
-  // to the JSON tab so content is actually visible. Runs when content/parse
-  // changes (covers async lazy-loaded content too).
+  // The mermaid diagram is streamed as a SEPARATE asset and merged onto this
+  // preview as diagramContent (see builderStore.updateAssetPreview). Prefer that;
+  // fall back to a mermaid block embedded in the content (legacy). diagramContent
+  // may be raw `graph ...` OR a fenced ```mermaid block (live gen wraps it,
+  // the persisted file is raw) — normalize to the raw chart MermaidDiagram wants.
+  const mermaidChart = useMemo(() => {
+    const raw = preview.diagramContent;
+    if (raw) {
+      const fenced = raw.match(/```\s*mermaid\s*[\r\n]+([\s\S]*?)[\r\n]+\s*```/i);
+      return (fenced ? fenced[1] : raw).trim();
+    }
+    return parsedContent.mermaid;
+  }, [preview.diagramContent, parsedContent.mermaid]);
+
+  // If the active tab is 'diagram' but this flow has no diagram, switch to the
+  // JSON tab so content is actually visible. Runs when content/diagram changes
+  // (covers diagram arriving after the JSON, and async lazy-loaded content).
   useEffect(() => {
-    if (activeTab === 'diagram' && !parsedContent.mermaid) {
+    if (activeTab === 'diagram' && !mermaidChart) {
       setActiveTab('json');
     }
-  }, [activeTab, parsedContent.mermaid]);
+  }, [activeTab, mermaidChart]);
 
   // Use content directly - no typewriter animation
   const content = preview.content;
@@ -95,7 +109,7 @@ export function ContactFlowPreview({ preview, language = 'ko-KR' }: ContactFlowP
   const isStreaming = !preview.isComplete;
 
   const handleCopy = async () => {
-    const contentToCopy = activeTab === 'json' ? (parsedContent.json || content) : (parsedContent.mermaid || content);
+    const contentToCopy = activeTab === 'json' ? (parsedContent.json || content) : (mermaidChart || content);
     await navigator.clipboard.writeText(contentToCopy);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -171,7 +185,7 @@ export function ContactFlowPreview({ preview, language = 'ko-KR' }: ContactFlowP
         ) : (
         <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
           <Tabs.List className="flex border-b border-green-200 dark:border-green-800 bg-green-100/50 dark:bg-green-900/30">
-            {parsedContent.mermaid && (
+            {mermaidChart && (
               <Tabs.Trigger value="diagram" className={cn('flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px', activeTab === 'diagram' ? 'border-green-600 text-green-700 dark:text-green-300 bg-white dark:bg-surface-850' : 'border-transparent text-green-600 dark:text-green-400 hover:text-green-700 dark:hover:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/40')}>
                 <Eye className="w-4 h-4" />{language === 'ko-KR' ? '다이어그램' : 'Diagram'}
               </Tabs.Trigger>
@@ -181,7 +195,7 @@ export function ContactFlowPreview({ preview, language = 'ko-KR' }: ContactFlowP
             </Tabs.Trigger>
           </Tabs.List>
 
-          {parsedContent.mermaid && (
+          {mermaidChart && (
             <Tabs.Content value="diagram" className="relative">
               {isStreaming && (
                 <div className="absolute top-2 right-2 z-10">
@@ -192,7 +206,7 @@ export function ContactFlowPreview({ preview, language = 'ko-KR' }: ContactFlowP
                 </div>
               )}
               <div className="max-h-[70vh] overflow-auto bg-white dark:bg-surface-900">
-                <MermaidDiagram chart={parsedContent.mermaid} language={language} className="min-h-[300px]" />
+                <MermaidDiagram chart={mermaidChart} language={language} className="min-h-[300px]" />
               </div>
             </Tabs.Content>
           )}

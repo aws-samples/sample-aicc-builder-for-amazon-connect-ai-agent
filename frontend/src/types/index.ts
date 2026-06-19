@@ -157,6 +157,9 @@ export interface AssetPreview {
   previousCreatedAt?: number; // Timestamp of the previous version
   // Diff support - unified diff from workspace modifications
   diffContent?: string; // Unified diff text (from patch_workspace_file or write_with_diff)
+  // Contact Flow diagram: the sibling mermaid asset (same operationId) is merged
+  // onto the contact_flow preview so ContactFlowPreview can render the Diagram tab.
+  diagramContent?: string; // Mermaid diagram source (graph ...) for contact_flow previews
 }
 
 /** Debug information sent with error messages */

@@ -475,6 +475,35 @@ export const useBuilderStore = create<BuilderState>((set) => ({
 
   updateAssetPreview: (preview) =>
     set((state) => {
+      // Contact Flow diagram: the mermaid asset is streamed SEPARATELY from the
+      // contact_flow JSON (same operationId). Merge it onto the matching
+      // contact_flow preview as diagramContent so ContactFlowPreview can render
+      // the Diagram tab. The standalone 'mermaid' assetType has no tab of its own.
+      if (preview.assetType === 'mermaid') {
+        const cfKey = Object.keys(state.assetPreviews).find(k => {
+          const p = state.assetPreviews[k];
+          return p.assetType === 'contact_flow' &&
+            (!preview.operationId || p.operationId === preview.operationId);
+        });
+        if (cfKey) {
+          return {
+            assetPreviews: {
+              ...state.assetPreviews,
+              [cfKey]: { ...state.assetPreviews[cfKey], diagramContent: preview.content },
+            },
+          };
+        }
+        // contact_flow not in yet — stash the mermaid under a holder key so the
+        // contact_flow branch below can adopt it when it arrives.
+        const holderKey = `__pending_mermaid-${preview.operationId || 'default'}`;
+        return {
+          assetPreviews: {
+            ...state.assetPreviews,
+            [holderKey]: { ...preview, createdAt: Date.now() },
+          },
+        };
+      }
+
       // Handle diff events: attach diffContent to existing preview for the same fileName
       if (preview.operationId === 'diff' && preview.fileName) {
         // Find existing preview with matching fileName (any operationId)
@@ -607,6 +636,22 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         ...state.assetPreviews,
         [key]: newPreview,
       };
+
+      // If this is a contact_flow and a sibling mermaid arrived first, adopt it
+      // (and drop the holder) so the Diagram tab renders.
+      if (newPreview.assetType === 'contact_flow' && !newPreview.diagramContent) {
+        const holderKey = Object.keys(newAssetPreviews).find(k =>
+          k.startsWith('__pending_mermaid-') &&
+          (newAssetPreviews[k].operationId || 'default') === (newPreview.operationId || 'default'));
+        // also accept a generic holder if no op-specific match
+        const fallbackHolder = holderKey || Object.keys(newAssetPreviews).find(k => k.startsWith('__pending_mermaid-'));
+        const useHolder = holderKey || fallbackHolder;
+        if (useHolder && newAssetPreviews[useHolder]) {
+          newPreview.diagramContent = newAssetPreviews[useHolder].content;
+          newAssetPreviews = { ...newAssetPreviews, [key]: newPreview };
+          delete newAssetPreviews[useHolder];
+        }
+      }
 
       // Track the latest asset as the workspace's active asset so the pane has
       // something to show when the user opens it. We do NOT force the pane open
