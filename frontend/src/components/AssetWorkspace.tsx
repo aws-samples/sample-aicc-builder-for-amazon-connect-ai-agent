@@ -48,23 +48,38 @@ export function AssetWorkspace({ language, onClose }: AssetWorkspaceProps) {
   const setFullscreenAssetKey = useBuilderStore((s) => s.setFullscreenAssetKey);
   const ko = language === 'ko-KR';
 
-  // Group the latest preview per tab id (Connect-centric assets first).
+  // Group ALL previews by tab id (a type can have several assets — e.g. one
+  // Lambda per operation). Each tab keeps its full item list (newest first) so
+  // a sub-selector can expose every file; the tab's representative is the newest.
   const tabs = useMemo(() => {
-    const byTab = new Map<string, { key: string; preview: AssetPreview }>();
+    const byTab = new Map<string, Array<{ key: string; preview: AssetPreview }>>();
     for (const [key, preview] of Object.entries(assetPreviews)) {
+      // Skip internal holder keys (e.g. __pending_mermaid-*) that have no tab.
+      if (key.startsWith('__')) continue;
       const tabId = tabIdFor(preview.assetType);
       if (!tabId) continue;
-      const existing = byTab.get(tabId);
-      // Prefer the most recently created preview for each tab.
-      if (!existing || (preview.createdAt || 0) >= (existing.preview.createdAt || 0)) {
-        byTab.set(tabId, { key, preview });
-      }
+      const list = byTab.get(tabId) || [];
+      list.push({ key, preview });
+      byTab.set(tabId, list);
+    }
+    // Sort each tab's items newest-first; de-dup by operationId/fileName keeping newest.
+    for (const [tabId, list] of byTab) {
+      const seen = new Set<string>();
+      const deduped = list
+        .sort((a, b) => (b.preview.createdAt || 0) - (a.preview.createdAt || 0))
+        .filter((it) => {
+          const id = `${it.preview.operationId || ''}|${it.preview.fileName || ''}`;
+          if (seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+      byTab.set(tabId, deduped);
     }
     // Stable, Connect-first order.
     const order = ['contact_flow', 'prompt', 'faq', 'openapi', 'lambda', 'cdk'];
     return order
       .filter((id) => byTab.has(id))
-      .map((id) => ({ tabId: id, ...byTab.get(id)! }));
+      .map((id) => ({ tabId: id, items: byTab.get(id)!, key: byTab.get(id)![0].key, preview: byTab.get(id)![0].preview }));
   }, [assetPreviews]);
 
   // Resolve the active preview from the active key, else fall back to first tab.
@@ -74,8 +89,17 @@ export function AssetWorkspace({ language, onClose }: AssetWorkspaceProps) {
       const tabId = tabIdFor(preview.assetType);
       if (tabId) return { tabId, key: activeAssetKey, preview };
     }
-    return tabs[0] || null;
+    return tabs[0] ? { tabId: tabs[0].tabId, key: tabs[0].key, preview: tabs[0].preview } : null;
   }, [activeAssetKey, assetPreviews, tabs]);
+
+  // Items belonging to the active tab (for the per-tab sub-selector).
+  const activeTabItems = useMemo(() => {
+    if (!active) return [];
+    return tabs.find((t) => t.tabId === active.tabId)?.items || [];
+  }, [tabs, active]);
+
+  // Short label for a sub-item chip: prefer operationId, else fileName.
+  const itemLabel = (p: AssetPreview) => p.operationId || p.fileName || '';
 
   // Keep activeAssetKey pointing at a valid preview.
   useEffect(() => {
@@ -116,7 +140,7 @@ export function AssetWorkspace({ language, onClose }: AssetWorkspaceProps) {
       {/* Asset-tab strip */}
       {tabs.length > 0 && (
         <div className="flex items-center gap-1 px-3 py-2 border-b border-surface-200 dark:border-surface-700 overflow-x-auto flex-shrink-0">
-          {tabs.map(({ tabId, key }) => {
+          {tabs.map(({ tabId, key, items }) => {
             const meta = TAB_META[tabId];
             const Icon = meta.icon;
             const isActive = active?.tabId === tabId;
@@ -134,6 +158,37 @@ export function AssetWorkspace({ language, onClose }: AssetWorkspaceProps) {
               >
                 <Icon className="w-3.5 h-3.5" />
                 {ko ? meta.labelKo : meta.label}
+                {items.length > 1 && (
+                  <span className="ml-0.5 px-1 rounded-full text-[10px] leading-none py-0.5 bg-surface-200 dark:bg-surface-700 text-surface-600 dark:text-surface-300">
+                    {items.length}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Per-tab sub-selector: when a type has multiple assets (e.g. one Lambda
+          per operation), let the user pick which file. Hidden for single-asset tabs. */}
+      {activeTabItems.length > 1 && (
+        <div className="flex items-center gap-1 px-3 py-1.5 border-b border-surface-200 dark:border-surface-700 overflow-x-auto flex-shrink-0 bg-surface-50 dark:bg-surface-900/40">
+          {activeTabItems.map(({ key, preview }) => {
+            const isActive = active?.key === key;
+            return (
+              <button
+                key={key}
+                onClick={() => setActiveAssetKey(key)}
+                className={cn(
+                  'px-2 py-1 rounded-md text-[11px] font-mono whitespace-nowrap transition-colors',
+                  isActive
+                    ? 'bg-primary-100 dark:bg-primary-900/40 text-primary-700 dark:text-primary-300'
+                    : 'text-surface-500 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-800'
+                )}
+                aria-pressed={isActive}
+                title={itemLabel(preview)}
+              >
+                {itemLabel(preview)}
               </button>
             );
           })}
