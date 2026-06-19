@@ -1670,6 +1670,87 @@ def _format_tool_result_summary(result_dict: dict) -> str:
     return json.dumps(result_dict, ensure_ascii=False, default=str)[:500]
 
 
+# Folders under assets/{session}/ whose files the right-hand Asset Workspace
+# renders as tabs, mapped to the canonical assetType the frontend keys on. Used
+# to rehydrate a restored session: persisted assets only ever reached the pane
+# via live asset_preview events during generation, so reopening a finished
+# project showed an EMPTY Asset Workspace even though every asset is in S3/NFS.
+_REHYDRATE_FOLDER_TO_TYPE = {
+    "contact_flow": "contact_flow",
+    "prompt": "prompt",
+    "openapi": "openapi",
+    "lambda": "lambda",
+    "cloudformation": "cdk",
+    "cdk": "cdk",
+    "faq": "faq",
+    "knowledge-base": "faq",
+    "knowledge_base": "faq",
+}
+_REHYDRATE_EXT_TO_LANG = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript",
+    ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".md": "markdown",
+}
+
+
+async def _rehydrate_assets_for_display(websocket: WebSocket, session_id: str) -> int:
+    """On session restore, replay persisted assets into the right Asset Workspace.
+
+    Lists the session's assets, and for each one whose folder maps to a
+    renderable asset type emits an `asset_preview` (the same event generators
+    stream on completion). The frontend's updateAssetPreview dedupes by
+    type/op/file, so this is idempotent with any live events. Best-effort: never
+    raises into the connect path.
+    """
+    try:
+        from tools.s3_asset_storage import list_session_assets, get_asset_from_s3
+        keys = list_session_assets(session_id) or []
+        emitted = 0
+        seen: set = set()
+        for key in keys:
+            # key: assets/{session}/{folder}/[op/]{file}
+            parts = [p for p in str(key).split("/") if p]
+            if len(parts) < 4 or parts[0] != "assets":
+                continue
+            folder = parts[2]
+            c_type = _REHYDRATE_FOLDER_TO_TYPE.get(folder)
+            if not c_type:
+                continue  # skip specs/state/context/operation_spec/review/etc.
+            file_name = parts[-1]
+            op_id = parts[3] if len(parts) >= 5 else ""
+            dedupe_key = (c_type, op_id, file_name)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            try:
+                content = get_asset_from_s3(key)
+            except Exception:
+                content = None
+            if not content:
+                continue
+            ext = os.path.splitext(file_name)[1].lower()
+            language = _REHYDRATE_EXT_TO_LANG.get(ext, "text")
+            await safe_send_json(websocket, {
+                "type": "asset_preview",
+                "sessionId": session_id,
+                "assetPreview": {
+                    "assetType": c_type,
+                    "fileName": file_name,
+                    "operationId": op_id,
+                    "content": content,
+                    "language": language,
+                    "isComplete": True,
+                    "rehydrated": True,
+                },
+            })
+            emitted += 1
+        if emitted:
+            logger.info(f"[WS] Rehydrated {emitted} asset(s) into the Asset Workspace for {session_id}")
+        return emitted
+    except Exception as e:
+        logger.warning(f"[WS] asset rehydrate failed (non-critical) for {session_id}: {e}")
+        return 0
+
+
 # ========================================
 # WebSocket Endpoint
 # ========================================
@@ -1706,9 +1787,11 @@ async def websocket_handler(
     })
 
     # Check for running background task and reattach WebSocket
+    _bg_active = False
     async with _background_tasks_lock:
         bg = _background_tasks.get(session_id)
         if bg and not bg["task"].done():
+            _bg_active = True
             logger.info(f"[WS] Reattaching WebSocket to running background task for {session_id}")
             bg["ws_holder"]["ws"] = websocket
             await safe_send_json(websocket, {
@@ -1716,6 +1799,13 @@ async def websocket_handler(
                 "sessionId": session_id,
                 "message": "Agent is still processing your request...",
             })
+
+    # Rehydrate persisted assets into the right Asset Workspace on (re)open.
+    # Skip when a generation is mid-flight — it will stream its own live events
+    # (and rehydrating now would race the in-progress writes). The frontend
+    # dedupes by asset key, so this is safe alongside any later live events.
+    if not _bg_active:
+        await _rehydrate_assets_for_display(websocket, session_id)
 
     client_connected = True
 
