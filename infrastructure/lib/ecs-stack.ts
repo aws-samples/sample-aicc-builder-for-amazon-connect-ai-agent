@@ -230,6 +230,20 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
+    // Amazon Bedrock AgentCore Gateway — web search for the Research and
+    // Contact Flow agents (replaces the old Brave Search API). The gateway and
+    // its Web Search connector target are created out-of-band in us-east-1 (the
+    // only region Web Search is GA), so the ARN isn't known at synth time —
+    // scope to any gateway in us-east-1 within this account.
+    taskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["bedrock-agentcore:InvokeGateway"],
+        resources: [
+          `arn:aws:bedrock-agentcore:us-east-1:${this.account}:gateway/*`,
+        ],
+      })
+    );
+
     // Allow the task to resolve the Contact Flow KB id from SSM at runtime
     // (CONTACT_FLOW_KB_ID). Published by KnowledgeBaseStack; absent when the KB
     // stack is disabled, in which case the backend simply leaves RAG off.
@@ -284,6 +298,10 @@ export class EcsStack extends cdk.Stack {
         ...(props?.contactFlowKbIdSsmParamName
           ? { CONTACT_FLOW_KB_ID_SSM_PARAM: props.contactFlowKbIdSsmParamName }
           : {}),
+        // Web search via Amazon Bedrock AgentCore Gateway (us-east-1). The
+        // endpoint is patched in by deploy.sh (from AGENTCORE_GATEWAY_URL);
+        // when empty the agents fall back to built-in knowledge.
+        AGENTCORE_GATEWAY_REGION: "us-east-1",
       },
       portMappings: [
         { containerPort: 8080, protocol: ecs.Protocol.TCP },

@@ -24,7 +24,7 @@ Your findings will be used by other agents to:
 
 ## AVAILABLE TOOLS
 
-1. **brave_web_search**: Search the web using Brave Search API
+1. **web_search**: Search the web using Amazon Bedrock AgentCore Gateway web search
    - Use specific, targeted queries
    - Supports multi-language searches (Korean, English, Japanese, etc.)
    - Adapt search queries to the target language and locale

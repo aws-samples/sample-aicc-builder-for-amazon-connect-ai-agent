@@ -91,6 +91,11 @@ from tools.project_workspace import (
     load_requirement_document,
 )
 from tools.interview_completion import complete_interview, check_interview_handoff
+# Conversational asset-import tools (replace the old auto-firing importAsset path):
+# the orchestrator calls these after acknowledging an upload (and, for images,
+# asking the user) to lint + seed an external Contact Flow / AI Prompt into
+# modification mode.
+from tools.asset_import_tools import import_uploaded_asset_tool, draft_flow_from_image_tool
 from tools.streaming_callback import set_session_id as set_streaming_session_id, set_message_index
 
 # Import Sub-Agent tools
@@ -199,6 +204,9 @@ INTERVIEW_TOOLS = [
     grep_workspace,
     # Sub-agents available during interview
     research_agent,
+    # Conversational asset import (uploaded flow JSON/YAML or flow-diagram image)
+    import_uploaded_asset_tool,
+    draft_flow_from_image_tool,
     # Interview completion signal
     complete_interview,
 ]
@@ -231,6 +239,10 @@ GENERATION_TOOLS = [
     lint_contact_flow_asset,
     asset_lookup,
     validate_parameter_consistency,
+    # Conversational asset import (uploaded flow JSON/YAML or flow-diagram image).
+    # Non-generator tools → kept even for scoped runs.
+    import_uploaded_asset_tool,
+    draft_flow_from_image_tool,
     # Sub-agents for generation
     lambda_generator_agent,
     openapi_generator_agent,
@@ -424,9 +436,17 @@ async def validate_cognito_token(token: str) -> Optional[Dict]:
         from jose import jwt, JWTError
         import urllib.request
 
+        # A Cognito user pool lives in the region encoded as its ID prefix
+        # (e.g. "ap-northeast-1_xxxx"). Derive the JWKS/issuer region from the
+        # pool ID itself — NOT from AWS_REGION — so a cross-region pool (or a
+        # region migration) can't point the JWKS fetch at the wrong region and
+        # 404. Fall back to AWS_REGION if the ID has no parseable prefix.
+        pool_region = user_pool_id.split("_", 1)[0] if "_" in user_pool_id else AWS_REGION
+        issuer = f"https://cognito-idp.{pool_region}.amazonaws.com/{user_pool_id}"
+
         global _jwks_cache
         if _jwks_cache is None:
-            jwks_url = f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{user_pool_id}/.well-known/jwks.json"
+            jwks_url = f"{issuer}/.well-known/jwks.json"
             with urllib.request.urlopen(jwks_url, timeout=5) as resp:
                 _jwks_cache = json.loads(resp.read())
 
@@ -450,7 +470,7 @@ async def validate_cognito_token(token: str) -> Optional[Dict]:
             key,
             algorithms=["RS256"],
             audience=os.environ.get("USER_POOL_CLIENT_ID", ""),
-            issuer=f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{user_pool_id}",
+            issuer=issuer,
         )
         return claims
     except Exception as e:
@@ -1957,6 +1977,26 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     effective_session_id = session.get("session_data", {}).get("original_session_id", session_id)
     set_streaming_session_id(effective_session_id)
 
+    # Stash the first uploaded image's raw bytes (keyed by session) so that, if
+    # the user later asks to turn an attached flow diagram into a Contact Flow,
+    # the orchestrator's draft_flow_from_image_tool can read it. Image bytes live
+    # only in the content blocks, never on disk. The stash PERSISTS ACROSS TURNS
+    # (the agent acknowledges + asks first, then converts on a later turn), so it
+    # is NOT cleared at end of turn — only when consumed by the conversion tool or
+    # replaced by a newer upload here.
+    try:
+        from tools.import_context import set_pending_import_image
+        if content_blocks:
+            for _blk in content_blocks:
+                _img = _blk.get("image") if isinstance(_blk, dict) else None
+                _src = (_img or {}).get("source") if isinstance(_img, dict) else None
+                _bytes = (_src or {}).get("bytes") if isinstance(_src, dict) else None
+                if _bytes:
+                    set_pending_import_image(effective_session_id, _bytes, _img.get("format", "png"))
+                    break
+    except Exception as _img_err:
+        logger.warning(f"[importImage] stash failed for {session_id}: {_img_err}")
+
     # Initialise S3 project workspace
     try:
         from tools.project_workspace import set_workspace_session_id
@@ -2409,6 +2449,10 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
         finally:
             flush_stop.set()
             await heartbeat_task
+            # NOTE: the uploaded-image stash (import_context) is intentionally NOT
+            # cleared here — it must survive across turns so the user can confirm
+            # "yes, convert it" on a later turn. It's cleared when the conversion
+            # tool consumes it or a newer image is uploaded.
             # Last-resort: ensure conversation history is persisted to NFS
             try:
                 history = session.get("conversation_history", [])
@@ -2789,6 +2833,13 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
     # Clear sub-agent caches
     clear_research_session(session_id)
     clear_faq_session(session_id)
+
+    # Drop any stashed uploaded-image bytes for this session.
+    try:
+        from tools.import_context import clear_pending_import_image
+        clear_pending_import_image(session_id)
+    except Exception:
+        pass
 
     # Reset spec manager
     try:

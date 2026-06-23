@@ -6,7 +6,7 @@
 
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Send, AlertCircle, Loader2, WifiOff, Wifi, ChevronDown, ChevronUp, CheckCircle2, Circle, Square, ArrowDown } from 'lucide-react';
-import { useBuilderStore, type StartMode, type SegmentType, type ImportAssetType } from '../stores/builderStore';
+import { useBuilderStore, type StartMode, type SegmentType } from '../stores/builderStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useAutoSave } from '../hooks/useAutoSave';
@@ -58,7 +58,7 @@ export function ChatWindow() {
   const setSegment = useBuilderStore(s => s.setSegment);
 
   const { currentSessionId, updateSessionTitle, updateSessionActivity, createNewSession, sessions } = useSessionStore();
-  const { sendMessage, sendMessageWithAttachments, importAsset, connect, switchSession, cancelGeneration, getCurrentSessionId } = useWebSocket();
+  const { sendMessage, sendMessageWithAttachments, connect, switchSession, cancelGeneration, getCurrentSessionId } = useWebSocket();
 
   const handleResetSession = useCallback(() => {
     const freshId = `session-${crypto.randomUUID()}`;
@@ -353,54 +353,97 @@ export function ChatWindow() {
     }
   }, [getCurrentSessionId]);
 
-  // Start a full build or single-segment run from the mode-first start screen.
-  // We set the scope in the store (read by switchSession when it sends
-  // createNewSession with {scope, model}), rotate to a fresh session, then
-  // queue the description. Always rotating guarantees the backend receives the
-  // scope via createNewSession.
+  // Start a run from the mode-first start screen. We set the scope in the store
+  // (read by switchSession when it sends createNewSession with {scope, model}),
+  // rotate to a fresh session, then send the kickoff message — with any staged
+  // attachments. Always rotating guarantees the backend receives the scope.
+  // Attachments are unified onto the normal message path: images/docs ride the
+  // multimodal attachment path; .json/.yaml are inlined as fenced text (Bedrock
+  // has no attachment MIME for them) so the orchestrator can import them.
   const handleStart = useCallback(
-    async (mode: StartMode, segment: SegmentType | null, description: string) => {
-      const scope = mode === 'segment' && segment ? [segment] : [];
+    async (mode: StartMode, segment: SegmentType | null, description: string, files: File[]) => {
+      // Scope: full → []; segment → [segment]; improve → derive from first file.
+      let scope: string[] = [];
+      if (mode === 'segment' && segment) {
+        scope = [segment];
+      } else if (mode === 'improve' && files.length > 0) {
+        const first = files[0].name.toLowerCase();
+        scope = first.endsWith('.yaml') || first.endsWith('.yml') ? ['prompt'] : ['contact_flow'];
+      }
 
-      // A description is optional for Full Build (the agent opens the interview
-      // itself) but should still kick off the conversation. When the user gives
-      // no text, send a localized default opener so Start never silently dead-ends
-      // on a blank screen. Segment mode requires text (Start is disabled without it).
+      // Partition staged files: json/yaml → inline text; everything else → real attachment.
+      const isTextAsset = (f: File) => /\.(json|ya?ml)$/i.test(f.name);
+      const textFiles = files.filter(isTextAsset);
+      const binaryFiles = files.filter((f) => !isTextAsset(f));
+
+      // Read json/yaml files and append them to the message as labeled fenced blocks.
+      let inlinedText = '';
+      for (const f of textFiles) {
+        try {
+          const content = await f.text();
+          const lang = /\.(ya?ml)$/i.test(f.name) ? 'yaml' : 'json';
+          inlinedText += `\n\n[Attached file: ${f.name}]\n\`\`\`${lang}\n${content}\n\`\`\``;
+        } catch {
+          /* ignore unreadable file */
+        }
+      }
+
+      // Default opener so Start never dead-ends on a blank screen.
       const defaultOpener: Record<string, string> = {
-        'en-US': "Let's get started — guide me through building my contact center.",
-        'ko-KR': '시작할게요 — 컨택센터 구축을 안내해 주세요.',
-        'ja-JP': '始めましょう — コンタクトセンター構築をガイドしてください。',
+        'en-US':
+          mode === 'improve'
+            ? "Here's my asset — please review it and help me improve it."
+            : "Let's get started — guide me through building my contact center.",
+        'ko-KR':
+          mode === 'improve'
+            ? '제 에셋입니다 — 검토하고 개선을 도와주세요.'
+            : '시작할게요 — 컨택센터 구축을 안내해 주세요.',
+        'ja-JP':
+          mode === 'improve'
+            ? '私のアセットです — 確認して改善を手伝ってください。'
+            : '始めましょう — コンタクトセンター構築をガイドしてください。',
       };
-      const kickoff = description.trim() || defaultOpener[language] || defaultOpener['en-US'];
+      const baseText = description.trim() || (defaultOpener[language] || defaultOpener['en-US']);
+      const kickoff = `${baseText}${inlinedText}`;
 
       const freshId = `session-${crypto.randomUUID()}`;
-      // switchSession() resets store state (incl. scope) synchronously, then
-      // schedules createNewSession after a short delay. Setting scope AFTER the
-      // await (but before that delayed send) ensures createNewSession carries it.
       await switchSession(freshId, true);
       setScope(scope.length > 0 ? scope : null);
 
+      // Build AttachedFile[] for binary files (images/docs) so they ride the
+      // multimodal attachment path.
+      const readyAttached: AttachedFile[] = binaryFiles
+        .map((file) => {
+          const v = validateFile(file);
+          return {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+            file,
+            type: v.type || 'document',
+            status: (v.valid ? 'ready' : 'error') as AttachedFile['status'],
+            error: v.error,
+          };
+        })
+        .filter((a) => a.status === 'ready');
+
       whenSessionReady(() => {
-        const sent = sendMessage(kickoff);
-        if (sent && currentSessionId) {
-          updateSessionTitle(currentSessionId, description.trim() || kickoff);
+        if (readyAttached.length > 0) {
+          const meta: MessageAttachment[] = readyAttached.map((a) => ({
+            name: a.file.name,
+            type: a.type,
+            mimeType: a.file.type,
+            size: a.file.size,
+          }));
+          void sendMessageWithAttachments(kickoff, readyAttached, meta);
+        } else {
+          sendMessage(kickoff);
+        }
+        if (currentSessionId) {
+          updateSessionTitle(currentSessionId, description.trim() || (files[0]?.name ?? kickoff));
           updateSessionActivity(currentSessionId, 1);
         }
       }, freshId);
     },
-    [setScope, sendMessage, switchSession, currentSessionId, updateSessionTitle, updateSessionActivity, whenSessionReady, language]
-  );
-
-  // Import an external asset file for editing (Improve Existing mode).
-  const handleImport = useCallback(
-    async (assetType: ImportAssetType, content: string, name: string, imageFormat?: string) => {
-      const freshId = `session-${crypto.randomUUID()}`;
-      await switchSession(freshId, true);
-      // importAsset buffers itself if the socket isn't open yet and is flushed by
-      // the session_created handler, so this survives the session-switch churn.
-      whenSessionReady(() => importAsset(assetType, content, name, imageFormat), freshId);
-    },
-    [importAsset, switchSession, whenSessionReady]
+    [setScope, sendMessage, sendMessageWithAttachments, switchSession, currentSessionId, updateSessionTitle, updateSessionActivity, whenSessionReady, language]
   );
 
   // Reset the start screen when a fresh, empty session is shown.
@@ -550,7 +593,6 @@ export function ChatWindow() {
           <ChatEmptyState
             language={language}
             onStart={handleStart}
-            onImport={handleImport}
           />
         ) : (
           <>

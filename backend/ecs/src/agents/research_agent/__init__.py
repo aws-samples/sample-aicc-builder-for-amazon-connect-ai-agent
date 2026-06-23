@@ -6,7 +6,7 @@ their services, and any relevant business data that can be used to
 generate FAQ documents, Lambda functions, and other assets.
 
 Key capabilities:
-- Web search using Brave Search API
+- Web search using Amazon Bedrock AgentCore Gateway
 - Website content fetching and analysis
 - Information extraction and summarization
 - Research result structuring for downstream agents

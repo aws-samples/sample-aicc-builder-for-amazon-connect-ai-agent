@@ -10,6 +10,10 @@ websockets>=13.0
 strands-agents>=1.22.0
 strands-agents-tools>=0.1.0
 
+# Web search via Amazon Bedrock AgentCore Gateway (MCP over SigV4, no API key)
+mcp>=1.9.0
+mcp-proxy-for-aws>=1.6.2
+
 # AWS SDK
 boto3>=1.35.0
 

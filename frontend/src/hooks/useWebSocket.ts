@@ -461,8 +461,8 @@ export function useWebSocket() {
   // Sub-Agent tool display labels
   const SUBAGENT_TOOL_LABELS: Record<string, Record<string, { icon: string; label: string }>> = {
     research_agent: {
-      brave_web_search: { icon: '🔎', label: '웹 검색' },
-      brave_search_tracked: { icon: '🔎', label: '웹 검색' },
+      web_search: { icon: '🔎', label: '웹 검색' },
+      web_search_tracked: { icon: '🔎', label: '웹 검색' },
       fetch_webpage: { icon: '🌐', label: '페이지 분석' },
       fetch_page_tracked: { icon: '🌐', label: '페이지 분석' },
       save_research_result: { icon: '💾', label: '결과 저장' },

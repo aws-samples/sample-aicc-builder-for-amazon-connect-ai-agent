@@ -127,12 +127,15 @@ def _stream_asset(asset_type: str, file_name: str, content: str, operation_id: s
 # ============================================
 
 @tool
-def search_amazon_connect_docs(
+async def search_amazon_connect_docs(
     query: str,
     count: int = 5
 ) -> dict:
     """
     Search for Amazon Connect documentation and best practices.
+
+    Uses Amazon Bedrock AgentCore Gateway web search (SigV4 task-role auth,
+    no API key), scoped to the official AWS docs site.
 
     Use this when you need to verify:
     - Contact Flow block parameters and syntax
@@ -146,76 +149,19 @@ def search_amazon_connect_docs(
     Returns:
         Search results with titles, URLs, and descriptions
     """
-    api_key = os.environ.get("BRAVE_API_KEY", "")
+    from tools.web_search import web_search
 
-    if not api_key:
-        return {
-            "success": False,
-            "error": "BRAVE_API_KEY not configured. Cannot perform web search.",
-            "results": []
-        }
-
-    try:
-        headers = {
-            "X-Subscription-Token": api_key,
-            "Accept": "application/json"
-        }
-
-        # Prefix with "Amazon Connect" and prefer AWS docs
-        full_query = f"site:docs.aws.amazon.com Amazon Connect {query}"
-
-        params = {
-            "q": full_query,
-            "count": min(count, 10),
-        }
-
-        response = requests.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers=headers,
-            params=params,
-            timeout=30
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        results = []
-
-        if "web" in data and "results" in data["web"]:
-            for item in data["web"]["results"]:
-                results.append({
-                    "title": item.get("title", ""),
-                    "url": item.get("url", ""),
-                    "description": item.get("description", ""),
-                })
-
-        logger.info(f"[search_amazon_connect_docs] Query: {query}, Results: {len(results)}")
-
-        return {
-            "success": True,
-            "query": full_query,
-            "results": results,
-            "count": len(results)
-        }
-
-    except requests.exceptions.Timeout:
-        return {
-            "success": False,
-            "error": "Search request timed out",
-            "results": []
-        }
-    except requests.exceptions.HTTPError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "results": []
-        }
-    except Exception as e:
-        logger.error(f"[search_amazon_connect_docs] Error: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "results": []
-        }
+    # Prefix with "Amazon Connect" and restrict to the AWS docs site.
+    result = await web_search(
+        f"Amazon Connect {query}",
+        count=min(count, 10),
+        site="docs.aws.amazon.com",
+    )
+    logger.info(
+        f"[search_amazon_connect_docs] Query: {query}, "
+        f"Results: {len(result.get('results', []))}"
+    )
+    return result
 
 
 @tool

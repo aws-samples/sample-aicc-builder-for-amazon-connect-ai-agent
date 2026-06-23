@@ -106,3 +106,4 @@ qa-*.png
 slack-*.png
 investigate-*.png
 debug/
+scripts/.websearch-venv/

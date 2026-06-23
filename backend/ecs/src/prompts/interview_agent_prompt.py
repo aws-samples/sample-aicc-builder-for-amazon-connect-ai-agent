@@ -507,7 +507,17 @@ Users should feel like they're talking to ONE helpful assistant.
 
 def get_interview_agent_prompt() -> list:
     """Return interview agent prompt with cachePoint for Bedrock prompt caching."""
+    # Attachments can arrive during the interview too (e.g. a Full Build where the
+    # user drops a flow image or JSON). Reuse the shared attachment-handling
+    # guidance so the interviewer acknowledges uploads and routes them to the
+    # import tools instead of ignoring them. Imported lazily to avoid any import
+    # cycle with system_prompt.py.
+    try:
+        from prompts.system_prompt import ATTACHMENT_HANDLING
+        text = INTERVIEW_AGENT_SYSTEM_PROMPT + "\n\n" + ATTACHMENT_HANDLING
+    except Exception:
+        text = INTERVIEW_AGENT_SYSTEM_PROMPT
     return [
-        {"text": INTERVIEW_AGENT_SYSTEM_PROMPT},
+        {"text": text},
         {"cachePoint": {"type": "default"}},
     ]

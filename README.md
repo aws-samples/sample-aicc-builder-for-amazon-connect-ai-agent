@@ -104,6 +104,11 @@ deep Contact Flow import-safety pass verified against the real Amazon Connect
 - **Interview anti-loop** — confirmations are remembered so the interview doesn't re-ask and loop.
 - **Fault tolerance** — hardened spec parsing eliminates the `'str' object has no attribute 'get'` crash.
 
+**Web search & uploads**
+- **Web search via Amazon Bedrock AgentCore Gateway** — the legacy Brave Search API key is gone. Web search now runs through a managed AgentCore Gateway Web Search connector, authenticated by the ECS task role (SigV4); `./deploy.sh` auto-provisions the gateway in us-east-1, so there's no key to manage and queries stay inside AWS.
+- **Attach in any mode, then prompt** — the start screen lets you attach files (a Contact Flow JSON, an AI Prompt YAML, a whiteboard/draw.io flow image, or docs) in **all** modes — Full Build, Single Segment, and Improve Existing — and attach multiple. Attaching never auto-starts; you type a prompt and send, so it's a normal conversation.
+- **Conversational import** — upload a Contact Flow JSON/YAML or a flow-diagram photo and the agent acknowledges it, narrates what it parsed, and (for images) **asks before converting** it into an importable Amazon Connect Contact Flow. Imports are lint-validated and land in patch-only modification mode — edits patch the asset rather than regenerating it.
+
 **Infrastructure & assets**
 - **Knowledge Base on Amazon S3 Vectors** — the Contact Flow RAG store moved from OpenSearch Serverless to S3 Vectors (substantially lower idle cost); ingestion uses non-filterable metadata keys so chunks index correctly.
 - **FAQ without research** — FAQ generation also works from user-uploaded documents or as a clearly-marked mock starter set.
@@ -288,6 +293,8 @@ Runtime highlights:
 
 AWS CLI 2.x (>= 2.34.27 for `s3files` support) · Node.js 18+ · Python 3.11+ · Docker · AWS CDK 2.x
 
+> **Web search** for the Research & Contact Flow agents runs through an **Amazon Bedrock AgentCore Gateway** (managed Web Search connector), authenticated by the ECS task role via SigV4 — **no API key**. `./deploy.sh` provisions the gateway automatically (idempotently) in **us-east-1**, the only region the Web Search connector is GA, regardless of your app's deploy region. Skip it with `ENABLE_WEB_SEARCH=false`; point at an existing gateway with `AGENTCORE_GATEWAY_URL=...`.
+
 ### Deploy
 
 ```bash
@@ -375,7 +382,7 @@ aws cognito-idp admin-create-user \
 │       ├── healthcheck.py       # ALB health check
 │       └── src/
 │           ├── agents/              # 9 specialized sub-agents
-│           │   ├── research_agent/      # Web search (Brave API)
+│           │   ├── research_agent/      # Web search (AgentCore Gateway)
 │           │   ├── faq_generator/       # Knowledge base documents
 │           │   ├── lambda_generator/    # Python Lambda handlers
 │           │   ├── openapi_generator/   # OpenAPI 3.0 specs (chunked)
@@ -977,7 +984,7 @@ aws cognito-idp admin-create-user \
 │       ├── healthcheck.py       # ALB ヘルスチェック
 │       └── src/
 │           ├── agents/              # 9 個の専門サブエージェント
-│           │   ├── research_agent/      # Web 検索（Brave API）
+│           │   ├── research_agent/      # Web 検索（AgentCore Gateway）
 │           │   ├── faq_generator/       # ナレッジベース用ドキュメント
 │           │   ├── lambda_generator/    # Python の Lambda ハンドラー
 │           │   ├── openapi_generator/   # OpenAPI 3.0 スペック（チャンク生成）

@@ -46,7 +46,7 @@ backend/
         ├── agents/                   # 9 specialized sub-agents
         │   ├── agent_pool.py            # Singleton warm instance management
         │   ├── streaming_handler.py     # Sub-agent streaming utilities
-        │   ├── research_agent/          # Web search (Brave API)
+        │   ├── research_agent/          # Web search (AgentCore Gateway)
         │   ├── faq_generator/           # Knowledge base documents
         │   ├── lambda_generator/        # Python Lambda code
         │   ├── openapi_generator/       # OpenAPI 3.0 spec (chunked)
@@ -134,7 +134,7 @@ container restarts, and ALB failovers.
 | Agent | Role | Temp | Output |
 |-------|------|------|--------|
 | **Orchestrator** | Interview + delegation + validation | 0.7 | Streaming text |
-| **Research** | Web search via Brave API | — | Structured findings |
+| **Research** | Web search via AgentCore Gateway | — | Structured findings |
 | **FAQ Generator** | Knowledge base documents | — | Markdown + ZIP |
 | **Lambda Generator** | Python Lambda per operation | 0.3 | Python code |
 | **OpenAPI Generator** | API spec (chunked) | 0.3 | OpenAPI 3.0 YAML |
@@ -169,7 +169,8 @@ and avoid request timeouts.
 | `ASSETS_BUCKET_NAME` | S3 bucket for generated assets | (from CDK outputs) |
 | `SESSION_STORE_BACKEND` | Session store (`s3files` \| `memory`) | `s3files` |
 | `S3FILES_MOUNT_PATH` | NFS mount path | `/mnt/s3` |
-| `BRAVE_API_KEY` | Brave Search API key (Research Agent) | (optional) |
+| `AGENTCORE_GATEWAY_URL` | AgentCore Gateway web-search MCP endpoint, us-east-1 (Research Agent) | (optional) |
+| `AGENTCORE_GATEWAY_REGION` | Region for SigV4 signing of gateway calls | `us-east-1` |
 | `CONTACT_FLOW_KB_ID` | Bedrock Knowledge Base ID for Contact Flow RAG | (optional) |
 
 ---
@@ -186,7 +187,7 @@ Installed via `backend/ecs/requirements.txt`:
 | fastapi + uvicorn | HTTP + WebSocket server |
 | pydantic | Data validation |
 | PyYAML | YAML processing |
-| requests | HTTP client (Brave Search) |
+| requests | HTTP client (web fetch) |
 
 ---
 

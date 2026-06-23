@@ -70,7 +70,7 @@ Create `backend/agentcore/.env` for local testing:
 ```bash
 AWS_REGION=ap-northeast-1
 BEDROCK_MODEL_ID=global.anthropic.claude-opus-4-6-v1
-BRAVE_API_KEY=<your-brave-api-key>     # Optional, for Research Agent
+AGENTCORE_GATEWAY_URL=<gateway-mcp-url>  # Optional, for Research Agent web search (us-east-1)
 ASSETS_BUCKET_NAME=<from-cdk-outputs>
 CONTACT_FLOW_KB_ID=<from-cdk-outputs>  # Optional, for Contact Flow RAG
 ```
@@ -80,7 +80,7 @@ CONTACT_FLOW_KB_ID=<from-cdk-outputs>  # Optional, for Contact Flow RAG
 ```bash
 AWS_REGION=ap-northeast-2
 BEDROCK_MODEL_ID=global.anthropic.claude-opus-4-6-v1
-BRAVE_API_KEY=<your-brave-api-key>     # Optional
+AGENTCORE_GATEWAY_URL=<gateway-mcp-url>  # Optional, web search (us-east-1)
 ASSETS_BUCKET_NAME=<from-cdk-outputs>
 CONTACT_FLOW_KB_ID=<from-cdk-outputs>  # Optional
 S3FILES_MOUNT_PATH=/tmp/s3files        # Local dev (prod: /mnt/s3)
@@ -138,7 +138,7 @@ The deployment script (`deploy.sh`, 732 lines) handles the full deployment pipel
 | `DEPLOY_MODE` | `agentcore` | `agentcore` or `ecs` (also set via `--mode`) |
 | `ENABLE_KNOWLEDGE_BASE` | `true` | Set `false` to skip KB deployment |
 | `ENABLE_REDIS` | `false` | Set `true` to deploy Redis stack (AgentCore mode) |
-| `BRAVE_API_KEY` | (prompted) | Brave Search API key, cached in `.env.local` |
+| `AGENTCORE_GATEWAY_URL` | (prompted) | AgentCore Gateway web-search MCP endpoint (us-east-1), cached in `.env.local` |
 
 ### Deployment steps (AgentCore mode)
 
@@ -482,7 +482,7 @@ cd ../infrastructure && npm install
 | `DEPLOY_MODE` | `agentcore` | `agentcore` 또는 `ecs` (`--mode`로도 설정 가능) |
 | `ENABLE_KNOWLEDGE_BASE` | `true` | `false`로 설정 시 KB 배포 건너뜀 |
 | `ENABLE_REDIS` | `false` | `true`로 설정 시 Redis 스택 배포 (AgentCore 모드) |
-| `BRAVE_API_KEY` | (프롬프트) | Brave Search API 키, `.env.local`에 캐시 |
+| `AGENTCORE_GATEWAY_URL` | (프롬프트) | AgentCore Gateway 웹 검색 MCP 엔드포인트 (us-east-1), `.env.local`에 캐시 |
 
 ### 증분 빌드
 
