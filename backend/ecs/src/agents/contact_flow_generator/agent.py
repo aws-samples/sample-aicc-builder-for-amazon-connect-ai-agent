@@ -70,15 +70,6 @@ def _setup_streaming_for_subagent():
         logger.warning(f"[SUBAGENT_SETUP] contact_flow_generator: handler not available or missing stream_asset_preview")
 
 
-def _parse_mermaid_block(text: str) -> tuple[str | None, str]:
-    """Parse Mermaid code block from LLM output."""
-    pattern = r'```mermaid\s*\n(.*?)```'
-    match = re.search(pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip(), "markdown_mermaid"
-    return None, "no_match"
-
-
 def _parse_json_block(text: str) -> tuple[str | None, str]:
     """
     Parse JSON code block from LLM output with multiple fallback patterns.
@@ -595,10 +586,8 @@ Operations:
             "contact_flow", "contact_flow.json", flow_name,
             code_markers=["json"], flush_interval=500
         )
-        mermaid_streamer = IncrementalCodeStreamer(
-            "mermaid", "contact_flow_diagram.md", flow_name,
-            code_markers=["mermaid"], flush_interval=500
-        )
+        # NOTE: the flow diagram is rendered from the JSON on the frontend
+        # (React Flow), so we no longer parse/stream a mermaid diagram.
 
         # Create heartbeat manager for background heartbeats
         heartbeat = create_heartbeat_manager(
@@ -617,7 +606,6 @@ Operations:
                         full_response += chunk
                         if not modification_tools:
                             json_streamer.feed(chunk)  # Progressive JSON streaming
-                            mermaid_streamer.feed(chunk)  # Progressive Mermaid streaming
                         heartbeat.update_progress(len(full_response))
                         # Yield text chunks for real-time streaming
                         yield {
@@ -651,13 +639,10 @@ Operations:
 
         if not modification_tools:
             json_streamer.finalize()
-            mermaid_streamer.finalize()
 
         # === Result processing ===
         json_content = None
         json_method = None
-        mermaid_content = None
-        mermaid_method = None
 
         if modification_tools and tools_were_used:
             logger.info(f"[CONTACT_FLOW] Modification completed via workspace tools for {flow_name}")
@@ -704,12 +689,6 @@ Operations:
             if not json_content:
                 json_content, json_method = _parse_json_block(full_response)
 
-            # Mermaid diagram: always use standard parsing (edits don't apply)
-            mermaid_content = mermaid_streamer.get_result()
-            mermaid_method = "incremental_stream" if mermaid_content else None
-            if not mermaid_content:
-                mermaid_content, mermaid_method = _parse_mermaid_block(full_response)
-
         if json_content:
             json_file_name = "contact_flow.json"
 
@@ -718,14 +697,6 @@ Operations:
                 logger.info(f"[CONTACT_FLOW] Workspace tools completed for {flow_name}")
             else:
                 logger.info(f"JSON parsed successfully for {flow_name} using method: {json_method}")
-
-                # Stream Mermaid diagram as a separate file if available
-                if mermaid_content:
-                    diagram_file_name = "contact_flow_diagram.md"
-                    diagram_content = f"# {flow_name} Contact Flow Diagram\n\n```mermaid\n{mermaid_content}\n```\n"
-                    # Only stream final asset if incremental streamer didn't already handle it
-                    if not mermaid_streamer.found_code_block:
-                        _stream_asset("mermaid", diagram_file_name, diagram_content, flow_name)
 
                 # Stream JSON as the main contact flow file
                 # Modification mode (legacy fallback): write to workspace + emit diff
@@ -753,8 +724,6 @@ Operations:
             }
 
             files_generated = [json_file_name]
-            if mermaid_content:
-                files_generated.append("contact_flow_diagram.md")
 
             # Structural lint: catch dangling transitions / orphan actions /
             # missing terminal block — the things that make an Amazon Connect
@@ -799,14 +768,13 @@ Operations:
                 "success": True,
                 "flow_name": flow_name,
                 "files_generated": files_generated,
-                "has_mermaid": mermaid_content is not None,
-                "parse_method": {"json": json_method, "mermaid": mermaid_method},
+                "parse_method": {"json": json_method},
                 "lint_ok": flow_lint["ok"],
                 "lint_errors": flow_lint["errors"][:15],
                 "lint_warnings": flow_lint["warnings"][:8],
                 "lint_fixes_applied": flow_lint.get("fixes_applied", []),
                 "summary": (
-                    f"Generated Contact Flow for {flow_name}" + (f" with diagram" if mermaid_content else "")
+                    f"Generated Contact Flow for {flow_name}"
                     + (f". ⚠️ {len(flow_lint['errors'])} structural error(s) — PATCH before deploy: {flow_lint['errors'][:3]}" if not flow_lint["ok"] else " (structure OK)")
                 ),
                 "_completion_marker": "SUBAGENT_COMPLETE"

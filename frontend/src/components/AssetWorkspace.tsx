@@ -4,7 +4,7 @@
  * When an asset streams/completes, this pane shows it in a focused, larger
  * surface than the inline chat marker. It has:
  *  - an asset-tab strip (only the in-scope / produced asset types)
- *  - reuses ContactFlowPreview (mermaid + JSON) for contact flows
+ *  - reuses ContactFlowPreview (interactive diagram + JSON) for contact flows
  *  - a language badge + readable code for other asset types
  *  - download + fullscreen controls
  *
@@ -54,7 +54,7 @@ export function AssetWorkspace({ language, onClose }: AssetWorkspaceProps) {
   const tabs = useMemo(() => {
     const byTab = new Map<string, Array<{ key: string; preview: AssetPreview }>>();
     for (const [key, preview] of Object.entries(assetPreviews)) {
-      // Skip internal holder keys (e.g. __pending_mermaid-*) that have no tab.
+      // Skip any internal holder keys (prefixed __) that have no tab.
       if (key.startsWith('__')) continue;
       const tabId = tabIdFor(preview.assetType);
       if (!tabId) continue;

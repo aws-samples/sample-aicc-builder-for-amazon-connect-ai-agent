@@ -99,3 +99,8 @@ questionnaire/*.docx
 .playwright-mcp/
 
 .e2e-tmp/
+
+# QA / demo capture artifacts (screenshots, demo bundles) — not source
+demo-assets/
+qa-*.png
+investigate-*.png

@@ -1627,7 +1627,7 @@ These generate production-quality artifacts AFTER interview is complete:
 - `contact_flow_generator_agent`: Generates Contact Flow JSON
   - Input: flow_name, company_name, language, contact_flow_requirements (optional), modification_request (optional)
   - `operations` is auto-loaded (omit it).
-  - Output: Contact Flow JSON + Mermaid diagram
+  - Output: Contact Flow JSON (the visual diagram is rendered from it on the frontend)
 
 ### Fallback Streaming Tool
 

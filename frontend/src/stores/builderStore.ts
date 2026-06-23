@@ -475,33 +475,12 @@ export const useBuilderStore = create<BuilderState>((set) => ({
 
   updateAssetPreview: (preview) =>
     set((state) => {
-      // Contact Flow diagram: the mermaid asset is streamed SEPARATELY from the
-      // contact_flow JSON (same operationId). Merge it onto the matching
-      // contact_flow preview as diagramContent so ContactFlowPreview can render
-      // the Diagram tab. The standalone 'mermaid' assetType has no tab of its own.
-      if (preview.assetType === 'mermaid') {
-        const cfKey = Object.keys(state.assetPreviews).find(k => {
-          const p = state.assetPreviews[k];
-          return p.assetType === 'contact_flow' &&
-            (!preview.operationId || p.operationId === preview.operationId);
-        });
-        if (cfKey) {
-          return {
-            assetPreviews: {
-              ...state.assetPreviews,
-              [cfKey]: { ...state.assetPreviews[cfKey], diagramContent: preview.content },
-            },
-          };
-        }
-        // contact_flow not in yet — stash the mermaid under a holder key so the
-        // contact_flow branch below can adopt it when it arrives.
-        const holderKey = `__pending_mermaid-${preview.operationId || 'default'}`;
-        return {
-          assetPreviews: {
-            ...state.assetPreviews,
-            [holderKey]: { ...preview, createdAt: Date.now() },
-          },
-        };
+      // Contact Flow diagrams are now derived from the validated JSON (React
+      // Flow), so the legacy standalone 'mermaid' asset is obsolete. Old sessions
+      // may still emit one on rehydration — drop it (the diagram comes from the
+      // contact_flow JSON, not this). Cast: 'mermaid' is no longer in the union.
+      if ((preview.assetType as string) === 'mermaid') {
+        return state;
       }
 
       // Handle diff events: attach diffContent to existing preview for the same fileName
@@ -632,34 +611,10 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         newPreview.messageIndex = preview.messageIndex ?? state.messages.length;
       }
 
-      // Preserve a previously-merged mermaid diagram: a later event for the same
-      // contact_flow (e.g. the message-log replay re-emitting the original
-      // generation event after rehydration already merged the diagram) must not
-      // drop diagramContent. Carry it forward unless the incoming event sets one.
-      if (!newPreview.diagramContent && state.assetPreviews[key]?.diagramContent) {
-        newPreview.diagramContent = state.assetPreviews[key].diagramContent;
-      }
-
       let newAssetPreviews = {
         ...state.assetPreviews,
         [key]: newPreview,
       };
-
-      // If this is a contact_flow and a sibling mermaid arrived first, adopt it
-      // (and drop the holder) so the Diagram tab renders.
-      if (newPreview.assetType === 'contact_flow' && !newPreview.diagramContent) {
-        const holderKey = Object.keys(newAssetPreviews).find(k =>
-          k.startsWith('__pending_mermaid-') &&
-          (newAssetPreviews[k].operationId || 'default') === (newPreview.operationId || 'default'));
-        // also accept a generic holder if no op-specific match
-        const fallbackHolder = holderKey || Object.keys(newAssetPreviews).find(k => k.startsWith('__pending_mermaid-'));
-        const useHolder = holderKey || fallbackHolder;
-        if (useHolder && newAssetPreviews[useHolder]) {
-          newPreview.diagramContent = newAssetPreviews[useHolder].content;
-          newAssetPreviews = { ...newAssetPreviews, [key]: newPreview };
-          delete newAssetPreviews[useHolder];
-        }
-      }
 
       // Track the latest asset as the workspace's active asset so the pane has
       // something to show when the user opens it. We do NOT force the pane open

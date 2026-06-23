@@ -33,7 +33,6 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { ContactFlowPreview } from './ContactFlowPreview';
-import { MermaidDiagram } from './MermaidDiagram';
 import { generatePresignedUrl } from '../services/sessions';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -60,7 +59,6 @@ const ASSET_TYPE_INFO: Record<string, {
   openapi: { icon: <FileJson className="w-4 h-4" />, label: 'OpenAPI Spec', labelKo: 'OpenAPI 스펙', color: 'text-blue-600 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800', collapseMode: 'preview', previewLines: 10 },
   prompt: { icon: <MessageSquare className="w-4 h-4" />, label: 'AI Prompt', labelKo: 'AI 프롬프트', color: 'text-purple-600 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border-purple-200 dark:border-purple-800', collapseMode: 'preview', previewLines: 8 },
   contact_flow: { icon: <Workflow className="w-4 h-4" />, label: 'Contact Flow', labelKo: 'Contact Flow', color: 'text-green-600 dark:text-green-300 bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800', collapseMode: 'full' },
-  mermaid: { icon: <Workflow className="w-4 h-4" />, label: 'Flow Diagram', labelKo: '플로우 다이어그램', color: 'text-violet-600 dark:text-violet-300 bg-violet-50 dark:bg-violet-900/20 border-violet-200 dark:border-violet-800', collapseMode: 'full' },
   cdk: { icon: <Boxes className="w-4 h-4" />, label: 'CloudFormation Template', labelKo: 'CloudFormation 템플릿', color: 'text-cyan-600 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-900/20 border-cyan-200 dark:border-cyan-800', collapseMode: 'preview', previewLines: 10 },
   cloudformation: { icon: <Boxes className="w-4 h-4" />, label: 'CloudFormation Template', labelKo: 'CloudFormation 템플릿', color: 'text-cyan-600 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-900/20 border-cyan-200 dark:border-cyan-800', collapseMode: 'preview', previewLines: 10 },
   company: { icon: <Building2 className="w-4 h-4" />, label: 'Company Profile', labelKo: '회사 정보', color: 'text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/20 border-indigo-200 dark:border-indigo-800', collapseMode: 'full' },
@@ -86,41 +84,6 @@ export const AssetPreviewBubble = memo(function AssetPreviewBubble({ preview, la
     return <ContactFlowPreview preview={preview} language={language} />;
   }
 
-  if (preview.assetType === 'mermaid') {
-    // Detect lazy-loading state: s3Key exists but content not yet loaded from S3
-    const isLazyLoading = !!(preview.s3Key && !preview.content);
-    return (
-      <div className="rounded-lg border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-900/20 p-4">
-        <div className="flex items-center gap-2 mb-3 text-violet-600 dark:text-violet-300">
-          <Workflow className="w-4 h-4" />
-          <span className="text-sm font-medium">
-            {language === 'ko-KR' ? '플로우 다이어그램' : 'Flow Diagram'}
-          </span>
-          {(!preview.isComplete || isLazyLoading) && <Loader2 className="w-4 h-4 animate-spin ml-auto" />}
-        </div>
-        <div className="bg-white dark:bg-surface-900 rounded-lg p-4 border border-violet-100 dark:border-violet-900/50">
-          {preview.isComplete && !isLazyLoading ? (
-            (() => {
-              const mermaidCode = preview.content
-                .replace(/^#[^\n]*\n\n?/, '')
-                .replace(/^```mermaid\n?/, '')
-                .replace(/\n?```\s*$/, '');
-              return <MermaidDiagram chart={mermaidCode} language={language} />;
-            })()
-          ) : (
-            <div className="flex flex-col items-center justify-center py-8 text-surface-500 dark:text-surface-400">
-              <Loader2 className="w-8 h-8 animate-spin mb-3" />
-              <span className="text-sm">
-                {isLazyLoading
-                  ? (language === 'ko-KR' ? '다이어그램 로딩 중...' : 'Loading diagram...')
-                  : (language === 'ko-KR' ? '다이어그램 생성 중...' : 'Generating diagram...')}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
 
   const [copied, setCopied] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);

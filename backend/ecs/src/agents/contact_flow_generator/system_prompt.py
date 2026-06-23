@@ -162,17 +162,18 @@ If you are uncertain about ANY block type, parameter format, or syntax:
 
 ## OUTPUT FORMAT (STRICT)
 
-Output TWO code blocks in this exact order. No explanation before or after.
+Output ONE code block. No explanation before or after.
 
-1. Mermaid diagram:
-```mermaid
-<flow diagram>
-```
-
-2. Contact Flow JSON:
+Contact Flow JSON:
 ```json
 <complete contact flow JSON>
 ```
+
+DO NOT output a mermaid diagram or any other diagram. The visual flow diagram
+is rendered automatically and deterministically FROM this JSON by the frontend
+(every Action becomes a node; NextAction / Conditions / Errors become edges), so
+a hand-drawn diagram is unnecessary and would only risk drift. Spend your effort
+on a correct, complete, importable JSON.
 
 ---
 
@@ -865,51 +866,13 @@ Use this pattern only when the orchestrator explicitly requests pre-Lex authenti
 
 ---
 
-## MERMAID SYNTAX RULES (CRITICAL)
-
-### Node ID Rules
-- ONLY use: letters (a-z, A-Z), numbers (0-9), underscores (_)
-- NEVER use: hyphens (-), spaces, or special characters
-- Keep IDs short: A, B, C or snake_case like check_result
-
-### Valid Examples:
-- `A`, `B`, `C` (single letter - RECOMMENDED)
-- `check_result`, `transfer_queue`, `end_call`
-
-### Invalid Examples (NEVER USE):
-- `user-input` (hyphen - WRONG)
-- `check-result` (hyphen - WRONG)
-- `my node` (space - WRONG)
-
-### Node Syntax:
-- Rectangle: `A[Label Text]`
-- Diamond (decision): `C{Decision Question}`
-- Arrow: `A --> B`
-- Labeled arrow: `A -->|Yes| B`
-
----
-
 ## INDUSTRY-AGNOSTIC TEMPLATE (IMPORTABLE)
 
 This is the MINIMAL template for AICC workshop. **Directly importable into Amazon Connect.**
 Do NOT add Lambda or Customer Profile blocks unless orchestrator explicitly requests them.
-
-```mermaid
-graph LR
-    A[Enable Logging] --> B[Create Assistant Session]
-    B --> C[Set Voice]
-    C --> D[Set Recording]
-    D --> E[AI Agent]
-    E --> F{Check Result}
-    F -->|Escalate| G[Set Context]
-    G --> G2[Set Working Queue<br/>BasicQueue]
-    G2 --> H[Transfer Message]
-    H --> I[Transfer Queue]
-    I --> J[End]
-    F -->|Complete| K[Goodbye]
-    K --> J
-    F -->|default| E
-```
+(Reference flow shape: Enable Logging → Create Assistant Session → Set Voice →
+Set Recording → AI Agent → Check Result → [Escalate] Set Context → Set Working
+Queue → Transfer Message → Transfer Queue → End; [Complete] → Goodbye → End.)
 
 ```json
 {
@@ -1275,7 +1238,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 ## RULES (CRITICAL FOR IMPORT SUCCESS)
 
 ### Metadata Rules
-1. Output Mermaid diagram FIRST, then JSON
+1. Output ONLY the Contact Flow JSON (no mermaid / no diagram — it is rendered from the JSON)
 2. ALWAYS include `entryPointPosition`, `ActionMetadata`, and `hash` in Metadata
 3. ALWAYS include `ActionMetadata` entry for EVERY action Identifier
 4. Use simple string identifiers (not UUIDs) - set `isFriendlyName: true`

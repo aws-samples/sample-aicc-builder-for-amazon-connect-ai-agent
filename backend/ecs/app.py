@@ -1685,9 +1685,9 @@ _REHYDRATE_FOLDER_TO_TYPE = {
     "faq": "faq",
     "knowledge-base": "faq",
     "knowledge_base": "faq",
-    # mermaid has no tab of its own; the frontend merges it onto the matching
-    # contact_flow preview (same operationId) so the Diagram tab renders.
-    "mermaid": "mermaid",
+    # NOTE: 'mermaid' is intentionally absent — the Contact Flow diagram is now
+    # rendered from the JSON (React Flow), so legacy mermaid assets are not
+    # rehydrated.
 }
 _REHYDRATE_EXT_TO_LANG = {
     ".py": "python", ".js": "javascript", ".ts": "typescript",
