@@ -13,6 +13,7 @@ import {
   Controls,
   MiniMap,
   Panel,
+  useNodesState,
   type Node,
   type Edge,
   type NodeProps,
@@ -123,6 +124,14 @@ export function FlowDiagram({ flowJson, language = 'ko-KR', className }: FlowDia
     }
   }, [flowJson, direction]);
 
+  // Nodes are user-draggable: keep them in local state so a drag sticks. Re-seed
+  // from the derived layout whenever the flow content or layout direction changes
+  // (otherwise a re-layout wouldn't reposition the nodes).
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(graph?.nodes ?? []);
+  useEffect(() => {
+    setNodes(graph?.nodes ?? []);
+  }, [graph, setNodes]);
+
   const edges = useMemo(() => (graph ? styleEdges(graph.edges, dark) : []), [graph, dark]);
 
   // Graceful fallback — never break the screen if the JSON isn't a parseable flow.
@@ -143,15 +152,16 @@ export function FlowDiagram({ flowJson, language = 'ko-KR', className }: FlowDia
   return (
     <div className={cn('w-full', className)} style={{ height: '70vh', minHeight: 320 }}>
       <ReactFlow
-        nodes={graph.nodes}
+        nodes={nodes}
         edges={edges}
+        onNodesChange={onNodesChange}
         nodeTypes={nodeTypes}
         colorMode={(dark ? 'dark' : 'light') as ColorMode}
         fitView
         fitViewOptions={{ padding: 0.15 }}
         minZoom={0.1}
         maxZoom={2}
-        nodesDraggable={false}
+        nodesDraggable
         nodesConnectable={false}
         elementsSelectable
         proOptions={{ hideAttribution: true }}
