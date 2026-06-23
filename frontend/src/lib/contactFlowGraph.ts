@@ -69,11 +69,14 @@ function shortText(s: unknown, max = 48): string {
 const NODE_W = 200;
 const NODE_H = 56;
 
+export type FlowDirection = 'TB' | 'LR';
+
 /**
  * Parse a Connect flow JSON string into a laid-out React Flow graph.
+ * @param direction dagre rankdir — 'TB' (top-down, default) or 'LR' (left-to-right).
  * Returns null if the content isn't a parseable flow (caller falls back to JSON view).
  */
-export function deriveContactFlowGraph(flowJson: string): ContactFlowGraph | null {
+export function deriveContactFlowGraph(flowJson: string, direction: FlowDirection = 'TB'): ContactFlowGraph | null {
   let doc: Record<string, unknown>;
   try {
     doc = JSON.parse(flowJson);
@@ -87,7 +90,7 @@ export function deriveContactFlowGraph(flowJson: string): ContactFlowGraph | nul
   const ids = new Set(actions.map((a) => String(a.Identifier || a.identifier || '')));
 
   const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 56, marginx: 16, marginy: 16 });
+  g.setGraph({ rankdir: direction, nodesep: 40, ranksep: 56, marginx: 16, marginy: 16 });
   g.setDefaultEdgeLabel(() => ({}));
 
   const nodes: Node[] = [];
@@ -128,6 +131,7 @@ export function deriveContactFlowGraph(flowJson: string): ContactFlowGraph | nul
         type,
         subtitle,
         kind: kindForType(type, isStart),
+        direction,
       },
       type: 'cfNode',
     });

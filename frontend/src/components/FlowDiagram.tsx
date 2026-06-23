@@ -12,6 +12,7 @@ import {
   Background,
   Controls,
   MiniMap,
+  Panel,
   type Node,
   type Edge,
   type NodeProps,
@@ -40,10 +41,14 @@ interface CfNodeData {
   type: string;
   subtitle: string;
   kind: string;
+  direction?: 'TB' | 'LR';
   [key: string]: unknown;
 }
 
 function CfNode({ data }: NodeProps<Node<CfNodeData>>) {
+  // Handles sit on top/bottom for top-down layout, left/right for left-to-right,
+  // so edges connect cleanly in either orientation.
+  const lr = data.direction === 'LR';
   return (
     <div
       className={cn(
@@ -51,7 +56,7 @@ function CfNode({ data }: NodeProps<Node<CfNodeData>>) {
         KIND_STYLE[data.kind] || KIND_STYLE.default
       )}
     >
-      <Handle type="target" position={Position.Top} className="!bg-surface-400 !w-1.5 !h-1.5" />
+      <Handle type="target" position={lr ? Position.Left : Position.Top} className="!bg-surface-400 !w-1.5 !h-1.5" />
       <div className="text-[11px] font-semibold text-surface-900 dark:text-surface-100 truncate">
         {data.label}
       </div>
@@ -63,7 +68,7 @@ function CfNode({ data }: NodeProps<Node<CfNodeData>>) {
           {data.subtitle}
         </div>
       )}
-      <Handle type="source" position={Position.Bottom} className="!bg-surface-400 !w-1.5 !h-1.5" />
+      <Handle type="source" position={lr ? Position.Right : Position.Bottom} className="!bg-surface-400 !w-1.5 !h-1.5" />
     </div>
   );
 }
@@ -98,6 +103,8 @@ export function FlowDiagram({ flowJson, language = 'ko-KR', className }: FlowDia
   const [dark, setDark] = useState<boolean>(() =>
     typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
   );
+  // Layout direction: top-down (default) or left-to-right. User-toggleable.
+  const [direction, setDirection] = useState<'TB' | 'LR'>('TB');
 
   // Track app theme so the canvas + edges match light/dark.
   useEffect(() => {
@@ -110,11 +117,11 @@ export function FlowDiagram({ flowJson, language = 'ko-KR', className }: FlowDia
 
   const graph = useMemo(() => {
     try {
-      return deriveContactFlowGraph(flowJson);
+      return deriveContactFlowGraph(flowJson, direction);
     } catch {
       return null;
     }
-  }, [flowJson]);
+  }, [flowJson, direction]);
 
   const edges = useMemo(() => (graph ? styleEdges(graph.edges, dark) : []), [graph, dark]);
 
@@ -152,6 +159,30 @@ export function FlowDiagram({ flowJson, language = 'ko-KR', className }: FlowDia
         <Background gap={16} />
         <Controls showInteractive={false} />
         <MiniMap pannable zoomable className="!bg-surface-100 dark:!bg-surface-800" />
+        <Panel position="top-right">
+          <div className="flex rounded-md overflow-hidden border border-surface-300 dark:border-surface-600 text-[11px] font-medium shadow-sm">
+            <button
+              onClick={() => setDirection('TB')}
+              className={cn('px-2 py-1 transition-colors',
+                direction === 'TB'
+                  ? 'bg-primary-600 text-white'
+                  : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-700')}
+              title={ko ? '위에서 아래로' : 'Top to bottom'}
+            >
+              {ko ? '↓ 세로' : '↓ Top-down'}
+            </button>
+            <button
+              onClick={() => setDirection('LR')}
+              className={cn('px-2 py-1 transition-colors border-l border-surface-300 dark:border-surface-600',
+                direction === 'LR'
+                  ? 'bg-primary-600 text-white'
+                  : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-700')}
+              title={ko ? '왼쪽에서 오른쪽으로' : 'Left to right'}
+            >
+              {ko ? '→ 가로' : '→ Left-right'}
+            </button>
+          </div>
+        </Panel>
       </ReactFlow>
     </div>
   );
