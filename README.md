@@ -51,6 +51,10 @@ UI, and a contact-flow correctness pass re-verified against the live Amazon Conn
 - A **split-view asset workspace** (resizable, with an asset-tab switcher and fullscreen/zoom) opens as assets stream, instead of fragmenting them across the chat, a narrow tab, and the file tree.
 - Progress promoted to a first-class tab grouped by the 4 phases; "jump to latest" in long chats; collapsed-by-default tool calls; real download lifecycle (packaging → ready → error/retry); reskinned + localized login; broad a11y + localization pass.
 
+**Interactive Contact Flow diagram (derived from the JSON, no more mermaid)**
+- The flow visualization is now an **interactive React Flow graph** (pan / zoom / minimap, themed per block kind, dark-mode aware) **derived deterministically from the validated Connect JSON** — every Action becomes a node and `NextAction`/`Conditions`/`Errors` become labelled edges.
+- This removes the previous approach where the LLM hand-authored a separate mermaid diagram: that produced periodic *"Syntax error in text"* render failures (which could stack broken graphics down the page), drift between the diagram and the actual flow, and extra tokens. The JSON is now the single source of truth, so the diagram is always valid and always matches the flow. The `mermaid` dependency has been removed entirely.
+
 **Contact Flow correctness — re-verified against the live `CreateContactFlow` API**
 - Live-API validation (create → inspect `problems` → delete, on a workshop instance) caught defects the internal linter had **wrong**, now fixed and re-confirmed accepted:
   - `UpdateContactCallbackNumber` requires exactly `InvalidCallbackNumber` + `CallbackNumberNotDialable` and rejects `NoMatchingError`/`InvalidNumber`/`NotDialable` (the linter previously believed `NoMatchingError` was valid here).
@@ -205,7 +209,7 @@ The system produces a complete set of workshop-ready artifacts:
 | **Lambda Functions** | Python handlers for each business operation (e.g., `process_return`, `track_order`) | Module 2: MCP Server Setup |
 | **OpenAPI Spec** | API definitions for Amazon Connect MCP Gateway integration | Module 2: MCP Gateway |
 | **AI Prompt** | Customized personality, tone, business rules, and guardrails | Module 2: AI Agent Prompt |
-| **Contact Flows** | Amazon Connect flow configurations with visual Mermaid diagrams | Module 2: Flow Builder |
+| **Contact Flows** | Amazon Connect flow configurations with an interactive visual diagram (rendered from the JSON) | Module 2: Flow Builder |
 | **CDK Infrastructure** | Complete AWS CDK project (Lambda, API Gateway, DynamoDB) | Module 2: Deploy |
 | **FAQ Documents** | Knowledge base articles for common customer questions | Module 3: Knowledge Base |
 
@@ -354,7 +358,7 @@ aws cognito-idp admin-create-user \
 | Layer | Technologies |
 |---|---|
 | **AI** | Strands Agents SDK · **Claude Opus 4.6** on Amazon Bedrock (`global.anthropic.claude-opus-4-6-v1`, cross-region inference) · Context Engineering (CLUES format) |
-| **Frontend** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · Mermaid.js |
+| **Frontend** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · React Flow |
 | **Backend** | Python 3.11 · FastAPI · Uvicorn · S3 Files NFS · DynamoDB |
 | **Infra** | AWS CDK · CloudFront · Cognito · ECS Fargate · ALB · X-Ray |
 
@@ -376,7 +380,7 @@ aws cognito-idp admin-create-user \
 │           │   ├── lambda_generator/    # Python Lambda handlers
 │           │   ├── openapi_generator/   # OpenAPI 3.0 specs (chunked)
 │           │   ├── prompt_generator/    # AI agent prompts
-│           │   ├── contact_flow_generator/  # Connect flows + Mermaid
+│           │   ├── contact_flow_generator/  # Connect flows (diagram from JSON)
 │           │   ├── infrastructure_generator/ # CloudFormation YAML (chunked)
 │           │   └── reviewer_agent/      # Asset consistency validation
 │           ├── tools/                   # Utility tools
@@ -626,7 +630,7 @@ cd backend/ecs && uvicorn app:app --port 8080
 | 레이어 | 기술 |
 |---|---|
 | **AI** | Strands Agents SDK · **Claude Opus 4.6** (Amazon Bedrock, `global.anthropic.claude-opus-4-6-v1`, 크로스 리전 추론) · Context Engineering (CLUES 형식) |
-| **프론트엔드** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · Mermaid.js |
+| **프론트엔드** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · React Flow |
 | **백엔드** | Python 3.11 · FastAPI · Uvicorn · S3 Files NFS · DynamoDB |
 | **인프라** | AWS CDK · CloudFront · Cognito · ECS Fargate · ALB · X-Ray |
 
@@ -793,7 +797,7 @@ Web 画面から AI エージェントとチャット形式でやり取りをし
 | **Lambda 関数** | 業務ごとの Python ハンドラー（例: `process_return`、`track_order`） | Module 2: MCP Server Setup |
 | **OpenAPI スペック** | Amazon Connect MCP Gateway 連携用の API 定義 | Module 2: MCP Gateway |
 | **AI プロンプト** | 業種に合わせたペルソナ、トーン、業務ルール、ガードレール | Module 2: AI Agent Prompt |
-| **Contact Flow** | Amazon Connect のフロー設定と Mermaid によるビジュアル図 | Module 2: Flow Builder |
+| **Contact Flow** | Amazon Connect のフロー設定とインタラクティブなビジュアル図 (JSON から描画) | Module 2: Flow Builder |
 | **CDK インフラ** | Lambda、API Gateway、DynamoDB を含む AWS CDK プロジェクト一式 | Module 2: Deploy |
 | **FAQ ドキュメント** | よくある問い合わせ向けのナレッジベース記事 | Module 3: Knowledge Base |
 
@@ -956,7 +960,7 @@ aws cognito-idp admin-create-user \
 | レイヤー | 技術 |
 |---|---|
 | **AI** | Strands Agents SDK · **Claude Opus 4.6**（Amazon Bedrock、`global.anthropic.claude-opus-4-6-v1`、クロスリージョン推論）· Context Engineering（CLUES形式） |
-| **フロントエンド** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · Mermaid.js |
+| **フロントエンド** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · React Flow |
 | **バックエンド** | Python 3.11 · FastAPI · Uvicorn · S3 Files NFS · DynamoDB |
 | **インフラ** | AWS CDK · CloudFront · Cognito · ECS Fargate · ALB · X-Ray |
 
@@ -978,7 +982,7 @@ aws cognito-idp admin-create-user \
 │           │   ├── lambda_generator/    # Python の Lambda ハンドラー
 │           │   ├── openapi_generator/   # OpenAPI 3.0 スペック（チャンク生成）
 │           │   ├── prompt_generator/    # AI エージェント用プロンプト
-│           │   ├── contact_flow_generator/  # Connect フロー + Mermaid 図
+│           │   ├── contact_flow_generator/  # Connect フロー (JSON から図を描画)
 │           │   ├── infrastructure_generator/ # CloudFormation YAML（チャンク生成）
 │           │   └── reviewer_agent/      # アセット間の整合性チェック
 │           ├── tools/                   # ユーティリティツール
