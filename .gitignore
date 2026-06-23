@@ -103,4 +103,6 @@ questionnaire/*.docx
 # QA / demo capture artifacts (screenshots, demo bundles) — not source
 demo-assets/
 qa-*.png
+slack-*.png
 investigate-*.png
+debug/
