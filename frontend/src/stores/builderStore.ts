@@ -12,6 +12,7 @@ import type {
   AssetPreview,
   BuilderPhase,
 } from '../types';
+import { PHASE_ORDER } from '../types';
 
 // Performance limits to prevent memory issues in long sessions
 const MAX_MESSAGES = 200;           // Keep last 200 messages in memory
@@ -672,7 +673,31 @@ export const useBuilderStore = create<BuilderState>((set) => ({
   triggerWorkspaceRefresh: () =>
     set((state) => ({ workspaceRefreshTrigger: state.workspaceRefreshTrigger + 1 })),
 
-  setCurrentPhase: (phase) => set({ currentPhase: phase }),
+  setCurrentPhase: (phase) =>
+    set((state) => {
+      const targetIdx = PHASE_ORDER.indexOf(phase);
+      // Reconcile progress when the phase advances: any step whose phase is
+      // EARLIER than the new phase must logically be done. This backfills the
+      // interview steps (database/operations/requirements/research) that are
+      // otherwise only driven by live tool_start/tool_end events — those events
+      // aren't persisted to NFS progressState and aren't re-played on restore,
+      // so reopening a finished project (or jumping straight to generation when
+      // a tool didn't fire) would leave them stuck "pending". The PhaseStepper
+      // already treats earlier phases as complete (i < currentIdx); this keeps
+      // the per-step list consistent with that. Only fills forward — never
+      // un-completes a step or downgrades the current/future phases.
+      const progress =
+        targetIdx <= 0
+          ? state.progress
+          : state.progress.map((item) => {
+              const itemIdx = PHASE_ORDER.indexOf(item.phase || 'generation');
+              if (itemIdx >= 0 && itemIdx < targetIdx && item.status !== 'completed') {
+                return { ...item, status: 'completed' as const, progress: 100, updatedAt: Date.now() };
+              }
+              return item;
+            });
+      return { currentPhase: phase, progress };
+    }),
 
   setInputHint: (hint) => set({ inputHint: hint }),
 

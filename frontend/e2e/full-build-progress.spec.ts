@@ -54,24 +54,54 @@ test.describe('Full build — 12-step progress + asset streaming (CS-5.1, CS-1.3
     await page.getByRole('button', { name: S.tabProgress }).first().click();
     await expect(page.getByText(/0 \/ 12 (완료|complete)/)).toBeVisible();
 
-    // Phase 1 → interview lanes complete.
+    // Phase 1 → one interview lane completes via a live progress_update.
     mock.progress('database', 'in_progress', 50);
     await expect(page.getByText(/0 \/ 12 (완료|complete)/)).toBeVisible();
     mock.progress('database', 'completed', 100);
     await expect(page.getByText(/1 \/ 12 (완료|complete)/)).toBeVisible();
 
-    // Enter generation and complete several generation lanes.
+    // Entering generation backfills ALL interview lanes to completed (the
+    // interview steps are otherwise only driven by live tool events that aren't
+    // persisted/replayed on restore — setCurrentPhase reconciles them so an
+    // advanced phase never shows earlier-phase steps stuck "pending"). So the 4
+    // interview lanes (database/operations/requirements/research) are all done now.
     mock.phaseChanged('generation', 'interview');
+    await expect(page.getByText(/4 \/ 12 (완료|complete)/)).toBeVisible();
+
+    // Then complete three generation lanes → 4 interview + 3 generation = 7.
     mock.progress('lambda', 'completed', 100);
     mock.progress('prompt', 'completed', 100);
     mock.progress('contact_flow', 'completed', 100);
-
-    // Counter should now reflect 4 completed (database + 3 generation lanes).
-    await expect(page.getByText(/[1-9] \/ 12 (완료|complete)/)).toBeVisible();
-    await expect(page.getByText(/4 \/ 12 (완료|complete)/)).toBeVisible();
+    await expect(page.getByText(/7 \/ 12 (완료|complete)/)).toBeVisible();
 
     // Still 12 total (full build never trims lanes).
     await expect(page.getByText(/\/ 12 (완료|complete)/)).toBeVisible();
+
+    expect(mock.consoleErrors, mock.consoleErrors.join('\n')).toEqual([]);
+  });
+
+  test('restore into generation backfills interview steps as completed (CS-5.1)', async ({ page, mock, gotoApp }) => {
+    await gotoApp();
+    await startFullBuild(page, mock);
+
+    await page.getByRole('button', { name: S.tabProgress }).first().click();
+    await expect(page.getByText(/0 \/ 12 (완료|complete)/)).toBeVisible();
+
+    // Simulate reopening a project that's already generating: the backend only
+    // persists generation/review asset progress (NOT the interview steps), and
+    // their live tool events are NOT replayed. Here ONLY a phase_changed and
+    // generation-lane progress arrive — no interview-step progress at all.
+    mock.phaseChanged('generation', 'interview');
+    mock.progress('lambda', 'completed', 100);
+
+    // The 4 interview steps must still read completed (backfilled by the phase
+    // advance), so the counter is 4 interview + 1 generation = 5 — NOT 1.
+    await expect(page.getByText(/5 \/ 12 (완료|complete)/)).toBeVisible();
+
+    // And each interview step shows its completed marker (not stuck pending).
+    for (const label of [/데이터베이스 분석|Database Analysis/, /작업 사양|Operation Specs/, /요구사항 분석|Requirements Analysis/, /리서치|Research/]) {
+      await expect(page.getByText(label).first()).toBeVisible();
+    }
 
     expect(mock.consoleErrors, mock.consoleErrors.join('\n')).toEqual([]);
   });
