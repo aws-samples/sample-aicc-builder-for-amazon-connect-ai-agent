@@ -2077,6 +2077,13 @@ export function useWebSocket() {
         const isStaleClose = globalWs !== null && globalWs !== ws;
         if (isStaleClose) {
           console.log("[useWebSocket] Ignoring stale onclose (a newer socket is already active)");
+          // The intentional close this flag was set for (switchSession closing
+          // the OLD socket) has now happened. Reset it here so it can't leak onto
+          // the NEW socket: without this, if the freshly-opened socket drops
+          // unexpectedly (e.g. an ALB/proxy flap right after session rotation),
+          // its onclose would see globalIntentionalClose=true and skip the
+          // auto-reconnect, leaving a dead socket the kickoff never lands on.
+          globalIntentionalClose = false;
           return;
         }
 
