@@ -21,6 +21,7 @@ from strands.agent.conversation_manager import SummarizingConversationManager
 from botocore.config import Config as BotocoreConfig
 
 from .system_prompt import REVIEWER_AGENT_SYSTEM_PROMPT
+from tools.model_selection import resolve_model_id, build_model_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -553,15 +554,15 @@ async def reviewer_agent(
     }
 
     try:
-        model = BedrockModel(
-            model_id=os.environ.get("MODEL_ID", "global.anthropic.claude-opus-4-6-v1"),
+        model = BedrockModel(**build_model_kwargs(
+            resolve_model_id(),
             region_name=os.environ.get("AWS_REGION", "us-east-1"),
-            temperature=0.2,  # Lower temperature for analytical review
+            # temperature omitted (None) — only applied on models that accept it
             max_tokens=128000,
             # cache_prompt removed - using cachePoint in system_prompt instead
             cache_tools="default",   # Cache tool definitions (lookup, validate, check)
             boto_client_config=BotocoreConfig(read_timeout=600),
-        )
+        ))
 
         # Internal tools for the reviewer
         internal_tools = [

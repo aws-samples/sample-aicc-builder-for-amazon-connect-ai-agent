@@ -15,13 +15,20 @@ import {
   Loader2,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import type { AttachedFile } from '../types';
+import type { AttachedFile, Language } from '../types';
+
+const REMOVE_LABEL: Record<Language, string> = {
+  'en-US': 'Remove attachment',
+  'ko-KR': '첨부 파일 제거',
+  'ja-JP': '添付ファイルを削除',
+};
 
 interface AttachmentPreviewProps {
   files: AttachedFile[];
   onRemove: (fileId: string) => void;
   isUploading?: boolean;
   className?: string;
+  language?: Language;
 }
 
 export function AttachmentPreview({
@@ -29,6 +36,7 @@ export function AttachmentPreview({
   onRemove,
   isUploading = false,
   className,
+  language = 'en-US',
 }: AttachmentPreviewProps) {
   if (files.length === 0) return null;
 
@@ -45,6 +53,7 @@ export function AttachmentPreview({
           file={file}
           onRemove={() => onRemove(file.id)}
           isUploading={isUploading}
+          language={language}
         />
       ))}
     </div>
@@ -55,9 +64,10 @@ interface AttachmentCardProps {
   file: AttachedFile;
   onRemove: () => void;
   isUploading: boolean;
+  language: Language;
 }
 
-function AttachmentCard({ file, onRemove, isUploading }: AttachmentCardProps) {
+function AttachmentCard({ file, onRemove, isUploading, language }: AttachmentCardProps) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   // Generate preview URL for images
@@ -129,7 +139,8 @@ function AttachmentCard({ file, onRemove, isUploading }: AttachmentCardProps) {
           'transition-colors',
           isUploading && 'opacity-50 cursor-not-allowed'
         )}
-        title="Remove attachment"
+        title={REMOVE_LABEL[language] || REMOVE_LABEL['en-US']}
+        aria-label={REMOVE_LABEL[language] || REMOVE_LABEL['en-US']}
       >
         <X className="w-4 h-4" />
       </button>

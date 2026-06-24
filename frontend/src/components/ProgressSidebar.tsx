@@ -37,11 +37,12 @@ import {
   Terminal,
   Rocket,
 } from 'lucide-react';
-import { useBuilderStore } from '../stores/builderStore';
+import { useBuilderStore, SCOPE_TO_PROGRESS_ID } from '../stores/builderStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { cn } from '../lib/utils';
 import type { ProgressItem, ProgressSubStep, BuilderPhase } from '../types';
 import { PHASE_LABELS, PHASE_ORDER } from '../types';
+
 import { useWebSocket } from '../hooks/useWebSocket';
 import { fetchAssetDownloadUrl } from '../services/workspaceApi';
 import { createZip, downloadBlob } from '../lib/zipUtils';
@@ -186,12 +187,42 @@ export function ProgressSidebar() {
   const showDownloadModal = useBuilderStore(s => s.showDownloadModal);
   const setShowDownloadModal = useBuilderStore(s => s.setShowDownloadModal);
   const currentPhase = useBuilderStore(s => s.currentPhase);
+  const scope = useBuilderStore(s => s.scope);
   const [isDownloading, setIsDownloading] = useState(false);
+  // E4: real download lifecycle + toast (replaces the fake 2s timer).
+  const [downloadState, setDownloadState] = useState<'idle' | 'packaging' | 'ready' | 'error'>('idle');
+  const [downloadToast, setDownloadToast] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('assets');
   const [isExpanded, setIsExpanded] = useState(false);
 
-  const completedCount = progress.filter((p) => p.status === 'completed').length;
-  const totalCount = progress.length;
+  // Scope-aware partition (G1: the count must match what ACTUALLY runs).
+  // - Full build (no scope): show all 12 steps.
+  // - Single-segment scope: a scoped run STILL runs the interview (it gathers
+  //   only what the in-scope asset needs) and STILL runs review/packaging — only
+  //   the OUT-OF-SCOPE generation lanes (e.g. lambda/openapi/cdk for a flow-only
+  //   run) don't execute. So we keep the interview + review + packaging steps
+  //   visible and trim only the generation lanes that won't run. A flow-only run
+  //   therefore shows ~7 honest steps, not a misleading 1–2.
+  const inScopeProgressIds = scope
+    ? new Set([...scope.map((s) => SCOPE_TO_PROGRESS_ID[s] || s)])
+    : null;
+  // Steps that run regardless of scope (interview gathering + review + package).
+  const ALWAYS_IN_SCOPE = new Set(['database', 'operations', 'requirements', 'research', 'review', 'ready']);
+  const isStepInScope = (item: ProgressItem) =>
+    !inScopeProgressIds || ALWAYS_IN_SCOPE.has(item.id) || inScopeProgressIds.has(item.id);
+
+  const inScopeSteps = progress.filter(isStepInScope);
+  const outOfScopeSteps = inScopeProgressIds ? progress.filter((p) => !isStepInScope(p)) : [];
+
+  // Completion meter reflects the in-scope steps only.
+  const completedCount = inScopeSteps.filter((p) => p.status === 'completed').length;
+  const totalCount = inScopeSteps.length;
+
+  // Group in-scope steps by phase for the grouped display.
+  const stepsByPhase = PHASE_ORDER.map((phase) => ({
+    phase,
+    steps: inScopeSteps.filter((s) => (s.phase || 'generation') === phase),
+  })).filter((g) => g.steps.length > 0);
 
   const assetFlags = useAvailableAssetTypes();
   const hasLambdaAsset = !!(assetFlags & 1);
@@ -211,9 +242,16 @@ export function ProgressSidebar() {
     ? new Date(downloadExpiresAt) > new Date()
     : false;
 
+  const ko = language === 'ko-KR';
+  const toast = (msg: string) => {
+    setDownloadToast(msg);
+    setTimeout(() => setDownloadToast(null), 4000);
+  };
+
   const handleDownloadAll = async () => {
     if (!currentSessionId) return;
     setIsDownloading(true);
+    setDownloadState('packaging');
     try {
       // Always fetch a fresh package from the backend (bypasses NFS cache and
       // any stale packageS3Key / downloadUrl cached on the client).
@@ -221,11 +259,18 @@ export function ProgressSidebar() {
       if (result?.downloadUrl) {
         const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
         setDownloadUrl(result.downloadUrl, expiresAt, result.s3Key);
-        window.open(result.downloadUrl, '_blank');
+        const win = window.open(result.downloadUrl, '_blank');
+        // Surface popup blockers explicitly rather than failing silently.
+        if (!win) {
+          toast(ko ? '팝업이 차단되었습니다. 아래 링크로 다시 시도하세요.' : 'Popup blocked — use the link below to retry.');
+        }
         setShowDownloadModal(true);
+        setDownloadState('ready');
       } else if (isConnected) {
         // Fallback: ask the agent via WebSocket (legacy path)
         requestAssets();
+        setDownloadState('packaging');
+        toast(ko ? '에셋을 패키징하는 중입니다…' : 'Packaging assets…');
       } else {
         // Last-resort client-side ZIP from streamed previews
         const entries: Array<{ name: string; content: string }> = [];
@@ -237,12 +282,18 @@ export function ProgressSidebar() {
         if (entries.length > 0) {
           const blob = await createZip(entries);
           downloadBlob(blob, `${session.companyName || 'aicc'}_assets.zip`);
+          setDownloadState('ready');
+        } else {
+          setDownloadState('error');
+          toast(ko ? '다운로드할 에셋이 없습니다.' : 'No assets available to download.');
         }
       }
     } catch (error) {
       console.error('[ProgressSidebar] Download All error:', error);
+      setDownloadState('error');
+      toast(ko ? '다운로드에 실패했습니다. 다시 시도하세요.' : 'Download failed — please retry.');
     } finally {
-      setTimeout(() => setIsDownloading(false), 2000);
+      setIsDownloading(false);
     }
   };
 
@@ -261,24 +312,26 @@ export function ProgressSidebar() {
             <button
               onClick={() => setActiveTab('assets')}
               className={cn(
-                'flex-1 py-3 text-sm font-medium transition-colors',
+                'flex-1 flex items-center justify-center gap-1.5 py-3 text-sm font-medium transition-colors',
                 activeTab === 'assets'
                   ? 'border-b-2 border-primary-500 text-primary-600 dark:text-primary-400'
                   : 'text-surface-500 dark:text-surface-400 hover:text-surface-700 dark:hover:text-surface-300'
               )}
             >
-              Assets
+              <CircleDot className="w-4 h-4" />
+              {language === 'ko-KR' ? '진행 상황' : 'Progress'}
             </button>
             <button
               onClick={() => setActiveTab(activeTab === 'notes' ? null : 'notes')}
               className={cn(
-                'flex-1 py-3 text-sm font-medium transition-colors',
+                'flex-1 flex items-center justify-center gap-1.5 py-3 text-sm font-medium transition-colors',
                 activeTab === 'notes'
                   ? 'border-b-2 border-primary-500 text-primary-600 dark:text-primary-400'
                   : 'text-surface-500 dark:text-surface-400 hover:text-surface-700 dark:hover:text-surface-300'
               )}
             >
-              Notes
+              <BookOpen className="w-4 h-4" />
+              {language === 'ko-KR' ? '노트' : 'Notes'}
             </button>
             {activeTab === 'notes' && (
               <button
@@ -295,17 +348,29 @@ export function ProgressSidebar() {
             <button
               onClick={() => setActiveTab('assets')}
               className="p-2 text-surface-400 hover:text-surface-600 dark:hover:text-surface-300 transition-colors"
-              title="Assets"
+              title={language === 'ko-KR' ? '진행 상황' : 'Progress'}
+              aria-label={language === 'ko-KR' ? '진행 상황' : 'Progress'}
             >
-              <Boxes className="w-4 h-4" />
+              <CircleDot className="w-4 h-4" />
             </button>
             <button
               onClick={() => setActiveTab('notes')}
               className="p-2 text-surface-400 hover:text-surface-600 dark:hover:text-surface-300 transition-colors"
-              title="Notes"
+              title={language === 'ko-KR' ? '노트' : 'Notes'}
+              aria-label={language === 'ko-KR' ? '노트' : 'Notes'}
             >
               <BookOpen className="w-4 h-4" />
             </button>
+            {/* Collapsed-rail status meter (vertical fill) */}
+            <div className="mt-2 flex flex-col items-center gap-1" title={`${completedCount}/${totalCount}`}>
+              <div className="w-1.5 h-24 rounded-full bg-surface-200 dark:bg-surface-700 overflow-hidden flex flex-col justify-end">
+                <div
+                  className="w-full bg-primary-500 dark:bg-primary-400 rounded-full transition-all duration-500"
+                  style={{ height: `${totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0}%` }}
+                />
+              </div>
+              <span className="text-[9px] text-surface-400 dark:text-surface-500 font-mono">{completedCount}/{totalCount}</span>
+            </div>
           </>
         )}
       </div>
@@ -335,12 +400,42 @@ export function ProgressSidebar() {
             </div>
           </div>
 
-          {/* Progress Steps */}
+          {/* Progress Steps — grouped by phase; scope-trimmed */}
           <div className="flex-1 overflow-y-auto px-4 py-4">
-            <div className="space-y-1">
-              {progress.map((item) => (
-                <ProgressStep key={item.id} item={item} language={language} />
+            <div className="space-y-3">
+              {stepsByPhase.map(({ phase, steps }) => (
+                <div key={phase}>
+                  <div className="px-1 mb-1 text-[10px] font-semibold uppercase tracking-wide text-surface-400 dark:text-surface-500">
+                    {PHASE_LABELS[phase]?.[language] || phase}
+                  </div>
+                  <div className="space-y-1">
+                    {steps.map((item) => (
+                      <ProgressStep key={item.id} item={item} language={language} />
+                    ))}
+                  </div>
+                </div>
               ))}
+
+              {/* Out-of-scope steps (muted) */}
+              {outOfScopeSteps.length > 0 && (
+                <div className="pt-2 mt-2 border-t border-surface-200 dark:border-surface-700">
+                  <div className="px-1 mb-1 text-[10px] font-semibold uppercase tracking-wide text-surface-400 dark:text-surface-500">
+                    {language === 'ko-KR' ? '이번 실행에 포함되지 않음' : 'Not in this run'}
+                  </div>
+                  <div className="space-y-1 opacity-50">
+                    {outOfScopeSteps.map((item) => (
+                      <div key={item.id} className="flex items-center gap-3 p-2 rounded-lg">
+                        <div className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center bg-surface-100 dark:bg-surface-800 text-surface-400 dark:text-surface-500">
+                          {STEP_ICONS[item.id] || <Circle className="w-3.5 h-3.5" />}
+                        </div>
+                        <span className="text-xs text-surface-400 dark:text-surface-500 line-through">
+                          {language === 'ko-KR' ? item.labelKo : item.label}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -430,13 +525,26 @@ export function ProgressSidebar() {
 
       {/* Download All Button */}
       <div className="px-6 py-4 border-t border-surface-200 dark:border-surface-700 flex-shrink-0">
+        {downloadToast && (
+          <div className={cn(
+            'mb-2 flex items-center gap-2 px-3 py-2 rounded-lg text-xs',
+            downloadState === 'error'
+              ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800'
+              : 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300 border border-primary-200 dark:border-primary-800'
+          )}>
+            {downloadState === 'error' ? <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" /> : <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />}
+            <span>{downloadToast}</span>
+          </div>
+        )}
         <button
           disabled={!isReady || isDownloading}
           onClick={handleDownloadAll}
           className={cn(
             'w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl',
             'font-medium transition-all',
-            isReady && !isDownloading
+            downloadState === 'error' && isReady
+              ? 'bg-red-600 text-white hover:bg-red-700'
+              : isReady && !isDownloading
               ? 'bg-primary-600 dark:bg-primary-500 text-white hover:bg-primary-700 dark:hover:bg-primary-600 shadow-sm dark:shadow-glow'
               : 'bg-surface-100 dark:bg-surface-800 text-surface-400 dark:text-surface-500 cursor-not-allowed'
           )}
@@ -446,9 +554,13 @@ export function ProgressSidebar() {
           ) : (
             <Download className="w-5 h-5" />
           )}
-          {isDownloadUrlValid || packageS3Key
-            ? (language === 'ko-KR' ? '에셋 다운로드' : 'Download Assets')
-            : (language === 'ko-KR' ? '에셋 패키징 및 다운로드' : 'Package & Download Assets')
+          {isDownloading
+            ? (ko ? '패키징 중…' : 'Packaging…')
+            : downloadState === 'error'
+            ? (ko ? '다시 시도' : 'Retry')
+            : isDownloadUrlValid || packageS3Key
+            ? (ko ? '에셋 다운로드' : 'Download Assets')
+            : (ko ? '에셋 패키징 및 다운로드' : 'Package & Download Assets')
           }
         </button>
         {isDownloadUrlValid && downloadExpiresAt && (

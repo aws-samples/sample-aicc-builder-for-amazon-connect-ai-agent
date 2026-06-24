@@ -17,6 +17,8 @@ Phase-based prompt splitting:
 - CONNECT_GUIDE: Amazon Connect AI Agent integration guide
 """
 
+from typing import Optional
+
 # =============================================================================
 # COMMON_PROMPT — Always loaded in every phase
 # Role, PM mindset, Rules 1-4, User Guidance Principle
@@ -29,7 +31,7 @@ Requirements have already been gathered by the Interview Agent and saved as spec
 Your job is to **load those specs and generate all assets** by coordinating specialized Sub-Agents.
 
 You coordinate these Sub-Agents for generation:
-1. **research_agent**: Web research using Brave Search API to gather company info
+1. **research_agent**: Web research using Amazon Bedrock AgentCore Gateway web search to gather company info
 2. **faq_generator_agent**: Generates FAQ documents for Knowledge Bases
 3. **infrastructure_generator_agent**: Generates CloudFormation YAML (DynamoDB + API Gateway + Lambda)
 4. **lambda_generator_agent**: Generates individual Lambda code (for reference/customization)
@@ -1562,11 +1564,11 @@ TOOLS_REFERENCE = """
   - Use when: all save_operation_spec calls are done, before asking user for final confirmation
 
 ### Research Sub-Agent
-- `research_agent`: Web research using Brave Search API
+- `research_agent`: Web research using Amazon Bedrock AgentCore Gateway web search
   - Input: research_request, company_name, company_url, session_id, orchestrator_context, research_depth
   - research_depth: "light" (~2min, 1-5 FAQs), "standard" (~5min, 5-10 FAQs), "deep" (~10min, all info)
   - Output: {success, research_results, searches_performed, pages_fetched}
-  - Internal tools: brave_web_search, fetch_webpage, save_research_result
+  - Internal tools: web_search, fetch_webpage, save_research_result
   - **CALL THIS** when user wants to gather info from company websites or external APIs
   - **ASK DEPTH FIRST**: Always ask user about research depth before calling
   - Returns structured findings that can be passed to faq_generator_agent
@@ -1625,7 +1627,7 @@ These generate production-quality artifacts AFTER interview is complete:
 - `contact_flow_generator_agent`: Generates Contact Flow JSON
   - Input: flow_name, company_name, language, contact_flow_requirements (optional), modification_request (optional)
   - `operations` is auto-loaded (omit it).
-  - Output: Contact Flow JSON + Mermaid diagram
+  - Output: Contact Flow JSON (the visual diagram is rendered from it on the frontend)
 
 ### Fallback Streaming Tool
 
@@ -2365,13 +2367,58 @@ Just focus on calling the right Sub-Agent tools.
 """
 
 # =============================================================================
+# ATTACHMENT_HANDLING — conversational import of an uploaded asset
+# =============================================================================
+# Loaded in every non-interview phase (and appended to the interview prompt).
+# The user can attach a Contact Flow JSON, an AI Prompt YAML, or a flow-diagram
+# image (whiteboard / draw.io / screenshot) to ANY message. JSON/YAML arrive
+# inline as fenced text in the message; images arrive as vision content.
+ATTACHMENT_HANDLING = """
+## 📎 HANDLING UPLOADED ATTACHMENTS (flow JSON / prompt YAML / flow-diagram image)
+
+The user may attach a file to any message. When a message includes an attachment,
+DO NOT silently run a pipeline. Be conversational:
+
+1. **Acknowledge it first** — in the user's language. e.g. "이미지를 올리셨군요!" /
+   "Contact Flow JSON 잘 받았습니다." / "You uploaded a flow diagram — nice."
+2. **Say what you see / what you'll do** — briefly describe what the attachment
+   appears to be (a Contact Flow, an AI prompt, a hand-drawn flow, …).
+
+### If the attachment is an IMAGE of a flow (whiteboard, draw.io, screenshot)
+- **ASK before converting.** Confirm intent, e.g. "이 다이어그램을 Amazon Connect
+  Contact Flow로 만들어 드릴까요?" / "Want me to turn this into an importable
+  Amazon Connect Contact Flow?"
+- Only AFTER the user confirms, call **`draft_flow_from_image_tool`** (it reads the
+  uploaded image, transcribes it to a draft flow, validates/repairs it, and seeds
+  it for editing). Tell the user you're reading the diagram before you call it.
+- If the image clearly isn't a contact-flow diagram, say so and ask what they want.
+
+### If the attachment is a Contact Flow JSON or an AI Prompt YAML (inline fenced text)
+- Confirm briefly, then call **`import_uploaded_asset_tool`**:
+  - Contact Flow JSON → `import_uploaded_asset_tool(asset_type="contact_flow", content=<the JSON>)`
+  - AI Prompt YAML → `import_uploaded_asset_tool(asset_type="prompt", content=<the YAML>)`
+- Pass the file content verbatim (the fenced block in the user's message).
+
+### After ANY successful import (image or file)
+- The tool lints/repairs the asset and returns `{operation_id, lint_summary}`.
+  Surface the lint summary to the user (e.g. "검증 완료 — 자동 수정 2건").
+- The session is now in **modification mode**. To edit the imported asset, call the
+  matching generator with `flow_name`/`agent_name` set to the **returned
+  operation_id** and a `modification_request` — this PATCHES the seeded file.
+  **Never regenerate the asset from scratch.**
+
+### If a file is attached with no instruction
+- Ask what they'd like to do with it (improve it, convert it, explain it).
+"""
+
+# =============================================================================
 # Phase-based prompt composition
 # =============================================================================
 PHASE_PROMPTS = {
     "interview":       None,  # Uses dedicated Interview Agent prompt (interview_agent_prompt.py)
-    "generation":      [COMMON_PROMPT, TERMINOLOGY_FACTS, GENERATION_PROMPT, TOOLS_REFERENCE, SCHEMA_REFERENCE, CONNECT_GUIDE],
-    "review":          [COMMON_PROMPT, TERMINOLOGY_FACTS, REVIEW_PROMPT, TOOLS_REFERENCE, SCHEMA_REFERENCE, CONNECT_GUIDE],
-    "post_generation": [COMMON_PROMPT, TERMINOLOGY_FACTS, REGENERATION_PROMPT, TOOLS_REFERENCE, SCHEMA_REFERENCE, CONNECT_GUIDE],
+    "generation":      [COMMON_PROMPT, TERMINOLOGY_FACTS, GENERATION_PROMPT, ATTACHMENT_HANDLING, TOOLS_REFERENCE, SCHEMA_REFERENCE, CONNECT_GUIDE],
+    "review":          [COMMON_PROMPT, TERMINOLOGY_FACTS, REVIEW_PROMPT, ATTACHMENT_HANDLING, TOOLS_REFERENCE, SCHEMA_REFERENCE, CONNECT_GUIDE],
+    "post_generation": [COMMON_PROMPT, TERMINOLOGY_FACTS, REGENERATION_PROMPT, ATTACHMENT_HANDLING, TOOLS_REFERENCE, SCHEMA_REFERENCE, CONNECT_GUIDE],
 }
 
 # Backward-compatible full prompt (all sections combined)
@@ -2381,11 +2428,98 @@ SYSTEM_PROMPT = "\n\n".join([
 ])
 
 
-def get_phase_system_prompt(phase: str) -> list:
-    """Return phase-specific system prompt sections with cachePoint for Bedrock prompt caching."""
+# Connect-centric segments a user may scope a run to. The full run produces all
+# six asset families; a scoped run produces only these (each is the asset id the
+# orchestrator and detect_phase reason about). NOTE: these are PRODUCED-ASSET ids
+# (the same space get_generation_scope returns), so FAQ is "knowledge_base", not
+# "faq" — keep this aligned with _SCOPE_TO_ASSET / _GENERATOR_TOOL_TO_ASSET.
+SCOPED_GENERATION_ASSETS = {"contact_flow", "prompt", "knowledge_base"}
+
+# Everything the full pipeline can produce (produced-asset id space). A scope equal
+# to (or a superset of) this set means a full build, not a scoped run.
+_FULL_PRODUCED_ASSETS = {"cdk", "lambda", "openapi", "prompt", "contact_flow", "knowledge_base"}
+
+# Per-segment guidance keyed by PRODUCED-ASSET id: which generator tool to run and
+# the one-line "what this segment needs" the scoped prompt surfaces so the
+# orchestrator does NOT reach for the full 5-phase pipeline.
+_SCOPED_SEGMENT_GUIDE = {
+    "contact_flow": "Contact Flow — call `contact_flow_generator_agent`. It needs the session flow config and contact-flow behaviors only; it does NOT need a generated Lambda, OpenAPI spec, or infrastructure schema.",
+    "prompt": "AI Prompt — call `prompt_generator_agent`. It needs the agent persona, greetings, and dialogue flow; the infrastructure schema is optional (omit it if not in scope).",
+    "knowledge_base": "FAQ / Knowledge Base — call `faq_generator_agent` (optionally `research_agent` first for source material). It is fully standalone — no upstream assets required.",
+}
+
+
+def _build_scoped_generation_prompt(scope: list) -> str:
+    """Compose a scoped variant of GENERATION_PROMPT for a partial run.
+
+    *scope* is a list of produced-asset ids. Restates the ONE-PHASE-PER-TURN /
+    HARD-STOP discipline (so it stays at the same cached-system-prompt altitude as
+    the original mandate) but with a phase table that contains ONLY the in-scope
+    generators and an explicit instruction NOT to generate the excluded assets.
+    """
+    in_scope = [a for a in scope if a in SCOPED_GENERATION_ASSETS]
+    lines = "\n".join(f"- {_SCOPED_SEGMENT_GUIDE[a]}" for a in in_scope)
+    excluded = sorted(_FULL_PRODUCED_ASSETS - set(in_scope))
+    return f"""
+## ⛔ SCOPED GENERATION MODE — ONE PHASE PER TURN, HARD STOP
+
+**THIS RUN IS SCOPED.** The user asked to generate ONLY the following Connect
+asset(s). You MUST NOT generate anything else.
+
+**IN SCOPE — generate these, one per turn:**
+{lines}
+
+**OUT OF SCOPE — do NOT generate, do NOT call their generators this run:**
+{", ".join(excluded) if excluded else "(none)"}
+
+The out-of-scope generator tools are NOT available to you this run; do not plan
+around them, do not tell the user you will build them, and do not block a scoped
+asset waiting on one. If the user explicitly asks to add an out-of-scope asset,
+tell them to start a Full Build or add that segment from the start screen.
+
+**TURN DISCIPLINE (unchanged from full generation):**
+- Each in-scope segment is its own LLM turn: run its generator tool(s), report the
+  result, ask if they want to continue/refine, then **END YOUR RESPONSE**.
+- Never run two segment generators in the same turn.
+- Never promise-then-stop: if the user says "진행"/"네"/"continue", actually call
+  the generator tool THIS turn.
+
+**WHY**: Scoped runs let the user iterate fast on a single Connect asset (e.g. a
+Contact Flow) without the cost and latency of the full bundle.
+"""
+
+
+def get_phase_system_prompt(phase: str, scope: Optional[list] = None) -> list:
+    """Return phase-specific system prompt sections with cachePoint for Bedrock prompt caching.
+
+    When ``phase == "generation"`` and ``scope`` is a proper subset of the scoped
+    segments (i.e. a partial run), the forceful full-pipeline GENERATION_PROMPT is
+    swapped for a scoped variant that only permits the in-scope generators.
+    """
     if phase == "interview":
         from prompts.interview_agent_prompt import get_interview_agent_prompt
         return get_interview_agent_prompt()
+
+    if phase == "generation" and scope:
+        scope_set = set(scope)
+        # Scoped run = contains a scoped segment AND is missing at least one
+        # full-pipeline asset (i.e. it's not a full build). Compared in
+        # produced-asset id space (knowledge_base, not faq).
+        is_scoped = (
+            bool(scope_set & SCOPED_GENERATION_ASSETS)
+            and not _FULL_PRODUCED_ASSETS.issubset(scope_set)
+        )
+        if is_scoped:
+            sections = [
+                COMMON_PROMPT, TERMINOLOGY_FACTS,
+                _build_scoped_generation_prompt(scope),
+                ATTACHMENT_HANDLING,
+                TOOLS_REFERENCE, SCHEMA_REFERENCE, CONNECT_GUIDE,
+            ]
+            return [
+                {"text": "\n\n".join(sections)},
+                {"cachePoint": {"type": "default"}},
+            ]
 
     sections = PHASE_PROMPTS.get(phase, PHASE_PROMPTS["generation"])
     combined = "\n\n".join(sections)

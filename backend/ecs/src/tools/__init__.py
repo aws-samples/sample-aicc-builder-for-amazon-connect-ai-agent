@@ -48,6 +48,7 @@ from .workspace_file_tools import (
     patch_workspace_file,
     find_workspace_files,
     grep_workspace,
+    get_asset_workspace_path,
 )
 
 # Export streaming callback functions for consistent import across modules
@@ -134,6 +135,7 @@ __all__ = [
     "patch_workspace_file",
     "find_workspace_files",
     "grep_workspace",
+    "get_asset_workspace_path",
     # Streaming callbacks
     "set_streaming_callback",
     "clear_streaming_callback",

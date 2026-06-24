@@ -115,21 +115,10 @@ fi
 set +e
 INGESTION_RESULT=$(aws bedrock-agent start-ingestion-job \
     --knowledge-base-id "$KB_ID" \
-<<<<<<< Updated upstream
-    --data-source-id "$DATA_SOURCE_ID" 2>&1)
-INGESTION_RC=$?
-=======
     --data-source-id "$DATA_SOURCE_ID" \
     --region "$REGION" 2>&1)
 INGESTION_RC=$?
 set -e
-
-if [ $INGESTION_RC -ne 0 ]; then
-    echo -e "${RED}start-ingestion-job failed (exit $INGESTION_RC):${NC}"
-    echo "$INGESTION_RESULT"
-    exit 1
-fi
->>>>>>> Stashed changes
 
 INGESTION_JOB_ID=$(echo "$INGESTION_RESULT" | jq -r '.ingestionJob.ingestionJobId // empty' 2>/dev/null)
 

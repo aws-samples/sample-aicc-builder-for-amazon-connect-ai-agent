@@ -1,8 +1,8 @@
 """
 Research Agent Sub-Agent
 
-This agent performs web research using Brave Search API to gather
-information about companies, services, and business data.
+This agent performs web research using Amazon Bedrock AgentCore Gateway web
+search to gather information about companies, services, and business data.
 
 AsyncGenerator Streaming (Strands SDK v1.22.0+):
 - Uses async def with yield for real-time event streaming
@@ -26,6 +26,7 @@ from strands.models import BedrockModel
 from botocore.config import Config as BotocoreConfig
 
 from .system_prompt import RESEARCH_AGENT_SYSTEM_PROMPT
+from tools.model_selection import resolve_model_id, build_model_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -122,86 +123,27 @@ def _send_progress(agent_name: str, status: str, message: str = ""):
 # ========================================
 
 @tool
-def brave_web_search(
+async def web_search(
     query: str,
     count: int = 10,
     session_id: str = "default"
 ) -> dict:
     """
-    Search the web using Brave Search API.
+    Search the web using Amazon Bedrock AgentCore Gateway web search.
+
+    Authenticated with the ECS task role (SigV4) — no API key. Queries stay
+    inside the AWS environment. Available region: us-east-1.
 
     Args:
         query: Search query string
-        count: Number of results to return (max 20)
+        count: Number of results to return (max 25)
         session_id: Session identifier for tracking
 
     Returns:
         Search results with titles, URLs, and descriptions
     """
-    api_key = os.environ.get("BRAVE_API_KEY", "")
-
-    if not api_key:
-        return {
-            "success": False,
-            "error": "BRAVE_API_KEY not configured. Please set the API key in environment variables.",
-            "results": []
-        }
-
-    try:
-        headers = {
-            "X-Subscription-Token": api_key,
-            "Accept": "application/json"
-        }
-
-        params = {
-            "q": query,
-            "count": min(count, 20),  # Max 20 results
-        }
-
-        response = requests.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers=headers,
-            params=params,
-            timeout=30
-        )
-        response.raise_for_status()
-
-        data = response.json()
-
-        # Extract web results
-        results = []
-        if "web" in data and "results" in data["web"]:
-            for item in data["web"]["results"]:
-                results.append({
-                    "title": item.get("title", ""),
-                    "url": item.get("url", ""),
-                    "description": item.get("description", ""),
-                })
-
-        return {
-            "success": True,
-            "query": query,
-            "result_count": len(results),
-            "results": results
-        }
-
-    except requests.exceptions.HTTPError as e:
-        error_msg = f"Brave Search API error: {e.response.status_code}"
-        if e.response.status_code == 401:
-            error_msg = "Invalid Brave Search API key"
-        elif e.response.status_code == 429:
-            error_msg = "Brave Search API rate limit exceeded"
-        return {
-            "success": False,
-            "error": error_msg,
-            "results": []
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Search failed: {str(e)}",
-            "results": []
-        }
+    from tools.web_search import web_search as _agentcore_web_search
+    return await _agentcore_web_search(query, count)
 
 
 @tool
@@ -420,9 +362,9 @@ async def research_agent(
     """
     Research companies, APIs, and topics using web search to gather information.
 
-    This async tool performs web research using Brave Search API and
-    extracts relevant information for generating FAQ documents and
-    other business assets.
+    This async tool performs web research using Amazon Bedrock AgentCore
+    Gateway web search and extracts relevant information for generating FAQ
+    documents and other business assets.
 
     Yields:
         dict: Streaming events with progress and findings
@@ -488,14 +430,13 @@ Focus on: services, policies, FAQ-worthy info, contact information.
     pages_fetched = []
 
     try:
-        # Use Opus for Research (consistent quality)
-        model_id = "global.anthropic.claude-opus-4-6-v1"
+        # Model follows the session selection (consistent quality across agents)
         region = os.environ.get("AWS_REGION", "ap-northeast-1")
 
-        model = BedrockModel(
-            model_id=model_id,
+        model = BedrockModel(**build_model_kwargs(
+            resolve_model_id(),
             region_name=region,
-            temperature=0.5,
+            # temperature omitted (None) — only applied on models that accept it
             max_tokens=128000,
             streaming=True,
             # cache_prompt removed - using cachePoint in system_prompt instead
@@ -504,7 +445,7 @@ Focus on: services, policies, FAQ-worthy info, contact information.
                 read_timeout=600,
                 retries={"max_attempts": 2, "mode": "adaptive"},
             ),
-        )
+        ))
 
         # Convert history to Strands format
         recent_history = history[-10:] if len(history) > 10 else history
@@ -516,10 +457,10 @@ Focus on: services, policies, FAQ-worthy info, contact information.
         # Create internal agent with research tools
         # Pass session_id to internal tools
         @tool
-        def brave_search_tracked(query: str, count: int = 10) -> dict:
+        async def web_search_tracked(query: str, count: int = 10) -> dict:
             """Search web with tracking."""
             searches_performed.append(query)
-            return brave_web_search(query, count, session_id)
+            return await web_search(query, count, session_id)
 
         @tool
         def fetch_page_tracked(url: str, max_length: int = 10000) -> dict:
@@ -546,7 +487,7 @@ Focus on: services, policies, FAQ-worthy info, contact information.
                 {"text": RESEARCH_AGENT_SYSTEM_PROMPT},
                 {"cachePoint": {"type": "default"}},
             ],
-            tools=[brave_search_tracked, fetch_page_tracked, save_result_tracked],
+            tools=[web_search_tracked, fetch_page_tracked, save_result_tracked],
             callback_handler=None,
             messages=strands_messages,
         )

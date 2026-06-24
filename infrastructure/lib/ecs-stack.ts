@@ -8,6 +8,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as applicationautoscaling from "aws-cdk-lib/aws-applicationautoscaling";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 /**
@@ -43,6 +44,14 @@ export interface EcsStackProps extends cdk.StackProps {
    * AiccBuilderStack reads the same parameter via dynamic reference.
    */
   albDnsSsmParamName: string;
+
+  /**
+   * SSM parameter name where KnowledgeBaseStack publishes the Contact Flow KB id.
+   * Passed to the container as CONTACT_FLOW_KB_ID_SSM_PARAM; the backend resolves
+   * the actual id from SSM at startup to enable RAG. Optional (KB stack may be
+   * disabled), so RAG degrades gracefully when the param is absent.
+   */
+  contactFlowKbIdSsmParamName?: string;
 }
 
 export class EcsStack extends cdk.Stack {
@@ -221,6 +230,34 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
+    // Amazon Bedrock AgentCore Gateway — web search for the Research and
+    // Contact Flow agents (replaces the old Brave Search API). The gateway and
+    // its Web Search connector target are created out-of-band in us-east-1 (the
+    // only region Web Search is GA), so the ARN isn't known at synth time —
+    // scope to any gateway in us-east-1 within this account.
+    taskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["bedrock-agentcore:InvokeGateway"],
+        resources: [
+          `arn:aws:bedrock-agentcore:us-east-1:${this.account}:gateway/*`,
+        ],
+      })
+    );
+
+    // Allow the task to resolve the Contact Flow KB id from SSM at runtime
+    // (CONTACT_FLOW_KB_ID). Published by KnowledgeBaseStack; absent when the KB
+    // stack is disabled, in which case the backend simply leaves RAG off.
+    if (props?.contactFlowKbIdSsmParamName) {
+      taskRole.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ["ssm:GetParameter"],
+          resources: [
+            `arn:aws:ssm:${this.region}:${this.account}:parameter${props.contactFlowKbIdSsmParamName}`,
+          ],
+        })
+      );
+    }
+
     // ========================================
     // Task Definition — ARM64, 4 vCPU, 16GB
     // ========================================
@@ -255,6 +292,16 @@ export class EcsStack extends cdk.Stack {
         S3FILES_MOUNT_PATH: "/mnt/s3",
         SESSION_STORE_BACKEND: "s3files",
         PYTHONUNBUFFERED: "1",
+        // Name of the SSM parameter holding the Contact Flow KB id. The backend
+        // resolves CONTACT_FLOW_KB_ID from this at startup to enable RAG. Empty
+        // when the KB stack is disabled → RAG stays off (graceful).
+        ...(props?.contactFlowKbIdSsmParamName
+          ? { CONTACT_FLOW_KB_ID_SSM_PARAM: props.contactFlowKbIdSsmParamName }
+          : {}),
+        // Web search via Amazon Bedrock AgentCore Gateway (us-east-1). The
+        // endpoint is patched in by deploy.sh (from AGENTCORE_GATEWAY_URL);
+        // when empty the agents fall back to built-in knowledge.
+        AGENTCORE_GATEWAY_REGION: "us-east-1",
       },
       portMappings: [
         { containerPort: 8080, protocol: ecs.Protocol.TCP },

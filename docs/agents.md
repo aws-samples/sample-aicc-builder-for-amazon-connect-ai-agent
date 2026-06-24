@@ -14,7 +14,7 @@ All sub-agents share the same base model (`global.anthropic.claude-opus-4-6-v1`)
 
 ```
 Orchestrator (temp=0.7, 128K tokens)
-├── research_agent           — Web research via Brave API
+├── research_agent           — Web research via AgentCore Gateway
 ├── faq_generator_agent      — Knowledge base documents
 ├── infrastructure_generator_agent — CloudFormation YAML
 ├── lambda_generator_agent   — Python Lambda handlers
@@ -130,12 +130,12 @@ Each sub-agent is registered as a tool on the Orchestrator.
 
 **File**: `backend/src/agents/research_agent/`
 
-Web research via Brave Search API. Gathers company information, FAQ content, and API documentation from the web.
+Web research via Amazon Bedrock AgentCore Gateway web search. Gathers company information, FAQ content, and API documentation from the web.
 
 ### Tools
 | Tool | Description |
 |------|-------------|
-| `brave_web_search` | Brave Search API queries |
+| `web_search` | Amazon Bedrock AgentCore Gateway web search |
 | `fetch_webpage` | Fetch and parse web page content |
 | `save_research_result` | Save research findings to S3 |
 
@@ -388,8 +388,8 @@ Generates Amazon Connect Contact Flow JSON and Mermaid diagrams.
 | `save_generated_code` | Save flow JSON + Mermaid to S3 + stream |
 | `get_operation_spec` | Load operation spec |
 | `get_all_specs` | Load all operation specs |
-| `brave_web_search` | Search AWS docs for block syntax |
-| `fetch_webpage` | Fetch AWS documentation pages |
+| `search_amazon_connect_docs` | Search AWS docs for block syntax (AgentCore Gateway) |
+| `fetch_documentation_page` | Fetch AWS documentation pages |
 
 ### Parameters
 | Parameter | Required | Description |
@@ -542,8 +542,8 @@ AICC Builder는 9개 에이전트를 사용합니다: 1개 Orchestrator + 8개 �
 - **수정 요청 처리 (Modification Triage)**: 매 사용자 턴마다 시스템이 `<modification_state>` 블록을 주입해서 이번 턴의 키워드(예: `flow`, `프롬프트`) → 대상 에셋 매핑과 반복 카운터를 제공합니다. Orchestrator는 수정 요청을 (1) **spec-level**(데이터 모델/운영 시간/슬롯 단위/녹음/인사 멘트 등 — `update_operation_spec` 또는 `save_infrastructure_spec` / `save_session_flow_config` 먼저 실행 후 영향 받는 에셋 플랜을 사용자에게 컨펌받고 재생성) vs (2) **asset-level**(단일 파일 문구 패치) 로 분류합니다. 같은 키워드가 ≥ 2회 반복되고 직전 수정이 성공으로 기록되어 있으면 패치 대신 파일 disambiguation 질문을 합니다. 참고: `backend/src/context/modification_tracking.py`, `backend/src/prompts/system_prompt.py`의 `HANDLING USER MODIFICATIONS` 섹션.
 
 ### 2. Research Agent
-- **역할**: Brave Search API로 웹 리서치
-- **도구**: `brave_web_search`, `fetch_webpage`, `save_research_result`
+- **역할**: Amazon Bedrock AgentCore Gateway 웹 검색으로 리서치
+- **도구**: `web_search`, `fetch_webpage`, `save_research_result`
 - **선택적**: 사용자가 명시적으로 요청할 때만 호출
 
 ### 3. FAQ Generator

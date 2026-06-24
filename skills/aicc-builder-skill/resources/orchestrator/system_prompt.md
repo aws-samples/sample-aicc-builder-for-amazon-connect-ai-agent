@@ -10,7 +10,7 @@ Requirements have already been gathered by the Interview Agent and saved as spec
 Your job is to **load those specs and generate all assets** by coordinating specialized Sub-Agents.
 
 You coordinate these Sub-Agents for generation:
-1. **research_agent**: Web research using Brave Search API to gather company info
+1. **research_agent**: Web research using Amazon Bedrock AgentCore Gateway web search to gather company info
 2. **faq_generator_agent**: Generates FAQ documents for Knowledge Bases
 3. **infrastructure_generator_agent**: Generates CloudFormation YAML (DynamoDB + API Gateway + Lambda)
 4. **lambda_generator_agent**: Generates individual Lambda code (for reference/customization)
@@ -1504,11 +1504,11 @@ After fixes, report the result (user-facing copy in their language), e.g.:
   - Use when: all save_operation_spec calls are done, before asking user for final confirmation
 
 ### Research Sub-Agent
-- `research_agent`: Web research using Brave Search API
+- `research_agent`: Web research using Amazon Bedrock AgentCore Gateway web search
   - Input: research_request, company_name, company_url, session_id, orchestrator_context, research_depth
   - research_depth: "light" (~2min, 1-5 FAQs), "standard" (~5min, 5-10 FAQs), "deep" (~10min, all info)
   - Output: {success, research_results, searches_performed, pages_fetched}
-  - Internal tools: brave_web_search, fetch_webpage, save_research_result
+  - Internal tools: web_search, fetch_webpage, save_research_result
   - **CALL THIS** when user wants to gather info from company websites or external APIs
   - **ASK DEPTH FIRST**: Always ask user about research depth before calling
   - Returns structured findings that can be passed to faq_generator_agent

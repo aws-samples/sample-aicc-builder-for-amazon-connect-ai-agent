@@ -598,7 +598,9 @@ REQUIRED_ERRORS_BY_TYPE = {
     "UpdateContactTargetQueue": ["NoMatchingError"],
     "UpdateContactAttributes": ["NoMatchingError"],   # API-verified: required
     "CheckHoursOfOperation": ["NoMatchingError"],     # branches via True/False Conditions; needs NoMatchingError
-    "UpdateContactCallbackNumber": ["NoMatchingError"],  # API-verified: InvalidNumber/NotDialable are NOT valid here
+    # API-verified (2026-06-18): UpdateContactCallbackNumber requires BOTH of these
+    # and rejects NoMatchingError / InvalidNumber / NotDialable.
+    "UpdateContactCallbackNumber": ["InvalidCallbackNumber", "CallbackNumberNotDialable"],
 }
 
 # Error types that are NOT valid for a given block — strip them on import.
@@ -607,6 +609,11 @@ INVALID_ERRORS_BY_TYPE = {
     "CheckHoursOfOperation": {"NoMatchingCondition"},
     # Compare branches via Conditions; its only valid Error is NoMatchingCondition.
     "Compare": {"NoMatchingError"},
+    # API-verified (CreateContactFlow problems, 2026-06-18): UpdateContactCallbackNumber
+    # accepts ONLY InvalidCallbackNumber + CallbackNumberNotDialable (both required).
+    # It rejects NoMatchingError AND the outbound-dial types (InvalidNumber/NotDialable)
+    # the LLM tends to hallucinate here — all of which trip InvalidContactFlowException.
+    "UpdateContactCallbackNumber": {"InvalidNumber", "NotDialable", "NoMatchingError"},
 }
 
 # Canonical AI-bot tool-result vocabulary (see SUBAGENT_TERMINOLOGY_AND_ESCALATION).
@@ -728,6 +735,17 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
                 inner = p["QueueId"].get("QueueId") or p["QueueId"].get("Id") or next(iter(p["QueueId"].values()), None)
                 p["QueueId"] = inner or "{{QUEUE_ARN}}"
                 fixes.append(f"[{aid}] UpdateContactTargetQueue: flattened nested QueueId → string")
+
+        # --- TransferContactToQueue: takes NO queue parameter (API-verified
+        # 2026-06-18). The target queue is set by a preceding UpdateContactTargetQueue;
+        # any QueueId/QueueArn/Queue here is rejected as "Invalid Action property name".
+        # The LLM frequently re-specifies the queue on the transfer block — strip it.
+        elif t == "TransferContactToQueue":
+            removed_q = [k for k in ("QueueId", "QueueArn", "Queue") if k in p]
+            for k in removed_q:
+                p.pop(k, None)
+            if removed_q:
+                fixes.append(f"[{aid}] TransferContactToQueue: removed invalid queue param(s) {removed_q} (queue is set via UpdateContactTargetQueue)")
 
         # --- InvokeLambdaFunction: RequestAttributes → LambdaInvocationAttributes
         elif t == "InvokeLambdaFunction":
@@ -1211,4 +1229,61 @@ def lint_contact_flow_asset(session_id: str = "", flow_name: str = "", file_name
             f"Contact Flow integrity: {len(result['errors'])} error(s), "
             f"{len(result['warnings'])} warning(s)"
         ),
+    }
+
+
+# Matches an Amazon Connect AI-prompt interpolation token: {{ $.something }} or
+# {{ foo }}. Captures the inner expression (trimmed) so we can detect duplicates.
+_AI_PROMPT_VAR_RE = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+
+
+def lint_ai_prompt(prompt_text: str) -> dict:
+    """Validate an Amazon Connect AI-agent prompt against the qconnect
+    CreateAIPrompt import rules. Never raises.
+
+    The one rule the real API enforces that the generator can silently violate:
+    **each variable may appear inside `{{ }}` only ONCE per prompt.** Verified
+    against qconnect create-ai-prompt: a second `{{$.Custom.firstName}}` ->
+    ValidationException "Each variable may only appear once." A bare reference
+    (no braces) is just literal text and is always fine.
+
+    Auto-fix: keep the FIRST `{{var}}` occurrence; strip the braces from every
+    later occurrence of the SAME variable (leaving the inner expression as plain
+    text), which the API accepts. Returns {ok, errors, warnings, fixes_applied,
+    fixed_text}.
+    """
+    if not isinstance(prompt_text, str) or not prompt_text:
+        return {"ok": False, "errors": ["Empty prompt text"], "warnings": [],
+                "fixes_applied": [], "fixed_text": prompt_text or ""}
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    fixes_applied: list[str] = []
+
+    seen: set[str] = set()
+
+    def _dedupe(m: "re.Match") -> str:
+        inner = m.group(1).strip()
+        if inner in seen:
+            # Subsequent reference — strip braces so it becomes literal text,
+            # which the API accepts. This is the documented "use the bare token
+            # after the first {{...}}" behavior.
+            fixes_applied.append(
+                f"AI prompt: variable '{inner}' referenced more than once with "
+                f"{{{{ }}}} — stripped braces on the duplicate (API allows each "
+                f"variable inside {{{{ }}}} only once)"
+            )
+            return inner
+        seen.add(inner)
+        return m.group(0)
+
+    fixed_text = _AI_PROMPT_VAR_RE.sub(_dedupe, prompt_text)
+
+    ok = not errors
+    return {
+        "ok": ok,
+        "errors": errors,
+        "warnings": warnings,
+        "fixes_applied": fixes_applied,
+        "fixed_text": fixed_text,
     }

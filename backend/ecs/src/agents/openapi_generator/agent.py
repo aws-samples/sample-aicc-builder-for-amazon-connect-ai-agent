@@ -21,6 +21,7 @@ from strands import Agent, tool
 from strands.models import BedrockModel
 from botocore.config import Config as BotocoreConfig
 
+from tools.model_selection import resolve_model_id, build_model_kwargs
 from .system_prompt import (
     OPENAPI_GENERATOR_SYSTEM_PROMPT,
     BASE_MODE_PROMPT,
@@ -523,13 +524,13 @@ async def openapi_generator_agent(
         suppress_complete = False
 
     try:
-        model = BedrockModel(
-            model_id=os.environ.get("MODEL_ID", "global.anthropic.claude-opus-4-6-v1"),
+        model = BedrockModel(**build_model_kwargs(
+            resolve_model_id(),
             region_name=os.environ.get("AWS_REGION", "us-east-1"),
-            temperature=0,
+            # temperature omitted (None) — only applied on models that accept it
             max_tokens=128000,
             boto_client_config=BotocoreConfig(read_timeout=600),
-        )
+        ))
 
         agent = Agent(
             model=model,

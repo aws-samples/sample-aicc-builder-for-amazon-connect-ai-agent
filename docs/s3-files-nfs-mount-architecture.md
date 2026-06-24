@@ -349,7 +349,7 @@ JQ_FILTER="${JQ_FILTER}
            {\"name\":\"USER_POOL_ID\",       \"value\":\$pool},
            {\"name\":\"USER_POOL_CLIENT_ID\", \"value\":\$poolclient},
            {\"name\":\"CONTACT_FLOW_KB_ID\",  \"value\":\$kbid},
-           {\"name\":\"BRAVE_API_KEY\",       \"value\":\$brave}]
+           {\"name\":\"AGENTCORE_GATEWAY_URL\", \"value\":\$gateway}]
       )"
 
 # 현재 Task Def 읽기 → 패치 → 새 리비전 등록
@@ -359,7 +359,7 @@ aws ecs describe-task-definition --task-definition "$TASK_DEF_FAMILY" \
          --arg pool "$USER_POOL_ID" \
          --arg poolclient "$USER_POOL_CLIENT_ID" \
          --arg kbid "$CONTACT_FLOW_KB_ID" \
-         --arg brave "$BRAVE_API_KEY" \
+         --arg gateway "$AGENTCORE_GATEWAY_URL" \
          "$JQ_FILTER" > /tmp/patched-task-def.json
 
 # 패치된 Task Definition을 새 리비전으로 등록

@@ -21,6 +21,7 @@ from botocore.config import Config as BotocoreConfig
 
 from .system_prompt import CONTACT_FLOW_GENERATOR_SYSTEM_PROMPT, RAG_SEARCH_INSTRUCTION
 from tools.workspace_tools_for_subagent import detect_spec_escalation
+from tools.model_selection import resolve_model_id, build_model_kwargs
 from .retrieve_tool import retrieve_contact_flow_knowledge
 
 logger = logging.getLogger(__name__)
@@ -67,15 +68,6 @@ def _setup_streaming_for_subagent():
             logger.warning(f"[SUBAGENT_SETUP] contact_flow_generator: ImportError - {e}")
     else:
         logger.warning(f"[SUBAGENT_SETUP] contact_flow_generator: handler not available or missing stream_asset_preview")
-
-
-def _parse_mermaid_block(text: str) -> tuple[str | None, str]:
-    """Parse Mermaid code block from LLM output."""
-    pattern = r'```mermaid\s*\n(.*?)```'
-    match = re.search(pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip(), "markdown_mermaid"
-    return None, "no_match"
 
 
 def _parse_json_block(text: str) -> tuple[str | None, str]:
@@ -135,12 +127,15 @@ def _stream_asset(asset_type: str, file_name: str, content: str, operation_id: s
 # ============================================
 
 @tool
-def search_amazon_connect_docs(
+async def search_amazon_connect_docs(
     query: str,
     count: int = 5
 ) -> dict:
     """
     Search for Amazon Connect documentation and best practices.
+
+    Uses Amazon Bedrock AgentCore Gateway web search (SigV4 task-role auth,
+    no API key), scoped to the official AWS docs site.
 
     Use this when you need to verify:
     - Contact Flow block parameters and syntax
@@ -154,76 +149,19 @@ def search_amazon_connect_docs(
     Returns:
         Search results with titles, URLs, and descriptions
     """
-    api_key = os.environ.get("BRAVE_API_KEY", "")
+    from tools.web_search import web_search
 
-    if not api_key:
-        return {
-            "success": False,
-            "error": "BRAVE_API_KEY not configured. Cannot perform web search.",
-            "results": []
-        }
-
-    try:
-        headers = {
-            "X-Subscription-Token": api_key,
-            "Accept": "application/json"
-        }
-
-        # Prefix with "Amazon Connect" and prefer AWS docs
-        full_query = f"site:docs.aws.amazon.com Amazon Connect {query}"
-
-        params = {
-            "q": full_query,
-            "count": min(count, 10),
-        }
-
-        response = requests.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers=headers,
-            params=params,
-            timeout=30
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        results = []
-
-        if "web" in data and "results" in data["web"]:
-            for item in data["web"]["results"]:
-                results.append({
-                    "title": item.get("title", ""),
-                    "url": item.get("url", ""),
-                    "description": item.get("description", ""),
-                })
-
-        logger.info(f"[search_amazon_connect_docs] Query: {query}, Results: {len(results)}")
-
-        return {
-            "success": True,
-            "query": full_query,
-            "results": results,
-            "count": len(results)
-        }
-
-    except requests.exceptions.Timeout:
-        return {
-            "success": False,
-            "error": "Search request timed out",
-            "results": []
-        }
-    except requests.exceptions.HTTPError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "results": []
-        }
-    except Exception as e:
-        logger.error(f"[search_amazon_connect_docs] Error: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "results": []
-        }
+    # Prefix with "Amazon Connect" and restrict to the AWS docs site.
+    result = await web_search(
+        f"Amazon Connect {query}",
+        count=min(count, 10),
+        site="docs.aws.amazon.com",
+    )
+    logger.info(
+        f"[search_amazon_connect_docs] Query: {query}, "
+        f"Results: {len(result.get('results', []))}"
+    )
+    return result
 
 
 @tool
@@ -543,15 +481,15 @@ Operations:
 {search_section}"""
 
     try:
-        model = BedrockModel(
-            model_id=os.environ.get("MODEL_ID", "global.anthropic.claude-opus-4-6-v1"),
+        model = BedrockModel(**build_model_kwargs(
+            resolve_model_id(),
             region_name=os.environ.get("AWS_REGION", "us-east-1"),
-            temperature=0,
+            # temperature omitted (None) — only applied on models that accept it
             max_tokens=128000,
             # cache_prompt removed - using cachePoint in system_prompt instead
             cache_tools="default",   # Cache tool definitions (web search tools)
             boto_client_config=BotocoreConfig(read_timeout=600),
-        )
+        ))
 
         # Conditionally add RAG and web search tools
         tools = []
@@ -594,10 +532,8 @@ Operations:
             "contact_flow", "contact_flow.json", flow_name,
             code_markers=["json"], flush_interval=500
         )
-        mermaid_streamer = IncrementalCodeStreamer(
-            "mermaid", "contact_flow_diagram.md", flow_name,
-            code_markers=["mermaid"], flush_interval=500
-        )
+        # NOTE: the flow diagram is rendered from the JSON on the frontend
+        # (React Flow), so we no longer parse/stream a mermaid diagram.
 
         # Create heartbeat manager for background heartbeats
         heartbeat = create_heartbeat_manager(
@@ -616,7 +552,6 @@ Operations:
                         full_response += chunk
                         if not modification_tools:
                             json_streamer.feed(chunk)  # Progressive JSON streaming
-                            mermaid_streamer.feed(chunk)  # Progressive Mermaid streaming
                         heartbeat.update_progress(len(full_response))
                         # Yield text chunks for real-time streaming
                         yield {
@@ -650,13 +585,10 @@ Operations:
 
         if not modification_tools:
             json_streamer.finalize()
-            mermaid_streamer.finalize()
 
         # === Result processing ===
         json_content = None
         json_method = None
-        mermaid_content = None
-        mermaid_method = None
 
         if modification_tools and tools_were_used:
             logger.info(f"[CONTACT_FLOW] Modification completed via workspace tools for {flow_name}")
@@ -703,12 +635,6 @@ Operations:
             if not json_content:
                 json_content, json_method = _parse_json_block(full_response)
 
-            # Mermaid diagram: always use standard parsing (edits don't apply)
-            mermaid_content = mermaid_streamer.get_result()
-            mermaid_method = "incremental_stream" if mermaid_content else None
-            if not mermaid_content:
-                mermaid_content, mermaid_method = _parse_mermaid_block(full_response)
-
         if json_content:
             json_file_name = "contact_flow.json"
 
@@ -717,14 +643,6 @@ Operations:
                 logger.info(f"[CONTACT_FLOW] Workspace tools completed for {flow_name}")
             else:
                 logger.info(f"JSON parsed successfully for {flow_name} using method: {json_method}")
-
-                # Stream Mermaid diagram as a separate file if available
-                if mermaid_content:
-                    diagram_file_name = "contact_flow_diagram.md"
-                    diagram_content = f"# {flow_name} Contact Flow Diagram\n\n```mermaid\n{mermaid_content}\n```\n"
-                    # Only stream final asset if incremental streamer didn't already handle it
-                    if not mermaid_streamer.found_code_block:
-                        _stream_asset("mermaid", diagram_file_name, diagram_content, flow_name)
 
                 # Stream JSON as the main contact flow file
                 # Modification mode (legacy fallback): write to workspace + emit diff
@@ -752,8 +670,6 @@ Operations:
             }
 
             files_generated = [json_file_name]
-            if mermaid_content:
-                files_generated.append("contact_flow_diagram.md")
 
             # Structural lint: catch dangling transitions / orphan actions /
             # missing terminal block — the things that make an Amazon Connect
@@ -769,9 +685,26 @@ Operations:
                     json_content = flow_lint["fixed_json"]
                     logger.info(f"[CONTACT_FLOW] applied import-safety auto-fixes: {flow_lint['fixes_applied']}")
                     try:
-                        _stream_asset("contact_flow", json_file_name, json_content, flow_name)
+                        # Force a FULL re-stream: the incremental streamer already
+                        # pushed the UNREPAIRED content into the frontend's asset
+                        # preview cache (keyed by type/op/file). force_full clears
+                        # the backend send-cache so this goes out as a non-delta
+                        # full event (isDelta=False), and the frontend store treats
+                        # a non-delta full event as authoritative — replacing the
+                        # broken longer content even though the linted JSON is
+                        # SHORTER (it strips invalid DTMFConfiguration / duplicate
+                        # SSML). Without this the user downloaded/imported the broken
+                        # flow (e.g. GetParticipantInput missing StoreInput). Matches
+                        # what we persist to NFS + S3.
+                        from tools.streaming_callback import stream_asset as _stream_full
+                        _stream_full("contact_flow", json_file_name, json_content,
+                                     operation_id=flow_name, is_complete=True, force_full=True)
                     except Exception as e:
                         logger.warning(f"[CONTACT_FLOW] re-stream after autofix failed: {e}")
+                        try:
+                            _stream_asset("contact_flow", json_file_name, json_content, flow_name)
+                        except Exception:
+                            pass
                 if not flow_lint["ok"]:
                     logger.warning(f"[CONTACT_FLOW] structural lint errors: {flow_lint['errors'][:5]}")
             except Exception as e:
@@ -781,14 +714,13 @@ Operations:
                 "success": True,
                 "flow_name": flow_name,
                 "files_generated": files_generated,
-                "has_mermaid": mermaid_content is not None,
-                "parse_method": {"json": json_method, "mermaid": mermaid_method},
+                "parse_method": {"json": json_method},
                 "lint_ok": flow_lint["ok"],
                 "lint_errors": flow_lint["errors"][:15],
                 "lint_warnings": flow_lint["warnings"][:8],
                 "lint_fixes_applied": flow_lint.get("fixes_applied", []),
                 "summary": (
-                    f"Generated Contact Flow for {flow_name}" + (f" with diagram" if mermaid_content else "")
+                    f"Generated Contact Flow for {flow_name}"
                     + (f". ⚠️ {len(flow_lint['errors'])} structural error(s) — PATCH before deploy: {flow_lint['errors'][:3]}" if not flow_lint["ok"] else " (structure OK)")
                 ),
                 "_completion_marker": "SUBAGENT_COMPLETE"

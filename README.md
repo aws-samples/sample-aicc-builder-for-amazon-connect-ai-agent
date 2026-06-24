@@ -27,6 +27,46 @@ https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
 
 ---
 
+## What's New in v2.2
+
+Frontend model choice, segment-scoped generation, import-and-improve, a redesigned
+UI, and a contact-flow correctness pass re-verified against the live Amazon Connect
+`CreateContactFlow` API.
+
+**Choose your Claude model (all agents)**
+- A model selector in the header (switchable mid-session) and on the start screen lets you pick among the top Bedrock Claude models — **Opus 4.8** (default), **4.7**, and **4.6** — applied to the orchestrator *and* every sub-agent.
+- **API-correct per model:** Opus 4.6 still accepts `temperature`; 4.7/4.8 removed it (sending it is a 400). A central `build_model_kwargs` includes `temperature` only for models that accept it. Verified end-to-end: `temperature` is sent for 4.6 and omitted for 4.7/4.8, and all three produce flows the real Connect API accepts.
+- Model ids are the exact Bedrock inference-profile strings (4.6 carries the `-v1` suffix; 4.7/4.8 do not) and are allowlisted server-side; the selection persists per session (survives reconnect).
+
+**Generate one segment, not the whole bundle**
+- A **mode-first start screen**: *Full Build* (the classic interview → 6-asset bundle), *Single Segment* (generate just a **Contact Flow**, **AI Prompt**, or **FAQ**), or *Improve Existing*.
+- Scoped runs are enforced two ways: the orchestrator's tool list is **trimmed** to the in-scope generators (a tool it can't call can't be misused) *and* it gets a scoped system prompt. A scoped interview gathers only what the chosen asset needs.
+- Progress UI adapts: only the in-scope steps are shown; the rest are muted under "Not in this run". FAQ-only / Prompt-only / Flow-only all reach a sensible terminal state.
+
+**Improve an asset the tool didn't generate**
+- Upload an external **Contact Flow JSON** or **AI Prompt YAML**; it's validated/auto-repaired (flows via the API-verified linter), seeded into the workspace, and dropped straight into patch-only edit mode — no full interview required.
+
+**UI/UX redesign (same violet/zinc theme, calmer tone)**
+- Dark-mode is now first-class across the whole chat timeline (message/tool/thinking/sub-agent/asset bubbles were previously light-only on a dark app).
+- A **split-view asset workspace** (resizable, with an asset-tab switcher and fullscreen/zoom) opens as assets stream, instead of fragmenting them across the chat, a narrow tab, and the file tree.
+- Progress promoted to a first-class tab grouped by the 4 phases; "jump to latest" in long chats; collapsed-by-default tool calls; real download lifecycle (packaging → ready → error/retry); reskinned + localized login; broad a11y + localization pass.
+
+**Interactive Contact Flow diagram (derived from the JSON, no more mermaid)**
+- The flow visualization is now an **interactive React Flow graph** (pan / zoom / minimap, themed per block kind, dark-mode aware) **derived deterministically from the validated Connect JSON** — every Action becomes a node and `NextAction`/`Conditions`/`Errors` become labelled edges.
+- This removes the previous approach where the LLM hand-authored a separate mermaid diagram: that produced periodic *"Syntax error in text"* render failures (which could stack broken graphics down the page), drift between the diagram and the actual flow, and extra tokens. The JSON is now the single source of truth, so the diagram is always valid and always matches the flow. The `mermaid` dependency has been removed entirely.
+
+**Contact Flow correctness — re-verified against the live `CreateContactFlow` API**
+- Live-API validation (create → inspect `problems` → delete, on a workshop instance) caught defects the internal linter had **wrong**, now fixed and re-confirmed accepted:
+  - `UpdateContactCallbackNumber` requires exactly `InvalidCallbackNumber` + `CallbackNumberNotDialable` and rejects `NoMatchingError`/`InvalidNumber`/`NotDialable` (the linter previously believed `NoMatchingError` was valid here).
+  - `TransferContactToQueue` takes **no** queue parameter — the queue is set by a preceding `UpdateContactTargetQueue`; a `QueueId`/`QueueArn` on the transfer is rejected. The linter now strips it.
+- **RAG made robust against deploy timing:** `deploy.sh` already injects `CONTACT_FLOW_KB_ID` into the ECS task from the KB stack's CDK output, but when that output isn't resolvable at backend-deploy time (KB stack deployed separately/after, or a stale outputs file) it injects an **empty** value and RAG silently falls back to off. v2.2 adds a second, order-independent path: the KB stack publishes its id to SSM and the ECS task resolves `CONTACT_FLOW_KB_ID` from SSM at startup, so RAG turns on regardless of deploy ordering. With RAG on, freshly-generated flows import into Connect with **zero** structural fixes across Opus 4.6/4.7/4.8; the linter fixes above are the deterministic backstop for when RAG is unavailable (e.g. local dev).
+
+**Verified end-to-end (real backend + live Connect API)**
+- Full Build to completion: all 6 asset families generated and validated (Lambda compile-check, OpenAPI 3.0 schema, CloudFormation, prompt YAML, FAQ docs, Contact Flow accepted by the real API).
+- Single-Segment Prompt-only and FAQ-only runs completed; Improve-Existing import→repair→edit cycle works; model selection, scoped generation, and the temperature branch confirmed against the running app via Playwright.
+
+---
+
 ## What's New in v2.1
 
 Reliability & quality hardening from live workshop QA rounds — including a
@@ -63,6 +103,11 @@ deep Contact Flow import-safety pass verified against the real Amazon Connect
 - **Cancel / Stop button** — in-flight generation can be interrupted from the chat input.
 - **Interview anti-loop** — confirmations are remembered so the interview doesn't re-ask and loop.
 - **Fault tolerance** — hardened spec parsing eliminates the `'str' object has no attribute 'get'` crash.
+
+**Web search & uploads**
+- **Web search via Amazon Bedrock AgentCore Gateway** — the legacy Brave Search API key is gone. Web search now runs through a managed AgentCore Gateway Web Search connector, authenticated by the ECS task role (SigV4); `./deploy.sh` auto-provisions the gateway in us-east-1, so there's no key to manage and queries stay inside AWS.
+- **Attach in any mode, then prompt** — the start screen lets you attach files (a Contact Flow JSON, an AI Prompt YAML, a whiteboard/draw.io flow image, or docs) in **all** modes — Full Build, Single Segment, and Improve Existing — and attach multiple. Attaching never auto-starts; you type a prompt and send, so it's a normal conversation.
+- **Conversational import** — upload a Contact Flow JSON/YAML or a flow-diagram photo and the agent acknowledges it, narrates what it parsed, and (for images) **asks before converting** it into an importable Amazon Connect Contact Flow. Imports are lint-validated and land in patch-only modification mode — edits patch the asset rather than regenerating it.
 
 **Infrastructure & assets**
 - **Knowledge Base on Amazon S3 Vectors** — the Contact Flow RAG store moved from OpenSearch Serverless to S3 Vectors (substantially lower idle cost); ingestion uses non-filterable metadata keys so chunks index correctly.
@@ -169,7 +214,7 @@ The system produces a complete set of workshop-ready artifacts:
 | **Lambda Functions** | Python handlers for each business operation (e.g., `process_return`, `track_order`) | Module 2: MCP Server Setup |
 | **OpenAPI Spec** | API definitions for Amazon Connect MCP Gateway integration | Module 2: MCP Gateway |
 | **AI Prompt** | Customized personality, tone, business rules, and guardrails | Module 2: AI Agent Prompt |
-| **Contact Flows** | Amazon Connect flow configurations with visual Mermaid diagrams | Module 2: Flow Builder |
+| **Contact Flows** | Amazon Connect flow configurations with an interactive visual diagram (rendered from the JSON) | Module 2: Flow Builder |
 | **CDK Infrastructure** | Complete AWS CDK project (Lambda, API Gateway, DynamoDB) | Module 2: Deploy |
 | **FAQ Documents** | Knowledge base articles for common customer questions | Module 3: Knowledge Base |
 
@@ -227,7 +272,7 @@ Runtime highlights:
 - Model: **Claude Opus 4.6** on Amazon Bedrock (`global.anthropic.claude-opus-4-6-v1`) for the orchestrator and every sub-agent, with cross-region inference + prompt caching
 - WebSocket: ALB with Cognito JWT (sticky sessions, 4h idle timeout), proxied same-origin through CloudFront
 - Session storage: 3-tier — in-memory → S3 Files NFS (`/mnt/s3/`) → DynamoDB
-- Contact Flow RAG: Bedrock Knowledge Base backed by **Amazon S3 Vectors** (replaced OpenSearch Serverless in v2.1 — far lower idle cost for a small, infrequently-queried corpus)
+- Contact Flow RAG: Bedrock Knowledge Base backed by **Amazon S3 Vectors** (replaced OpenSearch Serverless in v2.1 — far lower idle cost for a small, infrequently-queried corpus). The ECS task gets `CONTACT_FLOW_KB_ID` two ways: `deploy.sh` injects it from the KB stack output, and (v2.2) the KB stack also publishes it to SSM for the task to resolve at startup — so RAG stays on even when the deploy-time output isn't resolvable (e.g. KB stack deployed separately)
 - File I/O: Direct NFS access via `/mnt/s3/` — agents read/write/patch files like a local filesystem
 - Scaling: Auto-scaling (1–10 tasks) on the `ActiveWebSocketConnections` CloudWatch metric
 
@@ -247,6 +292,8 @@ Runtime highlights:
 ### Prerequisites
 
 AWS CLI 2.x (>= 2.34.27 for `s3files` support) · Node.js 18+ · Python 3.11+ · Docker · AWS CDK 2.x
+
+> **Web search** for the Research & Contact Flow agents runs through an **Amazon Bedrock AgentCore Gateway** (managed Web Search connector), authenticated by the ECS task role via SigV4 — **no API key**. `./deploy.sh` provisions the gateway automatically (idempotently) in **us-east-1**, the only region the Web Search connector is GA, regardless of your app's deploy region. Skip it with `ENABLE_WEB_SEARCH=false`; point at an existing gateway with `AGENTCORE_GATEWAY_URL=...`.
 
 ### Deploy
 
@@ -318,7 +365,7 @@ aws cognito-idp admin-create-user \
 | Layer | Technologies |
 |---|---|
 | **AI** | Strands Agents SDK · **Claude Opus 4.6** on Amazon Bedrock (`global.anthropic.claude-opus-4-6-v1`, cross-region inference) · Context Engineering (CLUES format) |
-| **Frontend** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · Mermaid.js |
+| **Frontend** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · React Flow |
 | **Backend** | Python 3.11 · FastAPI · Uvicorn · S3 Files NFS · DynamoDB |
 | **Infra** | AWS CDK · CloudFront · Cognito · ECS Fargate · ALB · X-Ray |
 
@@ -335,12 +382,12 @@ aws cognito-idp admin-create-user \
 │       ├── healthcheck.py       # ALB health check
 │       └── src/
 │           ├── agents/              # 9 specialized sub-agents
-│           │   ├── research_agent/      # Web search (Brave API)
+│           │   ├── research_agent/      # Web search (AgentCore Gateway)
 │           │   ├── faq_generator/       # Knowledge base documents
 │           │   ├── lambda_generator/    # Python Lambda handlers
 │           │   ├── openapi_generator/   # OpenAPI 3.0 specs (chunked)
 │           │   ├── prompt_generator/    # AI agent prompts
-│           │   ├── contact_flow_generator/  # Connect flows + Mermaid
+│           │   ├── contact_flow_generator/  # Connect flows (diagram from JSON)
 │           │   ├── infrastructure_generator/ # CloudFormation YAML (chunked)
 │           │   └── reviewer_agent/      # Asset consistency validation
 │           ├── tools/                   # Utility tools
@@ -590,7 +637,7 @@ cd backend/ecs && uvicorn app:app --port 8080
 | 레이어 | 기술 |
 |---|---|
 | **AI** | Strands Agents SDK · **Claude Opus 4.6** (Amazon Bedrock, `global.anthropic.claude-opus-4-6-v1`, 크로스 리전 추론) · Context Engineering (CLUES 형식) |
-| **프론트엔드** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · Mermaid.js |
+| **프론트엔드** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · React Flow |
 | **백엔드** | Python 3.11 · FastAPI · Uvicorn · S3 Files NFS · DynamoDB |
 | **인프라** | AWS CDK · CloudFront · Cognito · ECS Fargate · ALB · X-Ray |
 
@@ -757,7 +804,7 @@ Web 画面から AI エージェントとチャット形式でやり取りをし
 | **Lambda 関数** | 業務ごとの Python ハンドラー（例: `process_return`、`track_order`） | Module 2: MCP Server Setup |
 | **OpenAPI スペック** | Amazon Connect MCP Gateway 連携用の API 定義 | Module 2: MCP Gateway |
 | **AI プロンプト** | 業種に合わせたペルソナ、トーン、業務ルール、ガードレール | Module 2: AI Agent Prompt |
-| **Contact Flow** | Amazon Connect のフロー設定と Mermaid によるビジュアル図 | Module 2: Flow Builder |
+| **Contact Flow** | Amazon Connect のフロー設定とインタラクティブなビジュアル図 (JSON から描画) | Module 2: Flow Builder |
 | **CDK インフラ** | Lambda、API Gateway、DynamoDB を含む AWS CDK プロジェクト一式 | Module 2: Deploy |
 | **FAQ ドキュメント** | よくある問い合わせ向けのナレッジベース記事 | Module 3: Knowledge Base |
 
@@ -920,7 +967,7 @@ aws cognito-idp admin-create-user \
 | レイヤー | 技術 |
 |---|---|
 | **AI** | Strands Agents SDK · **Claude Opus 4.6**（Amazon Bedrock、`global.anthropic.claude-opus-4-6-v1`、クロスリージョン推論）· Context Engineering（CLUES形式） |
-| **フロントエンド** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · Mermaid.js |
+| **フロントエンド** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · React Flow |
 | **バックエンド** | Python 3.11 · FastAPI · Uvicorn · S3 Files NFS · DynamoDB |
 | **インフラ** | AWS CDK · CloudFront · Cognito · ECS Fargate · ALB · X-Ray |
 
@@ -937,12 +984,12 @@ aws cognito-idp admin-create-user \
 │       ├── healthcheck.py       # ALB ヘルスチェック
 │       └── src/
 │           ├── agents/              # 9 個の専門サブエージェント
-│           │   ├── research_agent/      # Web 検索（Brave API）
+│           │   ├── research_agent/      # Web 検索（AgentCore Gateway）
 │           │   ├── faq_generator/       # ナレッジベース用ドキュメント
 │           │   ├── lambda_generator/    # Python の Lambda ハンドラー
 │           │   ├── openapi_generator/   # OpenAPI 3.0 スペック（チャンク生成）
 │           │   ├── prompt_generator/    # AI エージェント用プロンプト
-│           │   ├── contact_flow_generator/  # Connect フロー + Mermaid 図
+│           │   ├── contact_flow_generator/  # Connect フロー (JSON から図を描画)
 │           │   ├── infrastructure_generator/ # CloudFormation YAML（チャンク生成）
 │           │   └── reviewer_agent/      # アセット間の整合性チェック
 │           ├── tools/                   # ユーティリティツール

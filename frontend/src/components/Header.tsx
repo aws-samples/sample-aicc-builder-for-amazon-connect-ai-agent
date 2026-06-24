@@ -4,7 +4,7 @@
  * App header with theme toggle, language selector and user menu
  */
 
-import { Globe, HelpCircle, ExternalLink, LogOut, User, Moon, Sun, Monitor } from 'lucide-react';
+import { Globe, HelpCircle, ExternalLink, LogOut, User, Moon, Sun, Monitor, Wifi, WifiOff, Loader2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useBuilderStore, type Theme } from '../stores/builderStore';
 import { useAuthStore } from '../stores/authStore';
@@ -12,10 +12,13 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import type { Language } from '../types';
 import { LANGUAGES } from '../types';
 import { cn } from '../lib/utils';
+import { ModelSelector } from './ModelSelector';
 
 export function Header() {
   const navigate = useNavigate();
   const { language, setLanguage, theme, setTheme } = useBuilderStore();
+  const isConnected = useBuilderStore((s) => s.isConnected);
+  const isConnecting = useBuilderStore((s) => s.isConnecting);
   const { email, signOut } = useAuthStore();
   const { disconnect } = useWebSocket();
 
@@ -77,6 +80,51 @@ export function Header() {
 
           {/* Right side actions */}
           <div className="flex items-center gap-2 lg:gap-4">
+            {/* Connection status chip (persistent) */}
+            <span
+              role="status"
+              aria-label={
+                isConnected
+                  ? (language === 'ko-KR' ? '연결됨' : 'Connected')
+                  : isConnecting
+                  ? (language === 'ko-KR' ? '연결 중' : 'Connecting')
+                  : (language === 'ko-KR' ? '연결 끊김' : 'Disconnected')
+              }
+              className={cn(
+                'hidden sm:flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium',
+                isConnected
+                  ? 'bg-green-500/15 text-green-400'
+                  : isConnecting
+                  ? 'bg-amber-500/15 text-amber-400'
+                  : 'bg-red-500/15 text-red-400'
+              )}
+              title={
+                isConnected
+                  ? (language === 'ko-KR' ? '연결됨' : 'Connected')
+                  : isConnecting
+                  ? (language === 'ko-KR' ? '연결 중...' : 'Connecting...')
+                  : (language === 'ko-KR' ? '연결 끊김' : 'Disconnected')
+              }
+            >
+              {isConnected ? (
+                <Wifi className="w-3.5 h-3.5" />
+              ) : isConnecting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <WifiOff className="w-3.5 h-3.5" />
+              )}
+              <span className="hidden lg:inline">
+                {isConnected
+                  ? (language === 'ko-KR' ? '연결됨' : 'Connected')
+                  : isConnecting
+                  ? (language === 'ko-KR' ? '연결 중' : 'Connecting')
+                  : (language === 'ko-KR' ? '연결 끊김' : 'Offline')}
+              </span>
+            </span>
+
+            {/* Model Selector */}
+            <ModelSelector language={language} variant="header" />
+
             {/* Theme Toggle */}
             <button
               onClick={cycleTheme}

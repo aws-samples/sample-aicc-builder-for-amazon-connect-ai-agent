@@ -166,7 +166,11 @@ async function getWebSocketUrl(
   idToken: string,
   sessionId: string
 ): Promise<string> {
-  const baseUrl = `wss://${window.location.host}/ws`;
+  // Match the page protocol: wss on https (prod / CloudFront), ws on http
+  // (local Vite dev server, which proxies /ws → the backend). Hardcoding wss
+  // breaks the local dev connection over plain http.
+  const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
+  const baseUrl = `${wsScheme}://${window.location.host}/ws`;
   const params = new URLSearchParams({
     token: idToken,
     sessionId: sessionId,
@@ -280,6 +284,10 @@ export function useWebSocket() {
   >(null);
   // Buffered outbound message awaiting a fresh session after liveness-triggered rotation
   const pendingOutboundRef = useRef<{ message: string } | null>(null);
+  // Same idea for an importAsset payload: in dev the hook can double-mount and the
+  // first socket gets superseded mid-send, dropping the import. Buffer it and flush
+  // it once the fresh session's socket reports ready (session_created handler).
+  const pendingImportRef = useRef<{ assetType: string; content: string; name: string; imageFormat?: string } | null>(null);
   const streamingMessageIdRef = useRef<string | null>(null);
   const streamTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastStreamContentRef = useRef<string>(""); // Track last content to detect duplicates
@@ -453,8 +461,8 @@ export function useWebSocket() {
   // Sub-Agent tool display labels
   const SUBAGENT_TOOL_LABELS: Record<string, Record<string, { icon: string; label: string }>> = {
     research_agent: {
-      brave_web_search: { icon: '🔎', label: '웹 검색' },
-      brave_search_tracked: { icon: '🔎', label: '웹 검색' },
+      web_search: { icon: '🔎', label: '웹 검색' },
+      web_search_tracked: { icon: '🔎', label: '웹 검색' },
       fetch_webpage: { icon: '🌐', label: '페이지 분석' },
       fetch_page_tracked: { icon: '🌐', label: '페이지 분석' },
       save_research_result: { icon: '💾', label: '결과 저장' },
@@ -1409,6 +1417,63 @@ export function useWebSocket() {
           }
           break;
 
+        case "asset_imported": {
+          // Backend acknowledged an imported (and lint-repaired) asset.
+          // Store the lint summary + transition the UI into edit mode.
+          const importedType = data.assetType as 'contact_flow' | 'prompt' | undefined;
+          const lint = data.lint;
+          if (importedType) {
+            useBuilderStore.getState().setImportedAsset({
+              assetType: importedType,
+              operationId: (data.operationId || data.operation_id || '') as string,
+              fileName: (data.fileName || '') as string,
+              lint: lint
+                ? {
+                    ok: !!lint.ok,
+                    errors: lint.errors || [],
+                    warnings: lint.warnings || [],
+                    fixesApplied: lint.fixesApplied ?? 0,
+                  }
+                : { ok: true, errors: [], warnings: [], fixesApplied: 0 },
+              phase: data.phase,
+            });
+            // Scope this run to the imported asset type so progress reflects it.
+            useBuilderStore.getState().setScope([importedType]);
+            // Reveal the imported asset in the right-hand asset workspace (the
+            // preceding asset_preview event populated it) — otherwise the user
+            // only sees a toast and the pane stays on Progress.
+            useBuilderStore.getState().setRightPaneView('assets');
+            // The import lands the session in modification/post_generation mode.
+            if (data.phase) {
+              useBuilderStore.getState().setCurrentPhase(data.phase as BuilderPhase);
+            }
+            // Mark session ready so the user can immediately request edits.
+            disarmSessionReadyWatchdog();
+            useBuilderStore.getState().setSessionReady(true);
+            useBuilderStore.getState().setLoadingSession(false);
+
+            // Surface a lint summary line in the chat timeline.
+            const ko = useBuilderStore.getState().language === 'ko-KR';
+            const fixes = lint?.fixesApplied ?? 0;
+            const errCount = lint?.errors?.length ?? 0;
+            const label = importedType === 'contact_flow'
+              ? (ko ? 'Contact Flow' : 'Contact Flow')
+              : (ko ? 'AI 프롬프트' : 'AI Prompt');
+            let summary: string;
+            if (errCount > 0) {
+              summary = ko
+                ? `${label} 가져오기 완료 — 검증 오류 ${errCount}건 (자동 수정 ${fixes}건)`
+                : `Imported ${label} — ${errCount} validation issue(s), ${fixes} auto-fixed`;
+            } else {
+              summary = ko
+                ? `${label} 가져오기 및 검증 완료 (자동 수정 ${fixes}건)`
+                : `Imported & validated ${label} (${fixes} fix${fixes === 1 ? '' : 'es'} applied)`;
+            }
+            addMessage({ role: 'system', content: summary });
+          }
+          break;
+        }
+
         case "download_ready":
           // Set download URL for packaged assets (handle both snake_case and camelCase)
           const downloadUrl = data.downloadUrl || (data as any).download_url;
@@ -1484,7 +1549,15 @@ export function useWebSocket() {
           if (data.phase) {
             useBuilderStore.getState().setCurrentPhase(data.phase as BuilderPhase);
           }
-          console.log("[useWebSocket] New session created:", data.sessionId, "phase:", data.phase || "interview", "- session NOW ready");
+          // Store the active generation scope + selected model echoed by the backend.
+          // scope = [] (or full asset set) means a full build; a proper subset is a scoped run.
+          if (Array.isArray(data.scope)) {
+            useBuilderStore.getState().setScope(data.scope.length > 0 ? data.scope : null);
+          }
+          if (typeof data.selectedModel === "string" && data.selectedModel) {
+            useBuilderStore.getState().setSelectedModel(data.selectedModel);
+          }
+          console.log("[useWebSocket] New session created:", data.sessionId, "phase:", data.phase || "interview", "scope:", data.scope, "- session NOW ready");
           // Flush any outbound message the liveness probe had buffered while rotating
           if (pendingOutboundRef.current && globalWs?.readyState === WebSocket.OPEN) {
             const buffered = pendingOutboundRef.current;
@@ -1494,8 +1567,24 @@ export function useWebSocket() {
               action: "sendMessage",
               message: buffered.message,
               language: useBuilderStore.getState().language,
+              model: useBuilderStore.getState().selectedModel,
             }));
             console.log("[useWebSocket] Flushed buffered message after session rotation");
+          }
+          // Flush a buffered importAsset onto the now-ready socket.
+          if (pendingImportRef.current && globalWs?.readyState === WebSocket.OPEN) {
+            const imp = pendingImportRef.current;
+            pendingImportRef.current = null;
+            globalWs.send(JSON.stringify({
+              action: "importAsset",
+              assetType: imp.assetType,
+              content: imp.content,
+              name: imp.name,
+              ...(imp.imageFormat ? { imageFormat: imp.imageFormat } : {}),
+              language: useBuilderStore.getState().language,
+              model: useBuilderStore.getState().selectedModel,
+            }));
+            console.log("[useWebSocket] Flushed buffered importAsset after session rotation");
           }
           break;
 
@@ -1514,6 +1603,14 @@ export function useWebSocket() {
           // Restore phase from backend
           if (data.phase) {
             useBuilderStore.getState().setCurrentPhase(data.phase as BuilderPhase);
+          }
+          // Restore the active scope + selected model from the backend handshake
+          // (survives reconnect / pod restart since the backend persists them to NFS).
+          if (Array.isArray(data.scope)) {
+            useBuilderStore.getState().setScope(data.scope.length > 0 ? data.scope : null);
+          }
+          if (typeof data.selectedModel === "string" && data.selectedModel) {
+            useBuilderStore.getState().setSelectedModel(data.selectedModel);
           }
           // Restore progress from NFS-backed progressState
           if (data.progressState) {
@@ -1980,6 +2077,13 @@ export function useWebSocket() {
         const isStaleClose = globalWs !== null && globalWs !== ws;
         if (isStaleClose) {
           console.log("[useWebSocket] Ignoring stale onclose (a newer socket is already active)");
+          // The intentional close this flag was set for (switchSession closing
+          // the OLD socket) has now happened. Reset it here so it can't leak onto
+          // the NEW socket: without this, if the freshly-opened socket drops
+          // unexpectedly (e.g. an ALB/proxy flap right after session rotation),
+          // its onclose would see globalIntentionalClose=true and skip the
+          // auto-reconnect, leaving a dead socket the kickoff never lands on.
+          globalIntentionalClose = false;
           return;
         }
 
@@ -2152,6 +2256,7 @@ export function useWebSocket() {
           action: "sendMessage",
           message,
           language: useBuilderStore.getState().language,
+          model: useBuilderStore.getState().selectedModel,
         })
       );
 
@@ -2307,6 +2412,7 @@ export function useWebSocket() {
               message,
               s3Attachments,
               language: useBuilderStore.getState().language,
+              model: useBuilderStore.getState().selectedModel,
             })
           );
 
@@ -2350,6 +2456,7 @@ export function useWebSocket() {
               message,
               attachments: attachmentData,
               language: useBuilderStore.getState().language,
+              model: useBuilderStore.getState().selectedModel,
             })
           );
 
@@ -2361,6 +2468,47 @@ export function useWebSocket() {
       }
     },
     [addMessage]
+  );
+
+  /**
+   * Import an existing asset (Contact Flow JSON / AI Prompt YAML) for editing.
+   * The backend lints/repairs it, seeds the workspace, and replies with an
+   * `asset_imported` event carrying the lint summary.
+   */
+  const importAsset = useCallback(
+    (
+      assetType: 'contact_flow' | 'prompt' | 'contact_flow_image',
+      content: string,
+      name: string,
+      imageFormat?: string,
+    ): boolean => {
+      console.log("[useWebSocket] Queuing importAsset:", assetType, name, `(${content.length} chars)`);
+      // Buffer the import and send it via a single, race-free path. Import always
+      // follows a fresh switchSession, so a session_created event is guaranteed and
+      // its handler flushes the buffer onto the correct, ready socket. (In dev the
+      // hook can double-mount, superseding the socket open at call time; sending
+      // inline would land on a dying socket and be lost — buffering avoids that.)
+      pendingImportRef.current = { assetType, content, name, imageFormat };
+      // If a socket is already open AND we're not mid-switch, send immediately too
+      // (covers importing into an already-established session with no rotation).
+      if (globalWs?.readyState === WebSocket.OPEN && useBuilderStore.getState().isSessionReady) {
+        pendingImportRef.current = null;
+        globalWs.send(
+          JSON.stringify({
+            action: "importAsset",
+            assetType,
+            content,
+            name,
+            ...(imageFormat ? { imageFormat } : {}),
+            language: useBuilderStore.getState().language,
+            model: useBuilderStore.getState().selectedModel,
+          })
+        );
+        console.log("[useWebSocket] Sent importAsset on ready session");
+      }
+      return true;
+    },
+    []
   );
 
   const requestAssets = useCallback(() => {
@@ -2549,9 +2697,13 @@ export function useWebSocket() {
         const waitForWsAndCreateSession = () => {
           if (globalWs?.readyState === WebSocket.OPEN) {
             console.log("[useWebSocket] Sending createNewSession to backend");
+            const st = useBuilderStore.getState();
             globalWs.send(
               JSON.stringify({
                 action: "createNewSession",
+                // Scope = [] for full build, [segment] for a single segment.
+                scope: st.scope ?? [],
+                model: st.selectedModel,
               })
             );
             // DO NOT set isSessionReady here!
@@ -2984,6 +3136,7 @@ export function useWebSocket() {
     disconnect,
     sendMessage,
     sendMessageWithAttachments,
+    importAsset,
     requestAssets,
     requestProgress,
     cancelGeneration,

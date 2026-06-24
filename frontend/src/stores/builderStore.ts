@@ -12,12 +12,56 @@ import type {
   AssetPreview,
   BuilderPhase,
 } from '../types';
+import { PHASE_ORDER } from '../types';
 
 // Performance limits to prevent memory issues in long sessions
 const MAX_MESSAGES = 200;           // Keep last 200 messages in memory
 const MAX_ASSET_PREVIEWS = 50;      // Keep last 50 asset previews
 
 export type Theme = 'light' | 'dark' | 'system';
+
+// ── Model selection ──────────────────────────────────────────────────────
+// Top Bedrock Claude models the user can pick from. Default 4.8.
+// The id is sent to the backend on every outbound WS message (mirrors `language`).
+export interface ModelOption {
+  id: string;
+  label: string;
+}
+
+export const MODELS: ModelOption[] = [
+  { id: 'global.anthropic.claude-opus-4-8', label: 'Opus 4.8' },
+  { id: 'global.anthropic.claude-opus-4-7', label: 'Opus 4.7' },
+  // NOTE: 4.6 carries the `-v1` suffix in Bedrock (verified ACTIVE inference
+  // profile in ap-northeast-2); 4.7/4.8 do not. Must match the backend allowlist.
+  { id: 'global.anthropic.claude-opus-4-6-v1', label: 'Opus 4.6' },
+];
+
+export const DEFAULT_MODEL_ID = 'global.anthropic.claude-opus-4-8';
+
+// ── Start-screen mode / generation scope ─────────────────────────────────
+export type StartMode = 'full' | 'segment' | 'improve';
+export type SegmentType = 'contact_flow' | 'prompt' | 'faq';
+// Asset types that can be imported & edited from an external file.
+// 'contact_flow_image' = a whiteboard/sketch photo the backend transcribes (via
+// vision) into a draft Contact Flow before the normal lint/seed import path.
+export type ImportAssetType = 'contact_flow' | 'prompt' | 'contact_flow_image';
+
+/** Lint summary returned by the backend after `importAsset`. */
+export interface ImportLintResult {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  fixesApplied: number;
+}
+
+/** Result of an `asset_imported` event from the backend. */
+export interface ImportedAssetInfo {
+  assetType: ImportAssetType;
+  operationId: string;
+  fileName: string;
+  lint: ImportLintResult;
+  phase?: string;
+}
 
 interface BuilderState {
   // Theme
@@ -69,6 +113,26 @@ interface BuilderState {
   // Language
   language: Language;
 
+  // Selected Claude model (sent on every outbound WS message)
+  selectedModel: string;
+
+  // Start-screen mode + active generation scope
+  startMode: StartMode;
+  segment: SegmentType | null;
+  // Active scope for this run (from session_created / asset_imported).
+  // null = full build (all assets). A non-null list = scoped run.
+  scope: string[] | null;
+  // Most recent imported-asset info (for the lint summary strip)
+  importedAsset: ImportedAssetInfo | null;
+
+  // Split-view asset workspace
+  // Which right-pane view is active: progress sidebar or the asset workspace.
+  rightPaneView: 'progress' | 'assets';
+  // When set, the asset workspace is open and focused on this asset key.
+  activeAssetKey: string | null;
+  // Fullscreen modal for an asset (zoom). null = closed.
+  fullscreenAssetKey: string | null;
+
   // Phase tracking
   currentPhase: BuilderPhase;
 
@@ -101,6 +165,14 @@ interface BuilderState {
   setCurrentPhase: (phase: BuilderPhase) => void;
   setInputHint: (hint: { placeholder: string; phase?: string } | null) => void;
   setLanguage: (language: Language) => void;
+  setSelectedModel: (modelId: string) => void;
+  setStartMode: (mode: StartMode) => void;
+  setSegment: (segment: SegmentType | null) => void;
+  setScope: (scope: string[] | null) => void;
+  setImportedAsset: (info: ImportedAssetInfo | null) => void;
+  setRightPaneView: (view: 'progress' | 'assets') => void;
+  setActiveAssetKey: (key: string | null) => void;
+  setFullscreenAssetKey: (key: string | null) => void;
   setTheme: (theme: Theme) => void;
   clearMessages: () => void;
   setMessages: (messages: Array<Omit<Message, 'id' | 'timestamp'> & { id?: string; timestamp?: Date }>) => void;
@@ -109,6 +181,9 @@ interface BuilderState {
   reset: () => void;
 }
 
+// The 12 progress steps, each tagged with the phase it belongs to so the
+// sidebar can group them under the 4-phase stepper (interview / generation /
+// review / post_generation).
 const initialProgress: ProgressItem[] = [
   {
     id: 'database',
@@ -116,6 +191,7 @@ const initialProgress: ProgressItem[] = [
     labelKo: '데이터베이스 분석',
     status: 'pending',
     progress: 0,
+    phase: 'interview',
   },
   {
     id: 'operations',
@@ -123,6 +199,7 @@ const initialProgress: ProgressItem[] = [
     labelKo: '작업 사양 정의',
     status: 'pending',
     progress: 0,
+    phase: 'interview',
   },
   {
     id: 'requirements',
@@ -130,48 +207,7 @@ const initialProgress: ProgressItem[] = [
     labelKo: '요구사항 분석',
     status: 'pending',
     progress: 0,
-  },
-  {
-    id: 'lambda',
-    label: 'Lambda Functions',
-    labelKo: 'Lambda 함수',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'prompt',
-    label: 'AI Prompt',
-    labelKo: 'AI 프롬프트',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'openapi',
-    label: 'OpenAPI Spec',
-    labelKo: 'OpenAPI 스펙',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'contact_flow',
-    label: 'Contact Flow',
-    labelKo: 'Contact Flow',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'cdk',
-    label: 'Infrastructure',
-    labelKo: '인프라',
-    status: 'pending',
-    progress: 0,
-  },
-  {
-    id: 'knowledge_base',
-    label: 'Knowledge Base',
-    labelKo: 'Knowledge Base',
-    status: 'pending',
-    progress: 0,
+    phase: 'interview',
   },
   {
     id: 'research',
@@ -179,6 +215,55 @@ const initialProgress: ProgressItem[] = [
     labelKo: '리서치',
     status: 'pending',
     progress: 0,
+    phase: 'interview',
+  },
+  {
+    id: 'lambda',
+    label: 'Lambda Functions',
+    labelKo: 'Lambda 함수',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'prompt',
+    label: 'AI Prompt',
+    labelKo: 'AI 프롬프트',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'openapi',
+    label: 'OpenAPI Spec',
+    labelKo: 'OpenAPI 스펙',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'contact_flow',
+    label: 'Contact Flow',
+    labelKo: 'Contact Flow',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'cdk',
+    label: 'Infrastructure',
+    labelKo: '인프라',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
+    id: 'knowledge_base',
+    label: 'Knowledge Base',
+    labelKo: 'Knowledge Base',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
   },
   {
     id: 'review',
@@ -186,6 +271,7 @@ const initialProgress: ProgressItem[] = [
     labelKo: '검증',
     status: 'pending',
     progress: 0,
+    phase: 'review',
   },
   {
     id: 'ready',
@@ -193,8 +279,17 @@ const initialProgress: ProgressItem[] = [
     labelKo: '패키징 & 다운로드',
     status: 'pending',
     progress: 0,
+    phase: 'post_generation',
   },
 ];
+
+// Map a scope id (contact_flow / prompt / faq) to the progress-step id it drives.
+// FAQ maps to knowledge_base (the FAQ generator's progress lane).
+export const SCOPE_TO_PROGRESS_ID: Record<string, string> = {
+  contact_flow: 'contact_flow',
+  prompt: 'prompt',
+  faq: 'knowledge_base',
+};
 
 const initialSession: SessionState = {
   companyName: null,
@@ -227,6 +322,17 @@ const getInitialLanguage = (): Language => {
   return 'ko-KR';
 };
 
+// Get initial selected model from localStorage (defaults to Opus 4.8)
+const getInitialModel = (): string => {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('selectedModel');
+    if (stored && MODELS.some((m) => m.id === stored)) {
+      return stored;
+    }
+  }
+  return DEFAULT_MODEL_ID;
+};
+
 export const useBuilderStore = create<BuilderState>((set) => ({
   // Initial state
   theme: getInitialTheme(),
@@ -249,6 +355,14 @@ export const useBuilderStore = create<BuilderState>((set) => ({
   stillProcessingCount: 0,
   workspaceRefreshTrigger: 0,
   language: getInitialLanguage(),
+  selectedModel: getInitialModel(),
+  startMode: 'full',
+  segment: null,
+  scope: null,
+  importedAsset: null,
+  rightPaneView: 'progress',
+  activeAssetKey: null,
+  fullscreenAssetKey: null,
   currentPhase: 'interview' as BuilderPhase,
   inputHint: null,
 
@@ -362,6 +476,14 @@ export const useBuilderStore = create<BuilderState>((set) => ({
 
   updateAssetPreview: (preview) =>
     set((state) => {
+      // Contact Flow diagrams are now derived from the validated JSON (React
+      // Flow), so the legacy standalone 'mermaid' asset is obsolete. Old sessions
+      // may still emit one on rehydration — drop it (the diagram comes from the
+      // contact_flow JSON, not this). Cast: 'mermaid' is no longer in the union.
+      if ((preview.assetType as string) === 'mermaid') {
+        return state;
+      }
+
       // Handle diff events: attach diffContent to existing preview for the same fileName
       if (preview.operationId === 'diff' && preview.fileName) {
         // Find existing preview with matching fileName (any operationId)
@@ -464,10 +586,22 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         const completePreview = state.assetPreviews[completeKey];
         newPreview.createdAt = completePreview.createdAt || Date.now();
         newPreview.messageIndex = completePreview.messageIndex ?? state.messages.length;
-        // Preserve existing content when incoming is a delta or shorter — prevents duplicate
-        // late-delivered events (race in backend pending_ws_events flush) from clobbering
-        // the fully accumulated content. Observed on cloudformation (many chunks → higher race).
-        if (preview.isDelta || !preview.content || (preview.content.length < (completePreview.content || '').length)) {
+        // Preserve existing content when incoming is a delta or empty — prevents
+        // late-delivered delta events (race in backend pending_ws_events flush)
+        // from clobbering the fully accumulated content. Observed on
+        // cloudformation (many chunks → higher race).
+        //
+        // EXCEPTION: an authoritative FULL replacement (isDelta === false) that
+        // is legitimately SHORTER must be allowed through. The contact-flow
+        // import-safety auto-fix re-streams the linted JSON full + non-delta,
+        // and the repaired flow is shorter than the raw one (it strips invalid
+        // DTMFConfiguration / duplicate SSML keys). The old "shorter ⇒ reject"
+        // rule silently kept the broken longer version, so the user downloaded
+        // a flow that fails CreateContactFlow. Only a non-delta full event may
+        // shrink the content; a delta/empty event never can.
+        const isAuthoritativeFull = preview.isDelta === false && !!preview.content;
+        if (preview.isDelta || !preview.content ||
+            (!isAuthoritativeFull && preview.content.length < (completePreview.content || '').length)) {
           newPreview.content = completePreview.content;
         }
       } else {
@@ -482,6 +616,11 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         ...state.assetPreviews,
         [key]: newPreview,
       };
+
+      // Track the latest asset as the workspace's active asset so the pane has
+      // something to show when the user opens it. We do NOT force the pane open
+      // here (that would interrupt the user) — the chat marker / tab does that.
+      const nextActiveAssetKey = key;
 
       // Limit asset previews to prevent memory issues
       const keys = Object.keys(newAssetPreviews);
@@ -498,7 +637,7 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         );
       }
 
-      return { assetPreviews: newAssetPreviews };
+      return { assetPreviews: newAssetPreviews, activeAssetKey: nextActiveAssetKey };
     }),
 
   completeAssetPreview: (assetKey) =>
@@ -534,7 +673,31 @@ export const useBuilderStore = create<BuilderState>((set) => ({
   triggerWorkspaceRefresh: () =>
     set((state) => ({ workspaceRefreshTrigger: state.workspaceRefreshTrigger + 1 })),
 
-  setCurrentPhase: (phase) => set({ currentPhase: phase }),
+  setCurrentPhase: (phase) =>
+    set((state) => {
+      const targetIdx = PHASE_ORDER.indexOf(phase);
+      // Reconcile progress when the phase advances: any step whose phase is
+      // EARLIER than the new phase must logically be done. This backfills the
+      // interview steps (database/operations/requirements/research) that are
+      // otherwise only driven by live tool_start/tool_end events — those events
+      // aren't persisted to NFS progressState and aren't re-played on restore,
+      // so reopening a finished project (or jumping straight to generation when
+      // a tool didn't fire) would leave them stuck "pending". The PhaseStepper
+      // already treats earlier phases as complete (i < currentIdx); this keeps
+      // the per-step list consistent with that. Only fills forward — never
+      // un-completes a step or downgrades the current/future phases.
+      const progress =
+        targetIdx <= 0
+          ? state.progress
+          : state.progress.map((item) => {
+              const itemIdx = PHASE_ORDER.indexOf(item.phase || 'generation');
+              if (itemIdx >= 0 && itemIdx < targetIdx && item.status !== 'completed') {
+                return { ...item, status: 'completed' as const, progress: 100, updatedAt: Date.now() };
+              }
+              return item;
+            });
+      return { currentPhase: phase, progress };
+    }),
 
   setInputHint: (hint) => set({ inputHint: hint }),
 
@@ -544,6 +707,37 @@ export const useBuilderStore = create<BuilderState>((set) => ({
     }
     return set({ language });
   },
+
+  setSelectedModel: (modelId) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('selectedModel', modelId);
+    }
+    return set({ selectedModel: modelId });
+  },
+
+  setStartMode: (mode) =>
+    set((state) => ({
+      startMode: mode,
+      // Leaving segment mode clears any chosen segment.
+      segment: mode === 'segment' ? state.segment : null,
+    })),
+
+  setSegment: (segment) => set({ segment }),
+
+  setScope: (scope) => set({ scope }),
+
+  setImportedAsset: (info) => set({ importedAsset: info }),
+
+  setRightPaneView: (view) => set({ rightPaneView: view }),
+
+  setActiveAssetKey: (key) =>
+    set((state) => ({
+      activeAssetKey: key,
+      // Opening an asset always reveals the asset workspace pane.
+      rightPaneView: key ? 'assets' : state.rightPaneView,
+    })),
+
+  setFullscreenAssetKey: (key) => set({ fullscreenAssetKey: key }),
 
   setTheme: (theme) => {
     // Persist to localStorage
@@ -608,7 +802,13 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       inputHint: null,
       stillProcessingCount: 0,
       connectionError: null,
-      // Keep language as it's a user preference
+      // Scope/imported state is per-session — clear it on switch.
+      scope: null,
+      importedAsset: null,
+      activeAssetKey: null,
+      fullscreenAssetKey: null,
+      rightPaneView: 'progress',
+      // Keep language and selectedModel as user preferences
     }),
 
   reset: () =>
@@ -629,5 +829,10 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       inputHint: null,
       stillProcessingCount: 0,
       connectionError: null,
+      scope: null,
+      importedAsset: null,
+      activeAssetKey: null,
+      fullscreenAssetKey: null,
+      rightPaneView: 'progress',
     }),
 }));

@@ -22,6 +22,20 @@ logger = logging.getLogger(__name__)
 # Core assets whose completion signals transition interview → generation → review
 GENERATION_ASSETS = {"cdk", "lambda", "openapi", "prompt", "contact_flow"}
 
+# Canonical full asset set (everything the unscoped pipeline can produce).
+# A scope equal to this set (or empty) means "full build".
+FULL_ASSET_SET = GENERATION_ASSETS | {"knowledge_base"}
+
+# Scoped (single-segment) generation ids the frontend may request.
+VALID_SCOPE_IDS = {"contact_flow", "prompt", "faq"}
+
+# Maps a requested scope id to the progress asset id it produces.
+_SCOPE_TO_ASSET = {
+    "contact_flow": "contact_flow",
+    "prompt": "prompt",
+    "faq": "knowledge_base",
+}
+
 # Sub-agent tool name → progress asset ID (mirrors app.py mapping)
 _TOOL_TO_ASSET: Dict[str, str] = {
     "infrastructure_generator_agent": "cdk",
@@ -298,6 +312,74 @@ def update_phase(session_id: str, new_phase: str, trigger: str = "") -> tuple:
     return old_phase, True
 
 
+def get_selected_model(session_id: str) -> Optional[str]:
+    """Read the persisted Bedrock model id for this session (None if unset)."""
+    state = _read_state(session_id)
+    return state.get("selected_model")
+
+
+def set_selected_model(session_id: str, model_id: str) -> None:
+    """Persist the selected Bedrock model id (survives reconnect/restart)."""
+    state = _read_state(session_id)
+    if state.get("selected_model") == model_id:
+        return
+    state["selected_model"] = model_id
+    _write_state(session_id, state)
+    logger.info(f"[selected_model] {session_id}: -> {model_id}")
+
+
+def get_generation_scope(session_id: str) -> List[str]:
+    """Return the requested generation scope as asset ids.
+
+    Default (no scope set, or "full") → the canonical full asset set.
+    Scoped runs map the requested ids ({contact_flow, prompt, faq}) to their
+    produced asset ids ({contact_flow, prompt, knowledge_base}).
+    """
+    state = _read_state(session_id)
+    raw = state.get("generation_scope")
+    if not raw:
+        return sorted(FULL_ASSET_SET)
+    assets: List[str] = []
+    for sid in raw:
+        mapped = _SCOPE_TO_ASSET.get(sid)
+        if mapped and mapped not in assets:
+            assets.append(mapped)
+    return assets or sorted(FULL_ASSET_SET)
+
+
+def set_generation_scope(session_id: str, scope: List[str]) -> None:
+    """Persist the requested generation scope (list of {contact_flow, prompt, faq}).
+
+    Invalid ids are dropped. An empty/None scope clears the override (full build).
+    """
+    cleaned = [s for s in (scope or []) if s in VALID_SCOPE_IDS]
+    state = _read_state(session_id)
+    if cleaned:
+        state["generation_scope"] = cleaned
+    else:
+        state.pop("generation_scope", None)
+    _write_state(session_id, state)
+    logger.info(f"[generation_scope] {session_id}: -> {cleaned or 'full'}")
+
+
+def mark_imported_session(session_id: str) -> None:
+    """Flag a session as having an externally-imported asset.
+
+    detect_phase honors this flag and returns 'post_generation' regardless of how
+    many assets are 'complete' — an imported single asset would otherwise satisfy
+    the scoped review gate and be routed to review instead of the edit flow.
+    """
+    state = _read_state(session_id)
+    state["imported"] = True
+    _write_state(session_id, state)
+    logger.info(f"[imported] {session_id}: marked imported")
+
+
+def is_imported_session(session_id: str) -> bool:
+    """True if this session was seeded from an imported asset."""
+    return bool(_read_state(session_id).get("imported"))
+
+
 def detect_phase(session_id: str) -> str:
     """Deterministically detect the current phase from asset states.
 
@@ -315,6 +397,14 @@ def detect_phase(session_id: str) -> str:
     state = _read_state(session_id)
     assets = state.get("assets", {})
 
+    # Scope-derived expectations. For an unscoped (full) run this resolves to the
+    # canonical full asset set, preserving legacy behavior exactly.
+    scope = set(get_generation_scope(session_id))
+    required_core = {a for a in scope if a in GENERATION_ASSETS}
+    # Non-core scoped assets (e.g. faq → knowledge_base) gate the terminal rule
+    # below when the scope produces nothing in GENERATION_ASSETS.
+    scoped_non_core = {a for a in scope if a not in GENERATION_ASSETS}
+
     if not assets:
         # Check if interview was completed (handoff marker exists)
         from tools.interview_completion import check_interview_handoff
@@ -324,6 +414,7 @@ def detect_phase(session_id: str) -> str:
 
     # Check which core assets are completed
     core_completed = set()
+    non_core_completed = set()
     has_review = False
     has_post_review_fix = False
 
@@ -331,10 +422,18 @@ def detect_phase(session_id: str) -> str:
         status = info.get("status", "")
         if asset_id in GENERATION_ASSETS and status in ("completed", "fixed", "reviewed"):
             core_completed.add(asset_id)
+        elif status in ("completed", "fixed", "reviewed"):
+            non_core_completed.add(asset_id)
         if asset_id == "review" and status == "reviewed":
             has_review = True
         if status == "fixed":
             has_post_review_fix = True
+
+    # 1c. Imported asset → always post_generation (modification mode). An imported
+    #     single asset satisfies the scoped review gate below, so without this it
+    #     would route to 'review' instead of the patch-only edit flow the user wants.
+    if state.get("imported"):
+        return "post_generation"
 
     # 2. Review completed → post_generation (user can request targeted fixes)
     #    Whether or not fixes have been applied, once review is done
@@ -342,13 +441,20 @@ def detect_phase(session_id: str) -> str:
     if has_review:
         return "post_generation"
 
-    # 3. Core assets (lambda, openapi, prompt, contact_flow) all completed → review
-    required_core = {"lambda", "openapi", "prompt", "contact_flow"}
-    if required_core.issubset(core_completed):
+    # 3a. Scopes whose assets fall entirely outside GENERATION_ASSETS (e.g.
+    #     FAQ-only → knowledge_base): once those scoped assets complete there is
+    #     no vacuous "core" set to wait on — advance to post_generation so the
+    #     user can iterate on the produced asset.
+    if not required_core and scoped_non_core:
+        if scoped_non_core.issubset(non_core_completed):
+            return "post_generation"
+
+    # 3b. Required core assets (full set, or the scoped subset) all completed → review
+    if required_core and required_core.issubset(core_completed):
         return "review"
 
     # 4. Some assets exist → generation
-    if core_completed:
+    if core_completed or non_core_completed:
         return "generation"
 
     # 5. Default

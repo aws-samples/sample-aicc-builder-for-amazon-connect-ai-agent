@@ -75,7 +75,7 @@ Regeneration creates new version directories (`v1/`, `v2/`, ...).
 | Agent | Assets Created | Asset Type Key | Tools Used to Read Others |
 |---|---|---|---|
 | **Interviewer** | (none -- returns state in-band) | -- | -- |
-| **Research** | `research.json` | `research` | Web search (Brave API) |
+| **Research** | `research.json` | `research` | Web search (AgentCore Gateway) |
 | **Infrastructure Generator** | `infrastructure.yaml`, or `infrastructure-base.yaml` + `{op}-fragment.yaml` | `cloudformation` | Auto-loads operation specs |
 | **Lambda Generator** | `index.py` (per operation) | `lambda` | Auto-loads operation spec, infra schema |
 | **OpenAPI Generator** | `openapi.yaml`, or `openapi-base.yaml` + `openapi-chunk-*.yaml` | `openapi` | Auto-loads operation specs |

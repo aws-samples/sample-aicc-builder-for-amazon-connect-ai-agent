@@ -1,6 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 import { bedrock, s3vectors } from "@cdklabs/generative-ai-cdk-constructs";
 
@@ -27,6 +28,14 @@ export interface KnowledgeBaseStackProps extends cdk.StackProps {
    * (no region), so identical stack names across regions would collide.
    */
   resolvedRegion?: string;
+
+  /**
+   * SSM parameter name to publish the Contact Flow KB id into. The ECS task reads
+   * this at runtime to enable RAG (CONTACT_FLOW_KB_ID). Using SSM (rather than a
+   * CFN cross-stack export) keeps the KB stack — which is optional and deploys
+   * AFTER the ECS stack — fully decoupled, matching the ALB-DNS SSM pattern.
+   */
+  kbIdSsmParamName?: string;
 }
 
 export class KnowledgeBaseStack extends cdk.Stack {
@@ -153,6 +162,17 @@ export class KnowledgeBaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ContactFlowKnowledgeBaseId", {
       value: kb.knowledgeBaseId,
     });
+
+    // Publish the KB id to SSM so the ECS task can resolve CONTACT_FLOW_KB_ID at
+    // runtime and turn RAG on. Decoupled from the ECS stack (no CFN cross-stack
+    // edge), so KB-stack deploy order / optionality doesn't matter.
+    if (props?.kbIdSsmParamName) {
+      new ssm.StringParameter(this, "ContactFlowKbIdParam", {
+        parameterName: props.kbIdSsmParamName,
+        stringValue: kb.knowledgeBaseId,
+        description: "Contact Flow RAG Knowledge Base id (read by the ECS task as CONTACT_FLOW_KB_ID)",
+      });
+    }
 
     new cdk.CfnOutput(this, "DataSourceId", {
       value: dataSource.dataSourceId,

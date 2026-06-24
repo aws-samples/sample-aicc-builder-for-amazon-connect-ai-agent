@@ -23,6 +23,8 @@ from strands import Agent
 from strands.models import BedrockModel
 from botocore.config import Config as BotocoreConfig
 
+from tools.model_selection import resolve_model_id, build_model_kwargs
+
 logger = logging.getLogger(__name__)
 
 # Configuration per agent type
@@ -63,31 +65,34 @@ _model_cache: Dict[str, BedrockModel] = {}
 _initialized = False
 
 
-def _get_model(temperature: float, max_tokens: int) -> BedrockModel:
+def _get_model(temperature: float, max_tokens: int, model_id: Optional[str] = None) -> BedrockModel:
     """
     Get or create a cached model instance.
 
-    Models are cached by (temperature, max_tokens) to avoid recreating
-    identical configurations.
+    Models are cached by (model_id, temperature, max_tokens) to avoid recreating
+    identical configurations. The model id resolves from the per-request selection
+    (ContextVar) → env → default, so a session's chosen model flows through here.
+
+    Note: ``temperature`` is only applied to models that accept it (Opus 4.6 and
+    older); ``build_model_kwargs`` drops it for 4.7/4.8 which removed the param.
     """
-    cache_key = f"{temperature}:{max_tokens}"
+    model_id = model_id or resolve_model_id()
+    region = os.environ.get("AWS_REGION", "ap-northeast-1")
+    cache_key = f"{model_id}:{temperature}:{max_tokens}"
     if cache_key not in _model_cache:
-        # Use Opus for all sub-agents (consistent quality)
-        model_id = "global.anthropic.claude-opus-4-6-v1"
-        region = os.environ.get("AWS_REGION", "ap-northeast-1")
+        logger.info(f"Creating model: {model_id} (temperature={temperature}, max_tokens={max_tokens})")
 
-        logger.info(f"Creating model: {model_id} (temp={temperature}, max_tokens={max_tokens})")
-
-        _model_cache[cache_key] = BedrockModel(
-            model_id=model_id,
-            region_name=region,
+        kwargs = build_model_kwargs(
+            model_id,
             temperature=temperature,
+            region_name=region,
             max_tokens=max_tokens,
             streaming=True,
             # cache_prompt removed - using cachePoint in system_prompt instead
             cache_tools="default",
             boto_client_config=BotocoreConfig(read_timeout=600),
         )
+        _model_cache[cache_key] = BedrockModel(**kwargs)
     return _model_cache[cache_key]
 
 
@@ -127,7 +132,7 @@ def initialize_pool(force: bool = False) -> None:
             )
 
             # Get model (shared across agents with same config)
-            model = _get_model(config["temperature"], config["max_tokens"])
+            model = _get_model(config["temperature"], config["max_tokens"], resolve_model_id())
 
             # Create agent WITHOUT tools (tools are added per-call)
             # This allows the pool to be initialized without circular imports
@@ -224,7 +229,7 @@ def get_agent_with_tools(
     )
 
     # Get shared model
-    model = _get_model(config["temperature"], config["max_tokens"])
+    model = _get_model(config["temperature"], config["max_tokens"], resolve_model_id())
 
     # Create new agent with tools
     return Agent(

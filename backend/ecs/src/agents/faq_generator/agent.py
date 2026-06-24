@@ -33,6 +33,7 @@ from botocore.config import Config as BotocoreConfig
 HEARTBEAT_INTERVAL_SECONDS = 5
 
 from .system_prompt import FAQ_GENERATOR_SYSTEM_PROMPT
+from tools.model_selection import resolve_model_id, build_model_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -630,20 +631,20 @@ Cover these topics:
     documents_generated = []
 
     try:
-        # Use Sonnet for FAQ generation (fast, sufficient quality for document writing)
-        model_id = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        # Model follows the session selection; FAQ_MODEL_ID env can override
+        # (e.g. point FAQ generation at a cheaper/faster model).
         region = os.environ.get("AWS_REGION", "ap-northeast-1")
 
-        model = BedrockModel(
-            model_id=model_id,
+        model = BedrockModel(**build_model_kwargs(
+            resolve_model_id(override_env="FAQ_MODEL_ID"),
             region_name=region,
-            temperature=0.5,
+            # temperature omitted (None) — only applied on models that accept it
             max_tokens=64000,
             streaming=True,
             # cache_prompt removed - using cachePoint in system_prompt instead
             cache_tools="default",   # Cache tool definitions
             boto_client_config=BotocoreConfig(read_timeout=600),
-        )
+        ))
 
         # Convert history to Strands format
         recent_history = history[-10:] if len(history) > 10 else history

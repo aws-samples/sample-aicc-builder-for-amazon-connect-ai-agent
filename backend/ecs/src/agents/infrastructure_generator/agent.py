@@ -27,6 +27,7 @@ from .system_prompt import (
     OPERATION_MODE_PROMPT,
 )
 from tools.workspace_tools_for_subagent import detect_spec_escalation
+from tools.model_selection import resolve_model_id, build_model_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -360,14 +361,13 @@ def _build_operation_spec_table(ops_list: list) -> str:
 
 def _create_agent(system_prompt_text: str, tools: list | None = None):
     """Create a Strands Agent with the given system prompt."""
-    model_id = os.environ.get("INFRA_MODEL_ID", os.environ.get("MODEL_ID", "global.anthropic.claude-opus-4-6-v1"))
-    model = BedrockModel(
-        model_id=model_id,
+    model = BedrockModel(**build_model_kwargs(
+        resolve_model_id(override_env="INFRA_MODEL_ID"),
         region_name=os.environ.get("AWS_REGION", "us-east-1"),
-        temperature=0,
+        # temperature omitted (None) — only applied on models that accept it
         max_tokens=128000,
         boto_client_config=BotocoreConfig(read_timeout=600),
-    )
+    ))
     return Agent(
         model=model,
         system_prompt=[{"text": system_prompt_text}, {"cachePoint": {"type": "default"}}],

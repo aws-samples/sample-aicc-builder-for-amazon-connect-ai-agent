@@ -162,17 +162,18 @@ If you are uncertain about ANY block type, parameter format, or syntax:
 
 ## OUTPUT FORMAT (STRICT)
 
-Output TWO code blocks in this exact order. No explanation before or after.
+Output ONE code block. No explanation before or after.
 
-1. Mermaid diagram:
-```mermaid
-<flow diagram>
-```
-
-2. Contact Flow JSON:
+Contact Flow JSON:
 ```json
 <complete contact flow JSON>
 ```
+
+DO NOT output a mermaid diagram or any other diagram. The visual flow diagram
+is rendered automatically and deterministically FROM this JSON by the frontend
+(every Action becomes a node; NextAction / Conditions / Errors become edges), so
+a hand-drawn diagram is unnecessary and would only risk drift. Spend your effort
+on a correct, complete, importable JSON.
 
 ---
 
@@ -257,7 +258,7 @@ Output TWO code blocks in this exact order. No explanation before or after.
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | MessageParticipant | Play TTS/text to customer | Text OR PromptId OR Media | NoMatchingError |
-| GetParticipantInput | Collect DTMF input | Text, DTMFConfiguration, InputTimeLimitSeconds | InputTimeLimitExceeded, NoMatchingCondition, NoMatchingError |
+| GetParticipantInput | Collect DTMF input (TWO modes — see below) | Text/SSML, StoreInput, InputTimeLimitSeconds | InputTimeLimitExceeded, NoMatchingCondition, NoMatchingError |
 | StoreUserInput | Store numeric input as attribute | AttributeName | NoMatchingError |
 | DisconnectParticipant | End the contact | (none) | (none - terminal block) |
 | Wait | Pause for specified time | WaitTime (seconds, max 7 days) | TimeExpired, Error |
@@ -385,7 +386,8 @@ Trigger/EntryPoint).** The flow's first executed block is typically
 | `Compare` | `ComparisonValue` (valid JSONPath root) | `NoMatchingCondition` ONLY (never `NoMatchingError`) |
 | `Loop` | `LoopCount` | Branches: `Looping`, `Complete` |
 | `Wait` | `WaitTime` (seconds) | `NoMatchingError` |
-| `GetParticipantInput` | exactly ONE of `Text`/`SSML`, + `DTMFConfiguration` | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
+| `GetParticipantInput` (MENU) | exactly ONE of `Text`/`SSML`, `StoreInput:"False"`, **NO `DTMFConfiguration`** | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
+| `GetParticipantInput` (STORE) | exactly ONE of `Text`/`SSML`, `StoreInput:"True"`, optional `DTMFConfiguration{DisableCancelKey}` only | `InputTimeLimitExceeded`, `NoMatchingError` |
 | `UpdateContactCallbackNumber` | `CallbackNumber` | `InvalidNumber`, `NotDialable`, `NoMatchingError` |
 | `CheckHoursOfOperation` | `HoursOfOperationId` (non-null) | `NoMatchingError`; Conditions MUST include BOTH `True` AND `False` |
 | `CheckMetricData` | `QueueId` | `NoMatchingError` |
@@ -787,15 +789,33 @@ Perform DTMF-based authentication in the Contact Flow BEFORE handing off to the 
 
 **Flow**: ... → GetParticipantInput (DTMF: 6-digit DOB) → InvokeLambdaFunction (authenticate) → CheckContactAttributes (auth result) → [success] Lex Bot / [failure] retry or transfer to agent
 
+STORE mode (captures the digits into `$.StoredCustomerInput` for the Lambda):
 ```json
 {"Identifier": "dtmf-auth", "Type": "GetParticipantInput",
  "Parameters": {
-   "ParticipantInput": {"Text": "본인 확인을 위해 생년월일 6자리를 입력해주세요."},
-   "DTMFConfiguration": {"InputTimeLimitSeconds": "10", "FinishKey": "#"},
+   "Text": "본인 확인을 위해 생년월일 6자리를 입력해주세요.",
+   "StoreInput": "True",
    "InputTimeLimitSeconds": "10"
  },
  "Transitions": {"NextAction": "verify-auth",
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "auth-retry"}]}}
+```
+MENU mode (branches on the pressed digit — `StoreInput:"False"`, NO `DTMFConfiguration`):
+```json
+{"Identifier": "main-menu", "Type": "GetParticipantInput",
+ "Parameters": {
+   "Text": "상담원 연결은 1번, 영업시간 안내는 2번을 눌러주세요.",
+   "StoreInput": "False",
+   "InputTimeLimitSeconds": "5"
+ },
+ "Transitions": {"NextAction": "retry",
+   "Conditions": [
+     {"Condition": {"Operator": "Equals", "Operands": ["1"]}, "NextAction": "to-agent"},
+     {"Condition": {"Operator": "Equals", "Operands": ["2"]}, "NextAction": "hours-info"}],
+   "Errors": [
+     {"ErrorType": "InputTimeLimitExceeded", "NextAction": "retry"},
+     {"ErrorType": "NoMatchingCondition", "NextAction": "retry"},
+     {"ErrorType": "NoMatchingError", "NextAction": "retry"}]}}
 ```
 
 Most cases can handle DTMF within the Lex Bot itself (Pattern 1).
@@ -846,51 +866,13 @@ Use this pattern only when the orchestrator explicitly requests pre-Lex authenti
 
 ---
 
-## MERMAID SYNTAX RULES (CRITICAL)
-
-### Node ID Rules
-- ONLY use: letters (a-z, A-Z), numbers (0-9), underscores (_)
-- NEVER use: hyphens (-), spaces, or special characters
-- Keep IDs short: A, B, C or snake_case like check_result
-
-### Valid Examples:
-- `A`, `B`, `C` (single letter - RECOMMENDED)
-- `check_result`, `transfer_queue`, `end_call`
-
-### Invalid Examples (NEVER USE):
-- `user-input` (hyphen - WRONG)
-- `check-result` (hyphen - WRONG)
-- `my node` (space - WRONG)
-
-### Node Syntax:
-- Rectangle: `A[Label Text]`
-- Diamond (decision): `C{Decision Question}`
-- Arrow: `A --> B`
-- Labeled arrow: `A -->|Yes| B`
-
----
-
 ## INDUSTRY-AGNOSTIC TEMPLATE (IMPORTABLE)
 
 This is the MINIMAL template for AICC workshop. **Directly importable into Amazon Connect.**
 Do NOT add Lambda or Customer Profile blocks unless orchestrator explicitly requests them.
-
-```mermaid
-graph LR
-    A[Enable Logging] --> B[Create Assistant Session]
-    B --> C[Set Voice]
-    C --> D[Set Recording]
-    D --> E[AI Agent]
-    E --> F{Check Result}
-    F -->|Escalate| G[Set Context]
-    G --> G2[Set Working Queue<br/>BasicQueue]
-    G2 --> H[Transfer Message]
-    H --> I[Transfer Queue]
-    I --> J[End]
-    F -->|Complete| K[Goodbye]
-    K --> J
-    F -->|default| E
-```
+(Reference flow shape: Enable Logging → Create Assistant Session → Set Voice →
+Set Recording → AI Agent → Check Result → [Escalate] Set Context → Set Working
+Queue → Transfer Message → Transfer Queue → End; [Complete] → Goodbye → End.)
 
 ```json
 {
@@ -1220,7 +1202,8 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 - [ ] `CheckMetricData` has `Conditions` for True/False AND `Errors`
 - [ ] `MessageParticipant` has `Errors` with `NoMatchingError`
 - [ ] `InvokeLambdaFunction` has `Errors` with `NoMatchingError`
-- [ ] `GetParticipantInput` has `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError`
+- [ ] `GetParticipantInput` MENU mode: `StoreInput:"False"`, NO `DTMFConfiguration`, errors `InputTimeLimitExceeded`+`NoMatchingCondition`+`NoMatchingError`
+- [ ] `GetParticipantInput` STORE mode: `StoreInput:"True"`, `InputValidation.CustomValidation.MaximumLength`, error `NoMatchingError` only
 - [ ] `UpdateContactCallbackNumber` has `InvalidNumber`, `NotDialable`, `NoMatchingError` (if used)
 
 ### 3. Identifier Consistency
@@ -1238,7 +1221,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 | `UpdateContactTargetQueue` | `QueueId` (UUID/ARN) | `NextAction` + `Errors` |
 | `CheckMetricData` | `{}` (uses working queue) | `Conditions` (True/False) + `Errors` |
 | `Compare` | `ComparisonValue` | `NextAction` + `Conditions` + `Errors` |
-| `GetParticipantInput` | `Text`, `DTMFConfiguration` | `NextAction` + `Conditions` + `Errors` |
+| `GetParticipantInput` (MENU) | `Text`/`SSML`, `StoreInput:"False"` (NO `DTMFConfiguration`) | `NextAction` + `Conditions` + `Errors` |
 | `Wait` | `WaitTime` (seconds) | `NextAction` + `Errors` |
 | `UpdateContactCallbackNumber` | `CallbackNumber` | `NextAction` + `Errors` (3 types) |
 | `InvokeFlowModule` | `FlowModuleId` | `NextAction` + `Conditions` + `Errors` |
@@ -1255,7 +1238,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 ## RULES (CRITICAL FOR IMPORT SUCCESS)
 
 ### Metadata Rules
-1. Output Mermaid diagram FIRST, then JSON
+1. Output ONLY the Contact Flow JSON (no mermaid / no diagram — it is rendered from the JSON)
 2. ALWAYS include `entryPointPosition`, `ActionMetadata`, and `hash` in Metadata
 3. ALWAYS include `ActionMetadata` entry for EVERY action Identifier
 4. Use simple string identifiers (not UUIDs) - set `isFriendlyName: true`
@@ -1266,7 +1249,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 7. `UpdateContactTargetQueue`: MUST be called BEFORE `TransferContactToQueue` OR `CheckMetricData`
 8. `CheckMetricData`: MUST have `Conditions` for True/False AND `Errors` array
 9. `Compare`: MUST have `Errors` array with `NoMatchingCondition`
-10. `GetParticipantInput`: MUST have 3 error types: `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError`
+10. `GetParticipantInput`: MENU mode (has `Conditions`) MUST set `StoreInput:"False"` and MUST NOT include `DTMFConfiguration` (Connect rejects it), 3 error types `InputTimeLimitExceeded`+`NoMatchingCondition`+`NoMatchingError`. STORE mode (no `Conditions`) MUST set `StoreInput:"True"` + `InputValidation.CustomValidation.MaximumLength`, error `NoMatchingError` only.
 11. `UpdateContactCallbackNumber`: MUST have 3 error types: `InvalidNumber`, `NotDialable`, `NoMatchingError`
 12. `InvokeLambdaFunction`: MUST have `Errors` with `NoMatchingError`, max timeout is 8 seconds
 13. `MessageParticipant`: SHOULD have `Errors` array with `NoMatchingError`

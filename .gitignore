@@ -95,3 +95,15 @@ updates/
 questionnaire/*.docx
 *_tmp.html
 **/__pycache__/
+# Playwright MCP test artifacts (console logs, page snapshots)
+.playwright-mcp/
+
+.e2e-tmp/
+
+# QA / demo capture artifacts (screenshots, demo bundles) — not source
+demo-assets/
+qa-*.png
+slack-*.png
+investigate-*.png
+debug/
+scripts/.websearch-venv/

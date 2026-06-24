@@ -33,7 +33,6 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { ContactFlowPreview } from './ContactFlowPreview';
-import { MermaidDiagram } from './MermaidDiagram';
 import { generatePresignedUrl } from '../services/sessions';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -56,23 +55,22 @@ const ASSET_TYPE_INFO: Record<string, {
   collapseMode: 'title-only' | 'preview' | 'full';
   previewLines?: number;
 }> = {
-  lambda: { icon: <FileCode className="w-4 h-4" />, label: 'Lambda Function', labelKo: 'Lambda 함수', color: 'text-orange-600 bg-orange-50 border-orange-200', collapseMode: 'preview', previewLines: 8 },
-  openapi: { icon: <FileJson className="w-4 h-4" />, label: 'OpenAPI Spec', labelKo: 'OpenAPI 스펙', color: 'text-blue-600 bg-blue-50 border-blue-200', collapseMode: 'preview', previewLines: 10 },
-  prompt: { icon: <MessageSquare className="w-4 h-4" />, label: 'AI Prompt', labelKo: 'AI 프롬프트', color: 'text-purple-600 bg-purple-50 border-purple-200', collapseMode: 'preview', previewLines: 8 },
-  contact_flow: { icon: <Workflow className="w-4 h-4" />, label: 'Contact Flow', labelKo: 'Contact Flow', color: 'text-green-600 bg-green-50 border-green-200', collapseMode: 'full' },
-  mermaid: { icon: <Workflow className="w-4 h-4" />, label: 'Flow Diagram', labelKo: '플로우 다이어그램', color: 'text-violet-600 bg-violet-50 border-violet-200', collapseMode: 'full' },
-  cdk: { icon: <Boxes className="w-4 h-4" />, label: 'CloudFormation Template', labelKo: 'CloudFormation 템플릿', color: 'text-cyan-600 bg-cyan-50 border-cyan-200', collapseMode: 'preview', previewLines: 10 },
-  cloudformation: { icon: <Boxes className="w-4 h-4" />, label: 'CloudFormation Template', labelKo: 'CloudFormation 템플릿', color: 'text-cyan-600 bg-cyan-50 border-cyan-200', collapseMode: 'preview', previewLines: 10 },
-  company: { icon: <Building2 className="w-4 h-4" />, label: 'Company Profile', labelKo: '회사 정보', color: 'text-indigo-600 bg-indigo-50 border-indigo-200', collapseMode: 'full' },
-  operations: { icon: <Settings className="w-4 h-4" />, label: 'Operations', labelKo: '작업 정의', color: 'text-teal-600 bg-teal-50 border-teal-200', collapseMode: 'full' },
-  validation: { icon: <CheckCircle2 className="w-4 h-4" />, label: 'Validation Rules', labelKo: '유효성 검사', color: 'text-amber-600 bg-amber-50 border-amber-200', collapseMode: 'full' },
-  research: { icon: <Search className="w-4 h-4" />, label: 'Research Result', labelKo: '리서치 결과', color: 'text-sky-600 bg-sky-50 border-sky-200', collapseMode: 'preview', previewLines: 6 },
-  faq: { icon: <FileText className="w-4 h-4" />, label: 'FAQ Document', labelKo: 'FAQ 문서', color: 'text-emerald-600 bg-emerald-50 border-emerald-200', collapseMode: 'title-only' },
-  package: { icon: <Package className="w-4 h-4" />, label: 'Knowledge Base Package', labelKo: 'Knowledge Base 패키지', color: 'text-rose-600 bg-rose-50 border-rose-200', collapseMode: 'full' },
-  review: { icon: <ClipboardCheck className="w-4 h-4" />, label: 'Review Report', labelKo: '리뷰 리포트', color: 'text-red-600 bg-red-50 border-red-200', collapseMode: 'full' },
-  operation_spec: { icon: <ClipboardCheck className="w-4 h-4" />, label: 'Operation Spec', labelKo: 'Operation 정의', color: 'text-teal-600 bg-teal-50 border-teal-200', collapseMode: 'full' },
-  workspace_file: { icon: <FileCode className="w-4 h-4" />, label: 'Workspace File', labelKo: '워크스페이스 파일', color: 'text-amber-600 bg-amber-50 border-amber-200', collapseMode: 'preview', previewLines: 12 },
-  requirement: { icon: <FileText className="w-4 h-4" />, label: 'Parsed Requirements', labelKo: '파싱된 요구사항', color: 'text-sky-600 bg-sky-50 border-sky-200', collapseMode: 'preview', previewLines: 12 },
+  lambda: { icon: <FileCode className="w-4 h-4" />, label: 'Lambda Function', labelKo: 'Lambda 함수', color: 'text-orange-600 dark:text-orange-300 bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800', collapseMode: 'preview', previewLines: 8 },
+  openapi: { icon: <FileJson className="w-4 h-4" />, label: 'OpenAPI Spec', labelKo: 'OpenAPI 스펙', color: 'text-blue-600 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800', collapseMode: 'preview', previewLines: 10 },
+  prompt: { icon: <MessageSquare className="w-4 h-4" />, label: 'AI Prompt', labelKo: 'AI 프롬프트', color: 'text-purple-600 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border-purple-200 dark:border-purple-800', collapseMode: 'preview', previewLines: 8 },
+  contact_flow: { icon: <Workflow className="w-4 h-4" />, label: 'Contact Flow', labelKo: 'Contact Flow', color: 'text-green-600 dark:text-green-300 bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800', collapseMode: 'full' },
+  cdk: { icon: <Boxes className="w-4 h-4" />, label: 'CloudFormation Template', labelKo: 'CloudFormation 템플릿', color: 'text-cyan-600 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-900/20 border-cyan-200 dark:border-cyan-800', collapseMode: 'preview', previewLines: 10 },
+  cloudformation: { icon: <Boxes className="w-4 h-4" />, label: 'CloudFormation Template', labelKo: 'CloudFormation 템플릿', color: 'text-cyan-600 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-900/20 border-cyan-200 dark:border-cyan-800', collapseMode: 'preview', previewLines: 10 },
+  company: { icon: <Building2 className="w-4 h-4" />, label: 'Company Profile', labelKo: '회사 정보', color: 'text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/20 border-indigo-200 dark:border-indigo-800', collapseMode: 'full' },
+  operations: { icon: <Settings className="w-4 h-4" />, label: 'Operations', labelKo: '작업 정의', color: 'text-teal-600 dark:text-teal-300 bg-teal-50 dark:bg-teal-900/20 border-teal-200 dark:border-teal-800', collapseMode: 'full' },
+  validation: { icon: <CheckCircle2 className="w-4 h-4" />, label: 'Validation Rules', labelKo: '유효성 검사', color: 'text-amber-600 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800', collapseMode: 'full' },
+  research: { icon: <Search className="w-4 h-4" />, label: 'Research Result', labelKo: '리서치 결과', color: 'text-sky-600 dark:text-sky-300 bg-sky-50 dark:bg-sky-900/20 border-sky-200 dark:border-sky-800', collapseMode: 'preview', previewLines: 6 },
+  faq: { icon: <FileText className="w-4 h-4" />, label: 'FAQ Document', labelKo: 'FAQ 문서', color: 'text-emerald-600 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800', collapseMode: 'title-only' },
+  package: { icon: <Package className="w-4 h-4" />, label: 'Knowledge Base Package', labelKo: 'Knowledge Base 패키지', color: 'text-rose-600 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border-rose-200 dark:border-rose-800', collapseMode: 'full' },
+  review: { icon: <ClipboardCheck className="w-4 h-4" />, label: 'Review Report', labelKo: '리뷰 리포트', color: 'text-red-600 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800', collapseMode: 'full' },
+  operation_spec: { icon: <ClipboardCheck className="w-4 h-4" />, label: 'Operation Spec', labelKo: 'Operation 정의', color: 'text-teal-600 dark:text-teal-300 bg-teal-50 dark:bg-teal-900/20 border-teal-200 dark:border-teal-800', collapseMode: 'full' },
+  workspace_file: { icon: <FileCode className="w-4 h-4" />, label: 'Workspace File', labelKo: '워크스페이스 파일', color: 'text-amber-600 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800', collapseMode: 'preview', previewLines: 12 },
+  requirement: { icon: <FileText className="w-4 h-4" />, label: 'Parsed Requirements', labelKo: '파싱된 요구사항', color: 'text-sky-600 dark:text-sky-300 bg-sky-50 dark:bg-sky-900/20 border-sky-200 dark:border-sky-800', collapseMode: 'preview', previewLines: 12 },
 };
 
 interface AssetPreviewBubbleProps {
@@ -86,41 +84,6 @@ export const AssetPreviewBubble = memo(function AssetPreviewBubble({ preview, la
     return <ContactFlowPreview preview={preview} language={language} />;
   }
 
-  if (preview.assetType === 'mermaid') {
-    // Detect lazy-loading state: s3Key exists but content not yet loaded from S3
-    const isLazyLoading = !!(preview.s3Key && !preview.content);
-    return (
-      <div className="rounded-lg border border-violet-200 bg-violet-50 p-4">
-        <div className="flex items-center gap-2 mb-3 text-violet-600">
-          <Workflow className="w-4 h-4" />
-          <span className="text-sm font-medium">
-            {language === 'ko-KR' ? '플로우 다이어그램' : 'Flow Diagram'}
-          </span>
-          {(!preview.isComplete || isLazyLoading) && <Loader2 className="w-4 h-4 animate-spin ml-auto" />}
-        </div>
-        <div className="bg-white rounded-lg p-4 border border-violet-100">
-          {preview.isComplete && !isLazyLoading ? (
-            (() => {
-              const mermaidCode = preview.content
-                .replace(/^#[^\n]*\n\n?/, '')
-                .replace(/^```mermaid\n?/, '')
-                .replace(/\n?```\s*$/, '');
-              return <MermaidDiagram chart={mermaidCode} language={language} />;
-            })()
-          ) : (
-            <div className="flex flex-col items-center justify-center py-8 text-gray-500">
-              <Loader2 className="w-8 h-8 animate-spin mb-3" />
-              <span className="text-sm">
-                {isLazyLoading
-                  ? (language === 'ko-KR' ? '다이어그램 로딩 중...' : 'Loading diagram...')
-                  : (language === 'ko-KR' ? '다이어그램 생성 중...' : 'Generating diagram...')}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
 
   const [copied, setCopied] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -132,7 +95,7 @@ export const AssetPreviewBubble = memo(function AssetPreviewBubble({ preview, la
 
   const typeInfo = ASSET_TYPE_INFO[preview.assetType] || {
     icon: <FileText className="w-4 h-4" />, label: preview.assetType || 'Asset', labelKo: preview.assetType || '에셋',
-    color: 'text-gray-600 bg-gray-50 border-gray-200', collapseMode: 'preview' as const, previewLines: 8,
+    color: 'text-surface-600 dark:text-surface-300 bg-surface-50 dark:bg-surface-800 border-surface-200 dark:border-surface-600', collapseMode: 'preview' as const, previewLines: 8,
   };
   const displayLabel = language === 'ko-KR' ? typeInfo.labelKo : typeInfo.label;
 
@@ -236,7 +199,7 @@ export const AssetPreviewBubble = memo(function AssetPreviewBubble({ preview, la
                      preview.operationId === 'patch' ? (language === 'ko-KR' ? '수정' : 'Modified') :
                      (language === 'ko-KR' ? '추가' : 'Appended')}
                   </span>
-                ) : preview.operationId ? (
+                ) : preview.operationId && preview.operationId !== 'knowledge_base' ? (
                   <span className="text-xs opacity-70 font-mono">({preview.operationId})</span>
                 ) : null}
                 {preview.isRegeneration && (
@@ -324,16 +287,16 @@ export const AssetPreviewBubble = memo(function AssetPreviewBubble({ preview, la
 
             {/* Rich markdown rendering for review reports, operation specs, and requirements */}
             {(preview.assetType === 'review' || preview.assetType === 'operation_spec' || preview.assetType === 'requirement') ? (
-              <div className="p-5 prose prose-sm max-w-none
-                prose-headings:text-gray-800 prose-h1:text-lg prose-h1:border-b prose-h1:pb-2 prose-h1:mb-4
+              <div className="p-5 prose prose-sm max-w-none dark:prose-invert
+                prose-headings:text-gray-800 dark:prose-headings:text-surface-100 prose-h1:text-lg prose-h1:border-b prose-h1:pb-2 prose-h1:mb-4
                 prose-h2:text-base prose-h2:mt-5 prose-h2:mb-2
                 prose-h3:text-sm prose-h3:mt-3
-                prose-p:text-gray-700 prose-p:my-1.5
-                prose-li:text-gray-700 prose-li:my-0.5
-                prose-table:text-xs prose-th:bg-gray-100 prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5 prose-td:border-gray-200
-                prose-code:text-teal-700 prose-code:bg-teal-50 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-xs
-                prose-strong:text-gray-900
-                bg-white text-gray-800">
+                prose-p:text-gray-700 dark:prose-p:text-surface-300 prose-p:my-1.5
+                prose-li:text-gray-700 dark:prose-li:text-surface-300 prose-li:my-0.5
+                prose-table:text-xs prose-th:bg-gray-100 dark:prose-th:bg-surface-800 prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5 prose-td:border-gray-200 dark:prose-td:border-surface-700
+                prose-code:text-teal-700 dark:prose-code:text-teal-300 prose-code:bg-teal-50 dark:prose-code:bg-teal-900/30 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-xs
+                prose-strong:text-gray-900 dark:prose-strong:text-surface-100
+                bg-white dark:bg-surface-900 text-gray-800 dark:text-surface-200">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
                 {isStreaming && <span className="inline-block w-2 h-4 bg-teal-400 animate-pulse ml-1" />}
               </div>

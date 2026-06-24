@@ -19,6 +19,33 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ENV_LOCAL="$SCRIPT_DIR/.env.local"
 
 # ========================================
+# Failure handling — with `set -e` a mid-deploy failure otherwise exits with no
+# context. Track the current step and, on error, print a consolidated summary
+# pointing at what failed and where to look, instead of a bare stack-trace.
+# ========================================
+CURRENT_STEP="startup"
+_on_error() {
+    local exit_code=$?
+    local line=$1
+    echo ""
+    echo -e "${RED}==========================================${NC}"
+    echo -e "${RED}  Deployment FAILED${NC}"
+    echo -e "${RED}==========================================${NC}"
+    echo -e "  Step:      ${YELLOW}${CURRENT_STEP}${NC}"
+    echo -e "  Exit code: ${YELLOW}${exit_code}${NC} (deploy.sh line ${line})"
+    echo -e "  Stage/Region: ${YELLOW}${STAGE:-dev}${NC} / ${YELLOW}${AWS_DEFAULT_REGION:-ap-northeast-2}${NC}"
+    echo ""
+    echo -e "  Common next steps:"
+    echo -e "    • Re-run with the same flags — most steps are hash-cached and resume cheaply."
+    echo -e "    • CDK failures: check the CloudFormation console for the failing resource's status reason."
+    echo -e "    • Image/ECR failures: confirm Docker is running and you can push to ECR."
+    echo -e "    • Use ${CYAN}--backend-only${NC} / ${CYAN}--frontend-only${NC} / ${CYAN}--infra-only${NC} to retry just one component."
+    echo ""
+    exit "$exit_code"
+}
+trap '_on_error $LINENO' ERR
+
+# ========================================
 # Docker Runtime Setup
 # ========================================
 setup_docker() {
@@ -120,7 +147,9 @@ print_usage() {
     echo "Environment variables:"
     echo "  ENABLE_KNOWLEDGE_BASE=false   Skip Knowledge Base deployment"
     echo "  AWS_DEFAULT_REGION=us-east-1  Set AWS region (default: ap-northeast-2 / Seoul)"
-    echo "  BRAVE_API_KEY=xxx             Brave Search API key for Research Agent"
+    echo "  ENABLE_WEB_SEARCH=false       Skip auto-provisioning the AgentCore Web Search gateway"
+    echo "  AGENTCORE_GATEWAY_URL=https://...gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+    echo "                                Use a pre-existing gateway instead of auto-creating one"
     echo ""
     echo "Examples:"
     echo "  $0                                    # Full deployment (Seoul)"
@@ -292,28 +321,55 @@ if [ -t 0 ] && [ "$SKIP_CHECKS" != true ]; then
     fi
 fi
 
-# Brave Search API Key (optional, cached in .env.local)
-if [ -z "$BRAVE_API_KEY" ]; then
-    if [ -t 0 ]; then
-        echo -e "${YELLOW}Brave Search API Key not set.${NC}"
-        echo "The Research Agent uses Brave Search for web research capabilities."
-        echo "Get your API key from: https://api.search.brave.com/app/keys"
-        echo ""
-        read -p "Enter Brave Search API Key (or press Enter to skip): " BRAVE_API_KEY_INPUT
-        if [ -n "$BRAVE_API_KEY_INPUT" ]; then
-            export BRAVE_API_KEY="$BRAVE_API_KEY_INPUT"
-            save_env_local "BRAVE_API_KEY" "$BRAVE_API_KEY_INPUT"
-            echo -e "${GREEN}Brave Search API Key configured and saved to .env.local${NC}"
-        else
-            echo -e "${YELLOW}Skipping Brave Search - Research Agent will have limited functionality${NC}"
-            export BRAVE_API_KEY=""
+# ========================================
+# AgentCore Gateway web search (auto-provisioned)
+# ========================================
+# Web search runs through an Amazon Bedrock AgentCore Gateway with the managed
+# Web Search connector, authenticated by the ECS task role (SigV4) — no API key.
+# deploy.sh CREATES the gateway (idempotently) via scripts/setup-web-search-gateway.sh,
+# so the operator never hand-creates anything. Web Search is GA in us-east-1
+# ONLY, so the gateway always lives there regardless of this deploy's region.
+# Opt out with ENABLE_WEB_SEARCH=false.
+ENABLE_WEB_SEARCH="${ENABLE_WEB_SEARCH:-true}"
+
+if [ "$ENABLE_WEB_SEARCH" = "false" ]; then
+    echo -e "${YELLOW}ENABLE_WEB_SEARCH=false — skipping web search gateway. Agents use built-in knowledge.${NC}"
+    export AGENTCORE_GATEWAY_URL=""
+elif [ -n "$AGENTCORE_GATEWAY_URL" ]; then
+    # Pre-existing gateway (set in env) or cached from a previous run — use as-is.
+    # To force re-provisioning, clear AGENTCORE_GATEWAY_URL from .env.local.
+    echo -e "${GREEN}AgentCore Gateway URL set — using ${AGENTCORE_GATEWAY_URL}${NC}"
+elif [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
+    CURRENT_STEP="AgentCore Web Search gateway provisioning"
+    echo -e "\n${YELLOW}Provisioning AgentCore Web Search gateway (us-east-1, idempotent)...${NC}"
+    # Non-critical: a failure here must not kill the deploy (mirrors KB sync).
+    # The script is idempotent — reuses the role/gateway/target if present.
+    GW_URL=""
+    if [ -x "$SCRIPT_DIR/scripts/setup-web-search-gateway.sh" ]; then
+        set +e
+        GW_URL=$("$SCRIPT_DIR/scripts/setup-web-search-gateway.sh" --stage "$STAGE" | tail -n 1)
+        GW_RC=$?
+        set -e
+        if [ $GW_RC -ne 0 ] || [ -z "$GW_URL" ]; then
+            echo -e "${YELLOW}Warning: web search gateway provisioning failed (rc=$GW_RC).${NC}"
+            echo -e "${YELLOW}  Continuing without web search — agents fall back to built-in knowledge.${NC}"
+            echo -e "${YELLOW}  Retry later: ./scripts/setup-web-search-gateway.sh --stage $STAGE${NC}"
+            GW_URL=""
         fi
     else
-        echo -e "${YELLOW}Brave Search API Key not set (non-interactive run) - Research Agent will have limited functionality${NC}"
-        export BRAVE_API_KEY=""
+        echo -e "${YELLOW}Warning: scripts/setup-web-search-gateway.sh missing — skipping web search.${NC}"
+    fi
+
+    if [ -n "$GW_URL" ]; then
+        export AGENTCORE_GATEWAY_URL="$GW_URL"
+        save_env_local "AGENTCORE_GATEWAY_URL" "$GW_URL"
+        echo -e "${GREEN}AgentCore Gateway ready: ${AGENTCORE_GATEWAY_URL}${NC}"
+    else
+        export AGENTCORE_GATEWAY_URL=""
     fi
 else
-    echo -e "${GREEN}Brave Search API Key loaded from cache${NC}"
+    # Frontend-only deploy: keep whatever was cached (no backend to repush).
+    echo -e "${CYAN}Web search gateway: using cached value (frontend-only deploy)${NC}"
 fi
 
 echo -e "${BLUE}Target Region: ${AWS_DEFAULT_REGION}${NC}"
@@ -398,6 +454,7 @@ ECR_REPO_NAME="$(echo "$ECS_STACK_NAME" | tr '[:upper:]' '[:lower:]')-repo"
 ECR_REPO_URI=""
 
 if [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
+    CURRENT_STEP="ECR image build & push (Step 0.5)"
     echo -e "\n${YELLOW}Step 0.5: Pre-creating ECR repository & pushing Docker image...${NC}"
 
     # 0.5a) Create ECR repo if it doesn't exist
@@ -443,10 +500,17 @@ if [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
 
             cd "$SCRIPT_DIR/backend/ecs"
 
-            # Extract USER_POOL_ID and USER_POOL_CLIENT_ID from existing CDK outputs (if available)
+            # Resolve USER_POOL_ID / USER_POOL_CLIENT_ID for this stack. CDK
+            # outputs are AUTHORITATIVE — they are bound to the stack/region
+            # being deployed. A stale exported USER_POOL_ID from a previous
+            # (different-region) session must NOT win, or it gets baked into the
+            # task def and breaks JWT validation (JWKS 404). Fall back to the
+            # ambient env var only when the output is missing.
             if [ -f "$CDK_OUTPUTS_FILE" ]; then
-                USER_POOL_ID=${USER_POOL_ID:-$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)}
-                USER_POOL_CLIENT_ID=${USER_POOL_CLIENT_ID:-$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolClientId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)}
+                _OUT_POOL=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                _OUT_CLIENT=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolClientId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                USER_POOL_ID=${_OUT_POOL:-$USER_POOL_ID}
+                USER_POOL_CLIENT_ID=${_OUT_CLIENT:-$USER_POOL_CLIENT_ID}
             fi
 
             echo "Building Docker image (ARM64)..."
@@ -456,7 +520,7 @@ if [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
                 --build-arg USER_POOL_ID="${USER_POOL_ID:-}" \
                 --build-arg USER_POOL_CLIENT_ID="${USER_POOL_CLIENT_ID:-}" \
                 --build-arg CONTACT_FLOW_KB_ID="${CONTACT_FLOW_KB_ID:-}" \
-                --build-arg BRAVE_API_KEY="${BRAVE_API_KEY:-}" \
+                --build-arg AGENTCORE_GATEWAY_URL="${AGENTCORE_GATEWAY_URL:-}" \
                 .
 
             echo "Pushing to ECR..."
@@ -477,6 +541,7 @@ fi
 # Step 1: Deploy CDK Infrastructure (AFTER ECR image is ready)
 # ========================================
 if [ "$DEPLOY_INFRA" = true ]; then
+    CURRENT_STEP="CDK infrastructure deploy (Step 1)"
     echo -e "\n${YELLOW}Step 1: Deploying CDK Infrastructure...${NC}"
     cd "$SCRIPT_DIR/infrastructure"
 
@@ -542,6 +607,7 @@ if [ "$DEPLOY_INFRA" = true ] && [ "$ENABLE_KNOWLEDGE_BASE" != "false" ]; then
 
         # Sync KB documents if docs directory exists
         if [ -d "$SCRIPT_DIR/knowledge-base-docs/contact-flow" ] && [ -x "$SCRIPT_DIR/scripts/sync-kb-docs.sh" ]; then
+            CURRENT_STEP="Knowledge Base doc sync (Step 1.1)"
             echo -e "${YELLOW}Step 1.1: Syncing Knowledge Base documents...${NC}"
             # Run in a subshell with `set +e` so a KB sync failure never kills
             # the whole deploy — KB is non-critical and can be retried via
@@ -572,6 +638,7 @@ fi
 ALB_DNS_NAME=""
 
 if [ "$DEPLOY_BACKEND" = true ]; then
+    CURRENT_STEP="ECS backend deploy (Step 3)"
     echo -e "\n${YELLOW}Step 3: Configuring ECS Fargate Backend...${NC}"
 
     # Extract ECS outputs (ECR_REPO_URI may already be set from Step 0.5)
@@ -602,12 +669,20 @@ if [ "$DEPLOY_BACKEND" = true ]; then
         if [ -n "$TASK_DEF_ARN" ]; then
             TASK_DEF_FAMILY=$(echo "$TASK_DEF_ARN" | sed 's|.*/||' | sed 's|:[0-9]*$||')
 
-            # Extract env var values from CDK outputs (may have been set after Docker build)
+            # Extract env var values from CDK outputs (may have been set after Docker build).
+            # CDK outputs are AUTHORITATIVE for these stack-bound values — a stale
+            # exported var from a previous (different-region) session must not win,
+            # or the wrong USER_POOL_ID gets baked into the task def and JWT
+            # validation fails (JWKS 404). Env var is a fallback only.
             if [ -f "$CDK_OUTPUTS_FILE" ]; then
-                USER_POOL_ID=${USER_POOL_ID:-$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)}
-                USER_POOL_CLIENT_ID=${USER_POOL_CLIENT_ID:-$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolClientId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)}
-                ASSETS_BUCKET_NAME=${ASSETS_BUCKET_NAME:-$(jq -r --arg s "$STACK_NAME" '.[$s].AssetsBucketName // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)}
-                CONTACT_FLOW_KB_ID=${CONTACT_FLOW_KB_ID:-$(jq -r --arg s "$KB_STACK_NAME" '.[$s].ContactFlowKnowledgeBaseId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)}
+                _OUT_POOL=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                _OUT_CLIENT=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolClientId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                _OUT_BUCKET=$(jq -r --arg s "$STACK_NAME" '.[$s].AssetsBucketName // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                _OUT_KB=$(jq -r --arg s "$KB_STACK_NAME" '.[$s].ContactFlowKnowledgeBaseId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                USER_POOL_ID=${_OUT_POOL:-$USER_POOL_ID}
+                USER_POOL_CLIENT_ID=${_OUT_CLIENT:-$USER_POOL_CLIENT_ID}
+                ASSETS_BUCKET_NAME=${_OUT_BUCKET:-$ASSETS_BUCKET_NAME}
+                CONTACT_FLOW_KB_ID=${_OUT_KB:-$CONTACT_FLOW_KB_ID}
             fi
 
             echo "Patching task definition (runtime env vars)..."
@@ -621,12 +696,13 @@ if [ "$DEPLOY_BACKEND" = true ]; then
             JQ_FILTER="${JQ_FILTER}
                 | .containerDefinitions[0].environment as \$env
                 | .containerDefinitions[0].environment = (
-                    [\$env[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"BRAVE_API_KEY\") | not)]
+                    [\$env[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"AGENTCORE_GATEWAY_URL\",\"AGENTCORE_GATEWAY_REGION\") | not)]
                     + [{\"name\":\"ASSETS_BUCKET_NAME\",\"value\":\$bucket},
                        {\"name\":\"USER_POOL_ID\",\"value\":\$pool},
                        {\"name\":\"USER_POOL_CLIENT_ID\",\"value\":\$poolclient},
                        {\"name\":\"CONTACT_FLOW_KB_ID\",\"value\":\$kbid},
-                       {\"name\":\"BRAVE_API_KEY\",\"value\":\$brave}]
+                       {\"name\":\"AGENTCORE_GATEWAY_URL\",\"value\":\$gateway},
+                       {\"name\":\"AGENTCORE_GATEWAY_REGION\",\"value\":\"us-east-1\"}]
                   )"
 
             aws ecs describe-task-definition --task-definition "$TASK_DEF_FAMILY" --region "$AWS_DEFAULT_REGION" \
@@ -634,7 +710,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
                      --arg pool "${USER_POOL_ID:-}" \
                      --arg poolclient "${USER_POOL_CLIENT_ID:-}" \
                      --arg kbid "${CONTACT_FLOW_KB_ID:-}" \
-                     --arg brave "${BRAVE_API_KEY:-}" \
+                     --arg gateway "${AGENTCORE_GATEWAY_URL:-}" \
                      "$JQ_FILTER" > /tmp/patched-task-def.json
 
             PATCHED_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file:///tmp/patched-task-def.json \
@@ -697,6 +773,7 @@ fi
 # Step 4: Build and Deploy Frontend
 # ========================================
 if [ "$DEPLOY_FRONTEND" = true ]; then
+    CURRENT_STEP="Frontend build & deploy (Step 4)"
     echo -e "\n${YELLOW}Step 4: Building Frontend...${NC}"
     cd "$SCRIPT_DIR/frontend"
 
@@ -775,12 +852,12 @@ if [ -f "$CDK_OUTPUTS_FILE" ]; then
     jq --arg albdns "${ALB_DNS_NAME:-}" \
        --arg mode "ecs" \
        --arg sessapi "$SESSION_API_URL" \
-       --arg braveenabled "$([ -n "$BRAVE_API_KEY" ] && echo "true" || echo "false")" \
+       --arg websearch "$([ -n "$AGENTCORE_GATEWAY_URL" ] && echo "true" || echo "false")" \
        --arg sn "$STACK_NAME" \
         '.[$sn].DeployMode = $mode |
          .[$sn].AlbDnsName = $albdns |
          .[$sn].SessionApiUrl = $sessapi |
-         .[$sn].BraveSearchEnabled = $braveenabled' \
+         .[$sn].WebSearchEnabled = $websearch' \
         "$CDK_OUTPUTS_FILE" > "${CDK_OUTPUTS_FILE}.tmp" && \
         mv "${CDK_OUTPUTS_FILE}.tmp" "$CDK_OUTPUTS_FILE"
 fi

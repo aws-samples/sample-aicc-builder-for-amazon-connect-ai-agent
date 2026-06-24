@@ -84,12 +84,18 @@ from tools import (
     patch_workspace_file,
     find_workspace_files,
     grep_workspace,
+    get_asset_workspace_path,
 )
 from tools.project_workspace import (
     save_requirement_document,
     load_requirement_document,
 )
 from tools.interview_completion import complete_interview, check_interview_handoff
+# Conversational asset-import tools (replace the old auto-firing importAsset path):
+# the orchestrator calls these after acknowledging an upload (and, for images,
+# asking the user) to lint + seed an external Contact Flow / AI Prompt into
+# modification mode.
+from tools.asset_import_tools import import_uploaded_asset_tool, draft_flow_from_image_tool
 from tools.streaming_callback import set_session_id as set_streaming_session_id, set_message_index
 
 # Import Sub-Agent tools
@@ -130,6 +136,16 @@ from context.generation_progress import detect_phase as _detect_phase
 from context.generation_progress import read_phase as _read_phase
 from context.generation_progress import update_phase as _update_phase
 from context.generation_progress import get_frontend_progress_state as _get_frontend_progress
+from context.generation_progress import (
+    get_selected_model as _get_selected_model,
+    set_selected_model as _set_selected_model,
+    get_generation_scope as _get_generation_scope,
+    set_generation_scope as _set_generation_scope,
+    mark_imported_session as _mark_imported_session,
+    FULL_ASSET_SET as _FULL_ASSET_SET,
+)
+from tools.model_selection import resolve_model_id, build_model_kwargs, validate_model_id
+from tools.session_context import current_selected_model as _current_selected_model
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("aicc-ecs")
@@ -188,6 +204,9 @@ INTERVIEW_TOOLS = [
     grep_workspace,
     # Sub-agents available during interview
     research_agent,
+    # Conversational asset import (uploaded flow JSON/YAML or flow-diagram image)
+    import_uploaded_asset_tool,
+    draft_flow_from_image_tool,
     # Interview completion signal
     complete_interview,
 ]
@@ -220,6 +239,10 @@ GENERATION_TOOLS = [
     lint_contact_flow_asset,
     asset_lookup,
     validate_parameter_consistency,
+    # Conversational asset import (uploaded flow JSON/YAML or flow-diagram image).
+    # Non-generator tools → kept even for scoped runs.
+    import_uploaded_asset_tool,
+    draft_flow_from_image_tool,
     # Sub-agents for generation
     lambda_generator_agent,
     openapi_generator_agent,
@@ -232,11 +255,42 @@ GENERATION_TOOLS = [
 ]
 
 
-def get_tools_for_phase(phase: str) -> list:
-    """Return the appropriate tool list for the given phase."""
+# Generator sub-agent tool → the progress asset id it produces. Used to trim
+# out-of-scope generators for single-segment runs.
+_GENERATOR_TOOL_TO_ASSET = {
+    infrastructure_generator_agent: "cdk",
+    lambda_generator_agent: "lambda",
+    openapi_generator_agent: "openapi",
+    prompt_generator_agent: "prompt",
+    contact_flow_generator_agent: "contact_flow",
+    faq_generator_agent: "knowledge_base",
+}
+
+
+def get_tools_for_phase(phase: str, scope: Optional[list] = None) -> list:
+    """Return the appropriate tool list for the given phase.
+
+    When *scope* is a proper subset of the full asset set, the generator
+    sub-agents whose produced asset is out of scope are dropped from the tool
+    list (a tool the model can't call can't be misused). Non-generator tools
+    (workspace, spec, lint, review) are always kept.
+    """
     if phase == "interview":
         return INTERVIEW_TOOLS
-    return GENERATION_TOOLS
+
+    # Full build (no scope, or scope == full set) → unmodified generation tools.
+    scope_set = set(scope) if scope else set()
+    if not scope_set or scope_set >= set(_FULL_ASSET_SET):
+        return GENERATION_TOOLS
+
+    # Proper subset: drop generators whose asset isn't in scope.
+    trimmed = []
+    for t in GENERATION_TOOLS:
+        asset = _GENERATOR_TOOL_TO_ASSET.get(t)
+        if asset is not None and asset not in scope_set:
+            continue  # out-of-scope generator → drop
+        trimmed.append(t)
+    return trimmed
 
 
 
@@ -293,11 +347,39 @@ async def _metric_publisher():
         await publish_ws_metric()
         await asyncio.sleep(60)
 
+def _resolve_contact_flow_kb_id() -> None:
+    """Resolve CONTACT_FLOW_KB_ID for the Contact Flow RAG at startup.
+
+    Precedence: an explicit CONTACT_FLOW_KB_ID env wins. Otherwise, if the infra
+    published the id to SSM (CONTACT_FLOW_KB_ID_SSM_PARAM names the parameter),
+    fetch it and set CONTACT_FLOW_KB_ID so the contact_flow_generator's RAG turns
+    on. Absent/failed lookup leaves RAG off — the generator degrades gracefully.
+    """
+    if os.environ.get("CONTACT_FLOW_KB_ID"):
+        return
+    param_name = os.environ.get("CONTACT_FLOW_KB_ID_SSM_PARAM")
+    if not param_name:
+        logger.info("[startup] Contact Flow RAG: no KB id configured (CONTACT_FLOW_KB_ID / _SSM_PARAM unset) — RAG off")
+        return
+    try:
+        import boto3
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        val = ssm.get_parameter(Name=param_name).get("Parameter", {}).get("Value", "").strip()
+        if val:
+            os.environ["CONTACT_FLOW_KB_ID"] = val
+            logger.info(f"[startup] Contact Flow RAG enabled — resolved KB id from SSM {param_name}")
+        else:
+            logger.warning(f"[startup] Contact Flow RAG: SSM {param_name} empty — RAG off")
+    except Exception as e:
+        logger.warning(f"[startup] Contact Flow RAG: could not resolve KB id from SSM {param_name}: {e} — RAG off")
+
+
 @app.on_event("startup")
 async def startup():
     global _metric_task, _background_tasks_lock
     _background_tasks_lock = asyncio.Lock()
     _metric_task = asyncio.create_task(_metric_publisher())
+    _resolve_contact_flow_kb_id()
     logger.info(f"AICC Builder ECS started. S3FILES_MOUNT={S3FILES_MOUNT}, REGION={AWS_REGION}")
 
 @app.on_event("shutdown")
@@ -354,9 +436,17 @@ async def validate_cognito_token(token: str) -> Optional[Dict]:
         from jose import jwt, JWTError
         import urllib.request
 
+        # A Cognito user pool lives in the region encoded as its ID prefix
+        # (e.g. "ap-northeast-1_xxxx"). Derive the JWKS/issuer region from the
+        # pool ID itself — NOT from AWS_REGION — so a cross-region pool (or a
+        # region migration) can't point the JWKS fetch at the wrong region and
+        # 404. Fall back to AWS_REGION if the ID has no parseable prefix.
+        pool_region = user_pool_id.split("_", 1)[0] if "_" in user_pool_id else AWS_REGION
+        issuer = f"https://cognito-idp.{pool_region}.amazonaws.com/{user_pool_id}"
+
         global _jwks_cache
         if _jwks_cache is None:
-            jwks_url = f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{user_pool_id}/.well-known/jwks.json"
+            jwks_url = f"{issuer}/.well-known/jwks.json"
             with urllib.request.urlopen(jwks_url, timeout=5) as resp:
                 _jwks_cache = json.loads(resp.read())
 
@@ -380,7 +470,7 @@ async def validate_cognito_token(token: str) -> Optional[Dict]:
             key,
             algorithms=["RS256"],
             audience=os.environ.get("USER_POOL_CLIENT_ID", ""),
-            issuer=f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{user_pool_id}",
+            issuer=issuer,
         )
         return claims
     except Exception as e:
@@ -390,19 +480,21 @@ async def validate_cognito_token(token: str) -> Optional[Dict]:
 # ========================================
 # Model Configuration (same as AgentCore)
 # ========================================
-def get_model_config():
-    model_id = os.environ.get(
-        "BEDROCK_MODEL_ID",
-        "global.anthropic.claude-opus-4-6-v1"
-    )
-    return SafeBedrockModel(
-        model_id=model_id,
+def get_model_config(model_id: Optional[str] = None):
+    # Orchestrator model follows the per-request/persisted selection.
+    # No temperature is passed (orchestrator never set one), so the
+    # 4.6-vs-4.7/4.8 branch in build_model_kwargs is a no-op here, but we
+    # still route through the helper for consistency.
+    model_id = model_id or resolve_model_id()
+    kwargs = build_model_kwargs(
+        model_id,
         region_name=AWS_REGION,
         boto_client_config=BotocoreConfig(
             read_timeout=300,
             retries={"max_attempts": 3, "mode": "adaptive"},
-        )
+        ),
     )
+    return SafeBedrockModel(**kwargs)
 
 
 class SafeBedrockModel(BedrockModel):
@@ -525,6 +617,16 @@ def get_or_create_session(session_id: str) -> Dict[str, Any]:
         session_store[session_id]["last_active"] = datetime.utcnow().isoformat()
         return session_store[session_id]
 
+    # On (re)create, rehydrate the persisted model selection so a restored
+    # session uses its chosen model rather than the bare default. Set the
+    # ContextVar BEFORE get_model_config() so resolve_model_id() picks it up.
+    try:
+        persisted_model = _get_selected_model(session_id)
+        if persisted_model and validate_model_id(persisted_model):
+            _current_selected_model.set(persisted_model)
+    except Exception as _model_err:
+        logger.warning(f"[session] model rehydrate failed for {session_id}: {_model_err}")
+
     model = get_model_config()
 
     # Use hot-reloaded prompt if available
@@ -560,6 +662,7 @@ def get_or_create_session(session_id: str) -> Dict[str, Any]:
     session_store[session_id] = {
         "agent": agent,
         "model": model,
+        "selected_model_id": resolve_model_id(),
         "tools": tools,
         "conversation_history": conversation_history,
         "session_data": {},
@@ -1587,6 +1690,90 @@ def _format_tool_result_summary(result_dict: dict) -> str:
     return json.dumps(result_dict, ensure_ascii=False, default=str)[:500]
 
 
+# Folders under assets/{session}/ whose files the right-hand Asset Workspace
+# renders as tabs, mapped to the canonical assetType the frontend keys on. Used
+# to rehydrate a restored session: persisted assets only ever reached the pane
+# via live asset_preview events during generation, so reopening a finished
+# project showed an EMPTY Asset Workspace even though every asset is in S3/NFS.
+_REHYDRATE_FOLDER_TO_TYPE = {
+    "contact_flow": "contact_flow",
+    "prompt": "prompt",
+    "openapi": "openapi",
+    "lambda": "lambda",
+    "cloudformation": "cdk",
+    "cdk": "cdk",
+    "faq": "faq",
+    "knowledge-base": "faq",
+    "knowledge_base": "faq",
+    # NOTE: 'mermaid' is intentionally absent — the Contact Flow diagram is now
+    # rendered from the JSON (React Flow), so legacy mermaid assets are not
+    # rehydrated.
+}
+_REHYDRATE_EXT_TO_LANG = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript",
+    ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".md": "markdown",
+}
+
+
+async def _rehydrate_assets_for_display(websocket: WebSocket, session_id: str) -> int:
+    """On session restore, replay persisted assets into the right Asset Workspace.
+
+    Lists the session's assets, and for each one whose folder maps to a
+    renderable asset type emits an `asset_preview` (the same event generators
+    stream on completion). The frontend's updateAssetPreview dedupes by
+    type/op/file, so this is idempotent with any live events. Best-effort: never
+    raises into the connect path.
+    """
+    try:
+        from tools.s3_asset_storage import list_session_assets, get_asset_from_s3
+        keys = list_session_assets(session_id) or []
+        emitted = 0
+        seen: set = set()
+        for key in keys:
+            # key: assets/{session}/{folder}/[op/]{file}
+            parts = [p for p in str(key).split("/") if p]
+            if len(parts) < 4 or parts[0] != "assets":
+                continue
+            folder = parts[2]
+            c_type = _REHYDRATE_FOLDER_TO_TYPE.get(folder)
+            if not c_type:
+                continue  # skip specs/state/context/operation_spec/review/etc.
+            file_name = parts[-1]
+            op_id = parts[3] if len(parts) >= 5 else ""
+            dedupe_key = (c_type, op_id, file_name)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            try:
+                content = get_asset_from_s3(key)
+            except Exception:
+                content = None
+            if not content:
+                continue
+            ext = os.path.splitext(file_name)[1].lower()
+            language = _REHYDRATE_EXT_TO_LANG.get(ext, "text")
+            await safe_send_json(websocket, {
+                "type": "asset_preview",
+                "sessionId": session_id,
+                "assetPreview": {
+                    "assetType": c_type,
+                    "fileName": file_name,
+                    "operationId": op_id,
+                    "content": content,
+                    "language": language,
+                    "isComplete": True,
+                    "rehydrated": True,
+                },
+            })
+            emitted += 1
+        if emitted:
+            logger.info(f"[WS] Rehydrated {emitted} asset(s) into the Asset Workspace for {session_id}")
+        return emitted
+    except Exception as e:
+        logger.warning(f"[WS] asset rehydrate failed (non-critical) for {session_id}: {e}")
+        return 0
+
+
 # ========================================
 # WebSocket Endpoint
 # ========================================
@@ -1623,9 +1810,11 @@ async def websocket_handler(
     })
 
     # Check for running background task and reattach WebSocket
+    _bg_active = False
     async with _background_tasks_lock:
         bg = _background_tasks.get(session_id)
         if bg and not bg["task"].done():
+            _bg_active = True
             logger.info(f"[WS] Reattaching WebSocket to running background task for {session_id}")
             bg["ws_holder"]["ws"] = websocket
             await safe_send_json(websocket, {
@@ -1633,6 +1822,13 @@ async def websocket_handler(
                 "sessionId": session_id,
                 "message": "Agent is still processing your request...",
             })
+
+    # Rehydrate persisted assets into the right Asset Workspace on (re)open.
+    # Skip when a generation is mid-flight — it will stream its own live events
+    # (and rehydrating now would race the in-progress writes). The frontend
+    # dedupes by asset key, so this is safe alongside any later live events.
+    if not _bg_active:
+        await _rehydrate_assets_for_display(websocket, session_id)
 
     client_connected = True
 
@@ -1657,6 +1853,19 @@ async def websocket_handler(
             except Exception as _bind_err:
                 logger.warning(f"[WS] session_id bind failed: {_bind_err}")
 
+            # Bind the selected Bedrock model for this WS iteration so the
+            # create_task() context snapshot for background agent runs (and every
+            # downstream BedrockModel construction) sees the user's chosen model.
+            # Precedence: explicit `model` on this message (validated + persisted)
+            # → the session's persisted selection.  Runs for EVERY action.
+            try:
+                _req_model = validate_model_id(data.get("model"))
+                if _req_model:
+                    _set_selected_model(_eff_sid, _req_model)
+                _current_selected_model.set(_req_model or _get_selected_model(_eff_sid))
+            except Exception as _model_bind_err:
+                logger.warning(f"[WS] model bind failed: {_model_bind_err}")
+
             if action == "sendMessage":
                 await handle_send_message_ws(websocket, session_id, data)
             elif action == "sendMessageWithAttachments":
@@ -1672,7 +1881,9 @@ async def websocket_handler(
             elif action == "injectHistory":
                 await handle_inject_history_ws(websocket, session_id, data)
             elif action == "createNewSession":
-                await handle_create_new_session_ws(websocket, session_id)
+                await handle_create_new_session_ws(websocket, session_id, data)
+            elif action == "importAsset":
+                await handle_import_asset_ws(websocket, session_id, data)
             elif action == "ping":
                 await safe_send_json(websocket, {"type": "pong"})
             elif action in ("cancelGeneration", "stopGeneration", "interrupt"):
@@ -1745,6 +1956,19 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
 
     session = get_or_create_session(session_id)
 
+    # Mid-session model switch: if the resolved model (ContextVar/persisted/env)
+    # differs from what this session's orchestrator model was built against,
+    # rebuild it so the per-turn streaming_agent (which reads session["model"])
+    # uses the newly selected model.
+    try:
+        _resolved_model = resolve_model_id()
+        if _resolved_model != session.get("selected_model_id"):
+            session["model"] = get_model_config()
+            session["selected_model_id"] = _resolved_model
+            logger.info(f"[model] rebuilt orchestrator model for {session_id} -> {_resolved_model}")
+    except Exception as _model_err:
+        logger.warning(f"[model] orchestrator rebuild failed for {session_id}: {_model_err}")
+
     # Send typing indicator
     if not await safe_send_json(websocket, {"type": "typing", "status": "Agent is thinking..."}):
         return
@@ -1752,6 +1976,26 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     # Set session ID for S3 asset storage
     effective_session_id = session.get("session_data", {}).get("original_session_id", session_id)
     set_streaming_session_id(effective_session_id)
+
+    # Stash the first uploaded image's raw bytes (keyed by session) so that, if
+    # the user later asks to turn an attached flow diagram into a Contact Flow,
+    # the orchestrator's draft_flow_from_image_tool can read it. Image bytes live
+    # only in the content blocks, never on disk. The stash PERSISTS ACROSS TURNS
+    # (the agent acknowledges + asks first, then converts on a later turn), so it
+    # is NOT cleared at end of turn — only when consumed by the conversion tool or
+    # replaced by a newer upload here.
+    try:
+        from tools.import_context import set_pending_import_image
+        if content_blocks:
+            for _blk in content_blocks:
+                _img = _blk.get("image") if isinstance(_blk, dict) else None
+                _src = (_img or {}).get("source") if isinstance(_img, dict) else None
+                _bytes = (_src or {}).get("bytes") if isinstance(_src, dict) else None
+                if _bytes:
+                    set_pending_import_image(effective_session_id, _bytes, _img.get("format", "png"))
+                    break
+    except Exception as _img_err:
+        logger.warning(f"[importImage] stash failed for {session_id}: {_img_err}")
 
     # Initialise S3 project workspace
     try:
@@ -1848,9 +2092,14 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             )
             strands_messages = [{"role": "user", "content": [{"text": bootstrap_msg}]}]
 
-    phase_prompt = get_phase_system_prompt(current_phase)
-    phase_tools = get_tools_for_phase(current_phase)
-    logger.info(f"[phase] Using phase '{current_phase}' system prompt for {effective_session_id}")
+    # Single-segment scope: trim generators + use the scoped generation prompt.
+    generation_scope = _get_generation_scope(effective_session_id)
+    phase_prompt = get_phase_system_prompt(current_phase, scope=generation_scope)
+    phase_tools = get_tools_for_phase(current_phase, scope=generation_scope)
+    logger.info(
+        f"[phase] Using phase '{current_phase}' system prompt for {effective_session_id} "
+        f"(scope={generation_scope})"
+    )
 
     # Create streaming agent
     streaming_agent = Agent(
@@ -1903,7 +2152,30 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     except Exception as mod_err:
         logger.warning(f"[modification_tracking] inject failed (non-critical): {mod_err}")
 
-    combined_state = f"{generation_state_block}{modification_state_block}"
+    # Single-segment scope directive: name the in-scope asset ids and forbid
+    # out-of-scope generators. Only injected for a proper subset (full builds
+    # don't need it). Flows into both multimodal and text paths via combined_state.
+    generation_scope_block = ""
+    try:
+        _scope_set = set(generation_scope)
+        if _scope_set and _scope_set < set(_FULL_ASSET_SET):
+            _in_scope = ", ".join(sorted(_scope_set))
+            generation_scope_block = (
+                "\n<generation_scope>\n"
+                "SCOPED MODE — single-segment generation.\n"
+                f"In-scope assets (generate ONLY these): {_in_scope}\n"
+                "⛔ Do NOT generate infrastructure (cdk), lambda, or openapi unless\n"
+                "   that asset id appears in the in-scope list above.\n"
+                "⛔ Only call the generator sub-agents for the in-scope assets; the\n"
+                "   others are intentionally unavailable this run.\n"
+                "If gathering requirements first, gather ONLY what the in-scope\n"
+                "assets need and skip everything else.\n"
+                "</generation_scope>\n\n"
+            )
+    except Exception as scope_err:
+        logger.warning(f"[generation_scope] inject failed (non-critical): {scope_err}")
+
+    combined_state = f"{generation_state_block}{modification_state_block}{generation_scope_block}"
 
     if content_blocks:
         # Multimodal: prepend session context to the text block in content_blocks
@@ -2177,6 +2449,10 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
         finally:
             flush_stop.set()
             await heartbeat_task
+            # NOTE: the uploaded-image stash (import_context) is intentionally NOT
+            # cleared here — it must survive across turns so the user can confirm
+            # "yes, convert it" on a later turn. It's cleared when the conversion
+            # tool consumes it or a newer image is uploaded.
             # Last-resort: ensure conversation history is persisted to NFS
             try:
                 history = session.get("conversation_history", [])
@@ -2535,8 +2811,15 @@ async def handle_inject_history_ws(websocket: WebSocket, session_id: str, data: 
     })
 
 
-async def handle_create_new_session_ws(websocket: WebSocket, session_id: str):
-    """Create a fresh session."""
+async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, data: Optional[Dict[str, Any]] = None):
+    """Create a fresh session.
+
+    Accepts an optional ``scope`` (subset of {contact_flow, prompt, faq} for a
+    partial run) and ``model`` (one of the allowlisted Bedrock ids) chosen on the
+    start screen. Both are persisted to NFS so detect_phase / the phase prompt /
+    every BedrockModel construction reason about the right values from turn one.
+    """
+    data = data or {}
     if session_id in session_store:
         # Flush before clearing
         try:
@@ -2550,6 +2833,13 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str):
     # Clear sub-agent caches
     clear_research_session(session_id)
     clear_faq_session(session_id)
+
+    # Drop any stashed uploaded-image bytes for this session.
+    try:
+        from tools.import_context import clear_pending_import_image
+        clear_pending_import_image(session_id)
+    except Exception:
+        pass
 
     # Reset spec manager
     try:
@@ -2571,11 +2861,195 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str):
     except Exception as _ce:
         logger.warning(f"[createNewSession] cleanup_session failed: {_ce}")
 
+    # Persist the start-screen choices (scope + model) for the fresh session.
+    _eff_for_state = session_store.get(session_id, {}).get("session_data", {}).get("original_session_id", session_id) \
+        if isinstance(session_store.get(session_id), dict) else session_id
+    try:
+        _scope = data.get("scope")
+        if isinstance(_scope, list):
+            _set_generation_scope(_eff_for_state, _scope)
+    except Exception as _se:
+        logger.warning(f"[createNewSession] set scope failed: {_se}")
+    try:
+        _model = validate_model_id(data.get("model"))
+        if _model:
+            _set_selected_model(_eff_for_state, _model)
+            _current_selected_model.set(_model)
+    except Exception as _me:
+        logger.warning(f"[createNewSession] set model failed: {_me}")
+
+    # Echo a UI-facing scope: [] for a full build (so the frontend shows all 12
+    # progress steps), the proper produced-asset subset for a scoped single-segment
+    # run. get_generation_scope() defaults to the FULL asset set when nothing was
+    # set, so we must collapse that back to [] here — otherwise the progress panel
+    # would mistake a full build for a 6-asset "scope" and trim interview/review.
+    _resolved_scope = _get_generation_scope(_eff_for_state)
+    _ui_scope = [] if set(_resolved_scope) >= set(_FULL_ASSET_SET) else _resolved_scope
     await safe_send_json(websocket, {
         "type": "session_created",
         "sessionId": session_id,
         "phase": _detect_phase(session_id),
+        "scope": _ui_scope,
+        "selectedModel": _get_selected_model(_eff_for_state) or resolve_model_id(),
     })
+
+
+async def handle_import_asset_ws(websocket: WebSocket, session_id: str, data: Dict[str, Any]):
+    """Import an externally-created asset (Contact Flow JSON / AI Prompt YAML) so the
+    tool can modify/improve it.
+
+    File presence alone does NOT flip detect_phase (phase is derived from the
+    progress-state asset map, not the assets/ dir). So this:
+      1. Validates + (for flows) lints/repairs via lint_contact_flow.
+      2. Seeds the file at assets/{type}/{operation_id}/{file} via write_workspace_file
+         (operation_id MUST equal the flow_name/agent_name the generator will use).
+      3. Records the asset as completed and forces phase=post_generation so the
+         orchestrator routes a follow-up edit through the patch-only modification flow.
+    """
+    eff_sid = session_store.get(session_id, {}).get("session_data", {}).get("original_session_id", session_id) \
+        if isinstance(session_store.get(session_id), dict) else session_id
+
+    asset_type = (data.get("assetType") or "").strip()
+    content = data.get("content") or ""
+    raw_name = (data.get("name") or "").strip()
+
+    # Whiteboard / sketch photo → Contact Flow. A vision model transcribes the
+    # image into a draft flow JSON, then we fall through to the normal contact_flow
+    # import path (lint/repair + seed + post_generation). `content` here is the
+    # base64 image; `imageFormat` is png/jpeg/etc.
+    if asset_type == "contact_flow_image":
+        await safe_send_json(websocket, {"type": "tool_status", "content": "Reading your flow diagram…"})
+        try:
+            import base64 as _b64
+            img_b64 = content
+            if "," in img_b64:  # strip a data: URL prefix if present
+                img_b64 = img_b64.split(",", 1)[1]
+            img_bytes = _b64.b64decode(img_b64)
+            from agents.contact_flow_generator.vision_import import draft_flow_from_image
+            vres = draft_flow_from_image(
+                img_bytes,
+                image_format=(data.get("imageFormat") or "png"),
+                company_name=data.get("companyName", ""),
+                hint=data.get("hint", ""),
+            )
+            if not vres.get("ok") or not vres.get("flow_json"):
+                await safe_send_json(websocket, {"type": "error", "content": f"Couldn't read a flow from that image: {vres.get('error') or 'no flow detected'}"})
+                return
+            # Continue as a normal contact_flow import with the drafted JSON.
+            asset_type = "contact_flow"
+            content = vres["flow_json"]
+        except Exception as _ve:
+            logger.error(f"[importAsset] vision import failed: {_ve}")
+            await safe_send_json(websocket, {"type": "error", "content": "Failed to transcribe the flow image."})
+            return
+
+    # Map asset type → (file name, tool name for completion recording, default op id)
+    _IMPORT_MAP = {
+        "contact_flow": ("contact_flow.json", "contact_flow_generator_agent", "imported_flow"),
+        "prompt": ("ai_agent_prompt.yaml", "prompt_generator_agent", "imported_agent"),
+    }
+    if asset_type not in _IMPORT_MAP:
+        await safe_send_json(websocket, {"type": "error", "content": f"Unsupported import asset type: {asset_type}"})
+        return
+    if not content.strip():
+        await safe_send_json(websocket, {"type": "error", "content": "Imported asset content is empty."})
+        return
+
+    file_name, tool_name, default_op = _IMPORT_MAP[asset_type]
+    # operation_id = a slug derived from the provided name (or default). MUST match
+    # what the orchestrator later passes as flow_name/agent_name.
+    op_id = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_name).strip("_") or default_op
+
+    lint_summary = None
+    final_content = content
+    # 1. Validate + repair imported assets against the real Connect import APIs.
+    if asset_type == "contact_flow":
+        try:
+            from tools.asset_linters import lint_contact_flow
+            result = lint_contact_flow(content)
+            if result.get("fixed_json"):
+                final_content = result["fixed_json"]
+            lint_summary = {
+                "ok": result.get("ok", False),
+                "errors": result.get("errors", []),
+                "warnings": result.get("warnings", []),
+                "fixesApplied": result.get("fixes_applied", []),
+            }
+        except Exception as _le:
+            logger.warning(f"[importAsset] lint failed (non-critical): {_le}")
+    elif asset_type == "prompt":
+        # Enforce the qconnect CreateAIPrompt rule: each variable may appear
+        # inside {{ }} only once. Strip braces from duplicates so the imported
+        # prompt imports cleanly.
+        try:
+            from tools.asset_linters import lint_ai_prompt
+            result = lint_ai_prompt(content)
+            if result.get("fixed_text"):
+                final_content = result["fixed_text"]
+            lint_summary = {
+                "ok": result.get("ok", True),
+                "errors": result.get("errors", []),
+                "warnings": result.get("warnings", []),
+                "fixesApplied": result.get("fixes_applied", []),
+            }
+        except Exception as _le:
+            logger.warning(f"[importAsset] prompt lint failed (non-critical): {_le}")
+
+    # 2. Seed the file into the workspace at the canonical asset path.
+    ws_path = get_asset_workspace_path(eff_sid, asset_type, file_name, operation_id=op_id)
+    try:
+        write_result = write_workspace_file(eff_sid, ws_path, final_content)
+        if not write_result.get("success", True):
+            await safe_send_json(websocket, {"type": "error", "content": f"Failed to seed imported asset: {write_result.get('error')}"})
+            return
+    except Exception as _we:
+        logger.error(f"[importAsset] write_workspace_file failed: {_we}")
+        await safe_send_json(websocket, {"type": "error", "content": "Failed to write imported asset to workspace."})
+        return
+
+    # 3. Seed progress state + force post_generation so detect_phase routes to
+    #    modification mode without an interview.
+    try:
+        _record_tool_completion(eff_sid, tool_name, status="completed")
+        # Scope the imported session to just this asset so the progress UI and
+        # phase logic stay consistent with a single-asset edit.
+        _set_generation_scope(eff_sid, [asset_type])
+        # Flag as imported so detect_phase routes to post_generation (modification
+        # mode) instead of the scoped review gate that a single complete asset trips.
+        _mark_imported_session(eff_sid)
+        _update_phase(eff_sid, "post_generation", "imported_asset")
+    except Exception as _pe:
+        logger.warning(f"[importAsset] progress seed failed: {_pe}")
+
+    # 4. Push the imported asset into the right-hand asset workspace, exactly like
+    #    normal generation does — otherwise the user only sees a toast and the pane
+    #    stays empty ("nothing was made"). This mirrors the asset_preview event the
+    #    generators stream on completion.
+    _lang = "json" if asset_type == "contact_flow" else "yaml"
+    await safe_send_json(websocket, {
+        "type": "asset_preview",
+        "sessionId": session_id,
+        "assetPreview": {
+            "assetType": asset_type,
+            "fileName": file_name,
+            "operationId": op_id,
+            "content": final_content,
+            "language": _lang,
+            "isComplete": True,
+        },
+    })
+
+    await safe_send_json(websocket, {
+        "type": "asset_imported",
+        "sessionId": session_id,
+        "assetType": asset_type,
+        "operationId": op_id,
+        "fileName": file_name,
+        "lint": lint_summary,
+        "phase": _detect_phase(eff_sid),
+    })
+    # Surface the seeded file in the frontend file tree.
+    await safe_send_json(websocket, {"type": "workspace_update", "sessionId": session_id})
 
 
 # ========================================

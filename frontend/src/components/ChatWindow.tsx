@@ -5,8 +5,8 @@
  */
 
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { Send, AlertCircle, Loader2, WifiOff, Wifi, ChevronDown, ChevronUp, CheckCircle2, Circle, Square } from 'lucide-react';
-import { useBuilderStore } from '../stores/builderStore';
+import { Send, AlertCircle, Loader2, WifiOff, Wifi, ChevronDown, ChevronUp, CheckCircle2, Circle, Square, ArrowDown } from 'lucide-react';
+import { useBuilderStore, type StartMode, type SegmentType } from '../stores/builderStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useAutoSave } from '../hooks/useAutoSave';
@@ -53,8 +53,12 @@ export function ChatWindow() {
   const inputHint = useBuilderStore(s => s.inputHint);
   const session = useBuilderStore(s => s.session);
 
+  const setScope = useBuilderStore(s => s.setScope);
+  const setStartMode = useBuilderStore(s => s.setStartMode);
+  const setSegment = useBuilderStore(s => s.setSegment);
+
   const { currentSessionId, updateSessionTitle, updateSessionActivity, createNewSession, sessions } = useSessionStore();
-  const { sendMessage, sendMessageWithAttachments, connect, switchSession, cancelGeneration } = useWebSocket();
+  const { sendMessage, sendMessageWithAttachments, connect, switchSession, cancelGeneration, getCurrentSessionId } = useWebSocket();
 
   const handleResetSession = useCallback(() => {
     const freshId = `session-${crypto.randomUUID()}`;
@@ -139,12 +143,24 @@ export function ChatWindow() {
 
   // Auto-scroll: only when user is near the bottom
   const isNearBottomRef = useRef(true);
+  // E2: "Jump to latest" pill — shown when scrolled up; counts new messages since.
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [newMessageCount, setNewMessageCount] = useState(0);
+  const lastSeenCountRef = useRef(messages.length);
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
     const threshold = 150;
-    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    isNearBottomRef.current = nearBottom;
+    if (nearBottom) {
+      setShowJumpToLatest(false);
+      setNewMessageCount(0);
+      lastSeenCountRef.current = useBuilderStore.getState().messages.length;
+    } else {
+      setShowJumpToLatest(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -157,8 +173,24 @@ export function ChatWindow() {
   useEffect(() => {
     if (isNearBottomRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      lastSeenCountRef.current = messages.length;
+    } else {
+      // User has scrolled up — tally new messages so the pill can show a count.
+      const delta = messages.length - lastSeenCountRef.current;
+      if (delta > 0) {
+        setNewMessageCount(delta);
+        setShowJumpToLatest(true);
+      }
     }
   }, [messages, isTyping, assetPreviews]);
+
+  const jumpToLatest = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    isNearBottomRef.current = true;
+    setShowJumpToLatest(false);
+    setNewMessageCount(0);
+    lastSeenCountRef.current = useBuilderStore.getState().messages.length;
+  }, []);
 
   // Connect on mount
   useEffect(() => {
@@ -305,14 +337,127 @@ export function ChatWindow() {
   // to the static per-language default if no hint has arrived yet.
   const placeholderText = inputHint?.placeholder?.trim() || defaultPlaceholderText;
 
-  const handleStarterPromptClick = useCallback((message: string) => {
-    setInputValue(message);
-    inputRef.current?.focus();
-  }, []);
+  // Wait for the session to be ready (session_created) then run `fn`.
+  // Run `fn` once the session is ready. When `expectSessionId` is given, also
+  // wait until THAT session is the active one — guards against a send firing on a
+  // superseded socket during a session switch (isSessionReady can still read true
+  // from the prior session for a tick after switchSession starts). This race was
+  // observed dropping a large importAsset payload onto a closing socket.
+  const whenSessionReady = useCallback((fn: () => void, expectSessionId?: string, attempt = 0) => {
+    const ready = useBuilderStore.getState().isSessionReady;
+    const onExpected = !expectSessionId || getCurrentSessionId() === expectSessionId;
+    if (ready && onExpected) {
+      fn();
+    } else if (attempt < 80) {
+      setTimeout(() => whenSessionReady(fn, expectSessionId, attempt + 1), 250);
+    }
+  }, [getCurrentSessionId]);
 
-  const handleFileUploadClick = useCallback(() => {
-    attachmentButtonRef.current?.click();
-  }, []);
+  // Start a run from the mode-first start screen. We set the scope in the store
+  // (read by switchSession when it sends createNewSession with {scope, model}),
+  // rotate to a fresh session, then send the kickoff message — with any staged
+  // attachments. Always rotating guarantees the backend receives the scope.
+  // Attachments are unified onto the normal message path: images/docs ride the
+  // multimodal attachment path; .json/.yaml are inlined as fenced text (Bedrock
+  // has no attachment MIME for them) so the orchestrator can import them.
+  const handleStart = useCallback(
+    async (mode: StartMode, segment: SegmentType | null, description: string, files: File[]) => {
+      // Scope: full → []; segment → [segment]; improve → derive from first file.
+      let scope: string[] = [];
+      if (mode === 'segment' && segment) {
+        scope = [segment];
+      } else if (mode === 'improve' && files.length > 0) {
+        const first = files[0].name.toLowerCase();
+        scope = first.endsWith('.yaml') || first.endsWith('.yml') ? ['prompt'] : ['contact_flow'];
+      }
+
+      // Partition staged files: json/yaml → inline text; everything else → real attachment.
+      const isTextAsset = (f: File) => /\.(json|ya?ml)$/i.test(f.name);
+      const textFiles = files.filter(isTextAsset);
+      const binaryFiles = files.filter((f) => !isTextAsset(f));
+
+      // Read json/yaml files and append them to the message as labeled fenced blocks.
+      let inlinedText = '';
+      for (const f of textFiles) {
+        try {
+          const content = await f.text();
+          const lang = /\.(ya?ml)$/i.test(f.name) ? 'yaml' : 'json';
+          inlinedText += `\n\n[Attached file: ${f.name}]\n\`\`\`${lang}\n${content}\n\`\`\``;
+        } catch {
+          /* ignore unreadable file */
+        }
+      }
+
+      // Default opener so Start never dead-ends on a blank screen.
+      const defaultOpener: Record<string, string> = {
+        'en-US':
+          mode === 'improve'
+            ? "Here's my asset — please review it and help me improve it."
+            : "Let's get started — guide me through building my contact center.",
+        'ko-KR':
+          mode === 'improve'
+            ? '제 에셋입니다 — 검토하고 개선을 도와주세요.'
+            : '시작할게요 — 컨택센터 구축을 안내해 주세요.',
+        'ja-JP':
+          mode === 'improve'
+            ? '私のアセットです — 確認して改善を手伝ってください。'
+            : '始めましょう — コンタクトセンター構築をガイドしてください。',
+      };
+      const baseText = description.trim() || (defaultOpener[language] || defaultOpener['en-US']);
+      const kickoff = `${baseText}${inlinedText}`;
+
+      const freshId = `session-${crypto.randomUUID()}`;
+      await switchSession(freshId, true);
+      setScope(scope.length > 0 ? scope : null);
+
+      // Build AttachedFile[] for binary files (images/docs) so they ride the
+      // multimodal attachment path.
+      const readyAttached: AttachedFile[] = binaryFiles
+        .map((file) => {
+          const v = validateFile(file);
+          return {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+            file,
+            type: v.type || 'document',
+            status: (v.valid ? 'ready' : 'error') as AttachedFile['status'],
+            error: v.error,
+          };
+        })
+        .filter((a) => a.status === 'ready');
+
+      whenSessionReady(() => {
+        if (readyAttached.length > 0) {
+          const meta: MessageAttachment[] = readyAttached.map((a) => ({
+            name: a.file.name,
+            type: a.type,
+            mimeType: a.file.type,
+            size: a.file.size,
+          }));
+          void sendMessageWithAttachments(kickoff, readyAttached, meta);
+        } else {
+          sendMessage(kickoff);
+        }
+        if (currentSessionId) {
+          updateSessionTitle(currentSessionId, description.trim() || (files[0]?.name ?? kickoff));
+          updateSessionActivity(currentSessionId, 1);
+        }
+      }, freshId);
+    },
+    [setScope, sendMessage, sendMessageWithAttachments, switchSession, currentSessionId, updateSessionTitle, updateSessionActivity, whenSessionReady, language]
+  );
+
+  // Reset the start screen when a fresh, empty session is shown.
+  useEffect(() => {
+    if (messages.length === 0) {
+      setStartMode('full');
+      setSegment(null);
+    }
+  }, [currentSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The mode-first start screen (ChatEmptyState) has its own description
+  // composer + Start button, so the regular bottom chat input is redundant and
+  // looks uncoordinated while it's shown. Hide the bottom input in that state.
+  const showStartScreen = timeline.length === 0 && !isTyping && !isLoadingSession;
 
   return (
     <div className="flex flex-col h-full bg-white dark:bg-surface-850 rounded-xl shadow-sm dark:shadow-none border border-surface-200 dark:border-surface-700 overflow-hidden transition-colors">
@@ -360,6 +505,8 @@ export function ChatWindow() {
         <div className="lg:hidden flex-shrink-0 border-b border-surface-200 dark:border-surface-700">
           <button
             onClick={() => setShowProgressDetail(prev => !prev)}
+            aria-expanded={showProgressDetail}
+            aria-label={language === 'ko-KR' ? '진행 상황 세부 정보 토글' : 'Toggle progress details'}
             className="w-full px-4 py-2 flex items-center gap-2 text-xs"
           >
             <div className="flex-1">
@@ -433,6 +580,7 @@ export function ChatWindow() {
       )}
 
       {/* Messages Area */}
+      <div className="relative flex-1 min-h-0 flex flex-col">
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 lg:px-6 py-4 space-y-4 bg-surface-50/30 dark:bg-surface-900/30">
         {isLoadingSession && timeline.length === 0 && !isTyping ? (
           <div className="space-y-4 animate-pulse pt-4">
@@ -444,8 +592,7 @@ export function ChatWindow() {
         ) : timeline.length === 0 && !isTyping ? (
           <ChatEmptyState
             language={language}
-            onStarterPromptClick={handleStarterPromptClick}
-            onFileUploadClick={handleFileUploadClick}
+            onStart={handleStart}
           />
         ) : (
           <>
@@ -481,7 +628,32 @@ export function ChatWindow() {
         )}
       </div>
 
-      {/* Input Area */}
+      {/* E2: Jump to latest pill (shown when scrolled up) */}
+      {showJumpToLatest && timeline.length > 0 && (
+        <button
+          type="button"
+          onClick={jumpToLatest}
+          aria-label={language === 'ko-KR' ? '최신으로 이동' : 'Jump to latest'}
+          className={cn(
+            'absolute left-1/2 -translate-x-1/2 bottom-4 z-20',
+            'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium',
+            'bg-primary-600 dark:bg-primary-500 text-white shadow-lg dark:shadow-glow',
+            'hover:bg-primary-700 dark:hover:bg-primary-600 transition-colors'
+          )}
+        >
+          <ArrowDown className="w-3.5 h-3.5" />
+          {language === 'ko-KR' ? '최신으로' : 'Jump to latest'}
+          {newMessageCount > 0 && (
+            <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-white/25 text-[10px]">
+              {newMessageCount} {language === 'ko-KR' ? '개' : 'new'}
+            </span>
+          )}
+        </button>
+      )}
+      </div>
+
+      {/* Input Area — hidden on the start screen (which has its own composer) */}
+      {!showStartScreen && (
       <form onSubmit={handleSubmit} className="px-4 lg:px-6 py-3 lg:py-4 border-t border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-850 flex-shrink-0">
         {attachmentError && (
           <div className="mb-3 flex items-start gap-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
@@ -529,6 +701,7 @@ export function ChatWindow() {
             onRemove={handleRemoveAttachment}
             isUploading={isUploadingAttachments}
             className="mb-3"
+            language={language}
           />
         )}
 
@@ -539,6 +712,7 @@ export function ChatWindow() {
             onError={handleAttachmentError}
             disabled={!isConnected || isUploadingAttachments}
             currentFileCount={attachments.length}
+            language={language}
           />
 
           <div className="flex-1 relative">
@@ -617,6 +791,7 @@ export function ChatWindow() {
           )}
         </div>
       </form>
+      )}
     </div>
   );
 }
