@@ -199,7 +199,7 @@ export const AssetPreviewBubble = memo(function AssetPreviewBubble({ preview, la
                      preview.operationId === 'patch' ? (language === 'ko-KR' ? '수정' : 'Modified') :
                      (language === 'ko-KR' ? '추가' : 'Appended')}
                   </span>
-                ) : preview.operationId ? (
+                ) : preview.operationId && preview.operationId !== 'knowledge_base' ? (
                   <span className="text-xs opacity-70 font-mono">({preview.operationId})</span>
                 ) : null}
                 {preview.isRegeneration && (

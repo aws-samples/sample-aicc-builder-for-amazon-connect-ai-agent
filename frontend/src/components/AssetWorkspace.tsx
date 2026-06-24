@@ -12,29 +12,12 @@
  */
 
 import { useEffect, useMemo } from 'react';
-import { Maximize2, X, Workflow, FileCode, MessageSquare, FileJson, BookOpen, Boxes, FileText, Inbox } from 'lucide-react';
+import { Maximize2, X, FileText, Inbox } from 'lucide-react';
 import { useBuilderStore } from '../stores/builderStore';
 import { cn } from '../lib/utils';
 import { AssetPreviewBubble } from './AssetPreviewBubble';
-import type { AssetPreview, Language } from '../types';
-
-const TAB_META: Record<string, { icon: typeof Workflow; label: string; labelKo: string }> = {
-  contact_flow: { icon: Workflow, label: 'Contact Flow', labelKo: 'Contact Flow' },
-  prompt: { icon: MessageSquare, label: 'AI Prompt', labelKo: 'AI 프롬프트' },
-  faq: { icon: BookOpen, label: 'FAQ', labelKo: 'FAQ' },
-  lambda: { icon: FileCode, label: 'Lambda', labelKo: 'Lambda' },
-  openapi: { icon: FileJson, label: 'OpenAPI', labelKo: 'OpenAPI' },
-  cdk: { icon: Boxes, label: 'Infrastructure', labelKo: '인프라' },
-  cloudformation: { icon: Boxes, label: 'Infrastructure', labelKo: '인프라' },
-};
-
-// Normalize asset types into a single tab id (faq+package → faq, cdk+cloudformation → cdk).
-function tabIdFor(assetType: string): string | null {
-  if (assetType === 'package') return 'faq';
-  if (assetType === 'cloudformation') return 'cdk';
-  if (TAB_META[assetType]) return assetType;
-  return null;
-}
+import { TAB_META, tabIdFor, itemLabel, groupAssetTabs } from '../lib/assetTabs';
+import type { Language } from '../types';
 
 interface AssetWorkspaceProps {
   language: Language;
@@ -51,36 +34,7 @@ export function AssetWorkspace({ language, onClose }: AssetWorkspaceProps) {
   // Group ALL previews by tab id (a type can have several assets — e.g. one
   // Lambda per operation). Each tab keeps its full item list (newest first) so
   // a sub-selector can expose every file; the tab's representative is the newest.
-  const tabs = useMemo(() => {
-    const byTab = new Map<string, Array<{ key: string; preview: AssetPreview }>>();
-    for (const [key, preview] of Object.entries(assetPreviews)) {
-      // Skip any internal holder keys (prefixed __) that have no tab.
-      if (key.startsWith('__')) continue;
-      const tabId = tabIdFor(preview.assetType);
-      if (!tabId) continue;
-      const list = byTab.get(tabId) || [];
-      list.push({ key, preview });
-      byTab.set(tabId, list);
-    }
-    // Sort each tab's items newest-first; de-dup by operationId/fileName keeping newest.
-    for (const [tabId, list] of byTab) {
-      const seen = new Set<string>();
-      const deduped = list
-        .sort((a, b) => (b.preview.createdAt || 0) - (a.preview.createdAt || 0))
-        .filter((it) => {
-          const id = `${it.preview.operationId || ''}|${it.preview.fileName || ''}`;
-          if (seen.has(id)) return false;
-          seen.add(id);
-          return true;
-        });
-      byTab.set(tabId, deduped);
-    }
-    // Stable, Connect-first order.
-    const order = ['contact_flow', 'prompt', 'faq', 'openapi', 'lambda', 'cdk'];
-    return order
-      .filter((id) => byTab.has(id))
-      .map((id) => ({ tabId: id, items: byTab.get(id)!, key: byTab.get(id)![0].key, preview: byTab.get(id)![0].preview }));
-  }, [assetPreviews]);
+  const tabs = useMemo(() => groupAssetTabs(assetPreviews), [assetPreviews]);
 
   // Resolve the active preview from the active key, else fall back to first tab.
   const active = useMemo(() => {
@@ -97,9 +51,6 @@ export function AssetWorkspace({ language, onClose }: AssetWorkspaceProps) {
     if (!active) return [];
     return tabs.find((t) => t.tabId === active.tabId)?.items || [];
   }, [tabs, active]);
-
-  // Short label for a sub-item chip: prefer operationId, else fileName.
-  const itemLabel = (p: AssetPreview) => p.operationId || p.fileName || '';
 
   // Keep activeAssetKey pointing at a valid preview.
   useEffect(() => {
