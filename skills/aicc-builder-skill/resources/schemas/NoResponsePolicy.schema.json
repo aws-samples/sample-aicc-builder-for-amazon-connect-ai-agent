@@ -1,0 +1,29 @@
+{
+  "additionalProperties": true,
+  "description": "Policy for handling no-response situations.",
+  "properties": {
+    "max_retries": {
+      "default": 2,
+      "title": "Max Retries",
+      "type": "integer"
+    },
+    "retry_message": {
+      "default": "\uc8c4\uc1a1\ud569\ub2c8\ub2e4. \uc798 \ub4e4\ub9ac\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. \ub2e4\uc2dc \ud55c \ubc88 \ub9d0\uc500\ud574 \uc8fc\uc138\uc694.",
+      "title": "Retry Message",
+      "type": "string"
+    },
+    "final_message": {
+      "default": "\uc751\ub2f5\uc774 \uc5c6\uc5b4 \ub098\uc911\uc5d0 \ub2e4\uc2dc \uc5f0\ub77d\ub4dc\ub9ac\uaca0\uc2b5\ub2c8\ub2e4.",
+      "title": "Final Message",
+      "type": "string"
+    },
+    "final_action": {
+      "default": "complete",
+      "description": "'complete' | 'escalate'",
+      "title": "Final Action",
+      "type": "string"
+    }
+  },
+  "title": "NoResponsePolicy",
+  "type": "object"
+}

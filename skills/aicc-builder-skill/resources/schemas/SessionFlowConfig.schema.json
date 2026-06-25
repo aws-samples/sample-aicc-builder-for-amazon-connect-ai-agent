@@ -1,154 +1,29 @@
 {
   "$defs": {
-    "BusinessRule": {
+    "CustomerInfoVariable": {
       "additionalProperties": true,
-      "description": "A single business rule for an operation.",
+      "description": "Customer information variable injected via Contact Flow.",
       "properties": {
-        "rule_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Rule Id"
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "default": "",
+          "description": "'phone_lookup' | 'contact_flow_attribute' | 'manual_input'",
+          "title": "Source",
+          "type": "string"
         },
         "description": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Description"
-        },
-        "condition": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Condition"
-        },
-        "action": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Action"
-        },
-        "error_message": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Error Message"
-        },
-        "error_code": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Error Code"
-        }
-      },
-      "title": "BusinessRule",
-      "type": "object"
-    },
-    "ConversationStep": {
-      "additionalProperties": true,
-      "description": "A single step in a structured conversation flow.",
-      "properties": {
-        "step_id": {
-          "description": "Step identifier (e.g., '1', '2', 'A', 'B')",
-          "title": "Step Id",
+          "default": "",
+          "title": "Description",
           "type": "string"
-        },
-        "label": {
-          "description": "Step name (e.g., '\ud1b5\ud654 \uac00\ub2a5 \uc5ec\ubd80 \ud655\uc778')",
-          "title": "Label",
-          "type": "string"
-        },
-        "message": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Fixed message verbatim (None = AI decides)",
-          "title": "Message"
-        },
-        "branches": {
-          "default": [],
-          "description": "[{\"condition\": \"\ub124\", \"next_step\": \"3\"}, ...]",
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "title": "Branches",
-          "type": "array"
-        },
-        "tool_call": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "tool_id to invoke at this step",
-          "title": "Tool Call"
-        },
-        "notes": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Extra instructions for AI at this step",
-          "title": "Notes"
         }
       },
       "required": [
-        "step_id",
-        "label"
+        "name"
       ],
-      "title": "ConversationStep",
+      "title": "CustomerInfoVariable",
       "type": "object"
     },
     "DataSourceSpec": {
@@ -243,63 +118,6 @@
         }
       },
       "title": "DataSourceSpec",
-      "type": "object"
-    },
-    "ErrorResponse": {
-      "additionalProperties": true,
-      "description": "Specification for an error response.",
-      "properties": {
-        "status_code": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "HTTP status code",
-          "title": "Status Code"
-        },
-        "error_code": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Error Code"
-        },
-        "message": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Message"
-        },
-        "condition": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Condition"
-        }
-      },
-      "title": "ErrorResponse",
       "type": "object"
     },
     "FieldSpec": {
@@ -558,110 +376,33 @@
       "title": "FieldSpec",
       "type": "object"
     },
-    "SideEffect": {
+    "NoResponsePolicy": {
       "additionalProperties": true,
-      "description": "A side effect that occurs after the main operation.",
+      "description": "Policy for handling no-response situations.",
       "properties": {
-        "effect_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Type: email, sms, notification, webhook, audit_log",
-          "title": "Effect Type"
+        "max_retries": {
+          "default": 2,
+          "title": "Max Retries",
+          "type": "integer"
         },
-        "description": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Description"
+        "retry_message": {
+          "default": "\uc8c4\uc1a1\ud569\ub2c8\ub2e4. \uc798 \ub4e4\ub9ac\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. \ub2e4\uc2dc \ud55c \ubc88 \ub9d0\uc500\ud574 \uc8fc\uc138\uc694.",
+          "title": "Retry Message",
+          "type": "string"
         },
-        "condition": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Condition"
+        "final_message": {
+          "default": "\uc751\ub2f5\uc774 \uc5c6\uc5b4 \ub098\uc911\uc5d0 \ub2e4\uc2dc \uc5f0\ub77d\ub4dc\ub9ac\uaca0\uc2b5\ub2c8\ub2e4.",
+          "title": "Final Message",
+          "type": "string"
         },
-        "recipient_field": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Recipient Field"
-        },
-        "template_name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Template Name"
-        },
-        "subject": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Subject"
-        },
-        "webhook_url": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Webhook Url"
-        },
-        "audit_fields": {
-          "anyOf": [
-            {
-              "items": {},
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Audit Fields"
+        "final_action": {
+          "default": "complete",
+          "description": "'complete' | 'escalate'",
+          "title": "Final Action",
+          "type": "string"
         }
       },
-      "title": "SideEffect",
+      "title": "NoResponsePolicy",
       "type": "object"
     },
     "ToolSpec": {
@@ -796,9 +537,14 @@
     }
   },
   "additionalProperties": true,
-  "description": "Complete specification for a single API operation.",
+  "description": "Session-level flow configuration shared across all operations.",
   "properties": {
-    "operation_id": {
+    "call_direction": {
+      "default": "inbound",
+      "title": "Call Direction",
+      "type": "string"
+    },
+    "agent_persona": {
       "anyOf": [
         {
           "type": "string"
@@ -808,9 +554,9 @@
         }
       ],
       "default": null,
-      "title": "Operation Id"
+      "title": "Agent Persona"
     },
-    "operation_type": {
+    "common_greeting": {
       "anyOf": [
         {
           "type": "string"
@@ -820,9 +566,9 @@
         }
       ],
       "default": null,
-      "title": "Operation Type"
+      "title": "Common Greeting"
     },
-    "http_method": {
+    "common_closing": {
       "anyOf": [
         {
           "type": "string"
@@ -832,66 +578,20 @@
         }
       ],
       "default": null,
-      "title": "Http Method"
+      "title": "Common Closing"
     },
-    "path": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Path"
-    },
-    "summary": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Summary"
-    },
-    "description": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Description"
-    },
-    "input_fields": {
+    "customer_info_variables": {
       "default": [],
-      "description": "All input fields",
       "items": {
-        "$ref": "#/$defs/FieldSpec"
+        "$ref": "#/$defs/CustomerInfoVariable"
       },
-      "title": "Input Fields",
+      "title": "Customer Info Variables",
       "type": "array"
     },
-    "output_fields": {
-      "default": [],
-      "description": "All output fields",
-      "items": {
-        "$ref": "#/$defs/FieldSpec"
-      },
-      "title": "Output Fields",
-      "type": "array"
-    },
-    "data_source": {
+    "no_response_policy": {
       "anyOf": [
         {
-          "$ref": "#/$defs/DataSourceSpec"
+          "$ref": "#/$defs/NoResponsePolicy"
         },
         {
           "type": "null"
@@ -899,223 +599,25 @@
       ],
       "default": null
     },
-    "business_rules": {
+    "shared_exceptions": {
       "default": [],
       "items": {
-        "$ref": "#/$defs/BusinessRule"
+        "additionalProperties": true,
+        "type": "object"
       },
-      "title": "Business Rules",
+      "title": "Shared Exceptions",
       "type": "array"
     },
-    "cross_field_validations": {
-      "anyOf": [
-        {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Cross Field Validations"
-    },
-    "success_status_code": {
-      "default": 200,
-      "title": "Success Status Code",
-      "type": "integer"
-    },
-    "success_message_template": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Success Message Template"
-    },
-    "error_responses": {
+    "session_tools": {
       "default": [],
-      "items": {
-        "$ref": "#/$defs/ErrorResponse"
-      },
-      "title": "Error Responses",
-      "type": "array"
-    },
-    "side_effects": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/SideEffect"
-      },
-      "title": "Side Effects",
-      "type": "array"
-    },
-    "requires_authentication": {
-      "default": true,
-      "title": "Requires Authentication",
-      "type": "boolean"
-    },
-    "allowed_roles": {
-      "anyOf": [
-        {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Allowed Roles"
-    },
-    "rate_limit_per_minute": {
-      "anyOf": [
-        {
-          "type": "integer"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Rate Limit Per Minute"
-    },
-    "conversation_script": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Conversation scenario verbatim or S3 key reference",
-      "title": "Conversation Script"
-    },
-    "greeting_message": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Exact greeting message from customer requirements",
-      "title": "Greeting Message"
-    },
-    "closing_message": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Exact closing message from customer requirements",
-      "title": "Closing Message"
-    },
-    "exception_scenarios": {
-      "anyOf": [
-        {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "type": "array"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Exception/fallback scenarios",
-      "title": "Exception Scenarios"
-    },
-    "call_direction": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "'inbound' or 'outbound'",
-      "title": "Call Direction"
-    },
-    "scenario_step_count": {
-      "anyOf": [
-        {
-          "type": "integer"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Number of scenario steps (for verification)",
-      "title": "Scenario Step Count"
-    },
-    "tools": {
-      "default": [],
-      "description": "Tools belonging to this operation (primary + helper)",
+      "description": "Session-wide tools (e.g., log_call_result, get_outbound_targets)",
       "items": {
         "$ref": "#/$defs/ToolSpec"
       },
-      "title": "Tools",
+      "title": "Session Tools",
       "type": "array"
-    },
-    "conversation_steps": {
-      "default": [],
-      "description": "Structured conversation steps (structured version of conversation_script)",
-      "items": {
-        "$ref": "#/$defs/ConversationStep"
-      },
-      "title": "Conversation Steps",
-      "type": "array"
-    },
-    "flow_type": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "'scripted' | 'intent_driven' | 'hybrid'",
-      "title": "Flow Type"
-    },
-    "generate_lambda": {
-      "default": true,
-      "title": "Generate Lambda",
-      "type": "boolean"
-    },
-    "generate_openapi": {
-      "default": true,
-      "title": "Generate Openapi",
-      "type": "boolean"
-    },
-    "language": {
-      "default": "python",
-      "title": "Language",
-      "type": "string"
     }
   },
-  "title": "OperationSpec",
+  "title": "SessionFlowConfig",
   "type": "object"
 }

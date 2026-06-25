@@ -224,6 +224,27 @@ Customers use their generated assets throughout the workshop, ending with a **de
 
 ---
 
+## Use it as a CLI Skill (no deployment)
+
+Don't want to deploy the webapp? The same interview → 6-asset pipeline ships as a
+**Claude Code / Kiro Skill** under [`skills/aicc-builder-skill/`](skills/aicc-builder-skill/) —
+same prompts, same sub-agents, same generated bundle, but it runs directly in your
+terminal/editor and writes the assets to local disk. It mirrors the webapp's modes
+(full build / single segment / improve an existing flow or prompt), attachments,
+progress, and validation.
+
+```bash
+# Claude Code (personal) — promotes SKILL.md and installs to ~/.claude/skills/
+skills/aicc-builder-skill/scripts/install.sh claude user
+# Kiro
+skills/aicc-builder-skill/scripts/install.sh kiro user
+```
+
+Then trigger with `/aicc-builder`. Full install + usage details:
+**[skills/aicc-builder-skill/README.md](skills/aicc-builder-skill/README.md)**.
+
+---
+
 ## Architecture
 
 ```
@@ -574,6 +595,27 @@ Contact Flow, CDK 인프라, FAQ)을 자동 생성합니다. 단일 오케스트
 
 ---
 
+## CLI Skill로 사용하기 (배포 불필요)
+
+webapp을 배포하지 않아도 됩니다. 동일한 인터뷰 → 6종 에셋 파이프라인이
+[`skills/aicc-builder-skill/`](skills/aicc-builder-skill/) 아래에 **Claude Code / Kiro
+Skill**로 패키징되어 있습니다 — 같은 프롬프트, 같은 서브에이전트, 같은 결과물이지만
+터미널/에디터에서 바로 실행되고 에셋을 로컬 디스크에 저장합니다. webapp의 모드
+(풀 빌드 / 단일 세그먼트 / 기존 플로우·프롬프트 개선), 첨부파일, 진행 표시, 검증을
+그대로 재현합니다.
+
+```bash
+# Claude Code (개인) — SKILL.md를 승격해 ~/.claude/skills/ 에 설치
+skills/aicc-builder-skill/scripts/install.sh claude user
+# Kiro
+skills/aicc-builder-skill/scripts/install.sh kiro user
+```
+
+이후 `/aicc-builder`로 실행합니다. 설치·사용 상세:
+**[skills/aicc-builder-skill/README.md](skills/aicc-builder-skill/README.md)**.
+
+---
+
 ## 빠른 시작
 
 ### 사전 요구사항
@@ -811,6 +853,27 @@ Web 画面から AI エージェントとチャット形式でやり取りをし
 ### Step 4 — ワークショップ
 
 生成されたアセットをワークショップを通じて触りながら、最終的に**自社のビジネスで動かせる PoC** を持ち帰ることができます。
+
+---
+
+## CLI スキルとして使う（デプロイ不要）
+
+webapp をデプロイしたくない場合でも大丈夫です。同じインタビュー → 6 種アセットの
+パイプラインが [`skills/aicc-builder-skill/`](skills/aicc-builder-skill/) 配下に
+**Claude Code / Kiro スキル**としてパッケージされています — 同じプロンプト、同じ
+サブエージェント、同じ生成物で、ターミナル/エディタ上で直接実行し、アセットを
+ローカルディスクに書き出します。webapp のモード（フルビルド / 単一セグメント /
+既存フロー・プロンプトの改善）、添付ファイル、進捗表示、検証をそのまま再現します。
+
+```bash
+# Claude Code（個人）— SKILL.md を昇格して ~/.claude/skills/ にインストール
+skills/aicc-builder-skill/scripts/install.sh claude user
+# Kiro
+skills/aicc-builder-skill/scripts/install.sh kiro user
+```
+
+その後 `/aicc-builder` で起動します。インストール・利用の詳細:
+**[skills/aicc-builder-skill/README.md](skills/aicc-builder-skill/README.md)**。
 
 ---
 

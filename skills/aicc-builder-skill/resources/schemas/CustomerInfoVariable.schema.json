@@ -1,0 +1,26 @@
+{
+  "additionalProperties": true,
+  "description": "Customer information variable injected via Contact Flow.",
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "source": {
+      "default": "",
+      "description": "'phone_lookup' | 'contact_flow_attribute' | 'manual_input'",
+      "title": "Source",
+      "type": "string"
+    },
+    "description": {
+      "default": "",
+      "title": "Description",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "CustomerInfoVariable",
+  "type": "object"
+}

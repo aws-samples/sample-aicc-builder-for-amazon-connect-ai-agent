@@ -18,7 +18,9 @@ import types
 from pathlib import Path
 
 
-def extract_prompts(repo_root: Path, skill_root: Path) -> None:
+def extract_prompts(repo_root: Path, skill_root: Path) -> int:
+    """Extract prompts + schemas. Returns the count of un-extracted backend items
+    found by the coverage pass (0 == full coverage)."""
     src = repo_root / "backend/ecs/src"
     agents_dir = src / "agents"
     out_sub = skill_root / "resources/sub-agents"
@@ -93,12 +95,19 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> None:
     sp_text = (src / "prompts/system_prompt.py").read_text()
     sp_ns: dict = {}
     exec(sp_text, sp_ns)
+    # Order mirrors how the live orchestrator composes phases (see
+    # PHASE_PROMPTS / get_phase_system_prompt in system_prompt.py): the always-on
+    # COMMON + TERMINOLOGY prefix, the per-phase bodies (interview → generation →
+    # review → regeneration), then the shared reference sections. ATTACHMENT_HANDLING
+    # is injected into every non-interview phase in the webapp, so it belongs here.
     phases = [
         "COMMON_PROMPT",
         "TERMINOLOGY_FACTS",
         "INTERVIEW_PROMPT",
         "GENERATION_PROMPT",
         "REVIEW_PROMPT",
+        "REGENERATION_PROMPT",
+        "ATTACHMENT_HANDLING",
         "TOOLS_REFERENCE",
         "SCHEMA_REFERENCE",
         "CONNECT_GUIDE",
@@ -110,6 +119,23 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> None:
             parts.append(f"\n\n<!-- ============ {p} ============ -->\n\n{v}")
             print(f"[ok] orchestrator: appended {p} ({len(v)} chars)")
     (out_orch / "system_prompt.md").write_text("".join(parts))
+
+    # ---------------- 3b) standalone orchestrator references ----------------
+    # These two carry `{placeholder}` tokens (e.g. {document_content}) so they must
+    # be written VERBATIM — never .format()'d — into their own files. They are not
+    # part of the phase-composed system prompt above; the skill reads them on demand
+    # (document-analysis entry path, OperationSpec authoring template).
+    standalone_orch = {
+        "DOCUMENT_ANALYSIS_PROMPT": "document_analysis.md",
+        "OPERATION_SPEC_TEMPLATE": "operation_spec_template.md",
+    }
+    for var_name, fname in standalone_orch.items():
+        v = sp_ns.get(var_name)
+        if isinstance(v, str) and v:
+            (out_orch / fname).write_text(v)
+            print(f"[ok] orchestrator: {fname} <- {var_name} ({len(v)} chars)")
+        else:
+            print(f"[!] orchestrator: {var_name} missing or not a string")
 
     # ---------------- 4) interview agent prompt ----------------
     ia_text = (src / "prompts/interview_agent_prompt.py").read_text()
@@ -169,7 +195,7 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> None:
         except Exception:
             pass
 
-    for cls in (
+    schema_models = (
         "OperationSpec",
         "InfrastructureSpec",
         "ToolSpec",
@@ -179,7 +205,16 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> None:
         "ErrorResponse",
         "SideEffect",
         "ConversationStep",
-    ):
+        # Session/flow contracts the orchestrator persists (save_session_flow_config /
+        # save_contact_flow_spec) and the prompt + contact_flow generators consume.
+        # Without these the skill's schema reference is materially incomplete.
+        "SessionFlowConfig",
+        "ContactFlowSpec",
+        "FlowBehavior",
+        "CustomerInfoVariable",
+        "NoResponsePolicy",
+    )
+    for cls in schema_models:
         model = spec_ns.get(cls)
         if model is None:
             print(f"[!] missing {cls}")
@@ -193,13 +228,96 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> None:
         p.write_text(json.dumps(schema, indent=2))
         print(f"[ok] {cls}.schema.json ({p.stat().st_size} bytes)")
 
+    # ---------------- 6) COVERAGE ASSERTION (drift-gate blind-spot guard) ----------------
+    # The --check drift gate diffs the extractor's output against itself, so it can
+    # ONLY catch edits to sections/models the extractor already enumerates. A NEWLY
+    # added backend prompt section or Pydantic model would silently never reach
+    # resources/ and the gate would still report "no drift". This pass closes that
+    # hole: it scans the backend for things that LOOK like they should be extracted
+    # and warns about any the extractor's lists don't cover, so future additions
+    # surface instead of rotting.
+    return _report_coverage(sp_ns, spec_ns, phases, standalone_orch, schema_models)
+
+
+# Backend prompt strings that are intentionally NOT extracted as standalone skill
+# resources (they are compositions/aliases of sections we already emit).
+_PROMPT_COVERAGE_IGNORE = {
+    "SYSTEM_PROMPT",  # backward-compat concatenation of all sections
+}
+# Pydantic models that live only nested inside InfrastructureSpec (they surface as
+# $defs in InfrastructureSpec.schema.json), so we don't emit standalone files.
+_MODEL_COVERAGE_IGNORE = {
+    "FlexibleBaseModel",  # shared base, not a contract
+    "RdsConfig",
+    "DynamoDbConfig",
+    "LambdaConfig",
+    "ApiGatewayConfig",
+    "VpcConfig",
+}
+
+
+def _report_coverage(sp_ns, spec_ns, phases, standalone_orch, schema_models) -> int:
+    """Warn about backend prompt sections / spec models the extractor doesn't cover.
+
+    Returns the number of uncovered items found (0 == fully covered). The shell
+    --check gate treats a non-zero return as drift so new backend additions can't
+    silently bypass the skill.
+    """
+    covered_prompts = set(phases) | set(standalone_orch) | _PROMPT_COVERAGE_IGNORE
+    uncovered = []
+
+    # Any module-level UPPER_SNAKE name bound to a substantial string is a prompt
+    # section the skill probably needs. We do NOT filter on a _PROMPT/_TEMPLATE
+    # suffix — several real sections (TERMINOLOGY_FACTS, TOOLS_REFERENCE,
+    # SCHEMA_REFERENCE, CONNECT_GUIDE, ATTACHMENT_HANDLING) don't use it.
+    for name, val in sp_ns.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            continue
+        if not isinstance(val, str) or len(val) < 200:
+            continue
+        if name not in covered_prompts:
+            uncovered.append(("prompt", name))
+
+    covered_models = set(schema_models) | _MODEL_COVERAGE_IGNORE
+    for name, val in spec_ns.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Z][A-Za-z0-9]*", name):
+            continue
+        # A FlexibleBaseModel subclass exposes model_json_schema(); the base itself
+        # is in the ignore set.
+        if not (hasattr(val, "model_json_schema") and isinstance(val, type)):
+            continue
+        if val.__module__ != "spec_manager_extracted":
+            continue  # imported (e.g. pydantic BaseModel), not a spec contract
+        if name not in covered_models:
+            uncovered.append(("model", name))
+
+    if not uncovered:
+        print("[ok] coverage: all backend prompt sections + spec models are extracted.")
+        return 0
+
+    print("")
+    print("[!] COVERAGE GAP — these backend items are NOT extracted into resources/:")
+    for kind, name in uncovered:
+        print(f"    - {kind}: {name}")
+    print("    Add them to the extractor's `phases`/`standalone_orch`/`schema_models`")
+    print("    lists (or to the *_COVERAGE_IGNORE sets if intentionally excluded).")
+    return len(uncovered)
+
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <repo_root> <skill_root>", file=sys.stderr)
+    argv = sys.argv[1:]
+    strict = "--strict" in argv
+    argv = [a for a in argv if a != "--strict"]
+    if len(argv) != 2:
+        print(
+            f"Usage: {sys.argv[0]} [--strict] <repo_root> <skill_root>",
+            file=sys.stderr,
+        )
         return 2
-    extract_prompts(Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve())
-    return 0
+    gaps = extract_prompts(Path(argv[0]).resolve(), Path(argv[1]).resolve())
+    # In --strict mode (used by extract_prompts.sh --check) a coverage gap is a hard
+    # failure; in plain extract mode it's a warning so a normal re-extract still works.
+    return 1 if (strict and gaps) else 0
 
 
 if __name__ == "__main__":

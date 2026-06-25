@@ -308,6 +308,19 @@
       "title": "Include Customer Phone Lookup",
       "type": "boolean"
     },
+    "test_phone_number": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The phone number the user will call into Connect from during testing. When set, the sample-data seeder MUST include at least one record keyed to this number (normalized to the same format as the phone GSI) so a live test call finds a match.",
+      "title": "Test Phone Number"
+    },
     "tags": {
       "additionalProperties": true,
       "default": {},
