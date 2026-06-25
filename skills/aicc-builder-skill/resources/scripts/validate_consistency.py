@@ -14,7 +14,7 @@ Directory layout expected (matches what the skill instructs Claude to write):
         infrastructure_schema.json
         session_flow_config.json
       assets/
-        lambda/<operation_id>/handler.py
+        lambda/<tool_id>/index.py        # (handler.py also accepted)
         openapi/openapi.yaml
         infrastructure/template.yaml
 
@@ -110,15 +110,27 @@ def _extract_lambda_fields(code: str) -> Set[str]:
 
 
 def load_lambda_code(assets_dir: Path) -> Dict[str, str]:
-    """op_id / tool_id -> handler.py contents."""
+    """tool_id -> Lambda handler contents.
+
+    Accepts both the backend-canonical ``lambda/<tool_id>/index.py`` and the
+    legacy ``lambda/<tool_id>/handler.py`` layout. The fixed Node.js Lambdas
+    (``update_q_session``) and the flow-invoked ``customer_lookup`` have no
+    OperationSpec to validate against, so they are skipped.
+    """
     lam_dir = assets_dir / "lambda"
     if not lam_dir.is_dir():
         return {}
-    out = {}
-    for handler in lam_dir.rglob("handler.py"):
-        rel = handler.relative_to(lam_dir)
-        op_id = rel.parts[0] if rel.parts else handler.stem
-        out[op_id] = handler.read_text()
+    # Lambdas that are bundled/flow-invoked rather than spec-driven API tools.
+    skip_dirs = {"update_q_session", "customer_lookup"}
+    out: Dict[str, str] = {}
+    for fname in ("index.py", "handler.py"):
+        for handler in lam_dir.rglob(fname):
+            rel = handler.relative_to(lam_dir)
+            op_id = rel.parts[0] if rel.parts else handler.stem
+            if op_id in skip_dirs:
+                continue
+            # index.py wins if both exist for the same tool.
+            out.setdefault(op_id, handler.read_text())
     return out
 
 
@@ -236,11 +248,26 @@ def validate(output_dir: Path) -> List[dict]:
                     "issue": f"Spec output '{name}' missing from OpenAPI response schema",
                 })
 
+    # Collect infra GSI names + env-var → table mappings for checks 6 & 7.
+    infra_gsi_names: Set[str] = set()        # all GSI index names across all tables
+    infra_env_vars: Set[str] = set()         # all *_TABLE_NAME env var names
+
     # 3) Infrastructure keys vs spec.data_source
     if infra:
         tables = infra.get("tables") or infra.get("dynamodb_tables") or {}
         if isinstance(tables, list):
             tables = {t.get("table_name") or t.get("tableName"): t for t in tables}
+        for tdef in tables.values():
+            if not isinstance(tdef, dict):
+                continue
+            for gsi in (tdef.get("gsi") or tdef.get("global_secondary_indexes") or tdef.get("gsi_indexes") or []):
+                if isinstance(gsi, dict):
+                    gname = gsi.get("index_name") or gsi.get("indexName") or gsi.get("name")
+                    if gname:
+                        infra_gsi_names.add(gname)
+            env_name = tdef.get("env_var_name") or tdef.get("envVarName") or tdef.get("env_var")
+            if env_name:
+                infra_env_vars.add(env_name)
         for op_id, spec in specs.items():
             ds = spec.get("data_source") or {}
             tname = ds.get("table_name") or ds.get("tableName")
@@ -264,7 +291,45 @@ def validate(output_dir: Path) -> List[dict]:
                     "issue": f"Spec primary_key '{pk}' not in infra keys for table '{tname}': {sorted(infra_keys)}",
                 })
 
-    # 4) Count parity
+    # 6) Lambda IndexName=/IndexName: vs infra GSI names
+    if infra_gsi_names:
+        for op_id, code in lam.items():
+            for idx_name in set(re.findall(r"IndexName\s*[=:]\s*['\"](\w[\w-]*)['\"]", code)):
+                if idx_name not in infra_gsi_names:
+                    mismatches.append({
+                        "check": "lambda_gsi", "operation_id": op_id, "field": idx_name,
+                        "issue": f"Lambda uses IndexName='{idx_name}' but it is not an infra GSI: {sorted(infra_gsi_names)}",
+                    })
+
+    # 7) Lambda os.environ["X_TABLE_NAME"] vs infra env vars
+    if infra_env_vars:
+        for op_id, code in lam.items():
+            env_refs = set(re.findall(r'os\.environ\s*\[\s*[\'"](\w+_TABLE_NAME)[\'"]\s*\]', code))
+            env_refs.update(re.findall(r'os\.environ\.get\s*\(\s*[\'"](\w+_TABLE_NAME)[\'"]', code))
+            for env_name in env_refs:
+                if env_name not in infra_env_vars:
+                    mismatches.append({
+                        "check": "lambda_env", "operation_id": op_id, "field": env_name,
+                        "issue": f"Lambda references env var '{env_name}' but it is not an infra env var: {sorted(infra_env_vars)}",
+                    })
+
+    # 8) Lambda response wrapper (data vs flat) vs OpenAPI response shape
+    for op_id, code in lam.items():
+        matched = oapi.get(op_id) or oapi.get("/" + op_id.replace("_", "-"))
+        if not matched:
+            continue
+        lambda_has_data = bool(re.search(r'''['"]data['"]\s*:''', code))
+        openapi_has_data = "data" in matched.get("output", set())
+        if lambda_has_data != openapi_has_data:
+            mismatches.append({
+                "check": "response_structure", "operation_id": op_id, "field": "data",
+                "issue": (
+                    f"Response wrapper mismatch: Lambda {'uses' if lambda_has_data else 'omits'} a "
+                    f"'data' wrapper but OpenAPI {'has' if openapi_has_data else 'omits'} a 'data' property"
+                ),
+            })
+
+    # 9) Count parity
     if lam and len(lam) < len(expected):
         mismatches.append({
             "check": "count_lambda", "operation_id": "__all__", "field": "",

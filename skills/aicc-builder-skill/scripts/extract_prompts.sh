@@ -45,7 +45,18 @@ case "${MODE}" in
     mkdir -p "${TMP_ROOT}/resources/sub-agents"
     mkdir -p "${TMP_ROOT}/resources/schemas"
 
-    python3 "${HERE}/_extract_prompts.py" "${REPO_ROOT}" "${TMP_ROOT}" >/dev/null
+    # --strict: a coverage gap (a new backend prompt section / spec model the
+    # extractor doesn't enumerate) is a hard failure here, not just a warning —
+    # otherwise the self-diff below would report "no drift" for something that
+    # never reached resources/ in the first place.
+    if ! python3 "${HERE}/_extract_prompts.py" --strict "${REPO_ROOT}" "${TMP_ROOT}" >"${TMP_ROOT}/extract.log" 2>&1; then
+      echo "Coverage gap: the extractor does not cover all backend prompt sections / spec models." >&2
+      grep -A 50 "COVERAGE GAP" "${TMP_ROOT}/extract.log" >&2 || cat "${TMP_ROOT}/extract.log" >&2
+      echo "" >&2
+      echo "Add the missing items to _extract_prompts.py (phases / standalone_orch /" >&2
+      echo "schema_models) or to the *_COVERAGE_IGNORE sets, then re-run." >&2
+      exit 1
+    fi
 
     DRIFT=0
     for sub in orchestrator sub-agents schemas; do

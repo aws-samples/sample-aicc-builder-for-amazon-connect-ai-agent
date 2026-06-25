@@ -51,7 +51,7 @@
             }
           ],
           "default": null,
-          "description": "Minimum string length",
+          "description": "Minimum string length (integer)",
           "title": "Min Length"
         },
         "max_length": {
@@ -64,7 +64,7 @@
             }
           ],
           "default": null,
-          "description": "Maximum string length",
+          "description": "Maximum string length (integer)",
           "title": "Max Length"
         },
         "pattern": {
@@ -77,7 +77,7 @@
             }
           ],
           "default": null,
-          "description": "Regex pattern for validation",
+          "description": "Regex pattern for validation (e.g. '^\\d{12}$')",
           "title": "Pattern"
         },
         "min_value": {
@@ -126,7 +126,7 @@
             }
           ],
           "default": null,
-          "description": "Expected date format",
+          "description": "Expected date format for date/datetime fields ONLY (e.g. 'YYYY-MM-DD', 'ISO8601'). Do NOT use for string length/format constraints \u2014 those go in max_length/pattern.",
           "title": "Date Format"
         },
         "allow_future_dates": {

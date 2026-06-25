@@ -15,13 +15,16 @@ directly inside Claude Code or Kiro — no infrastructure to deploy.
 ```
 skills/aicc-builder-skill/
 ├── claude/SKILL.md         # Claude Skills entry point (YAML frontmatter)
-├── kiro/SKILL.md           # Kiro Skills entry point (same content, Kiro frontmatter)
+├── kiro/SKILL.md           # Kiro Skills entry point (same body, Kiro frontmatter)
 └── resources/              # Shared payload — both SKILL.md files reference these
     ├── orchestrator/
-    │   ├── system_prompt.md        # Full orchestrator prompt (fallback)
-    │   └── interview_agent.md      # Interview persona
+    │   ├── system_prompt.md           # Full orchestrator prompt (COMMON + TERMINOLOGY
+    │   │                              #   + all phases + ATTACHMENT_HANDLING + REGENERATION)
+    │   ├── interview_agent.md         # Interview persona (full + scoped)
+    │   ├── document_analysis.md       # Raw-requirements-doc entry mode
+    │   └── operation_spec_template.md # OperationSpec authoring template
     ├── sub-agents/
-    │   ├── _shared_rules.md        # Cross-generator golden rules
+    │   ├── _shared_rules.md        # 16 golden rules + Complete/Escalate tool-result contract
     │   ├── infrastructure_generator.md
     │   ├── lambda_generator.md
     │   ├── openapi_generator.md
@@ -30,17 +33,21 @@ skills/aicc-builder-skill/
     │   ├── faq_generator.md
     │   ├── research_agent.md
     │   └── reviewer_agent.md
+    ├── reference/                     # Authored (NOT auto-extracted)
+    │   ├── vision_import.md           # Flow-image → Contact Flow JSON contract
+    │   └── contact_flow_block_schemas.md  # API-verified block Types + per-block params
     ├── schemas/
     │   ├── OperationSpec.schema.json
     │   ├── InfrastructureSpec.schema.json
-    │   └── ... (7 more JSON Schemas)
+    │   └── ... (12 more JSON Schemas, incl. SessionFlowConfig / ContactFlowSpec / FlowBehavior)
     ├── scripts/
     │   ├── validate_consistency.py  # 9-check cross-asset validator
     │   ├── check_spec_complete.py   # Interview-completion gate
     │   └── clues_format.py          # CLUES response helper
     ├── templates/
     │   ├── pre_questionnaire_template.md
-    │   └── deploy_workshop.sh
+    │   ├── deploy_workshop.sh
+    │   └── update_q_session/index.js  # FIXED Node.js Lambda — bundled, not generated
     └── examples/
         └── sample_*.md              # Complete + partial input examples
 ```
@@ -52,26 +59,33 @@ Claude Code requires the skill's enclosing folder name to match the
 `claude/` → `aicc-builder/` and promote `SKILL.md` to the top of that
 folder.
 
-```bash
-# Personal install
-mkdir -p ~/.claude/skills
-cp -r skills/aicc-builder-skill ~/.claude/skills/aicc-builder
-mv ~/.claude/skills/aicc-builder/claude/SKILL.md ~/.claude/skills/aicc-builder/SKILL.md
-rm -rf ~/.claude/skills/aicc-builder/claude ~/.claude/skills/aicc-builder/kiro
-
-# Or project-scoped (commit to your repo)
-mkdir -p .claude/skills
-cp -r skills/aicc-builder-skill .claude/skills/aicc-builder
-mv .claude/skills/aicc-builder/claude/SKILL.md .claude/skills/aicc-builder/SKILL.md
-rm -rf .claude/skills/aicc-builder/claude .claude/skills/aicc-builder/kiro
-```
-
-Or use the one-shot installer:
+The one-shot installer is the recommended path — it does exactly the manual
+steps below (promote `SKILL.md`, drop the sibling-platform dir, drop the
+dual-platform helper `scripts/` and the top-level `README.md`) so the
+installed skill is identical either way:
 
 ```bash
 skills/aicc-builder-skill/scripts/install.sh claude user      # ~/.claude/skills/
 skills/aicc-builder-skill/scripts/install.sh claude project   # ./.claude/skills/
 ```
+
+Equivalent manual steps (these mirror `install.sh` exactly):
+
+```bash
+# Personal install
+mkdir -p ~/.claude/skills
+cp -r skills/aicc-builder-skill ~/.claude/skills/aicc-builder
+mv ~/.claude/skills/aicc-builder/claude/SKILL.md ~/.claude/skills/aicc-builder/SKILL.md
+rm -rf ~/.claude/skills/aicc-builder/claude ~/.claude/skills/aicc-builder/kiro \
+       ~/.claude/skills/aicc-builder/scripts
+rm -f  ~/.claude/skills/aicc-builder/README.md   # skill-internal docs live in SKILL.md
+
+# Or project-scoped (commit to your repo): same, under ./.claude/skills/
+```
+
+> The `resources/` tree (incl. `reference/` and `templates/`) is kept; only the
+> re-sync `scripts/` (`extract_prompts.sh`, `install.sh`) and the top-level
+> `README.md` are dropped, since they're for maintaining the skill, not running it.
 
 Then in Claude Code:
 ```
@@ -85,11 +99,20 @@ the frontmatter description.
 ## Install (Kiro)
 
 ```bash
+skills/aicc-builder-skill/scripts/install.sh kiro user      # ~/.kiro/skills/
+skills/aicc-builder-skill/scripts/install.sh kiro project   # ./.kiro/skills/
+```
+
+Equivalent manual steps:
+
+```bash
 # Kiro skills live at ~/.kiro/skills/ by default
 mkdir -p ~/.kiro/skills
 cp -r skills/aicc-builder-skill ~/.kiro/skills/aicc-builder
 mv ~/.kiro/skills/aicc-builder/kiro/SKILL.md ~/.kiro/skills/aicc-builder/SKILL.md
-rm -rf ~/.kiro/skills/aicc-builder/claude
+rm -rf ~/.kiro/skills/aicc-builder/claude ~/.kiro/skills/aicc-builder/kiro \
+       ~/.kiro/skills/aicc-builder/scripts
+rm -f  ~/.kiro/skills/aicc-builder/README.md
 ```
 
 ## Requirements
@@ -102,19 +125,32 @@ rm -rf ~/.kiro/skills/aicc-builder/claude
 
 ## How it works
 
-When you invoke the skill, Claude/Kiro reads `SKILL.md` and enters one of
-two modes based on whether `<output_dir>/state/specs/` already has specs:
+When you invoke the skill, Claude/Kiro reads `SKILL.md`, detects the user's
+language, and picks a **mode** (the same three the webapp offers):
 
-1. **Interview mode** — Claude loads
-   `resources/orchestrator/interview_agent.md` as its active persona and
-   conducts the 15-minute structured interview, saving each
-   `OperationSpec` to `state/specs/<op>.json`.
+- **Full build** — the full interview, then all 6 asset packages.
+- **Single segment** — a focused interview + just one of Contact Flow / AI
+  Prompt / FAQ (scoped run; out-of-scope generators are skipped).
+- **Improve existing** — the user supplies an existing Contact Flow JSON, AI
+  Prompt YAML, or a flow-diagram image; the skill lints/repairs (or
+  vision-transcribes) it, seeds it, and switches to patch-only edits.
 
-2. **Generation mode** — Claude runs 6 phases in strict order
-   (infrastructure → lambda → openapi → prompt → contact flow → faq).
-   For each phase it loads the corresponding sub-agent prompt from
-   `resources/sub-agents/` as its system prompt, reads the specs,
-   writes the asset, and validates before moving on.
+It can also accept **attachments** at any point — requirements docs (PDF/Word/
+Markdown/CSV/XLSX), images, or pasted JSON/YAML — and `Read`s them to shortcut
+the interview.
+
+Within a run there are two states based on whether `<output_dir>/state/specs/`
+or any generated asset exists yet:
+
+1. **Interview** — Claude loads `resources/orchestrator/interview_agent.md` as
+   its active persona (full, scoped, or `document_analysis.md` for a raw doc)
+   and saves each `OperationSpec` to `state/specs/<op>.json`.
+
+2. **Generation** — Claude runs the in-scope phases one-per-turn
+   (infrastructure → lambda *(one per tool)* → openapi → prompt → contact flow →
+   faq), loading the matching `resources/sub-agents/*.md` persona each phase,
+   merging fragments, and gating on cfn-lint / OpenAPI validation before the
+   cross-asset consistency check.
 
 After Phase 3 and Phase 6, Claude runs
 `resources/scripts/validate_consistency.py` which enforces the same 9
@@ -128,29 +164,48 @@ See `claude/SKILL.md` for the full workflow.
 | Webapp component | Skill equivalent |
 |---|---|
 | Orchestrator agent (Strands) | `SKILL.md` + Claude reading sub-agent prompts |
-| 9 specialized sub-agents | `resources/sub-agents/*.md` |
-| `spec_manager.py` (Pydantic + S3) | JSON files in `<output_dir>/state/` + JSON Schemas |
+| Mode picker (Full / Segment / Improve) | `SKILL.md` "Mode selection" + `state/project.json.scope` |
+| 8 specialized sub-agents | `resources/sub-agents/*.md` |
+| `spec_manager.py` (Pydantic + S3) | JSON files in `<output_dir>/state/` + 14 JSON Schemas |
+| Conversational attachments (multimodal) | `Read` on local file paths (images/PDF/docs natively) |
+| `import_uploaded_asset_tool` / vision import | `SKILL.md` "Import an existing asset" + `resources/reference/vision_import.md` |
+| `web_search` / `fetch_webpage` (AgentCore Gateway) | Native `WebSearch` / `WebFetch` |
+| Contact-Flow RAG KB | `resources/reference/contact_flow_block_schemas.md` + WebSearch on docs.aws.amazon.com |
+| `merge_*_fragments` + cfn-lint / OpenAPI gates | String-merge at anchor + `cfn-lint` / OpenAPI validate in `SKILL.md` |
+| Fixed `update_q_session` Node.js Lambda | `resources/templates/update_q_session/index.js` (copied, not generated) |
 | `workspace_file_tools.py` | Claude's `Read` / `Write` / `Edit` |
 | `s3_asset_storage.py` | Local filesystem under `<output_dir>/assets/v1/` |
 | `validate_consistency.py` (Strands tool) | `resources/scripts/validate_consistency.py` (stdlib + PyYAML) |
-| WebSocket streaming UI | Plain text updates between phases |
+| `<generation_state>` injected block | `state/progress.json`, re-read each turn |
+| 4-phase / 12-step progress sidebar | Printed phase headers + ticking checklist |
+| WebSocket streaming UI | Your normal streamed responses |
+| Download-All ZIP + deploy modal | Files on disk + printed package tree + deploy.sh steps |
 | Session versioning (v1/, v2/) | Same directory convention, local |
 
-The generated artifacts are byte-for-byte equivalent.
+The generated artifacts are equivalent — same paths, same contracts.
 
 ## Re-syncing from the webapp
 
 When you edit prompts in `backend/ecs/src/prompts/` or
-`backend/ecs/src/agents/*/system_prompt.py`, re-run:
+`backend/ecs/src/agents/*/system_prompt.py`, or change a Pydantic spec model,
+re-run:
 
 ```bash
-./scripts/extract_prompts.sh
+./scripts/extract_prompts.sh           # regenerate resources/
+./scripts/extract_prompts.sh --check   # CI / pre-commit drift + coverage gate
 ```
 
-That regenerates `resources/orchestrator/*.md` and
-`resources/sub-agents/*.md` from the Python source strings, and
-regenerates `resources/schemas/*.json` from the Pydantic models. Review
-the diff, commit, done.
+`extract_prompts.sh` regenerates `resources/orchestrator/*.md`,
+`resources/sub-agents/*.md`, and `resources/schemas/*.json` from the Python
+source. The `--check` gate diffs against the backend **and** fails if a NEW
+prompt section or spec model isn't covered by the extractor — so the skill
+can't silently fall out of sync. Review the diff, commit, done.
+
+> The authored files under `resources/reference/` and
+> `resources/templates/update_q_session/` are **not** auto-extracted. Update
+> them by hand when their backend counterparts
+> (`agents/contact_flow_generator/vision_import.py`, `tools/asset_linters.py`,
+> `tools/asset_packager.py`) change.
 
 ## License
 

@@ -17,6 +17,34 @@
   — do not hard-code "built on Nova Sonic" into generated prompts unless the
   user specified it.
 
+## AI-BOT ↔ CONTACT-FLOW TOOL-RESULT CONTRACT (canonical, do not improvise)
+
+The AI agent (Lex/Q-in-Connect bot) communicates its decision back to the
+Contact Flow through ONE session attribute: **`$.Lex.SessionAttributes.Tool`**.
+The flow's `Compare` block branches on its value. The vocabulary is FIXED:
+
+- **`Complete`** — the conversation is finished; end the call. (Self-service
+  done, customer satisfied, or graceful close.) Flow → goodbye → Disconnect.
+- **`Escalate`** — connect the customer to a human agent. Flow → set escalation
+  context → UpdateContactTargetQueue → TransferContactToQueue.
+
+These TWO values are the REQUIRED baseline. NEVER invent alternates like
+`END_CALL`, `END_CONVERSATION`, `ESCALATE` (wrong case), `TRANSFER`, `DONE`, or
+`actionType`. The prompt_generator MUST teach the bot to set exactly `Complete`
+or `Escalate`; the contact_flow_generator MUST `Compare` on exactly those.
+
+**Permitted extensions** (only when the spec/requirements call for distinct
+downstream handling — e.g. routing to a different queue or passing extra context
+to a Connect 1P/MCP agent transfer):
+- Additional ESCALATE-family values that still route to a human but differ in
+  context/queue: e.g. `EscalateBilling`, `EscalateTechnical`.
+- Additional COMPLETE-family values that still end the call but differ in
+  closing handling: e.g. `OutOfHoursComplete`, `CallbackScheduledComplete`.
+
+Even with extensions, the base `Complete` and `Escalate` MUST exist and be the
+default branches. Any extra value MUST be matched by a corresponding `Compare`
+condition in the flow AND documented in the bot prompt — never one side only.
+
 ## SPEC-LEVEL MODIFICATION ESCALATION (applies when modification_request is set)
 
 Before patching a file, classify the request:
@@ -149,6 +177,12 @@ messages:
    - `{{$.dateTime}}` - Current timestamp
    - `{{$.toolConfigurationList}}` - MCP tools list (auto-injected)
    - `{{$.Custom.firstName}}`, `{{$.Custom.customerId}}`, `{{$.Custom.email}}` - Customer info
+
+   ⛔ **EACH VARIABLE MAY APPEAR INSIDE `{{ }}` ONLY ONCE in the entire prompt.**
+   The Amazon Connect AI-prompt API rejects a prompt that references the same
+   variable inside `{{ }}` twice ("Each variable may only appear once."). If you
+   need to mention a variable again, write it WITHOUT braces (plain text). E.g.
+   first use `{{$.Custom.firstName}}`, any later mention is just `firstName`.
 
 3. **Messages Section** (REQUIRED at end)
    ```yaml

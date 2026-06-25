@@ -1,0 +1,47 @@
+{
+  "additionalProperties": true,
+  "description": "A single customer-requested Contact Flow behavior, mapped to the\nAmazon Connect blocks that implement it (with dependency ordering).\n\nThis is the unit the Contact Flow generator MUST realize in the flow JSON.",
+  "properties": {
+    "behavior": {
+      "description": "One of: 'callback', 'queue_transfer', 'business_hours', 'agent_escalation', 'dtmf_auth', 'language_branch', 'recording', 'custom'",
+      "title": "Behavior",
+      "type": "string"
+    },
+    "description": {
+      "default": "",
+      "description": "What the customer asked for, in their words",
+      "title": "Description",
+      "type": "string"
+    },
+    "blocks": {
+      "default": [],
+      "description": "Ordered Amazon Connect block Types that implement this behavior (e.g. ['UpdateContactCallbackNumber','TransferContactToQueue']). Order encodes dependency: each block's NextAction points to the next.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Blocks",
+      "type": "array"
+    },
+    "parameters": {
+      "additionalProperties": true,
+      "default": {},
+      "description": "Behavior-specific params, e.g. {'queue':'sales','hours_id':'...','after_hours_message':'...'}",
+      "title": "Parameters",
+      "type": "object"
+    },
+    "depends_on": {
+      "default": [],
+      "description": "Other behaviors/blocks that must precede this one (e.g. 'dtmf_auth' before 'agent_escalation')",
+      "items": {
+        "type": "string"
+      },
+      "title": "Depends On",
+      "type": "array"
+    }
+  },
+  "required": [
+    "behavior"
+  ],
+  "title": "FlowBehavior",
+  "type": "object"
+}

@@ -1,0 +1,135 @@
+{
+  "$defs": {
+    "FlowBehavior": {
+      "additionalProperties": true,
+      "description": "A single customer-requested Contact Flow behavior, mapped to the\nAmazon Connect blocks that implement it (with dependency ordering).\n\nThis is the unit the Contact Flow generator MUST realize in the flow JSON.",
+      "properties": {
+        "behavior": {
+          "description": "One of: 'callback', 'queue_transfer', 'business_hours', 'agent_escalation', 'dtmf_auth', 'language_branch', 'recording', 'custom'",
+          "title": "Behavior",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "description": "What the customer asked for, in their words",
+          "title": "Description",
+          "type": "string"
+        },
+        "blocks": {
+          "default": [],
+          "description": "Ordered Amazon Connect block Types that implement this behavior (e.g. ['UpdateContactCallbackNumber','TransferContactToQueue']). Order encodes dependency: each block's NextAction points to the next.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Blocks",
+          "type": "array"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Behavior-specific params, e.g. {'queue':'sales','hours_id':'...','after_hours_message':'...'}",
+          "title": "Parameters",
+          "type": "object"
+        },
+        "depends_on": {
+          "default": [],
+          "description": "Other behaviors/blocks that must precede this one (e.g. 'dtmf_auth' before 'agent_escalation')",
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "behavior"
+      ],
+      "title": "FlowBehavior",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Dedicated specification for the Contact Flow generator.\n\nUnlike OperationSpec (which describes API business operations), this captures\nthe FLOW-level behaviors the customer requested \u2014 callback, queue transfers,\nbusiness-hours branching, escalation, DTMF auth \u2014 so the Contact Flow agent\nbuilds from an explicit contract instead of inferring from chat. Each\nbehavior names the Connect blocks and their dependency order.",
+  "properties": {
+    "flow_name": {
+      "default": "main-flow",
+      "title": "Flow Name",
+      "type": "string"
+    },
+    "call_direction": {
+      "default": "inbound",
+      "title": "Call Direction",
+      "type": "string"
+    },
+    "include_customer_phone_lookup": {
+      "default": false,
+      "title": "Include Customer Phone Lookup",
+      "type": "boolean"
+    },
+    "use_native_faq_retrieve": {
+      "default": true,
+      "description": "True \u2192 rely on Connect AI agent native Retrieve for FAQ (NO custom Lambda/API). False only when an external doc API was requested.",
+      "title": "Use Native Faq Retrieve",
+      "type": "boolean"
+    },
+    "use_native_escalation": {
+      "default": true,
+      "description": "True \u2192 agent escalation/end-call via native Return to Control (flow routing), NOT a custom Lambda/tool.",
+      "title": "Use Native Escalation",
+      "type": "boolean"
+    },
+    "behaviors": {
+      "default": [],
+      "description": "Ordered list of customer-requested flow behaviors to realize.",
+      "items": {
+        "$ref": "#/$defs/FlowBehavior"
+      },
+      "title": "Behaviors",
+      "type": "array"
+    },
+    "welcome_message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Welcome Message"
+    },
+    "transfer_message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Transfer Message"
+    },
+    "after_hours_message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "After Hours Message"
+    },
+    "notes": {
+      "default": "",
+      "description": "Free-text design notes for the flow generator",
+      "title": "Notes",
+      "type": "string"
+    }
+  },
+  "title": "ContactFlowSpec",
+  "type": "object"
+}

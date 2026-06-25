@@ -17,6 +17,34 @@
   — do not hard-code "built on Nova Sonic" into generated prompts unless the
   user specified it.
 
+## AI-BOT ↔ CONTACT-FLOW TOOL-RESULT CONTRACT (canonical, do not improvise)
+
+The AI agent (Lex/Q-in-Connect bot) communicates its decision back to the
+Contact Flow through ONE session attribute: **`$.Lex.SessionAttributes.Tool`**.
+The flow's `Compare` block branches on its value. The vocabulary is FIXED:
+
+- **`Complete`** — the conversation is finished; end the call. (Self-service
+  done, customer satisfied, or graceful close.) Flow → goodbye → Disconnect.
+- **`Escalate`** — connect the customer to a human agent. Flow → set escalation
+  context → UpdateContactTargetQueue → TransferContactToQueue.
+
+These TWO values are the REQUIRED baseline. NEVER invent alternates like
+`END_CALL`, `END_CONVERSATION`, `ESCALATE` (wrong case), `TRANSFER`, `DONE`, or
+`actionType`. The prompt_generator MUST teach the bot to set exactly `Complete`
+or `Escalate`; the contact_flow_generator MUST `Compare` on exactly those.
+
+**Permitted extensions** (only when the spec/requirements call for distinct
+downstream handling — e.g. routing to a different queue or passing extra context
+to a Connect 1P/MCP agent transfer):
+- Additional ESCALATE-family values that still route to a human but differ in
+  context/queue: e.g. `EscalateBilling`, `EscalateTechnical`.
+- Additional COMPLETE-family values that still end the call but differ in
+  closing handling: e.g. `OutOfHoursComplete`, `CallbackScheduledComplete`.
+
+Even with extensions, the base `Complete` and `Escalate` MUST exist and be the
+default branches. Any extra value MUST be matched by a corresponding `Compare`
+condition in the flow AND documented in the bot prompt — never one side only.
+
 ## SPEC-LEVEL MODIFICATION ESCALATION (applies when modification_request is set)
 
 Before patching a file, classify the request:
@@ -265,6 +293,17 @@ A common source of **403 errors at runtime** is when the API Gateway PathPart (f
 - [ ] `!Ref` and `!Sub` references resolve to existing logical resource IDs
 - [ ] 🚨 **`ApiEndpoint` Output is the stage root** — value matches `https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}` with **no** trailing `/tools` (or any other path). If OpenAPI `paths` start with `/tools/...` and `ApiEndpoint` also ends in `/tools`, the runtime URL becomes `.../tools/tools/<op>` → **403 "Missing Authentication Token"**. Report as CRITICAL.
 
+### 4b. DynamoDB Sample Data Validation (Custom Resource seeding)
+When CloudFormation includes a sample-data seeder (Custom Resource / inline records):
+- [ ] **No NULL/None on GSI key attributes.** Every item MUST carry a non-null,
+      correctly-typed value for every attribute that is a partition/sort key of
+      the table OR any GSI. A missing/NULL GSI key attribute makes DynamoDB
+      reject the `PutItem` (ValidationException) during stack creation.
+- [ ] Decimal/number fields are strings (DynamoDB has no float type) where the schema expects `N` as string.
+- [ ] Date/time sample values are **realistic and current-relative** (not hardcoded past years like 2023 when "upcoming reservation" is implied). Future-dated records should be in the future relative to a recent date.
+- [ ] Sample data field names are camelCase and match the spec/Lambda exactly.
+- [ ] Records cover the GSI query paths the Lambdas exercise (e.g. a status value the Lambda filters on).
+
 ### 5. Contact Flow Validation
 - [ ] All Actions have `Metadata` with position
 - [ ] All Transitions reference valid action IDs
@@ -273,6 +312,30 @@ A common source of **403 errors at runtime** is when the API Gateway PathPart (f
 - [ ] Disconnect block at end of each path
 - [ ] DTMF blocks (if present) match spec's `dtmf_fields` configuration
 - [ ] Queue names are consistent with session flow config
+- [ ] **Requested flow behaviors are actually present.** If the interview/spec
+      asked for callback, transfer-to-another-queue, or business-hours
+      branching, the corresponding blocks MUST exist in the flow
+      (`UpdateContactCallbackNumber`+`TransferContactToQueue`,
+      `UpdateContactTargetQueue`+`TransferContactToQueue`,
+      `CheckHoursOfOperation`). A requested behavior missing from the flow is a ❌.
+
+### 5b. Native-Tool Misuse (Connect AI Agent "Return to Control")
+Amazon Connect AI Agents have NATIVE FAQ retrieval (Retrieve) and agent
+escalation/end-call (Return to Control: Complete / Escalate). Generating a
+separate Lambda/API for these is wasteful and usually wrong.
+- [ ] ❌ Flag any Lambda/OpenAPI operation whose sole purpose is FAQ/knowledge
+      retrieval (unless the interview explicitly required querying an EXTERNAL
+      corporate document API). Native Retrieve should be used instead.
+- [ ] ❌ Flag any Lambda/OpenAPI operation whose sole purpose is "transfer to
+      agent" / "escalate" / "end call". That is native Return-to-Control, not a tool.
+
+### 4c. Lint-gate cross-check (defense in depth)
+The merge step now runs cfn-lint (CloudFormation) and OpenAPI 3.0 validation
+with auto-fix. As a backstop, if you spot any of these, report as ❌ Critical:
+- [ ] `!Sub` / intrinsic function used in a literal-only field (template
+      `Description`, etc.) — cfn-lint E1004/E1029.
+- [ ] OpenAPI operation with no `responses` block, or `null` where a string/object is required.
+- [ ] `type: array` without `items`, or `type: "null"` (invalid in OpenAPI 3.0).
 
 ### 6. Prompt Template Validation
 - [ ] Every tool name referenced in the prompt matches an `x-amazon-connect-tool-name` in OpenAPI
@@ -412,6 +475,12 @@ If you encounter any of these, skip them silently. Do NOT mention them in the re
 - ✅ CloudFormation MUST have `UpdateQSessionFunction` + `UpdateQSessionRole` + `UpdateQSessionConnectPermission` (Principal: connect.amazonaws.com)
 - ✅ Contact Flow chain order: `customer-lookup` (InvokeLambdaFunction) → `set-customer-attrs` (UpdateContactAttributes) → `update-q-session` (InvokeLambdaFunction) → Lex Bot
 - ✅ `customerLookup` Lambda returns STRING_MAP (not JSON) — Contact Flow direct invocation format
+- ❌ **If CustomerLookupFunction exists in CloudFormation, a REAL handler must exist
+  at `lambda/customer_lookup/index.py` (generated by lambda_generator).** Flag as
+  CRITICAL if the CFN `CustomerLookupFunction` has real business logic inlined in
+  its `ZipFile` (beyond a 501 placeholder) AND/OR there is no separate
+  `lambda/customer_lookup/index.py` asset — the real code must be the uploadable
+  Lambda asset, not embedded in the template.
 - ✅ `update-q-session` Lambda has IAM for `wisdom:UpdateSessionData` + `connect:DescribeContact`
 - ❌ IAM Statement.Action MUST NOT contain any `qconnect:*` entries — that namespace does not exist in IAM and causes AccessDenied
 
