@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**Turn a ~1-hour AI conversation into a fully customized Amazon Connect PoC** · powered by Bedrock **Claude Opus 4.6**
+**Turn a ~1-hour AI conversation into a fully customized Amazon Connect PoC** · powered by Amazon Bedrock and Strands SDK 
 
 [![AWS CDK](https://img.shields.io/badge/AWS%20CDK-2.x-orange?style=flat&logo=amazonaws)](https://aws.amazon.com/cdk/)
 [![React](https://img.shields.io/badge/React-18.3-blue?style=flat&logo=react)](https://reactjs.org/)
