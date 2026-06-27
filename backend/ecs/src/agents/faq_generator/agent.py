@@ -639,7 +639,7 @@ Cover these topics:
             resolve_model_id(override_env="FAQ_MODEL_ID"),
             region_name=region,
             # temperature omitted (None) — only applied on models that accept it
-            max_tokens=64000,
+            max_tokens=128000,  # Bedrock Opus-4.x output ceiling; streaming avoids HTTP timeout
             streaming=True,
             # cache_prompt removed - using cachePoint in system_prompt instead
             cache_tools="default",   # Cache tool definitions

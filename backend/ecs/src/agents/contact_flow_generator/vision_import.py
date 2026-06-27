@@ -101,7 +101,7 @@ def draft_flow_from_image(
         model = BedrockModel(**build_model_kwargs(
             model_id,
             temperature=0,  # deterministic transcription (dropped for 4.7/4.8)
-            max_tokens=64000,
+            max_tokens=128000,  # Bedrock Opus-4.x output ceiling (transcription output is naturally far smaller)
             boto_client_config=BotocoreConfig(read_timeout=300),
         ))
         agent = Agent(model=model, system_prompt=VISION_IMPORT_SYSTEM_PROMPT)
