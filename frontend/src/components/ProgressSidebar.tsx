@@ -623,7 +623,8 @@ function NoteSection({ icon, title, defaultOpen = true, variant, children }: {
   );
 }
 
-const WORKSHOP_URL = 'https://sukwonie.gitbook.io/amazon-connect-aicc-builder-agent-workshop/gWzCDnQYz8mQUQ0GtYa4/';
+// Official AWS workshop guide (Workshop Studio catalog).
+const WORKSHOP_URL = 'https://catalog.us-east-1.prod.workshops.aws/workshops/bffd236b-ce54-48f8-b3fa-c4acd4909053';
 
 /**
  * Notes Tab Content
