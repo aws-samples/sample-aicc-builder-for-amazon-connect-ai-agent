@@ -1,6 +1,7 @@
 # Security Scan 분석 결과
 
-> 분석일: 2026-03-26
+> 분석일: 2026-03-26 (초기 스캔)
+> 최종 갱신: 2026-06-27 — v2.2 기준 대부분 항목 조치 완료 (아래 상태 참조)
 > 스캐너: ACAT, Bandit
 
 ---
@@ -9,64 +10,20 @@
 
 | # | 파일 | 룰 | 심각도 | 판정 | 조치 |
 |---|---|---|---|---|---|
-| 1 | `frontend/src/components/MermaidDiagram.tsx` | dangerouslySetInnerHTML | High | 완화 필요 | securityLevel 변경 + DOMPurify 추가 |
-| 2 | `backend/src/tools/lambda_generator.py` (x3) | Bandit B608 | Medium | **오탐 (False Positive)** | `# nosec B608` 주석 추가 |
-| 3 | `infrastructure/lib/aicc-builder-stack.ts` (x2) | SecureCdkBsc17 | Low | 수정 필요 | `enforceSSL: true` 추가 |
-| 4 | `infrastructure/lib/knowledge-base-stack.ts` | SecureCdkBsc17 | Low | 수정 필요 | `enforceSSL: true` 추가 |
+| 1 | ~~`frontend/src/components/MermaidDiagram.tsx`~~ | dangerouslySetInnerHTML | High | **해소됨 (v2.2)** | mermaid 렌더링 제거 — Contact Flow 다이어그램이 검증된 JSON에서 파생되는 React Flow 그래프(`FlowDiagram.tsx`)로 대체되어 컴포넌트·`mermaid` 의존성·`dangerouslySetInnerHTML`이 모두 삭제됨 |
+| 2 | `backend/ecs/src/tools/lambda_generator.py` (x3) | Bandit B608 | Medium | **오탐 (False Positive)** | ✅ 조치 완료 — `# nosec B608` 주석 추가됨 (Line 429, 548, 590) |
+| 3 | `infrastructure/lib/aicc-builder-stack.ts` (x2) | SecureCdkBsc17 | Low | ✅ 조치 완료 | `enforceSSL: true` 적용됨 |
+| 4 | `infrastructure/lib/knowledge-base-stack.ts` | SecureCdkBsc17 | Low | ✅ 조치 완료 | `enforceSSL: true` 적용됨 |
 | 5 | `infrastructure/lib/knowledge-base-stack.ts` | SecureCdkBsc43 | Low | 무시 가능 | PoC 용도로 access logging 불필요 |
-| 6 | `infrastructure/dist/*.js` (x2) | SecureCdkBsc17 | Low | 무시 | 컴파일 결과물, 소스(.ts) 수정 시 자동 해결 |
+| 6 | `infrastructure/dist/*.js` (x2) | SecureCdkBsc17 | Low | ✅ 해소됨 | 소스(.ts)에 `enforceSSL: true` 추가 후 재빌드되어 `dist/*.js`에도 반영됨 |
 
 ---
 
 ## 수정 필요 항목
 
-### 1. MermaidDiagram.tsx — dangerouslySetInnerHTML (High)
+### 1. MermaidDiagram.tsx — dangerouslySetInnerHTML (High) — ✅ 해소됨 (v2.2)
 
-**파일:** `frontend/src/components/MermaidDiagram.tsx`
-
-**현재 상태:**
-- `mermaid.initialize()`에서 `securityLevel: 'loose'`로 설정되어 있어 mermaid 라벨 내 HTML/script 삽입 가능
-- mermaid.render()가 반환한 SVG 문자열을 sanitize 없이 `dangerouslySetInnerHTML`로 주입
-
-**위험:**
-- `chart` prop은 LLM이 생성한 mermaid 코드에서 오는데, `securityLevel: 'loose'`일 때 mermaid가 라벨 안의 HTML 태그를 그대로 렌더링함
-- 악의적인 mermaid 코드가 주입될 경우 XSS 가능성 존재
-
-**수정 방법:**
-
-(1) mermaid securityLevel을 `strict`으로 변경:
-
-```tsx
-// frontend/src/components/MermaidDiagram.tsx (Line 17)
-
-// Before
-securityLevel: 'loose',
-
-// After
-securityLevel: 'strict',
-```
-
-(2) DOMPurify 패키지 설치:
-
-```bash
-cd frontend
-npm install dompurify
-npm install -D @types/dompurify
-```
-
-(3) SVG sanitize 적용:
-
-```tsx
-// frontend/src/components/MermaidDiagram.tsx
-
-import DOMPurify from 'dompurify';
-
-// mermaid.render() 호출 후 (Line 143 부근)
-const { svg: renderedSvg } = await mermaid.render(id, cleanChart);
-setSvg(DOMPurify.sanitize(renderedSvg, { USE_PROFILES: { svg: true, svgFilters: true } }));
-```
-
-**참고:** `dangerouslySetInnerHTML` 자체는 mermaid.js가 SVG를 문자열로 반환하는 구조상 제거할 수 없으므로, scanner warning은 남을 수 있다. 위 조치로 실질적 XSS 위험은 해소된다.
+**상태:** ✅ 해소됨 — v2.2에서 mermaid 렌더링이 완전히 제거되었습니다. Contact Flow 다이어그램은 이제 검증된 Connect JSON에서 파생되는 React Flow 그래프(`frontend/src/components/FlowDiagram.tsx`, `frontend/src/lib/contactFlowGraph.ts`)로 렌더링됩니다. `MermaidDiagram.tsx` 컴포넌트, `mermaid` 의존성, `dangerouslySetInnerHTML` / `securityLevel` 사용이 모두 삭제되어 이 XSS 위험은 더 이상 존재하지 않습니다.
 
 ---
 
@@ -74,15 +31,15 @@ setSvg(DOMPurify.sanitize(renderedSvg, { USE_PROFILES: { svg: true, svgFilters: 
 
 **파일:** `infrastructure/lib/aicc-builder-stack.ts`, `infrastructure/lib/knowledge-base-stack.ts`
 
-**현재 상태:** S3 버킷 3개에 `enforceSSL` 옵션이 없어 HTTP 평문 접근이 가능
+**상태:** ✅ 조치 완료 — 3개 버킷 모두 `enforceSSL: true` 설정됨.
 
 **대상 버킷:**
 
 | 버킷 | 파일 | 위치 |
 |---|---|---|
-| `AssetsBucket` | `aicc-builder-stack.ts` | Line 137 |
-| `FrontendBucket` | `aicc-builder-stack.ts` | Line 1091 |
-| `KnowledgeBaseDocsBucket` | `knowledge-base-stack.ts` | Line 24 |
+| `AssetsBucket` | `aicc-builder-stack.ts` | Line 136 |
+| `FrontendBucket` | `aicc-builder-stack.ts` | Line 1092 |
+| `KnowledgeBaseDocsBucket` | `knowledge-base-stack.ts` | Line 50 |
 
 **수정 방법:** 각 `new s3.Bucket()` 호출에 `enforceSSL: true` 추가:
 
@@ -114,7 +71,7 @@ const docsBucket = new s3.Bucket(this, "KnowledgeBaseDocsBucket", {
 
 ### 3. lambda_generator.py — Bandit B608: SQL injection (Medium, Confidence: Low)
 
-**파일:** `backend/src/tools/lambda_generator.py` (Line 429, 548, 590)
+**파일:** `backend/ecs/src/tools/lambda_generator.py` (Line 429, 548, 590)
 
 **스캐너 판단:** f-string 안에 SQL 키워드(`INSERT INTO`, `SELECT`, `UPDATE`)가 포함되어 있어 SQL injection 가능성 경고
 
@@ -129,7 +86,7 @@ const docsBucket = new s3.Bucket(this, "KnowledgeBaseDocsBucket", {
 
 Bandit B608 룰은 "f-string에 SQL 패턴이 있으면 경고"하는 단순 패턴 매칭이므로, 코드 생성(code generation) 컨텍스트를 구분하지 못한다.
 
-**조치:** 해당 라인에 `# nosec B608` 주석을 추가하여 suppress:
+**조치:** ✅ 조치 완료 — 해당 라인(429, 548, 590)에 `# nosec B608` 주석이 추가되어 suppress됨:
 
 ```python
 # Line 429
@@ -167,6 +124,4 @@ Bandit B608 룰은 "f-string에 SQL 패턴이 있으면 경고"하는 단순 패
 
 **파일:** `infrastructure/dist/aicc-builder-stack.js`, `infrastructure/dist/knowledge-base-stack.js`
 
-**무시 사유:**
-
-`dist/` 디렉토리는 TypeScript 소스의 컴파일 결과물이다. 소스 파일(`.ts`)에서 `enforceSSL: true`를 추가한 후 재빌드하면 자동으로 해결되므로, `dist/` 파일을 직접 수정할 필요 없음.
+**상태:** ✅ 해소됨 — 소스(`.ts`)에 `enforceSSL: true` 추가 후 재빌드되어 `dist/*.js`에도 반영됨 (`enforceSSL` 포함 확인). `dist/` 파일을 직접 수정할 필요 없음.

@@ -61,7 +61,7 @@ AICC Builder의 ECS Fargate 컨테이너는 **AWS S3 Files** 서비스를 통해
 
 ### 1. IAM Role 설정 (CDK)
 
-**파일:** `infrastructure/lib/ecs-stack.ts:214-294`
+**파일:** `infrastructure/lib/ecs-stack.ts:411-454`
 
 S3 Files 서비스가 S3 버킷에 접근하기 위한 IAM Role을 생성합니다. `elasticfilesystem.amazonaws.com` 서비스 프린시펄이 이 역할을 assume합니다.
 
@@ -97,7 +97,7 @@ s3FilesRole.addToPolicy(new iam.PolicyStatement({
 **ECS Task Role에는 S3 Files 클라이언트 권한이 별도로 부여됩니다:**
 
 ```typescript
-// infrastructure/lib/ecs-stack.ts:123-126
+// infrastructure/lib/ecs-stack.ts:148-150
 taskRole.addManagedPolicy(
   iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonS3FilesClientFullAccess")
 );
@@ -109,12 +109,12 @@ taskRole.addManagedPolicy(
 
 ### 2. ECS Task Definition (CDK)
 
-**파일:** `infrastructure/lib/ecs-stack.ts:299-341`
+**파일:** `infrastructure/lib/ecs-stack.ts:264-316`
 
 ```typescript
 const taskDefinition = new ecs.FargateTaskDefinition(this, "TaskDef", {
-  memoryLimitMiB: 4096,
-  cpu: 2048,
+  memoryLimitMiB: 16384,
+  cpu: 4096,
   runtimePlatform: {
     cpuArchitecture: ecs.CpuArchitecture.ARM64,
     operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
@@ -133,19 +133,19 @@ const appContainer = taskDefinition.addContainer("app", {
 > **주의:** CDK L2 construct는 아직 `s3filesVolumeConfiguration`을 지원하지 않습니다.
 > 따라서 볼륨/마운트포인트 설정은 deploy.sh에서 AWS CLI로 패치합니다.
 
-### 3. 배포 스크립트 — deploy.sh 전체 파이프라인
+### 3. S3 Files 리소스는 CDK가 생성 — deploy.sh는 런타임 env var만 패치
 
-**파일:** `deploy.sh`
+**파일:** `infrastructure/lib/ecs-stack.ts`, `deploy.sh`
 
-S3 Files 리소스는 CDK가 아닌 **deploy.sh에서 AWS CLI로 직접 생성**합니다.
-CDK L2 construct가 `s3filesVolumeConfiguration`을 아직 지원하지 않기 때문입니다.
+S3 Files FileSystem, Mount Target, 그리고 Task Definition 볼륨/마운트포인트는 모두 CDK(`infrastructure/lib/ecs-stack.ts`)에서 L1 CfnResource(`AWS::S3Files::FileSystem` / `AWS::S3Files::MountTarget`)로 생성됩니다. CDK L2 construct가 아직 이 필드를 지원하지 않아 L1으로 직접 작성합니다.
+deploy.sh는 CDK 배포 후 Task Definition에 런타임 환경변수(ASSETS_BUCKET_NAME, USER_POOL_ID, USER_POOL_CLIENT_ID, CONTACT_FLOW_KB_ID, AGENTCORE_GATEWAY_URL, AGENTCORE_GATEWAY_REGION)만 패치한 뒤 ECS 서비스를 강제 재배포합니다 (deploy.sh:665-738).
 
 #### 전체 배포 순서 (S3 Files 관련만)
 
 ```
 deploy.sh 실행
 │
-├─ [사전 검증] AWS CLI 버전 >= 2.34.27 확인     ← deploy.sh:192-207
+├─ [사전 검증] AWS CLI 버전 >= 2.34.27 확인     ← deploy.sh:212-226
 │
 ├─ Step 0.5: ECR 리포지토리 생성 + Docker 이미지 빌드/푸시  ← deploy.sh:366-449
 │   ├─ ECR 리포지토리 생성 (없으면)
@@ -156,6 +156,9 @@ deploy.sh 실행
 ├─ Step 1: CDK 배포                              ← deploy.sh:454-491
 │   ├─ S3FilesRole (IAM) 생성
 │   ├─ TaskRole + AmazonS3FilesClientFullAccess 부여
+│   ├─ S3 Files FileSystem 생성 (AWS::S3Files::FileSystem)
+│   ├─ Mount Target 생성 (서브넷별, AWS::S3Files::MountTarget)
+│   ├─ Task Definition에 s3files 볼륨 + /mnt/s3 마운트포인트 주입
 │   ├─ ECS Cluster, Service, Task Definition 생성
 │   ├─ VPC + Private Subnets 생성
 │   └─ CDK Outputs → cdk-outputs.json 으로 내보내기
@@ -164,30 +167,22 @@ deploy.sh 실행
 │       ├─ EcsSecurityGroupId
 │       └─ TaskDefinitionArn
 │
-├─ Step 3: ECS 백엔드 구성 (Post-CDK)            ← deploy.sh:534-746
-│   │
-│   ├─ 3.1a) S3 Files FileSystem 생성            ← deploy.sh:571-597
-│   ├─ 3.1b) Mount Target 생성 (서브넷별)         ← deploy.sh:599-651
-│   ├─ 3.1c) Task Definition 패치                ← deploy.sh:653-726
-│   └─ ECS Service force-new-deployment           ← deploy.sh:728-737
+├─ Step 3: Task Definition 런타임 env var 패치 + ECS force-new-deployment   ← deploy.sh:665-738
 │
 └─ 완료
 ```
 
 #### 사전 검증: AWS CLI 버전 체크
 
-**`deploy.sh:192-207`** — `aws s3files` 명령은 AWS CLI 2.34.27에서 추가되었습니다.
+**`deploy.sh:212-226`** — `aws s3files` 명령은 AWS CLI 2.34.27에서 추가되었습니다. 이 검증은 모드와 무관하게 항상 실행됩니다 (이 스크립트는 ECS 전용).
 
 ```bash
-# ECS 모드일 때만 CLI 버전 검증
-if [ "$DEPLOY_MODE" = "ecs" ]; then
-    CLI_VERSION=$(aws --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    # ... major.minor.patch 파싱 후 비교 ...
-    if [ 버전 < 2.34.27 ]; then
-        echo "ERROR: ECS mode requires AWS CLI >= 2.34.27"
-        echo "The 'aws s3files' commands were added in CLI 2.34.27."
-        exit 1
-    fi
+CLI_VERSION=$(aws --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+if [ "$CLI_MAJOR" -lt 2 ] || { [ "$CLI_MAJOR" -eq 2 ] && [ "$CLI_MINOR" -lt 34 ]; } || \
+   { [ "$CLI_MAJOR" -eq 2 ] && [ "$CLI_MINOR" -eq 34 ] && [ "$CLI_PATCH" -lt 27 ]; }; then
+    echo "ERROR: AWS CLI >= 2.34.27 required (current: $CLI_VERSION)"
+    echo "The 'aws s3files' commands were added in CLI 2.34.27."
+    exit 1
 fi
 ```
 
@@ -233,173 +228,55 @@ ECS_SG_ID=$(jq -r '.AiccBuilderEcs.EcsSecurityGroupId' "$CDK_OUTPUTS_FILE")
 TASK_DEF_ARN=$(jq -r '.AiccBuilderEcs.TaskDefinitionArn' "$CDK_OUTPUTS_FILE")
 ```
 
-#### Step 3.1a: S3 Files FileSystem 생성
+#### CDK가 생성하는 S3 Files 리소스 (L1 CfnResource)
 
-**`deploy.sh:571-597`** — S3 버킷을 NFS로 노출하는 파일시스템을 생성합니다.
+**`infrastructure/lib/ecs-stack.ts:456-509`** — CDK L2 construct가 아직 `s3filesVolumeConfiguration`을 지원하지 않으므로, S3 Files FileSystem / Mount Target / Task Definition 볼륨·마운트포인트를 L1 `CfnResource`로 직접 작성합니다.
 
-```bash
-ASSETS_BUCKET_ARN="arn:aws:s3:::${ASSETS_BUCKET_NAME}"
+```typescript
+// S3 Files FileSystem (AWS::S3Files::FileSystem) — S3 버킷을 NFS로 노출, 버킷과 1:1 매핑
+const fileSystem = new cdk.CfnResource(this, "S3FilesFileSystem", {
+  type: "AWS::S3Files::FileSystem",
+  properties: { /* Bucket ARN, RoleArn(S3FilesRole) */ },
+});
 
-# 기존 파일시스템 확인 (멱등성)
-EXISTING_FS=$(aws s3files list-file-systems --region "$AWS_DEFAULT_REGION" \
-    | jq -r --arg b "$ASSETS_BUCKET_ARN" \
-      '.fileSystems[] | select(.bucket == $b) | .fileSystemId' | head -1)
+// Mount Target (AWS::S3Files::MountTarget) — 프라이빗 서브넷마다 1개씩 (VPC maxAzs:2 → 보통 2개)
+vpc.privateSubnets.forEach((subnet, i) => {
+  new cdk.CfnResource(this, `S3FilesMountTarget${i}`, {
+    type: "AWS::S3Files::MountTarget",
+    properties: { /* FileSystemId, SubnetId, SecurityGroups(EcsSG) */ },
+  });
+});
 
-if [ -n "$EXISTING_FS" ]; then
-    S3FILES_FS_ID="$EXISTING_FS"
-    echo "S3 Files filesystem exists: $S3FILES_FS_ID"
-else
-    # 새 파일시스템 생성
-    FS_OUTPUT=$(aws s3files create-file-system \
-        --bucket "$ASSETS_BUCKET_ARN" \        # 마운트할 S3 버킷
-        --role-arn "$S3FILES_ROLE_ARN" \        # S3 Files 서비스가 사용할 IAM Role
-        --region "$AWS_DEFAULT_REGION")
-    S3FILES_FS_ID=$(echo "$FS_OUTPUT" | jq -r '.fileSystemId')
-fi
+// Task Definition에 s3files 볼륨 + /mnt/s3 마운트포인트 주입 (CfnTaskDefinition L1 override)
+cfnTaskDef.volumes = [{
+  name: "s3files",
+  configuredAtLaunch: false,
+  s3filesVolumeConfiguration: { fileSystemArn: fileSystem.ref, rootDirectory: "/" },
+}];
+cfnTaskDef.addPropertyOverride("ContainerDefinitions.0.MountPoints", [{
+  SourceVolume: "s3files", ContainerPath: "/mnt/s3", ReadOnly: false,
+}]);
 ```
 
-> 생성되는 리소스: `arn:aws:s3files:{region}:{account}:file-system/{fs-id}`
-> 이 파일시스템은 지정된 S3 버킷과 1:1로 매핑됩니다.
+> 생성되는 리소스: `arn:aws:s3files:{region}:{account}:file-system/{fs-id}` (S3 버킷과 1:1 매핑).
+> Mount Target은 ENI(네트워크 인터페이스)로서 각 프라이빗 서브넷에 배치되며, ECS 태스크의 NFS 트래픽을 같은 서브넷/AZ의 Mount Target으로 라우팅합니다. 따라서 태스크가 배치될 수 있는 모든 서브넷에 Mount Target이 필요합니다.
 
-#### Step 3.1b: Mount Target 생성 (서브넷별)
+#### Step 3: deploy.sh — 런타임 env var 패치 + 강제 재배포
 
-**`deploy.sh:599-651`** — 각 프라이빗 서브넷에 ENI(네트워크 인터페이스)를 배치합니다.
-ECS 태스크가 NFS 트래픽을 이 ENI를 통해 S3 Files 서비스로 보냅니다.
-
-```bash
-IFS=',' read -ra SUBNETS <<< "$PRIVATE_SUBNET_IDS"
-for SUBNET_ID in "${SUBNETS[@]}"; do
-    # 서브넷별 기존 마운트 타겟 확인 (멱등성)
-    EXISTING_MT=$(aws s3files list-mount-targets \
-        --file-system-id "$S3FILES_FS_ID" \
-        --region "$AWS_DEFAULT_REGION" \
-        | jq -r --arg sid "$SUBNET_ID" \
-          '.mountTargets[] | select(.subnetId == $sid) | .mountTargetId' | head -1)
-
-    if [ -z "$EXISTING_MT" ]; then
-        aws s3files create-mount-target \
-            --file-system-id "$S3FILES_FS_ID" \
-            --subnet-id "$SUBNET_ID" \           # 배치할 서브넷
-            --security-groups "$ECS_SG_ID" \     # ECS와 동일한 보안그룹
-            --region "$AWS_DEFAULT_REGION"
-    fi
-done
-
-# Mount Target이 available이 될 때까지 폴링 (최대 ~5분)
-for i in $(seq 1 30); do
-    ALL_AVAILABLE=true
-    MT_STATUS=$(aws s3files list-mount-targets \
-        --file-system-id "$S3FILES_FS_ID" \
-        | jq -r '.mountTargets[].status')
-    for STATUS in $MT_STATUS; do
-        if [ "$STATUS" != "available" ]; then ALL_AVAILABLE=false; break; fi
-    done
-    if [ "$ALL_AVAILABLE" = true ]; then echo "All mount targets available"; break; fi
-    sleep 10
-done
-```
-
-> **왜 서브넷마다 Mount Target이 필요한가?**
-> ECS Fargate 태스크는 VPC 내 프라이빗 서브넷에서 실행됩니다.
-> NFS 트래픽은 같은 서브넷(또는 같은 AZ) 내의 Mount Target ENI로 라우팅되므로,
-> 태스크가 배치될 수 있는 모든 서브넷에 Mount Target을 만들어야 합니다.
-
-#### Step 3.1c: Task Definition 패치 — S3 Files Volume 주입
-
-**`deploy.sh:653-726`** — CDK가 생성한 Task Definition에 S3 Files 볼륨과 마운트포인트를 주입합니다.
-CDK L2가 이 필드를 지원하지 않으므로 jq로 JSON을 직접 조작합니다.
+**`deploy.sh:665-738`** — CDK 배포 후 확정되는 값(버킷명, Cognito User Pool 등)을 Task Definition의 컨테이너 환경변수로 패치한 뒤, ECS 서비스를 강제 재배포합니다. **볼륨/마운트포인트는 이미 CDK가 주입했으므로 deploy.sh는 손대지 않습니다.**
 
 ```bash
-TASK_DEF_FAMILY=$(echo "$TASK_DEF_ARN" | sed 's|.*/||' | sed 's|:[0-9]*$||')
-S3FILES_FS_ARN="arn:aws:s3files:${AWS_DEFAULT_REGION}:${ACCOUNT_ID}:file-system/${S3FILES_FS_ID}"
-
-# 이미 볼륨이 설정되어 있는지 확인
-EXISTING_VOLUMES=$(aws ecs describe-task-definition --task-definition "$TASK_DEF_FAMILY" \
-    --query 'taskDefinition.volumes[?name==`s3files`].name' --output text)
-
-# jq 필터로 Task Definition JSON 패치
-JQ_FILTER='.taskDefinition
-    | del(.taskDefinitionArn, .revision, .status, .registeredAt, .registeredBy,
-          .compatibilities, .requiresAttributes)'
-
-if [ "$EXISTING_VOLUMES" != "s3files" ]; then
-    JQ_FILTER="${JQ_FILTER}
-        # ── S3 Files 볼륨 추가 ──
-        | .volumes += [{
-            \"name\": \"s3files\",
-            \"configuredAtLaunch\": false,
-            \"s3filesVolumeConfiguration\": {
-                \"fileSystemArn\": \$fs_arn,
-                \"rootDirectory\": \"/\"
-            }
-          }]
-        # ── 컨테이너 마운트포인트 추가 ──
-        | .containerDefinitions[0].mountPoints += [{
-            \"sourceVolume\": \"s3files\",
-            \"containerPath\": \"/mnt/s3\",
-            \"readOnly\": false
-          }]"
-fi
-
-# 런타임 환경변수도 함께 주입 (CDK 배포 후 확정되는 값들)
-JQ_FILTER="${JQ_FILTER}
-    | .containerDefinitions[0].environment = (
-        [기존 env에서 덮어쓸 키 제외]
-        + [{\"name\":\"ASSETS_BUCKET_NAME\", \"value\":\$bucket},
-           {\"name\":\"USER_POOL_ID\",       \"value\":\$pool},
-           {\"name\":\"USER_POOL_CLIENT_ID\", \"value\":\$poolclient},
-           {\"name\":\"CONTACT_FLOW_KB_ID\",  \"value\":\$kbid},
-           {\"name\":\"AGENTCORE_GATEWAY_URL\", \"value\":\$gateway}]
-      )"
-
-# 현재 Task Def 읽기 → 패치 → 새 리비전 등록
+# 현재 Task Def 읽기 → 런타임 env var만 jq로 패치 → 새 리비전 등록
 aws ecs describe-task-definition --task-definition "$TASK_DEF_FAMILY" \
-    | jq --arg fs_arn "$S3FILES_FS_ARN" \
-         --arg bucket "$ASSETS_BUCKET_NAME" \
+    | jq --arg bucket "$ASSETS_BUCKET_NAME" \
          --arg pool "$USER_POOL_ID" \
          --arg poolclient "$USER_POOL_CLIENT_ID" \
          --arg kbid "$CONTACT_FLOW_KB_ID" \
          --arg gateway "$AGENTCORE_GATEWAY_URL" \
          "$JQ_FILTER" > /tmp/patched-task-def.json
-
-# 패치된 Task Definition을 새 리비전으로 등록
 aws ecs register-task-definition --cli-input-json file:///tmp/patched-task-def.json
-```
 
-> **패치 결과 Task Definition JSON 구조:**
-> ```json
-> {
->   "family": "AiccBuilderEcs-TaskDef",
->   "volumes": [{
->     "name": "s3files",
->     "configuredAtLaunch": false,
->     "s3filesVolumeConfiguration": {
->       "fileSystemArn": "arn:aws:s3files:ap-northeast-2:123456789:file-system/fs-abc123",
->       "rootDirectory": "/"
->     }
->   }],
->   "containerDefinitions": [{
->     "name": "app",
->     "mountPoints": [{
->       "sourceVolume": "s3files",
->       "containerPath": "/mnt/s3",
->       "readOnly": false
->     }],
->     "environment": [
->       {"name": "S3FILES_MOUNT_PATH", "value": "/mnt/s3"},
->       {"name": "SESSION_STORE_BACKEND", "value": "s3files"},
->       {"name": "ASSETS_BUCKET_NAME", "value": "aiccbuilder-assets-xxx"},
->       ...
->     ]
->   }]
-> }
-> ```
-
-#### 최종: ECS Service 강제 재배포
-
-**`deploy.sh:728-737`** — 새 Task Definition 리비전을 적용하기 위해 서비스를 강제 재배포합니다.
-
-```bash
+# 새 리비전을 적용하기 위해 서비스 강제 재배포
 aws ecs update-service \
     --cluster "$ECS_CLUSTER_NAME" \
     --service "$ECS_SERVICE_NAME" \
@@ -418,23 +295,20 @@ deploy.sh가 생성하는 리소스 (CDK 외부):
 ┌─────────────────────────────────────────────────────────┐
 │ 리소스                    │ AWS API               │ 수량 │
 ├─────────────────────────────────────────────────────────┤
-│ S3 Files FileSystem       │ aws s3files            │ 1개  │
-│  └─ S3 버킷과 1:1 매핑                                   │
-│                                                         │
-│ S3 Files Mount Target     │ aws s3files            │ N개  │
-│  └─ 프라이빗 서브넷 수만큼 (보통 2~3개)                     │
-│                                                         │
-│ ECS Task Definition Rev.  │ aws ecs                │ 1개  │
-│  └─ 기존 CDK Task Def에 볼륨/마운트/환경변수 패치            │
+│ ECS Task Definition Rev.  │ aws ecs (런타임 env var 패치) │ 1개  │
+│  └─ CDK Task Def에 런타임 환경변수만 패치 후 새 리비전 등록    │
 └─────────────────────────────────────────────────────────┘
 
 CDK가 생성하는 리소스 (infrastructure/lib/ecs-stack.ts):
 ┌─────────────────────────────────────────────────────────┐
 │ S3FilesRole (IAM Role)    │ elasticfilesystem 용    │ 1개 │
 │ TaskRole (IAM Role)       │ S3FilesClientFullAccess │ 1개 │
+│ S3 Files FileSystem       │ AWS::S3Files::FileSystem │ 1개 │
+│ S3 Files Mount Target     │ AWS::S3Files::MountTarget (프라이빗 서브넷당, 보통 2개) │ N개 │
 │ ECS Cluster               │                        │ 1개 │
 │ ECS Service               │                        │ 1개 │
-│ ECS Task Definition       │ 초기 버전 (볼륨 없음)     │ 1개 │
+│ ECS Task Definition       │ s3files 볼륨 + /mnt/s3 마운트 포함 │ 1개 │
+│ X-Ray daemon sidecar 컨테이너 │ 관측성              │ 1개 │
 │ VPC + Private Subnets     │                        │ 1개 │
 │ ALB + Target Group        │                        │ 1개 │
 │ Security Group            │ NFS 포트 2049 허용       │ 1개 │
@@ -542,6 +416,7 @@ AI 에이전트(Strands Agent)가 세션 워크스페이스 내 파일을 직접
 | `read_workspace_file` | session_id, path | 파일 읽기 (UTF-8) | `{content, size, summary}` |
 | `write_workspace_file` | session_id, path, content | 원자적 파일 쓰기 (tmp + rename) | `{path, size, summary}` |
 | `append_workspace_file` | session_id, path, content | 파일에 내용 추가 | `{path, new_size, summary}` |
+| `copy_workspace_file` | session_id, src, dst | 워크스페이스 내 파일 복사 | `{src, dst, size, summary}` |
 | `list_workspace_dir` | session_id, path | 디렉터리 목록 조회 | `{entries, count, summary}` |
 | `patch_workspace_file` | session_id, path, search, replace | 텍스트 찾기/바꾸기 (전체 치환) | `{replacements_made, changed_lines, summary}` |
 | `find_workspace_files` | session_id, pattern, path | glob 패턴으로 파일 검색 (최대 200개) | `{matches, count, summary}` |
@@ -587,27 +462,17 @@ NFS 위에서 파일 손상을 방지하기 위해, 모든 쓰기 작업이 `tem
 ```
 backend/ecs/src/tools/
 ├── __init__.py                    ← workspace_file_tools를 re-export
-├── workspace_file_tools.py        ← @tool 데코레이터로 7개 도구 정의
+├── workspace_file_tools.py        ← @tool 데코레이터로 8개 도구 정의
 └── project_workspace.py           ← @tool로 save/load_requirement_document 정의
 
 backend/ecs/app.py
-├── from tools import read_workspace_file, ...    ← Line 66-72
-├── from tools.project_workspace import save_requirement_document, ...  ← Line 74-77
+├── from tools import read_workspace_file, ...    ← Line 54-88 (워크스페이스 도구 79-87)
+├── from tools.project_workspace import save_requirement_document, ...  ← Line 89-92
 │
-└── tools = [                                     ← Line 424-461
-        ...,
-        save_requirement_document,
-        load_requirement_document,
-        read_workspace_file,
-        write_workspace_file,
-        append_workspace_file,
-        list_workspace_dir,
-        patch_workspace_file,
-        find_workspace_files,
-        grep_workspace,
-        ...,
-    ]
-    agent = Agent(model=model, system_prompt=system_prompt, tools=tools)
+└── 도구는 단계(phase)별 리스트(INTERVIEW_TOOLS Line 180+, GENERATION_TOOLS Line 214+)로 구성되고,
+    런타임에 get_tools_for_phase()로 선택됨 (Line 270+)
+        tools = get_tools_for_phase(initial_phase)                          ← Line 644
+        agent = Agent(model=model, system_prompt=system_prompt, tools=tools)  ← Line 646
 ```
 
 LLM이 tool call을 생성하면 Strands SDK가 해당 Python 함수를 직접 실행합니다.
@@ -856,7 +721,7 @@ _TEXT_EXTENSIONS = {'.py', '.ts', '.js', '.json', '.yaml', ...} # 프리뷰 대�
 ### Q: NFS를 사용할 수 없을 때는 어떻게 되나요?
 
 S3 Files가 해당 리전에서 사용 불가하거나 마운트 실패 시:
-- deploy.sh가 경고 메시지 출력: `"S3 Files not available in this region — skipping volume config"`
+- S3 Files 볼륨은 CDK가 생성하므로, 해당 리전에서 S3 Files가 미지원이면 CDK(CloudFormation) 스택 생성 단계에서 실패합니다 (deploy.sh에는 별도의 리전 가용성 분기가 없습니다).
 - 애플리케이션은 S3 API 직접 호출로 **fallback** 동작
 - `_check_nfs_available()` 함수가 매 파일 조작마다 마운트 상태 확인
 
@@ -873,10 +738,10 @@ S3 Files가 해당 리전에서 사용 불가하거나 마운트 실패 시:
 | `infrastructure/lib/ecs-stack.ts` | CDK — IAM Role, Task Definition, VPC, ALB |
 | `deploy.sh` | S3 Files 파일시스템/마운트타겟 생성, Task Def 패치 |
 | `backend/ecs/Dockerfile` | 컨테이너 이미지 — 환경변수 설정 |
-| `backend/ecs/app.py` | FastAPI 앱 — 세션 관리, WebSocket, 도구 등록 (Line 424-461) |
+| `backend/ecs/app.py` | FastAPI 앱 — 세션 관리, WebSocket, 도구 등록: phase별 리스트(INTERVIEW_TOOLS/GENERATION_TOOLS) + get_tools_for_phase(), Agent at Line 646 |
 | `backend/ecs/src/context/s3files_store.py` | 3-Tier 세션 스토어 (메모리 + NFS) |
 | `backend/ecs/src/tools/__init__.py` | 도구 모듈 re-export (workspace_file_tools 포함) |
-| `backend/ecs/src/tools/workspace_file_tools.py` | NFS 기반 워크스페이스 파일 도구 7종 |
+| `backend/ecs/src/tools/workspace_file_tools.py` | NFS 기반 워크스페이스 파일 도구 8종 |
 | `backend/ecs/src/tools/project_workspace.py` | 구조화된 프로젝트 상태 관리 (specs, requirements, NFS+S3 이중 쓰기) |
 | `backend/ecs/src/tools/streaming_callback.py` | 글로벌 스트리밍 콜백 — 도구 → WebSocket → 프론트엔드 이벤트 파이프 |
 | `backend/ecs/src/prompts/system_prompt.py` | 에이전트 시스템 프롬프트 — workspace 도구 사용 가이드 포함 |

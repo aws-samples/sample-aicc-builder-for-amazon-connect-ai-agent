@@ -8,47 +8,7 @@
 
 ## Overview
 
-AICC Builder uses a **multi-agent orchestration** pattern where a single Orchestrator agent delegates specialized tasks to 8 sub-agents. The system supports two deployment modes: **Amazon Bedrock AgentCore Runtime** (v1) and **ECS Fargate with S3 Files NFS** (v2), both communicating with the React frontend via WebSocket.
-
-### AgentCore Mode (v1)
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        CloudFront + S3                              │
-│                     React Web Application                           │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ WebSocket (SigV4 + Cognito)
-┌──────────────────────────▼──────────────────────────────────────────┐
-│                   AgentCore Runtime (MicroVM)                       │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │                    Orchestrator Agent                          │  │
-│  │  (agentcore/agent.py — Claude Opus, temp=0.7)                │  │
-│  │                                                               │  │
-│  │  Tools:  introspect_database, save/get/list_operation_spec,  │  │
-│  │          merge_infrastructure, merge_openapi,                 │  │
-│  │          validate_consistency, replace_asset_field,           │  │
-│  │          asset_lookup, stream_fallback_asset                  │  │
-│  │                                                               │  │
-│  │  Sub-Agents (as tools):                                       │  │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐│  │
-│  │  │Research  │ │FAQ       │ │Lambda    │ │OpenAPI           ││  │
-│  │  │Agent     │ │Generator │ │Generator │ │Generator         ││  │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘│  │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐│  │
-│  │  │Prompt    │ │Contact   │ │Infra     │ │Reviewer          ││  │
-│  │  │Generator │ │Flow Gen  │ │Generator │ │Agent             ││  │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘│  │
-│  └───────────────────────────────────────────────────────────────┘  │
-└────────────┬──────────────┬──────────────┬─────────────────────────┘
-             │              │              │
-      ┌──────▼──────┐ ┌────▼────┐  ┌──────▼──────┐
-      │  DynamoDB    │ │   S3    │  │(ElastiCache)│
-      │  (sessions)  │ │ (assets+│  │  (optional) │
-      └─────────────┘ │  state) │  └─────────────┘
-                       └─────────┘
-```
-
-### ECS Fargate Mode (v2)
+AICC Builder uses a **multi-agent orchestration** pattern where a single Orchestrator agent delegates specialized tasks to 8 sub-agents, deployed on **ECS Fargate with S3 Files NFS**, communicating with the React frontend via WebSocket. (The legacy AgentCore v1 runtime has been removed.)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -57,22 +17,26 @@ AICC Builder uses a **multi-agent orchestration** pattern where a single Orchest
 └──────────────────────────┬──────────────────────────────────────────┘
                            │ WebSocket (Cognito JWT)
 ┌──────────────────────────▼──────────────────────────────────────────┐
-│                   ALB (idle timeout 4h, sticky sessions)            │
+│             ALB (idle timeout 4000s/~66min, sticky sessions)        │
 └──────────────────────────┬──────────────────────────────────────────┘
 ┌──────────────────────────▼──────────────────────────────────────────┐
-│                 ECS Fargate (ARM64 Graviton, 2vCPU/4GB)            │
+│                 ECS Fargate (ARM64 Graviton, 4vCPU/16GB)           │
 │                 FastAPI + Uvicorn                                    │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │                    Orchestrator Agent                          │  │
-│  │  (ecs/app.py — Claude Opus, temp=0.7)                        │  │
+│  │  (ecs/app.py — selectable Claude Opus 4.8 default / 4.7 /     │  │
+│  │   4.6, no orchestrator temperature)                           │  │
 │  │                                                               │  │
-│  │  Tools:  (all v1 tools) + workspace file tools:              │  │
+│  │  Tools:  introspect_database, save/get/list_operation_spec,  │  │
+│  │          merge_infrastructure, merge_openapi,                 │  │
+│  │          validate_consistency, asset_lookup,                  │  │
+│  │          stream_fallback_asset + workspace file tools:        │  │
 │  │          read_workspace_file, write_workspace_file,           │  │
 │  │          patch_workspace_file, append_workspace_file,         │  │
 │  │          list_workspace_dir, find_workspace_files,            │  │
 │  │          grep_workspace                                       │  │
 │  │                                                               │  │
-│  │  Sub-Agents (as tools): (same 8 sub-agents)                  │  │
+│  │  Sub-Agents (as tools): (8 sub-agents)                       │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │  /mnt/s3/ (S3 Files NFS Mount)                               │  │
@@ -90,8 +54,8 @@ AICC Builder uses a **multi-agent orchestration** pattern where a single Orchest
                        └─────────┘  └─────────────┘
 ```
 
-**Key differences in v2:**
-- Workspace file tools (7 new tools) for direct file read/write/patch/search
+**Key capabilities:**
+- Workspace file tools (8 tools) for direct file read/write/patch/search
 - 3-tier session storage: in-memory -> NFS -> DynamoDB metadata
 - Graceful shutdown: SIGTERM flushes sessions to NFS before container exit
 - Auto-scaling on `ActiveWebSocketConnections` metric (1-10 tasks)
@@ -141,27 +105,29 @@ The Agent Pool (`src/agents/agent_pool.py`) pre-creates `Agent` instances at sta
 | prompt_generator | 0.5 | 128,000 | Creative but consistent prompts |
 | contact_flow_generator | 0.3 | 128,000 | Structured flow definitions |
 | infrastructure_generator | 0.3 | 128,000 | Deterministic CDK code |
-| interviewer | 0.7 | 4,096 | Conversational, adaptive |
 
-Models are cached by `(temperature, max_tokens)` tuple to avoid recreating identical configurations.
+Models are cached by `(model_id, temperature, max_tokens)` tuple to avoid recreating identical configurations.
 
 ---
 
 ## WebSocket Protocol
 
-The frontend connects to AgentCore Runtime via WebSocket at `/ws`. All messages are JSON.
+The frontend connects to the ECS Fargate backend (via ALB, proxied same-origin through CloudFront) over WebSocket at `/ws`. All messages are JSON.
 
 ### Client → Server
 
 | Action | Description |
 |--------|-------------|
 | `sendMessage` | Chat message (with optional `attachments[]`) |
+| `sendMessageWithAttachments` | Chat message with inline file attachments |
+| `sendMessageWithS3Attachments` | Chat message with S3-referenced attachments |
 | `uploadQuestionnaire` | Pre-filled questionnaire document |
-| `downloadTemplate` | Request questionnaire template |
+| `importAsset` | Import an existing asset into the session |
 | `getAssets` | Request generated assets |
 | `getProgress` | Request session progress |
-| `createSession` | Create new session |
-| `restoreSession` | Restore existing session by ID |
+| `createNewSession` | Create new session |
+| `injectHistory` | Inject conversation history / restore session |
+| `cancelGeneration` | Cancel in-progress generation (also `stopGeneration` / `interrupt`) |
 | `ping` | Client keepalive |
 
 ### Server → Client
@@ -300,7 +266,7 @@ assets/{session_id}/
 
 **Session lifecycle:**
 1. Frontend creates session → `session_created` event
-2. Conversation stored in AgentCore Memory
+2. Conversation history persisted to S3 Files NFS (`context/conversation_history.json`)
 3. Structured state (specs, schema, progress) persisted to S3 Project Workspace via `ProjectWorkspace` class
 4. Generated assets stored in S3 with session-scoped keys
 5. On session restore: `ProjectWorkspace.restore_all()` loads specs/schema/progress from S3, warms in-memory caches, then conversation history injected from frontend
@@ -320,7 +286,7 @@ Frontend sends "injectHistory" with conversation + originalSessionId
 
 ### 5. WebSocket Payload Defense
 
-`safe_send_json()` in `agentcore/agent.py` monitors outgoing payload size:
+`safe_send_json()` in `ecs/app.py` monitors outgoing payload size:
 
 | Threshold | Action |
 |-----------|--------|
@@ -343,47 +309,20 @@ Each generation phase runs in a **separate LLM turn** (max ~3 min each) to preve
 8. Lambda response structure (data wrapper) vs OpenAPI response schema
 9. Operation count: Lambda files == OpenAPI paths == spec count
 
-Mismatches trigger auto-fix via `replace_asset_field` (simple renames) or `modification_request` (re-generation).
+Mismatches trigger auto-fix via `patch_workspace_file` (simple renames) or `modification_request` (re-generation).
 
 ---
 
 ## Deployment Architecture
 
-### AgentCore Mode
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    CDK Stacks                                │
-│                                                              │
-│  AiccBuilderStack          RedisStack       KnowledgeBase   │
-│  ├─ Cognito User Pool      ├─ VPC           ├─ OpenSearch   │
-│  ├─ Cognito Identity Pool  ├─ ElastiCache   └─ Bedrock KB   │
-│  ├─ S3 (frontend)          └─ Security                      │
-│  ├─ S3 (assets)               Groups                        │
-│  ├─ CloudFront                                               │
-│  ├─ DynamoDB (sessions)                                      │
-│  ├─ DynamoDB (assets)                                        │
-│  └─ Lambda (REST API)                                        │
-│                                                              │
-│  AgentCore Runtime (deployed via CLI, not CDK)               │
-│  └─ MicroVM with agent code                                  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-AgentCore Runtime is deployed separately via `agentcore launch` (called by `deploy.sh`), not through CDK. It provides:
-- Up to 8-hour session lifetime (vs Lambda's 15 min)
-- MicroVM isolation per session
-- Built-in WebSocket support
-- Automatic container builds via CodeBuild
-
-### ECS Fargate Mode
+The runtime is **ECS-only** (the legacy AgentCore v1 deployment mode has been removed).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    CDK Stacks                                │
 │                                                              │
 │  EcsStack                  AiccBuilderStack  KnowledgeBase  │
-│  ├─ VPC (2 AZ, NAT)       ├─ Cognito        ├─ OpenSearch  │
+│  ├─ VPC (2 AZ, NAT)       ├─ Cognito        ├─ S3 Vectors  │
 │  ├─ ALB (4h idle,sticky)   ├─ S3 (frontend)  └─ Bedrock KB  │
 │  ├─ ECS Cluster            ├─ S3 (assets)                   │
 │  │  └─ Fargate Service     ├─ CloudFront                    │
@@ -395,10 +334,10 @@ AgentCore Runtime is deployed separately via `agentcore launch` (called by `depl
 └─────────────────────────────────────────────────────────────┘
 ```
 
-ECS Fargate mode is deployed entirely via CDK (`./deploy.sh --mode ecs`). Key infrastructure:
+The system is deployed entirely via CDK (`./deploy.sh`). Key infrastructure:
 - **VPC**: 2 AZs, 1 NAT Gateway, public/private subnets
-- **ALB**: Internet-facing, 4-hour idle timeout, sticky sessions for WebSocket
-- **Fargate Task**: 2 vCPU, 4GB RAM, ARM64 Graviton, S3 Files NFS volume at `/mnt/s3/`
+- **ALB**: Internet-facing, ~66-min (4000s, ALB max) idle timeout with 8h sticky-session cookie; WebSocket keepalive sustains longer sessions
+- **Fargate Task**: 4 vCPU, 16GB RAM, ARM64 Graviton, S3 Files NFS volume at `/mnt/s3/`
 - **CloudFront**: Routes `/ws` and `/invocations` to ALB origin, static assets to S3
 - **Auto-scaling**: Step scaling on `ActiveWebSocketConnections` (1-10 tasks)
 
@@ -408,7 +347,7 @@ ECS Fargate mode is deployed entirely via CDK (`./deploy.sh --mode ecs`). Key in
 
 ## 개요
 
-AICC Builder는 **다중 에이전트 오케스트레이션** 패턴을 사용합니다. 하나의 Orchestrator 에이전트가 8개의 전문 서브 에이전트에게 작업을 위임합니다. 시스템은 두 가지 배포 모드를 지원합니다: **Amazon Bedrock AgentCore Runtime** (v1)과 **ECS Fargate + S3 Files NFS** (v2). 두 모드 모두 React 프론트엔드와 WebSocket으로 통신합니다.
+AICC Builder는 **다중 에이전트 오케스트레이션** 패턴을 사용합니다. 하나의 Orchestrator 에이전트가 8개의 전문 서브 에이전트에게 작업을 위임합니다. 시스템은 **ECS Fargate + S3 Files NFS** 단일 런타임으로 배포되며, React 프론트엔드와 WebSocket으로 통신합니다. (레거시 AgentCore v1 런타임은 제거되었습니다.)
 
 **v2(ECS 모드)의 주요 차이:**
 - 워크스페이스 파일 도구 7종 추가 (read/write/patch/append/list/find/grep)
@@ -442,25 +381,27 @@ Agent Pool (`src/agents/agent_pool.py`)은 시작 시 `Agent` 인스턴스를 �
 | prompt_generator | 0.5 | 128,000 | 창의적이면서 일관된 프롬프트 |
 | contact_flow_generator | 0.3 | 128,000 | 구조화된 플로우 정의 |
 | infrastructure_generator | 0.3 | 128,000 | 결정적 CDK 코드 |
-| interviewer | 0.7 | 4,096 | 대화형, 적응적 |
 
 ---
 
 ## WebSocket 프로토콜
 
-프론트엔드는 AgentCore Runtime의 `/ws` 엔드포인트에 WebSocket으로 연결합니다. 모든 메시지는 JSON 형식입니다.
+프론트엔드는 ECS Fargate 백엔드(ALB, CloudFront 동일 오리진)의 `/ws` 엔드포인트에 WebSocket으로 연결합니다. 모든 메시지는 JSON 형식입니다.
 
 ### 클라이언트 → 서버
 
 | Action | 설명 |
 |--------|------|
 | `sendMessage` | 채팅 메시지 (선택적 `attachments[]` 포함) |
+| `sendMessageWithAttachments` | 인라인 파일 첨부가 포함된 채팅 메시지 |
+| `sendMessageWithS3Attachments` | S3 참조 첨부가 포함된 채팅 메시지 |
 | `uploadQuestionnaire` | 사전 작성된 설문지 문서 |
-| `downloadTemplate` | 설문지 템플릿 요청 |
+| `importAsset` | 기존 에셋을 세션으로 가져오기 |
 | `getAssets` | 생성된 에셋 요청 |
 | `getProgress` | 세션 진행 상황 요청 |
-| `createSession` | 새 세션 생성 |
-| `restoreSession` | 기존 세션 복원 |
+| `createNewSession` | 새 세션 생성 |
+| `injectHistory` | 대화 이력 주입 / 세션 복원 |
+| `cancelGeneration` | 진행 중인 생성 취소 (또는 `stopGeneration` / `interrupt`) |
 | `ping` | 클라이언트 keepalive |
 
 ### 서버 → 클라이언트
@@ -539,7 +480,7 @@ S3FilesContextStore가 3-tier 계층을 관리합니다:
 
 **세션 수명주기:**
 1. 프론트엔드에서 세션 생성 → `session_created` 이벤트
-2. 대화 이력은 AgentCore Memory(v1) 또는 NFS(v2)에 저장
+2. 대화 이력은 S3 Files NFS(`context/conversation_history.json`)에 저장
 3. 구조적 상태(스펙, 스키마, 진행률)는 S3 프로젝트 워크스페이스에 영속화
 4. 에셋은 세션 범위 S3 키로 저장
 5. 세션 복원 시: `ProjectWorkspace.restore_all()`이 S3/NFS에서 전체 상태 복구 → 인메모리 캐시 워밍
@@ -562,18 +503,10 @@ S3FilesContextStore가 3-tier 계층을 관리합니다:
 
 ## 배포 아키텍처
 
-### AgentCore 모드
-AgentCore Runtime은 CDK가 아닌 `agentcore launch` (deploy.sh에서 호출)를 통해 별도 배포됩니다:
-- 최대 8시간 세션 수명 (Lambda의 15분 대비)
-- 세션별 MicroVM 격리
-- 내장 WebSocket 지원
-- CodeBuild를 통한 자동 컨테이너 빌드
-
-### ECS Fargate 모드
-CDK를 통해 전체 배포됩니다 (`./deploy.sh --mode ecs`):
+런타임은 **ECS 전용**입니다 (레거시 AgentCore v1 배포 모드는 제거되었습니다). CDK를 통해 전체 배포됩니다 (`./deploy.sh`):
 - **VPC**: 2개 AZ, 1 NAT Gateway, 퍼블릭/프라이빗 서브넷
-- **ALB**: 4시간 유휴 타임아웃, 스티키 세션 (WebSocket용)
-- **Fargate 태스크**: 2 vCPU, 4GB RAM, ARM64 Graviton, `/mnt/s3/` NFS 볼륨
+- **ALB**: ~66분(4000초, ALB 최대) 유휴 타임아웃, 8시간 스티키 세션 쿠키 (WebSocket 장기 세션은 keepalive로 유지)
+- **Fargate 태스크**: 4 vCPU, 16GB RAM, ARM64 Graviton, `/mnt/s3/` NFS 볼륨
 - **CloudFront**: `/ws`, `/invocations`를 ALB 오리진으로, 정적 에셋은 S3로 라우팅
 - **오토스케일링**: `ActiveWebSocketConnections` 기반 (1-10 태스크)
 

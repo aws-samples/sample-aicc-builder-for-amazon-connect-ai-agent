@@ -10,12 +10,11 @@
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| AWS CLI | 2.x | AWS resource management |
+| AWS CLI | 2.x (>= 2.34.27 for `s3files`) | AWS resource management; deploy.sh hard-fails below 2.34.27 |
 | Node.js | 18+ | Frontend build, CDK |
 | Python | 3.11+ | Backend agent code |
 | Docker | Any (Colima or Desktop) | CDK asset bundling |
 | AWS CDK | 2.x | Infrastructure deployment |
-| AgentCore CLI | Latest | `pip install bedrock-agentcore-starter-toolkit` (AgentCore mode only) |
 | jq | Any | JSON processing in deploy.sh |
 
 **AWS permissions required:**
@@ -43,17 +42,14 @@
 git clone <repository-url>
 cd aicc-builder
 
-# Backend (AgentCore mode)
-cd backend
+# Backend (ECS — the only runtime)
+cd backend/ecs
 python -m venv .venv
 source .venv/bin/activate
-pip install -r agentcore/requirements.txt
-
-# Backend (ECS mode)
-pip install -r ecs/requirements.txt
+pip install -r requirements.txt
 
 # Frontend
-cd ../frontend
+cd ../../frontend
 npm install
 
 # Infrastructure
@@ -63,23 +59,11 @@ npm install
 
 ### 2. Environment variables
 
-#### AgentCore mode
-
-Create `backend/agentcore/.env` for local testing:
-
-```bash
-AWS_REGION=ap-northeast-1
-BEDROCK_MODEL_ID=global.anthropic.claude-opus-4-6-v1
-AGENTCORE_GATEWAY_URL=<gateway-mcp-url>  # Optional, for Research Agent web search (us-east-1)
-ASSETS_BUCKET_NAME=<from-cdk-outputs>
-CONTACT_FLOW_KB_ID=<from-cdk-outputs>  # Optional, for Contact Flow RAG
-```
-
-#### ECS mode
+Create `backend/ecs/.env` for local testing:
 
 ```bash
 AWS_REGION=ap-northeast-2
-BEDROCK_MODEL_ID=global.anthropic.claude-opus-4-6-v1
+BEDROCK_MODEL_ID=global.anthropic.claude-opus-4-8  # default; also allowed: ...claude-opus-4-7, ...claude-opus-4-6-v1
 AGENTCORE_GATEWAY_URL=<gateway-mcp-url>  # Optional, web search (us-east-1)
 ASSETS_BUCKET_NAME=<from-cdk-outputs>
 CONTACT_FLOW_KB_ID=<from-cdk-outputs>  # Optional
@@ -115,17 +99,16 @@ npm run dev            # http://localhost:5173
 
 ## deploy.sh Reference
 
-The deployment script (`deploy.sh`, 732 lines) handles the full deployment pipeline.
+The deployment script (`deploy.sh`, ~900 lines) handles the full deployment pipeline.
 
 ### Usage
 
 ```bash
-./deploy.sh                          # Full deployment (AgentCore mode, default)
-./deploy.sh --mode ecs               # Full deployment (ECS Fargate mode)
-./deploy.sh --backend-only           # Redeploy backend only
+./deploy.sh                          # Full deployment (ECS Fargate, default region ap-northeast-2 / Seoul)
+./deploy.sh --backend-only           # Redeploy backend (ECS) only
 ./deploy.sh --frontend-only          # Rebuild + deploy frontend only
 ./deploy.sh --infra-only             # CDK deploy only
-./deploy.sh --stage dev              # Deploy to dev stage
+./deploy.sh --stage dev              # Deploy to a named stage (default: dev)
 ./deploy.sh --force                  # Force rebuild (ignore hash cache)
 ./deploy.sh --skip-checks            # Skip hash checks (faster)
 ```
@@ -134,39 +117,22 @@ The deployment script (`deploy.sh`, 732 lines) handles the full deployment pipel
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AWS_DEFAULT_REGION` | `ap-northeast-1` (AgentCore), `ap-northeast-2` (ECS) | Target AWS region |
-| `DEPLOY_MODE` | `agentcore` | `agentcore` or `ecs` (also set via `--mode`) |
+| `AWS_DEFAULT_REGION` | `ap-northeast-2` (Seoul) | Target AWS region |
 | `ENABLE_KNOWLEDGE_BASE` | `true` | Set `false` to skip KB deployment |
-| `ENABLE_REDIS` | `false` | Set `true` to deploy Redis stack (AgentCore mode) |
+| `ENABLE_WEB_SEARCH` | `true` | Set `false` to skip auto-provisioning the AgentCore Web Search gateway |
 | `AGENTCORE_GATEWAY_URL` | (prompted) | AgentCore Gateway web-search MCP endpoint (us-east-1), cached in `.env.local` |
 
-### Deployment steps (AgentCore mode)
+### Deployment steps
 
 ```
-Step 1:   CDK deploy (all stacks)
+Step 0.5: Pre-create ECR repo + build/push Docker image (ARM64) — before CDK so the ECS service can pull at creation
+Step 1:   CDK deploy (AiccBuilderStack + AiccBuilderEcs + optional KnowledgeBase)
 Step 1.1: Sync Knowledge Base documents (if KB enabled)
-Step 2:   Create/find AgentCore Memory
-Step 3:   Build + launch AgentCore Runtime
-Step 3.5: Attach IAM policies to AgentCore role
-Step 4:   Build frontend (Vite)
+Step 3:   Configure ECS backend (resolve env, force new deployment)
+Step 4:   Build frontend (Vite) with ALB/CloudFront endpoint
 Step 5:   Deploy frontend to S3
 Step 6:   Invalidate CloudFront cache
-Step 7:   Configure observability (CloudWatch log groups)
-Step 8:   Save deployment outputs to cdk-outputs.json
-```
-
-### Deployment steps (ECS mode)
-
-```
-Step 1:   CDK deploy (EcsStack + AiccBuilderStack)
-Step 1.1: Sync Knowledge Base documents (if KB enabled)
-Step 2:   Build Docker image (ARM64)
-Step 3:   Push to ECR
-Step 4:   Update ECS service (force new deployment)
-Step 5:   Build frontend (Vite) with ALB endpoint
-Step 6:   Deploy frontend to S3
-Step 7:   Invalidate CloudFront cache
-Step 8:   Save deployment outputs to cdk-outputs.json
+Step 8:   Save deployment outputs to cdk-outputs-<stage>.json
 ```
 
 ### Incremental builds
@@ -181,12 +147,12 @@ Use `--force` to bypass all hash checks.
 ### Stage support
 
 ```bash
-./deploy.sh --stage dev    # Creates AiccBuilderStack-dev, separate outputs
+./deploy.sh --stage dev    # Creates AiccBuilderStack-dev, separate outputs (cdk-outputs-dev.json)
 ./deploy.sh --stage prod   # Creates AiccBuilderStack-prod
-./deploy.sh                # Default: AiccBuilderStack (no suffix)
+./deploy.sh                # Default stage is `dev` -> AiccBuilderStack-dev
 ```
 
-Each stage gets its own CDK stacks, AgentCore runtime, and output file (`cdk-outputs-<stage>.json`).
+Each stage gets its own CDK stacks (main, ECS, Knowledge Base) and output file (`cdk-outputs-<stage>.json`).
 
 ---
 
@@ -195,7 +161,7 @@ Each stage gets its own CDK stacks, AgentCore runtime, and output file (`cdk-out
 ### 1. Create agent directory
 
 ```
-backend/src/agents/my_new_agent/
+backend/ecs/src/agents/my_new_agent/
 ├── __init__.py
 ├── agent.py
 └── system_prompt.py
@@ -281,7 +247,7 @@ __all__ = ["my_new_agent", "set_callback_handler"]
 
 ### 5. Register in Agent Pool
 
-Edit `src/agents/agent_pool.py`:
+Edit `backend/ecs/src/agents/agent_pool.py`:
 
 ```python
 AGENT_CONFIGS = {
@@ -297,7 +263,7 @@ AGENT_CONFIGS = {
 
 ### 6. Export from agents package
 
-Edit `src/agents/__init__.py`:
+Edit `backend/ecs/src/agents/__init__.py`:
 
 ```python
 from .my_new_agent import my_new_agent
@@ -306,7 +272,7 @@ from .my_new_agent import my_new_agent
 
 ### 7. Import in Orchestrator
 
-Edit `backend/agentcore/agent.py`:
+Edit `backend/ecs/app.py`:
 
 ```python
 # Import Sub-Agent tools
@@ -321,7 +287,7 @@ from agents.my_new_agent.agent import set_callback_handler as set_my_new_callbac
 
 ### 8. Connect WebSocket callback
 
-In the Orchestrator's session setup (in `agent.py`), add:
+In the Orchestrator's session setup (in `app.py`), add:
 
 ```python
 set_my_new_callback(callback_handler)
@@ -358,8 +324,6 @@ SUBAGENT_TO_PROGRESS_ID = {
 
 4. **Session ID propagation.** Call `set_streaming_session_id(session_id)` and `set_message_index(idx)` before sub-agent invocation so assets are stored with correct S3 keys.
 
-5. **AgentCore ping handler.** The `/ping` endpoint must return `HEALTHY_BUSY` during streaming to prevent AgentCore from killing the session. Track active sessions in `_active_streaming_sessions`.
-
 ---
 
 ## Debugging
@@ -377,30 +341,18 @@ log_info("my_event", key1="value1", key2=123)
 
 ### CloudWatch Logs
 
-#### AgentCore mode
-
 ```bash
-# Application logs
-aws logs tail /aws/bedrock-agentcore/runtimes/<agent-id>/application-logs --follow
-
-# OpenTelemetry logs
-aws logs tail /aws/bedrock-agentcore/runtimes/<agent-id>/otel-rt-logs --follow
-```
-
-#### ECS mode
-
-```bash
-# Application logs
-aws logs tail /ecs/aiccbuilder-ecs --follow
+# Application logs (stack id lower-cased; default stage 'dev')
+aws logs tail /ecs/aiccbuilderecs-dev --follow
 
 # X-Ray traces (via console)
 # Open AWS X-Ray console → Traces → Filter by service name "aiccbuilder"
 
 # ECS task logs
-aws ecs describe-tasks --cluster aiccbuilder-ecs --tasks <task-id> --query 'tasks[0].containers[*].{name:name,lastStatus:lastStatus}'
+aws ecs describe-tasks --cluster aiccbuilderecs-dev-cluster --tasks <task-id> --query 'tasks[0].containers[*].{name:name,lastStatus:lastStatus}'
 
 # Check S3 Files mount health
-curl https://<alb-endpoint>/ping  # Returns {"status": "healthy", "nfs_mount": true}
+curl https://<alb-endpoint>/ping  # Returns {"status":"healthy","mode":"ecs","nfs":{"mount_exists":true,...}}
 ```
 
 ### Correlation IDs
@@ -417,10 +369,9 @@ fields @timestamp, @message
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
-| WebSocket disconnects after 60s | Missing heartbeat / ping returns HEALTHY instead of HEALTHY_BUSY | Check `_active_streaming_sessions` tracking |
+| WebSocket disconnects after 60s | Missing heartbeat | Verify sub-agents yield heartbeat events during long operations |
 | Sub-agent output not streaming | Callback handler not set | Verify `set_*_callback()` called before invocation |
-| Asset preview not appearing | `stream_asset_preview` not connected | Check `_setup_streaming_for_subagent()` in agent.py |
-| "Module not found" in AgentCore | `src/` not copied to `agentcore/src/` | deploy.sh copies automatically; check `PYTHONPATH` |
+| Asset preview not appearing | `stream_asset_preview` not connected | Check `_setup_streaming_for_subagent()` in app.py |
 | Agent Pool returns stale agent | Messages not cleared | Call `agent.messages = []` before reuse |
 | NFS mount not available (ECS) | S3 Files access point not configured | Check `AmazonS3FilesClientFullAccess` policy on task role |
 | Session not restoring (ECS) | NFS path mismatch | Verify `S3FILES_MOUNT_PATH` env var matches Fargate volume config |
@@ -440,7 +391,6 @@ fields @timestamp, @message
 | Python | 3.11+ | 백엔드 에이전트 코드 |
 | Docker | Any (Colima 또는 Desktop) | CDK 에셋 번들링, ECS 이미지 빌드 |
 | AWS CDK | 2.x | 인프라 배포 |
-| AgentCore CLI | 최신 | AgentCore 모드 전용 |
 | jq | Any | deploy.sh에서 JSON 처리 |
 
 ---
@@ -450,12 +400,12 @@ fields @timestamp, @message
 ```bash
 git clone <repository-url> && cd aicc-builder
 
-# 백엔드
-cd backend && python -m venv .venv && source .venv/bin/activate
-pip install -r agentcore/requirements.txt
+# 백엔드 (ECS — 유일한 런타임)
+cd backend/ecs && python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
 # 프론트엔드
-cd ../frontend && npm install
+cd ../../frontend && npm install
 
 # 인프라
 cd ../infrastructure && npm install
@@ -466,11 +416,11 @@ cd ../infrastructure && npm install
 ## deploy.sh 사용법
 
 ```bash
-./deploy.sh                          # 전체 배포 (AgentCore 모드, 기본)
-./deploy.sh --mode ecs               # 전체 배포 (ECS Fargate 모드)
-./deploy.sh --backend-only           # 백엔드만 재배포
+./deploy.sh                          # 전체 배포 (ECS Fargate, 기본 / Seoul ap-northeast-2)
+./deploy.sh --backend-only           # 백엔드(ECS)만 재배포
 ./deploy.sh --frontend-only          # 프론트엔드만 빌드 + 배포
-./deploy.sh --stage dev              # dev 스테이지로 배포
+./deploy.sh --infra-only             # CDK 배포만
+./deploy.sh --stage dev              # 지정한 스테이지로 배포 (기본: dev)
 ./deploy.sh --force                  # 해시 캐시 무시, 강제 리빌드
 ```
 
@@ -478,10 +428,9 @@ cd ../infrastructure && npm install
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
-| `AWS_DEFAULT_REGION` | `ap-northeast-1` (AgentCore), `ap-northeast-2` (ECS) | 대상 AWS 리전 |
-| `DEPLOY_MODE` | `agentcore` | `agentcore` 또는 `ecs` (`--mode`로도 설정 가능) |
+| `AWS_DEFAULT_REGION` | `ap-northeast-2` (Seoul) | 대상 AWS 리전 |
 | `ENABLE_KNOWLEDGE_BASE` | `true` | `false`로 설정 시 KB 배포 건너뜀 |
-| `ENABLE_REDIS` | `false` | `true`로 설정 시 Redis 스택 배포 (AgentCore 모드) |
+| `ENABLE_WEB_SEARCH` | `true` | `false`로 설정 시 AgentCore 웹 검색 게이트웨이 자동 프로비저닝 건너뜀 |
 | `AGENTCORE_GATEWAY_URL` | (프롬프트) | AgentCore Gateway 웹 검색 MCP 엔드포인트 (us-east-1), `.env.local`에 캐시 |
 
 ### 증분 빌드
@@ -492,12 +441,12 @@ deploy.sh는 `.deploy-hashes/`에 MD5 해시를 캐시하여 변경되지 않은
 
 ## 새 에이전트 추가 (단계별)
 
-1. `src/agents/my_new_agent/` 디렉토리 생성 (`agent.py`, `system_prompt.py`, `__init__.py`)
+1. `backend/ecs/src/agents/my_new_agent/` 디렉토리 생성 (`agent.py`, `system_prompt.py`, `__init__.py`)
 2. system prompt 작성
 3. `agent.py` 구현 — `@tool` + `AsyncIterator` 패턴, callback handler 설정
-4. `src/agents/agent_pool.py`의 `AGENT_CONFIGS`에 등록
-5. `src/agents/__init__.py`에서 export
-6. `agentcore/agent.py`에서 import + callback 연결
+4. `backend/ecs/src/agents/agent_pool.py`의 `AGENT_CONFIGS`에 등록
+5. `backend/ecs/src/agents/__init__.py`에서 export
+6. `backend/ecs/app.py`에서 import + callback 연결
 7. (선택) `SUBAGENT_TO_PROGRESS_ID`에 진행률 매핑 추가
 8. `./deploy.sh --backend-only`로 배포
 
@@ -511,7 +460,6 @@ deploy.sh는 `.deploy-hashes/`에 MD5 해시를 캐시하여 변경되지 않은
 2. **긴 작업 중 heartbeat 전송** — 5-10초마다 yield하여 WebSocket 타임아웃(60초) 방지
 3. **32KB WebSocket 프레임 제한** — 대용량 에셋은 델타 스트리밍 사용 (`isDelta: true`)
 4. **세션 ID 전파** — `set_streaming_session_id()`와 `set_message_index()` 호출 필요
-5. **AgentCore ping 핸들러** — 스트리밍 중 `HEALTHY_BUSY` 반환 필수
 
 ---
 
@@ -520,20 +468,16 @@ deploy.sh는 `.deploy-hashes/`에 MD5 해시를 캐시하여 변경되지 않은
 ### CloudWatch Logs
 
 ```bash
-# AgentCore 모드 — 애플리케이션 로그
-aws logs tail /aws/bedrock-agentcore/runtimes/<agent-id>/application-logs --follow
-
-# ECS 모드 — 애플리케이션 로그
-aws logs tail /ecs/aiccbuilder-ecs --follow
+# 애플리케이션 로그 (스택 ID 소문자; 기본 스테이지 'dev')
+aws logs tail /ecs/aiccbuilderecs-dev --follow
 ```
 
 ### 자주 발생하는 문제
 
 | 문제 | 원인 | 해결 |
 |------|------|------|
-| WebSocket 60초 후 끊김 | heartbeat 누락 / ping이 HEALTHY 반환 | `_active_streaming_sessions` 추적 확인 |
+| WebSocket 60초 후 끊김 | heartbeat 누락 | 긴 작업 중 서브 에이전트가 heartbeat 이벤트를 yield하는지 확인 |
 | 서브 에이전트 출력 스트리밍 안 됨 | callback handler 미설정 | `set_*_callback()` 호출 확인 |
-| "Module not found" | `src/`가 복사 안 됨 | deploy.sh가 자동 복사; `PYTHONPATH` 확인 |
 | Agent Pool 오래된 에이전트 반환 | 메시지 미초기화 | 재사용 전 `agent.messages = []` 호출 |
 | NFS 마운트 불가 (ECS) | S3 Files 접근 설정 오류 | 태스크 역할의 `AmazonS3FilesClientFullAccess` 정책 확인 |
 | 세션 복원 실패 (ECS) | NFS 경로 불일치 | `S3FILES_MOUNT_PATH` 환경변수 확인 |

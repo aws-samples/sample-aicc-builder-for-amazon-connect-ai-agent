@@ -140,8 +140,8 @@ it against the spec. It currently runs 9 cross-asset checks:
 | 2 | Lambda response dict keys ⊇ spec `outputFields` |
 | 3 | OpenAPI request schema (with `$ref` resolution) == spec `inputFields` |
 | 4 | OpenAPI response schema == spec `outputFields` |
-| 5 | OpenAPI `operationId` set == spec `operationId` set (no orphans) |
-| 6 | CloudFormation DynamoDB keys == spec `dataSource.key` |
+| 5 | Lambda response `data` wrapper presence == OpenAPI response schema `data` property |
+| 6 | CloudFormation DynamoDB primary key == spec `dataSource.primaryKey` |
 | 7 | Lambda `IndexName="..."` == CloudFormation GSI names |
 | 8 | Lambda `os.environ["X_TABLE_NAME"]` == CloudFormation env var keys |
 | 9 | Operation count: Lambda files == OpenAPI paths == spec count |
@@ -306,10 +306,13 @@ everything. AICC Builder uses three techniques from the
 - **Frozen schema summary**: the Infrastructure Generator emits a
   Schema Summary JSON that Phase-2 agents read as a static file, not
   as a re-derived context block each call.
-- **Summarizing conversation manager**: on long sessions the
-  Orchestrator compacts older turns via Strands'
-  `SummarizingConversationManager`, preserving the spec and
-  decisions while dropping chit-chat.
+- **Conversation history pruning**: on long sessions the
+  Orchestrator compacts its own history via a custom pruner
+  (`_prune_conversation_history`, capped at `MAX_HISTORY_MESSAGES`),
+  which compresses older tool-call/tool-result blocks while keeping
+  tool-use pairs valid and preserving the spec and decisions.
+  (Strands' `SummarizingConversationManager` is used by the Reviewer
+  Agent, not the Orchestrator.)
 
 The net effect: adding more sub-agents does not linearly inflate token
 usage, and the Orchestrator's view of the customer's requirements
@@ -420,8 +423,8 @@ AICC Builder는 시스템 전체에 단일 규칙을 강제합니다:
 2. Lambda 응답 딕셔너리 키 ⊇ 스펙 `outputFields`
 3. OpenAPI 요청 스키마(`$ref` 해석) == 스펙 `inputFields`
 4. OpenAPI 응답 스키마 == 스펙 `outputFields`
-5. OpenAPI `operationId` 집합 == 스펙 `operationId` 집합 (고아 없음)
-6. CloudFormation DynamoDB 키 == 스펙 `dataSource.key`
+5. Lambda 응답 `data` 래퍼 존재 여부 == OpenAPI 응답 스키마 `data` 속성
+6. CloudFormation DynamoDB 기본 키 == 스펙 `dataSource.primaryKey`
 7. Lambda `IndexName="..."` == CloudFormation GSI 이름
 8. Lambda `os.environ["X_TABLE_NAME"]` == CloudFormation 환경변수 키
 9. Operation 수: Lambda 파일 수 == OpenAPI 경로 수 == 스펙 수
@@ -540,8 +543,12 @@ Phase 4(Contact Flow) 이후 오케스트레이터는 `reviewer_agent`를 호출
   결과를 흡수할 수 있습니다.
 - **고정 스키마 요약**: 인프라 생성기는 Schema Summary JSON을 방출하고,
   Phase 2 에이전트들은 매번 재추론이 아닌 정적 파일로 읽습니다.
-- **요약 대화 관리자**: 장기 세션에서는 Strands의 `SummarizingConversationManager`가
-  오래된 턴을 압축하면서 스펙과 의사결정은 보존합니다.
+- **대화 이력 프루닝**: 장기 세션에서는 오케스트레이터가 자체 커스텀
+  프루너(`_prune_conversation_history`, `MAX_HISTORY_MESSAGES` 상한)로 자신의
+  이력을 압축합니다. 오래된 tool-call/tool-result 블록을 압축하되 tool-use
+  쌍은 유효하게 유지하고 스펙과 의사결정은 보존합니다. (Strands의
+  `SummarizingConversationManager`는 오케스트레이터가 아닌 Reviewer Agent가
+  사용합니다.)
 
 결과적으로 서브 에이전트를 추가해도 토큰 사용량이 선형으로 증가하지 않고,
 오케스트레이터의 요구사항에 대한 이해도 장기 세션 내내 유지됩니다.
