@@ -231,7 +231,7 @@ export class EcsStack extends cdk.Stack {
     );
 
     // Amazon Bedrock AgentCore Gateway — web search for the Research and
-    // Contact Flow agents (replaces the old Brave Search API). The gateway and
+    // Contact Flow agents. The gateway and
     // its Web Search connector target are created out-of-band in us-east-1 (the
     // only region Web Search is GA), so the ARN isn't known at synth time —
     // scope to any gateway in us-east-1 within this account.

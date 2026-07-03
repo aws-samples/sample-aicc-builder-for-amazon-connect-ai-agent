@@ -584,7 +584,7 @@ NO_TRANSITION_ACTION_TYPES = frozenset({
 
 # Required Error handlers per Action Type (Connect import enforces these).
 # Required Error handlers per Action Type — all verified against the real
-# CreateContactFlow API (instance 5bf5005e, ap-northeast-2, 2026-06-08).
+# CreateContactFlow API (create → inspect problems → delete, ap-northeast-2).
 # NOTE: GetParticipantInput is intentionally absent — its required errors depend
 # on mode (menu vs store) and are handled in the dedicated normalizer above.
 REQUIRED_ERRORS_BY_TYPE = {

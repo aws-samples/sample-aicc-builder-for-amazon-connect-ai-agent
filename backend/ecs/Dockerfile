@@ -16,7 +16,7 @@ ARG ASSETS_BUCKET_NAME=""
 ARG USER_POOL_ID=""
 ARG USER_POOL_CLIENT_ID=""
 ARG CONTACT_FLOW_KB_ID=""
-# AgentCore Gateway web search endpoint (us-east-1). Replaces the old Brave API key.
+# AgentCore Gateway web search endpoint (us-east-1).
 ARG AGENTCORE_GATEWAY_URL=""
 
 # Environment
