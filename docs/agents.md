@@ -10,10 +10,10 @@
 
 AICC Builder uses 9 agents: 1 Orchestrator + 8 sub-agents. The Orchestrator registers each sub-agent as a **tool** (Agent-as-a-Tool pattern via Strands SDK). When the Orchestrator calls a sub-agent tool, the SDK creates a nested agent invocation with its own system prompt, model, and tools.
 
-All sub-agents share the same base model (`global.anthropic.claude-opus-4-6-v1`) via the Agent Pool, which caches model instances by `(temperature, max_tokens)` tuple.
+All sub-agents share the same selected Bedrock Claude model via the Agent Pool. The model is user-selectable per session among **Opus 4.8** (default, `global.anthropic.claude-opus-4-8`), **4.7** (`global.anthropic.claude-opus-4-7`), and **4.6** (`global.anthropic.claude-opus-4-6-v1`); the choice resolves per request (`tools/model_selection.py`) and applies to the orchestrator and every sub-agent. Model instances are cached by `(model_id, temperature, max_tokens)`. (Opus 4.7/4.8 removed the `temperature` parameter, so it is sent only for 4.6.)
 
 ```
-Orchestrator (temp=0.7, 128K tokens)
+Orchestrator (no fixed temperature; Bedrock default max tokens)
 ├── research_agent           — Web research via AgentCore Gateway
 ├── faq_generator_agent      — Knowledge base documents
 ├── infrastructure_generator_agent — CloudFormation YAML
@@ -28,7 +28,7 @@ Orchestrator (temp=0.7, 128K tokens)
 
 ## Agent Pool
 
-**File**: `backend/src/agents/agent_pool.py`
+**File**: `backend/ecs/src/agents/agent_pool.py`
 
 Pre-creates `Agent` instances as singletons at startup, keyed by agent type. Models are shared across agents with identical `(temperature, max_tokens)` configuration.
 
@@ -39,7 +39,6 @@ Pre-creates `Agent` instances as singletons at startup, keyed by agent type. Mod
 | prompt_generator | 0.5 | 128,000 | Creative yet consistent prompts |
 | contact_flow_generator | 0.3 | 128,000 | Structured flow definitions |
 | infrastructure_generator | 0.3 | 128,000 | Deterministic CloudFormation |
-| interviewer (legacy) | 0.7 | 4,096 | Conversational, adaptive |
 
 Agents are created **without tools** at initialization (to avoid circular imports). Tools are attached per-call via `get_agent_with_tools()`.
 
@@ -53,7 +52,7 @@ Agents are created **without tools** at initialization (to avoid circular import
 
 ## 1. Orchestrator
 
-**File**: `backend/agentcore/agent.py` (v1) · `backend/ecs/app.py` (v2) · `backend/src/prompts/system_prompt.py`
+**File**: `backend/ecs/app.py` · `backend/ecs/src/prompts/system_prompt.py`
 
 The central agent that directly interviews users and delegates generation tasks to sub-agents.
 
@@ -74,7 +73,6 @@ The central agent that directly interviews users and delegates generation tasks 
 | `save_requirement_document` | Save large requirement text to S3/NFS |
 | `load_requirement_document` | Load saved requirement text from S3/NFS |
 | `validate_parameter_consistency` | Cross-asset field name validation |
-| `replace_asset_field` | Deterministic field rename in assets (no LLM) |
 | `merge_infrastructure_fragments` | Deterministic YAML merge (no LLM) |
 | `merge_openapi_fragments` | Deterministic OpenAPI merge (no LLM) |
 | `asset_lookup` | Retrieve generated assets from S3/NFS |
@@ -100,8 +98,8 @@ All workspace file tools are sandboxed within `/mnt/s3/sessions/{session_id}/` a
 Each sub-agent is registered as a tool on the Orchestrator.
 
 ### Model Config
-- Temperature: 0.7 (conversational, adaptive)
-- Max tokens: 128,000
+- Temperature: not set (orchestrator never sends temperature; Opus 4.7/4.8 reject it)
+- Max tokens: Bedrock default (not explicitly configured)
 - Streaming: Enabled
 
 ### Key Rules (from system prompt)
@@ -121,14 +119,14 @@ Each sub-agent is registered as a tool on the Orchestrator.
    `ai_agent_prompt.yaml`, etc. If the same keyword is requested ≥2 times and
    the previous patch claimed success, the orchestrator stops patching and
    asks for disambiguation. See
-   `backend/src/context/modification_tracking.py` and the
-   `HANDLING USER MODIFICATIONS` section of `backend/src/prompts/system_prompt.py`.
+   `backend/ecs/src/context/modification_tracking.py` and the
+   `HANDLING USER MODIFICATIONS` section of `backend/ecs/src/prompts/system_prompt.py`.
 
 ---
 
 ## 2. Research Agent
 
-**File**: `backend/src/agents/research_agent/`
+**File**: `backend/ecs/src/agents/research_agent/`
 
 Web research via Amazon Bedrock AgentCore Gateway web search. Gathers company information, FAQ content, and API documentation from the web.
 
@@ -168,7 +166,7 @@ Web research via Amazon Bedrock AgentCore Gateway web search. Gathers company in
 
 ## 3. FAQ Generator Agent
 
-**File**: `backend/src/agents/faq_generator/`
+**File**: `backend/ecs/src/agents/faq_generator/`
 
 Generates Knowledge Base FAQ documents from research results. Reads research data from S3 automatically — no need to pass research results.
 
@@ -208,7 +206,7 @@ Generates Knowledge Base FAQ documents from research results. Reads research dat
 
 ## 4. Infrastructure Generator Agent
 
-**File**: `backend/src/agents/infrastructure_generator/`
+**File**: `backend/ecs/src/agents/infrastructure_generator/`
 
 Generates AWS CloudFormation YAML templates. Supports three modes for scalable generation.
 
@@ -256,7 +254,7 @@ base → operation (parallel, one per op) → merge_infrastructure_fragments
 
 ## 5. Lambda Generator Agent
 
-**File**: `backend/src/agents/lambda_generator/`
+**File**: `backend/ecs/src/agents/lambda_generator/`
 
 Generates Python Lambda handler files for each business operation.
 
@@ -292,7 +290,7 @@ Generates Python Lambda handler files for each business operation.
 
 ## 6. OpenAPI Generator Agent
 
-**File**: `backend/src/agents/openapi_generator/`
+**File**: `backend/ecs/src/agents/openapi_generator/`
 
 Generates OpenAPI 3.0 specifications with Amazon Connect MCP Gateway extensions.
 
@@ -332,7 +330,7 @@ base → chunk (parallel, 5-6 ops per chunk) → merge_openapi_fragments
 
 ## 7. Prompt Generator Agent
 
-**File**: `backend/src/agents/prompt_generator/`
+**File**: `backend/ecs/src/agents/prompt_generator/`
 
 Generates AI agent prompt YAML for Amazon Connect AI agents.
 (Terminology note: the product was previously called "Amazon Q in Connect". SDK/
@@ -378,14 +376,14 @@ Complete prompt YAML with:
 
 ## 8. Contact Flow Generator Agent
 
-**File**: `backend/src/agents/contact_flow_generator/`
+**File**: `backend/ecs/src/agents/contact_flow_generator/`
 
-Generates Amazon Connect Contact Flow JSON and Mermaid diagrams.
+Generates Amazon Connect Contact Flow JSON. The visual diagram is rendered client-side from the JSON (interactive React Flow graph) — the agent no longer authors a Mermaid diagram.
 
 ### Tools
 | Tool | Description |
 |------|-------------|
-| `save_generated_code` | Save flow JSON + Mermaid to S3 + stream |
+| `save_generated_code` | Save flow JSON to S3 + stream |
 | `get_operation_spec` | Load operation spec |
 | `get_all_specs` | Load all operation specs |
 | `search_amazon_connect_docs` | Search AWS docs for block syntax (AgentCore Gateway) |
@@ -403,7 +401,6 @@ Generates Amazon Connect Contact Flow JSON and Mermaid diagrams.
 
 ### Output
 1. Contact Flow JSON (Amazon Connect importable format)
-2. Mermaid diagram (visual flow representation)
 
 ### Key Features
 - **RAG retrieval**: Can search AWS documentation for correct block syntax
@@ -416,7 +413,7 @@ Generates Amazon Connect Contact Flow JSON and Mermaid diagrams.
 
 ## 9. Reviewer Agent
 
-**File**: `backend/src/agents/reviewer_agent/`
+**File**: `backend/ecs/src/agents/reviewer_agent/`
 
 Reviews all generated assets for cross-asset consistency and validates dependencies.
 
@@ -515,7 +512,7 @@ AICC Builder는 9개 에이전트를 사용합니다: 1개 Orchestrator + 8개 �
 
 ## Agent Pool
 
-**파일**: `backend/src/agents/agent_pool.py`
+**파일**: `backend/ecs/src/agents/agent_pool.py`
 
 시작 시 `Agent` 인스턴스를 싱글톤으로 사전 생성합니다. 모델은 `(temperature, max_tokens)` 튜플로 캐시됩니다.
 
@@ -535,11 +532,11 @@ AICC Builder는 9개 에이전트를 사용합니다: 1개 Orchestrator + 8개 �
 
 ### 1. Orchestrator
 - **역할**: 사용자 인터뷰 + 서브 에이전트 조율
-- **파일**: `backend/agentcore/agent.py` (v1), `backend/ecs/app.py` (v2), `backend/src/prompts/system_prompt.py`
-- **유틸리티 도구**: `save_operation_spec`, `validate_parameter_consistency`, `replace_asset_field`, `merge_infrastructure_fragments` 등 13개
+- **파일**: `backend/ecs/app.py`, `backend/ecs/src/prompts/system_prompt.py`
+- **유틸리티 도구**: `save_operation_spec`, `validate_parameter_consistency`, `patch_workspace_file`, `merge_infrastructure_fragments` 등 13개
 - **워크스페이스 파일 도구 (v2)**: `read_workspace_file`, `write_workspace_file`, `patch_workspace_file`, `append_workspace_file`, `list_workspace_dir`, `find_workspace_files`, `grep_workspace` — NFS 직접 파일 접근
 - **핵심 규칙**: Phase 분리 (WS 타임아웃 방지), 대형 텍스트 S3/NFS 자동 저장, 시나리오 원문 보존
-- **수정 요청 처리 (Modification Triage)**: 매 사용자 턴마다 시스템이 `<modification_state>` 블록을 주입해서 이번 턴의 키워드(예: `flow`, `프롬프트`) → 대상 에셋 매핑과 반복 카운터를 제공합니다. Orchestrator는 수정 요청을 (1) **spec-level**(데이터 모델/운영 시간/슬롯 단위/녹음/인사 멘트 등 — `update_operation_spec` 또는 `save_infrastructure_spec` / `save_session_flow_config` 먼저 실행 후 영향 받는 에셋 플랜을 사용자에게 컨펌받고 재생성) vs (2) **asset-level**(단일 파일 문구 패치) 로 분류합니다. 같은 키워드가 ≥ 2회 반복되고 직전 수정이 성공으로 기록되어 있으면 패치 대신 파일 disambiguation 질문을 합니다. 참고: `backend/src/context/modification_tracking.py`, `backend/src/prompts/system_prompt.py`의 `HANDLING USER MODIFICATIONS` 섹션.
+- **수정 요청 처리 (Modification Triage)**: 매 사용자 턴마다 시스템이 `<modification_state>` 블록을 주입해서 이번 턴의 키워드(예: `flow`, `프롬프트`) → 대상 에셋 매핑과 반복 카운터를 제공합니다. Orchestrator는 수정 요청을 (1) **spec-level**(데이터 모델/운영 시간/슬롯 단위/녹음/인사 멘트 등 — `update_operation_spec` 또는 `save_infrastructure_spec` / `save_session_flow_config` 먼저 실행 후 영향 받는 에셋 플랜을 사용자에게 컨펌받고 재생성) vs (2) **asset-level**(단일 파일 문구 패치) 로 분류합니다. 같은 키워드가 ≥ 2회 반복되고 직전 수정이 성공으로 기록되어 있으면 패치 대신 파일 disambiguation 질문을 합니다. 참고: `backend/ecs/src/context/modification_tracking.py`, `backend/ecs/src/prompts/system_prompt.py`의 `HANDLING USER MODIFICATIONS` 섹션.
 
 ### 2. Research Agent
 - **역할**: Amazon Bedrock AgentCore Gateway 웹 검색으로 리서치
@@ -572,7 +569,7 @@ AICC Builder는 9개 에이전트를 사용합니다: 1개 Orchestrator + 8개 �
 - **S3 연동**: 대화 시나리오 원문을 S3에서 로드
 
 ### 8. Contact Flow Generator
-- **역할**: Amazon Connect Contact Flow JSON + Mermaid 다이어그램
+- **역할**: Amazon Connect Contact Flow JSON (시각화는 JSON에서 React Flow로 렌더링)
 - **핵심**: RAG 검색 (AWS 문서), 고객 조회 체인, barge-in 방지
 - **단독 실행**: RAG 검색 시간 소요로 별도 턴에서 실행
 

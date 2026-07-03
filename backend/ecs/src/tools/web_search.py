@@ -1,11 +1,11 @@
 """
 Web search via Amazon Bedrock AgentCore Gateway.
 
-Replaces the legacy Brave Search API integration. Web search now runs through an
-Amazon Bedrock AgentCore Gateway whose target is the managed **Web Search**
-connector. The gateway is reached over MCP and authenticated with the ECS task
-role's SigV4 credentials via `mcp-proxy-for-aws` — there is no API key to manage,
-and queries never leave the AWS environment ("zero data egress").
+Web search runs through an Amazon Bedrock AgentCore Gateway whose target is the
+managed **Web Search** connector. The gateway is reached over MCP and
+authenticated with the ECS task role's SigV4 credentials via `mcp-proxy-for-aws`
+— there is no API key to manage, and queries never leave the AWS environment
+("zero data egress").
 
 Region: Web Search on Amazon Bedrock AgentCore is only available in **us-east-1**
 (GA 2026-06-17), so the gateway is region-pinned there regardless of the app's
@@ -17,9 +17,8 @@ Configuration (env):
 - ``AGENTCORE_GATEWAY_REGION`` optional, defaults to ``us-east-1``
 
 When ``AGENTCORE_GATEWAY_URL`` is unset the search functions degrade gracefully
-(``success: False`` with an explanatory error) exactly as the old Brave path did
-when ``BRAVE_API_KEY`` was missing, so the agents keep working off built-in
-knowledge.
+(``success: False`` with an explanatory error), so the agents keep working off
+built-in knowledge.
 
 Reference:
 https://builder.aws.com/content/3FHnWgGt3ebBdMQWA2k4bVOnMbB/web-search-in-claude-code-on-amazon-bedrock

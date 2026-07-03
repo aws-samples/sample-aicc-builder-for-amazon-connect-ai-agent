@@ -12,8 +12,7 @@ All assets live in two places, kept in sync by a dual-write strategy:
 NFS (fast, local)                          S3 (durable, backup)
 /mnt/s3/sessions/{sid}/                    assets/{sid}/
   assets/                                    {type}/{op_id?}/{file}
-    v1/  (v2, v3 for regeneration)
-      {type}/{op_id?}/{file}
+    {type}/{op_id?}/{file}
   state/                                   assets/{sid}/state/
     project.json                             project.json
     progress.json                            progress.json
@@ -27,7 +26,7 @@ NFS (fast, local)                          S3 (durable, backup)
 subagent generates content
   -> stream_asset(is_complete=True)
        -> save_asset_to_s3(session_id, type, file, content, op_id)
-            1. _save_to_nfs()   -> /mnt/s3/sessions/{sid}/assets/v1/{type}/{op_id}/{file}
+            1. _save_to_nfs()   -> /mnt/s3/sessions/{sid}/assets/{type}/{op_id}/{file}
             2. s3.put_object()  -> s3://{bucket}/assets/{sid}/{type}/{op_id}/{file}
 ```
 
@@ -42,7 +41,7 @@ any consumer calls get_asset_from_s3(s3_key)
        -> (session_id, asset_type, file_name, operation_id)
        -> returns (None,...) for state keys or unparseable keys -> skip to S3
   2. _get_from_nfs(session_id, type, file, op_id)
-       -> reads /mnt/s3/sessions/{sid}/assets/{latest_version}/{type}/{op_id}/{file}
+       -> reads /mnt/s3/sessions/{sid}/assets/{type}/{op_id}/{file}
        -> returns content if found
   3. If NFS miss or unavailable: fall through to s3.get_object()
 ```
@@ -56,7 +55,7 @@ patches propagate to S3.
 ```
 any consumer calls list_session_assets(session_id)
   1. _list_nfs_assets(session_id)
-       -> walks /mnt/s3/sessions/{sid}/assets/{latest_version}/
+       -> walks /mnt/s3/sessions/{sid}/assets/
        -> reconstructs S3-key-format strings for backward compat
        -> returns list (possibly empty) if NFS available, None if not
   2. If None: fall through to s3.list_objects_v2()
@@ -64,9 +63,10 @@ any consumer calls list_session_assets(session_id)
 
 ### Versioning
 
-Regeneration creates new version directories (`v1/`, `v2/`, ...).
-`_get_current_version()` always returns the latest.
-`get_next_version()` is called when the orchestrator triggers regeneration.
+The asset storage layer is **flat -- there is no version directory**. A save
+overwrites the asset at its canonical path (`assets/{type}/{op_id?}/{file}`)
+in place. Iterative changes after the first generation go through patch-only
+modification (`patch_workspace_file`) rather than writing a new version tree.
 
 ---
 
@@ -80,7 +80,7 @@ Regeneration creates new version directories (`v1/`, `v2/`, ...).
 | **Lambda Generator** | `index.py` (per operation) | `lambda` | Auto-loads operation spec, infra schema |
 | **OpenAPI Generator** | `openapi.yaml`, or `openapi-base.yaml` + `openapi-chunk-*.yaml` | `openapi` | Auto-loads operation specs |
 | **Prompt Generator** | `ai_agent_prompt.yaml` | `prompt` | Auto-loads operation specs, flow config, infra schema |
-| **Contact Flow Generator** | `contact_flow.json`, `contact_flow_diagram.md` | `contact_flow` | Auto-loads operation specs, flow config, infra schema |
+| **Contact Flow Generator** | `contact_flow.json` | `contact_flow` | Auto-loads operation specs, flow config, infra schema |
 | **FAQ Generator** | `faq_{category}.txt` + `{company}_knowledge_base.zip` | `faq` | Loads `research.json` from S3 |
 | **Reviewer** | `review_report.md` | `review` | `lookup_assets`, `get_asset_content`, workspace file tools, spec manager |
 
@@ -90,7 +90,7 @@ Regeneration creates new version directories (`v1/`, `v2/`, ...).
 
 ### 3.1 Orchestrator Wiring
 
-The orchestrator (`backend/agentcore/agent.py`) is a Strands Agent that has
+The orchestrator (`backend/ecs/app.py`) is a FastAPI app driving a Strands Agent that has
 all subagents registered as `@tool` functions. On each WebSocket request:
 
 ```python
@@ -153,8 +153,8 @@ Reviewer Agent
 
 ### 3.3 Parallel Generation with Fragment Merge
 
-For projects with many operations (>6), Infrastructure and OpenAPI generators
-switch to parallel mode:
+The Infrastructure generator always runs in base + per-operation fragment (parallel) mode;
+the OpenAPI generator switches to parallel chunked mode for projects with many operations (>6):
 
 ```
 Orchestrator
@@ -188,7 +188,7 @@ After the Reviewer reports issues, the orchestrator can fix assets directly:
 Reviewer: "Lambda uses phoneNumber but OpenAPI has phone_number"
   |
   v
-Orchestrator calls replace_asset_field() or workspace patch_workspace_file()
+Orchestrator calls workspace patch_workspace_file()
   -> modifies file on NFS directly
   -> NFS content is now newer than S3 content
   |
@@ -208,7 +208,7 @@ only (fast, no S3 round-trip), and all subsequent reads see them immediately.
 ### 4.1 WebSocket Flow
 
 ```
-Frontend <--WebSocket--> BedrockAgentCoreApp
+Frontend <--WebSocket--> FastAPI app (backend/ecs/app.py)
                              |
                              v
                     StrandsCallbackHandler
@@ -326,7 +326,6 @@ orchestrator auto-sends a progress update to the frontend.
     ai_agent_prompt.yaml                 # Connect AI agent prompt
   contact-flow/
     contact_flow.json                    # Amazon Connect contact flow
-    contact_flow_diagram.md              # Mermaid diagram
   knowledge-base/
     {category}/
       faq_{topic}.txt                    # FAQ documents
@@ -426,8 +425,8 @@ A single asset's lifecycle from generation to download:
      -> reports: "field mismatch: Lambda uses phone_number, OpenAPI uses phoneNumber"
 
 3. PATCH
-   orchestrator calls replace_asset_field(session_id, ...)
-     -> patch_workspace_file() modifies NFS file directly
+   orchestrator calls patch_workspace_file(session_id, ...)
+     -> modifies NFS file directly
      -> NFS now has corrected content; S3 still has old content
 
 4. RE-REVIEW
