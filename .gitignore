@@ -23,6 +23,11 @@ improvements/
 refactoring-to-ecs-s3files/
 PATCH_NOTES.md
 
+# === Internal-only docs (never publish to the public sample repo) ===
+# Internal PM backlog, QA execution logs, and anything referencing live
+# dev endpoints / instance ids. Kept on local disk under internal-docs/.
+internal-docs/
+
 # === Workshop content & static assets ===
 assets/*
 !assets/README.md
@@ -97,6 +102,11 @@ questionnaire/*.docx
 **/__pycache__/
 # Playwright MCP test artifacts (console logs, page snapshots)
 .playwright-mcp/
+
+# Playwright run artifacts (reports, videos, screenshots — throwaway test output)
+frontend/playwright-report/
+frontend/test-results/
+frontend/e2e/.auth/
 
 .e2e-tmp/
 

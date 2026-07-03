@@ -5,18 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:e2e": "vite --mode e2e --port 5179 --strictPort --no-open",
-    "dev:e2e-login": "vite --mode e2e-login --port 5180 --strictPort --no-open",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint . --ext ts,tsx",
-    "test:e2e:auth": "RUN_REAL=1 playwright test --project=setup --headed",
-    "test:e2e": "RUN_REAL=1 playwright test --project=real",
-    "test:e2e:real": "RUN_REAL=1 playwright test --project=real",
-    "test:e2e:smoke": "RUN_REAL=1 playwright test --project=real e2e/real/smoke.spec.ts e2e/real/protocol.spec.ts",
-    "test:e2e:headed": "RUN_REAL=1 playwright test --project=real --headed",
-    "test:e2e:report": "playwright show-report",
-    "test:e2e:mock": "playwright test --project=hermetic --project=login"
+    "lint": "eslint . --ext ts,tsx"
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity": "^3.700.0",
@@ -40,8 +31,6 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
-    "@aws-sdk/client-bedrock-runtime": "^3.1075.0",
-    "@playwright/test": "^1.61.1",
     "@tailwindcss/typography": "^0.5.19",
     "@types/dompurify": "^3.0.5",
     "@types/react": "^18.3.0",

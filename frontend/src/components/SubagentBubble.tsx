@@ -3,7 +3,7 @@
  *
  * Displays Sub-Agent activities with:
  * - Collapsible thinking/reasoning section
- * - Tool calls (Brave search, webpage fetch, etc.)
+ * - Tool calls (web search, webpage fetch, etc.)
  * - Progress status with visual indicators
  */
 

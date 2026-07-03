@@ -1,7 +1,0 @@
-# Playwright E2E
-/test-results/
-/playwright-report/
-/playwright/.cache/
-# Saved authenticated browser state from `npm run test:e2e:auth` — NEVER commit
-# (contains real Cognito tokens). Re-capture when it expires.
-/e2e/.auth/
