@@ -2479,12 +2479,29 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
         }
 
 
+def _safe_upload_path(session_id: str, name: str) -> str:
+    """Resolve an attachment's on-disk path inside the session's uploads/ dir.
+
+    Both ``session_id`` (raw WS query param) and ``name`` (client-supplied
+    attachment name) are untrusted. We reduce ``name`` to its basename to strip
+    any ``../`` or absolute-path components, then run the result through
+    ``_resolve_safe_path`` which sanitizes ``session_id`` and containment-checks
+    the resolved path — so a crafted name can never escape uploads/ (e.g. to
+    overwrite the hot-reloaded prompts/ or another session's files).
+    """
+    from tools.workspace_file_tools import _resolve_safe_path
+    base = os.path.basename(name or "")
+    if not base or base in (".", ".."):
+        raise ValueError(f"Invalid attachment name: {name!r}")
+    target = _resolve_safe_path(session_id, os.path.join("uploads", base))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    return str(target)
+
+
 def _save_attachments_to_workspace(session_id: str, attachments: list):
     """Save inline (base64) attachments to NFS workspace for FileExplorer visibility."""
     try:
         import base64 as b64
-        uploads_dir = os.path.join(S3FILES_MOUNT, "sessions", session_id, "uploads")
-        os.makedirs(uploads_dir, exist_ok=True)
         for att in attachments:
             name = att.get("name", "unknown")
             data_b64 = att.get("data", "")
@@ -2495,7 +2512,7 @@ def _save_attachments_to_workspace(session_id: str, attachments: list):
                 data_b64 = data_b64.split(",", 1)[1]
             try:
                 file_bytes = b64.b64decode(data_b64)
-                filepath = os.path.join(uploads_dir, name)
+                filepath = _safe_upload_path(session_id, name)
                 with open(filepath, "wb") as f:
                     f.write(file_bytes)
                 logger.info(f"[WORKSPACE] Saved upload: {filepath} ({len(file_bytes)} bytes)")
@@ -2509,8 +2526,6 @@ def _save_s3_attachments_to_workspace(session_id: str, s3_attachments: list):
     """Save S3 attachments to NFS workspace for FileExplorer visibility."""
     try:
         from tools.attachment_handler import read_file_from_s3
-        uploads_dir = os.path.join(S3FILES_MOUNT, "sessions", session_id, "uploads")
-        os.makedirs(uploads_dir, exist_ok=True)
         for att in s3_attachments:
             s3_key = att.get("s3Key", "")
             filename = att.get("filename") or s3_key.split("/")[-1]
@@ -2519,7 +2534,7 @@ def _save_s3_attachments_to_workspace(session_id: str, s3_attachments: list):
             try:
                 file_bytes = read_file_from_s3(s3_key)
                 if file_bytes:
-                    filepath = os.path.join(uploads_dir, filename)
+                    filepath = _safe_upload_path(session_id, filename)
                     with open(filepath, "wb") as f:
                         f.write(file_bytes)
                     logger.info(f"[WORKSPACE] Saved S3 upload: {filepath} ({len(file_bytes)} bytes)")
