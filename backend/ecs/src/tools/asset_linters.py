@@ -588,8 +588,10 @@ NO_TRANSITION_ACTION_TYPES = frozenset({
 # CreateContactFlow API (create → inspect problems → delete, ap-northeast-2).
 # NOTE: GetParticipantInput is intentionally absent — its required errors depend
 # on mode (menu vs store) and are handled in the dedicated normalizer above.
+# NOTE: MessageParticipant is intentionally absent — API-verified (2026-07-04)
+# that it imports with NO Errors, so NoMatchingError is recommended (see prompt)
+# but NOT import-required; force-injecting it would over-normalize a valid flow.
 REQUIRED_ERRORS_BY_TYPE = {
-    "MessageParticipant": ["NoMatchingError"],
     "Compare": ["NoMatchingCondition"],
     "ConnectParticipantWithLexBot": ["NoMatchingError", "NoMatchingCondition"],
     "InvokeLambdaFunction": ["NoMatchingError"],
