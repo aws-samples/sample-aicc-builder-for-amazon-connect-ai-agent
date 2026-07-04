@@ -8,31 +8,31 @@ The callback pattern allows customers to receive a callback instead of waiting o
 
 ## Key Components
 
-1. **UpdateContactCallbackNumber** - Sets the phone number for callback
-2. **TransferContactToQueue** - Creates the callback contact in the queue
+1. **UpdateContactTargetQueue** - Sets the queue the contact will be transferred to (takes the queue ARN)
+2. **TransferContactToQueue** - Transfers the contact into the queue already set on it (takes **no** QueueId)
+3. **UpdateContactCallbackNumber** - Sets the phone number for the callback
+4. **CreateCallbackContact** - Creates the callback contact in the queue
 
-## CRITICAL: There is NO CreateCallbackContact Block!
-Callbacks are created by calling UpdateContactCallbackNumber followed by TransferContactToQueue.
+## How Callbacks Are Created
+`CreateCallbackContact` is a real, valid block. Set the callback number with `UpdateContactCallbackNumber`, then create the callback with `CreateCallbackContact` (which requires `InitialCallDelaySeconds`, `MaximumConnectionAttempts`, and `RetryDelaySeconds`).
 
 ## Complete Pattern Implementation
 
 ```json
 {
   "Version": "2019-10-30",
-  "StartAction": "check-staffing",
+  "StartAction": "set-queue",
   "Metadata": {
     "entryPointPosition": {"x": 40, "y": 40},
     "ActionMetadata": {
-      "check-staffing": {"position": {"x": 280, "y": 40}, "isFriendlyName": true},
+      "set-queue": {"position": {"x": 280, "y": 40}, "isFriendlyName": true},
       "transfer-queue": {"position": {"x": 0, "y": 300}, "isFriendlyName": true},
-      "no-agents": {"position": {"x": 560, "y": 300}, "isFriendlyName": true},
       "offer-callback": {"position": {"x": 560, "y": 560}, "isFriendlyName": true},
       "callback-confirm": {"position": {"x": 280, "y": 820}, "isFriendlyName": true},
       "set-callback": {"position": {"x": 280, "y": 1080}, "isFriendlyName": true},
       "create-callback": {"position": {"x": 280, "y": 1340}, "isFriendlyName": true},
       "callback-scheduled": {"position": {"x": 280, "y": 1600}, "isFriendlyName": true},
       "invalid-callback": {"position": {"x": 560, "y": 1340}, "isFriendlyName": true},
-      "queue-full": {"position": {"x": -280, "y": 560}, "isFriendlyName": true},
       "error-handler": {"position": {"x": 840, "y": 560}, "isFriendlyName": true},
       "disconnect": {"position": {"x": 280, "y": 1860}, "isFriendlyName": true}
     },
@@ -43,45 +43,24 @@ Callbacks are created by calling UpdateContactCallbackNumber followed by Transfe
   },
   "Actions": [
     {
-      "Identifier": "check-staffing",
-      "Type": "CheckStaffing",
-      "Parameters": {},
+      "Identifier": "set-queue",
+      "Type": "UpdateContactTargetQueue",
+      "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
       "Transitions": {
-        "Conditions": [
-          {"Condition": {"Operator": "Equals", "Operands": ["True"]}, "NextAction": "transfer-queue"},
-          {"Condition": {"Operator": "Equals", "Operands": ["False"]}, "NextAction": "no-agents"}
-        ],
+        "NextAction": "transfer-queue",
         "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
       }
     },
     {
       "Identifier": "transfer-queue",
       "Type": "TransferContactToQueue",
-      "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
+      "Parameters": {},
       "Transitions": {
         "NextAction": "disconnect",
         "Errors": [
-          {"ErrorType": "QueueAtCapacity", "NextAction": "queue-full"},
+          {"ErrorType": "QueueAtCapacity", "NextAction": "offer-callback"},
           {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
         ]
-      }
-    },
-    {
-      "Identifier": "no-agents",
-      "Type": "MessageParticipant",
-      "Parameters": {"Text": "All our agents are currently busy."},
-      "Transitions": {
-        "NextAction": "offer-callback",
-        "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "offer-callback"}]
-      }
-    },
-    {
-      "Identifier": "queue-full",
-      "Type": "MessageParticipant",
-      "Parameters": {"Text": "We are experiencing high call volume."},
-      "Transitions": {
-        "NextAction": "offer-callback",
-        "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "offer-callback"}]
       }
     },
     {
@@ -89,8 +68,8 @@ Callbacks are created by calling UpdateContactCallbackNumber followed by Transfe
       "Type": "GetParticipantInput",
       "Parameters": {
         "Text": "Press 1 to receive a callback when an agent is available, or press 2 to continue waiting.",
-        "InputTimeLimitSeconds": "10",
-        "DTMFConfiguration": {"DisableCancelKey": false}
+        "StoreInput": "False",
+        "InputTimeLimitSeconds": "10"
       },
       "Transitions": {
         "NextAction": "disconnect",
@@ -121,20 +100,22 @@ Callbacks are created by calling UpdateContactCallbackNumber followed by Transfe
       "Transitions": {
         "NextAction": "create-callback",
         "Errors": [
-          {"ErrorType": "InvalidNumber", "NextAction": "invalid-callback"},
-          {"ErrorType": "NotDialable", "NextAction": "invalid-callback"},
-          {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
+          {"ErrorType": "InvalidCallbackNumber", "NextAction": "invalid-callback"},
+          {"ErrorType": "CallbackNumberNotDialable", "NextAction": "invalid-callback"}
         ]
       }
     },
     {
       "Identifier": "create-callback",
-      "Type": "TransferContactToQueue",
-      "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
+      "Type": "CreateCallbackContact",
+      "Parameters": {
+        "InitialCallDelaySeconds": "20",
+        "MaximumConnectionAttempts": "3",
+        "RetryDelaySeconds": "60"
+      },
       "Transitions": {
         "NextAction": "callback-scheduled",
         "Errors": [
-          {"ErrorType": "QueueAtCapacity", "NextAction": "invalid-callback"},
           {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
         ]
       }
@@ -178,41 +159,51 @@ Callbacks are created by calling UpdateContactCallbackNumber followed by Transfe
 
 ## UpdateContactCallbackNumber Error Handling
 
-CRITICAL: UpdateContactCallbackNumber requires handling THREE error types:
+CRITICAL: UpdateContactCallbackNumber requires exactly TWO error types — `InvalidCallbackNumber` and `CallbackNumberNotDialable`. `NoMatchingError` is NOT allowed on this block (the API rejects it), and there are no `InvalidNumber`/`NotDialable` error types.
 
 ```json
 {
   "Errors": [
-    {"ErrorType": "InvalidNumber", "NextAction": "invalid-callback"},
-    {"ErrorType": "NotDialable", "NextAction": "invalid-callback"},
-    {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
+    {"ErrorType": "InvalidCallbackNumber", "NextAction": "invalid-callback"},
+    {"ErrorType": "CallbackNumberNotDialable", "NextAction": "invalid-callback"}
   ]
 }
 ```
 
 | Error Type | Description | Common Cause |
 |------------|-------------|--------------|
-| InvalidNumber | Format is invalid | Missing country code, wrong format |
-| NotDialable | Valid but can't dial | Blocked numbers, out of service area |
-| NoMatchingError | General failure | Permissions, service issue |
+| InvalidCallbackNumber | Format is invalid | Missing country code, wrong format |
+| CallbackNumberNotDialable | Valid but can't dial | Blocked numbers, out of service area |
 
-## NON-EXISTENT Block Warning
+## Creating the Callback Contact
 
-WRONG:
+`CreateCallbackContact` IS a valid block Type. It requires three parameters — `InitialCallDelaySeconds`, `MaximumConnectionAttempts`, and `RetryDelaySeconds`:
+
 ```json
-{"Type": "CreateCallbackContact"}  // DOES NOT EXIST!
+{
+  "Identifier": "create-callback",
+  "Type": "CreateCallbackContact",
+  "Parameters": {
+    "InitialCallDelaySeconds": "20",
+    "MaximumConnectionAttempts": "3",
+    "RetryDelaySeconds": "60"
+  },
+  "Transitions": {
+    "NextAction": "callback-scheduled",
+    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
+  }
+}
 ```
 
-CORRECT:
-```json
-{"Type": "UpdateContactCallbackNumber"}  // Step 1: Set the number
-// followed by
-{"Type": "TransferContactToQueue"}  // Step 2: Creates the callback
-```
+## Queue Transfer Note
+
+`TransferContactToQueue` takes NO `QueueId` parameter — it transfers the contact to the queue already set on it. Set the queue first with `UpdateContactTargetQueue` (which takes the queue ARN as `QueueId`), then call `TransferContactToQueue` with empty `Parameters`.
 
 ## Callback with Custom Number Collection
 
 If you want to allow customers to enter a different callback number:
+
+When you store input, `GetParticipantInput` runs in **store mode**: set `StoreInput` to `"True"`, supply an `InputValidation` block, and the only error type allowed is `NoMatchingError` (store mode does not accept `InputTimeLimitExceeded` or `NoMatchingCondition`). There is no `DTMFConfiguration` property on this block.
 
 ```json
 {
@@ -220,14 +211,13 @@ If you want to allow customers to enter a different callback number:
   "Type": "GetParticipantInput",
   "Parameters": {
     "Text": "Please enter the 10-digit phone number where you'd like to receive a callback, followed by the pound key.",
+    "StoreInput": "True",
     "InputTimeLimitSeconds": "30",
-    "DTMFConfiguration": {"InputTerminationSequence": "#"}
+    "InputValidation": {"CustomValidation": {"MaximumLength": "10"}}
   },
   "Transitions": {
     "NextAction": "set-custom-callback",
     "Errors": [
-      {"ErrorType": "InputTimeLimitExceeded", "NextAction": "use-current-number"},
-      {"ErrorType": "NoMatchingCondition", "NextAction": "set-custom-callback"},
       {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
     ]
   }
@@ -240,9 +230,8 @@ If you want to allow customers to enter a different callback number:
   "Transitions": {
     "NextAction": "create-callback",
     "Errors": [
-      {"ErrorType": "InvalidNumber", "NextAction": "invalid-number-retry"},
-      {"ErrorType": "NotDialable", "NextAction": "invalid-number-retry"},
-      {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
+      {"ErrorType": "InvalidCallbackNumber", "NextAction": "invalid-number-retry"},
+      {"ErrorType": "CallbackNumberNotDialable", "NextAction": "invalid-number-retry"}
     ]
   }
 }
@@ -250,11 +239,12 @@ If you want to allow customers to enter a different callback number:
 
 ## Related Topics
 - UpdateContactCallbackNumber
+- CreateCallbackContact
+- UpdateContactTargetQueue
 - TransferContactToQueue
-- CheckStaffing
 - GetParticipantInput
 
 ---
 **Metadata**
 - Category: Pattern
-- Keywords: callback, queue callback, UpdateContactCallbackNumber, InvalidNumber, NotDialable
+- Keywords: callback, queue callback, UpdateContactCallbackNumber, CreateCallbackContact, InvalidCallbackNumber, CallbackNumberNotDialable

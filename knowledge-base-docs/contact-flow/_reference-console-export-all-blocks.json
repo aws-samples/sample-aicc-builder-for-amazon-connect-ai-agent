@@ -2,6 +2,19 @@
   "Version": "2019-10-30",
   "StartAction": "",
   "Metadata": {
+    "_comment": "DESIGN-TIME CONSOLE EXPORT / REFERENCE ONLY - NOT DIRECTLY IMPORTABLE. This file is a saved-flow export from the Amazon Connect console that catalogs one instance of nearly every block Type. It is a placeholder: StartAction and every Transitions.NextAction / Errors[].NextAction are empty strings (\"\"), and many Parameters are empty. Re-verified against CreateContactFlow: importing it verbatim fails with InvalidContactFlowException and 51+ 'Invalid Action property value. Path: Actions[N].Transitions.NextAction' problems. To reuse a block from here you MUST wire NextAction/Error/Condition targets to real Identifiers, set StartAction, and fill required Parameters. Use this as a Type/parameter-shape catalog, not a copy-paste-ready flow.",
+    "_verifiedBlockNotes": {
+      "UpdateContactEventHooks": "The console emits EventHooks:{} (empty), but CreateContactFlow REJECTS an empty EventHooks map ('Invalid contact flow format' / 'Invalid request'). At least one hook key (CustomerQueue, CustomerRemaining, AgentHold, or AgentWhisper) is required, and its value must be non-empty (a key present with an empty-string value, e.g. {\"AgentWhisper\":\"\"}, is rejected with 'Action is missing required property. Path: ...Parameters.EventHooks.AgentWhisper').",
+      "CheckMetricData": "REQUIRES Transitions.Conditions (at least one condition branch). The condition-less variant in this export (identifier 1e8c881b, MetricType OldestContactInQueueAgeSeconds) is NOT importable; the variant with a Conditions branch (identifier c9e42ae9, MetricType NumberOfAgentsAvailable) imports. Valid MetricType values include NumberOfAgentsAvailable, NumberOfContactsInQueue, OldestContactInQueueAgeSeconds. Does NOT accept a Parameters.Queue key.",
+      "ShowView": "This export contains InvocationTimeLimitSeconds:\"undefined\" (a JS serialization artifact) which CreateContactFlow REJECTS. Supply a numeric-string timeout (e.g. \"30\") and a valid ViewResource.Id. Do not copy the literal string 'undefined'.",
+      "Compare": "Requires BOTH a non-empty ComparisonValue AND at least one Evaluate condition branch. The empty ComparisonValue with no conditions shown here is a design-time placeholder, not importable.",
+      "StartOutboundEmailContact": "Requires BOTH FromEmailAddress.EmailAddress AND DestinationEmailAddress. The export omits DestinationEmailAddress, so this shape alone is incomplete for import.",
+      "CreateTask": "Requires ContactFlowId and a task name (surfaces as ContactName in API errors). The ContactFlowId must be a real contact-flow ARN.",
+      "UpdatePreviousContactParticipantState": "Requires a PreviousContactParticipantState value from a specific accepted enum; the export leaves it empty so no valid value is demonstrated here.",
+      "CreateCase": "Does NOT take a Parameters.Fields property (the export correctly omits it). Do not add a Fields array.",
+      "GetParticipantInput": "Prompt-playing variants (MENU/STORE, e.g. identifiers 652c3102, cc16283d) require one of PromptId/Text/SSML/Media; the EnableDTMFBuffer=True variant (identifier bba6809b) does not require a prompt.",
+      "UpdateContactData": "Fully valid, importable Type (verified) with Parameters such as WisdomSessionArn."
+    },
     "entryPointPosition": {
       "x": 40,
       "y": 40

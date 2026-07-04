@@ -20,7 +20,8 @@ The ConnectParticipantWithLexBot block connects the contact to a Lex V2 bot for 
   "Transitions": {
     "NextAction": "check-result",
     "Errors": [
-      {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
+      {"ErrorType": "NoMatchingError", "NextAction": "error-handler"},
+      {"ErrorType": "NoMatchingCondition", "NextAction": "error-handler"}
     ]
   }
 }
@@ -29,16 +30,27 @@ The ConnectParticipantWithLexBot block connects the contact to a Lex V2 bot for 
 ### Required Parameters
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| Text / SSML / PromptId / Media | one of | Initial message. Provide exactly ONE of these |
+| Text / SSML / PromptId / Media / LexInitializationData | one of | Initial message. Provide exactly ONE of these |
 | LexV2Bot.AliasArn *(recommended)* | String | ARN of the Lex V2 bot alias |
 | LexBot *(legacy, still supported)* | Object | Lex V1 — `{Name, Region, Alias}` |
+
+The initial-message set is mutually exclusive: supplying `Text` together with
+`LexInitializationData` is rejected (`Only one of these properties may be defined.
+Properties: [Text, LexInitializationData]`). Use `LexInitializationData.InitialMessage`
+**instead of** `Text`, not alongside it. `LexInitializationData` alone (no `Text`) imports.
 
 ### Optional Parameters
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | LexSessionAttributes | Object (string→string) | Session attributes passed to Lex |
-| LexInitializationData.InitialMessage | String | Chat-only: message to prime the bot |
-| LexTimeoutSeconds.Text | Number | Chat-only: timer for inactive customer |
+| LexTimeoutSeconds.Text | Number | Chat-only: timer for inactive customer (see caveat below) |
+
+> **LexTimeoutSeconds caveat (unverified):** On a plain `CONTACT_FLOW` import, every literal
+> value form tested for `LexTimeoutSeconds.Text` (number `10`, string `"10"`, ISO-8601 `"PT10S"`)
+> is rejected with `Invalid Action property value. Path: Actions[0].Parameters.LexTimeoutSeconds.Text`.
+> The property *name* is accepted, but no literal value validated on a standard contact flow —
+> the accepted value format may be channel-specific (chat) or require an attribute JSONPath rather
+> than a literal. Confirm the exact accepted format before relying on it.
 
 ### Error Types
 - **NoMatchingError**: Bot invocation failed (invalid ARN, permissions, bot error)
@@ -48,14 +60,17 @@ The ConnectParticipantWithLexBot block connects the contact to a Lex V2 bot for 
 ### CRITICAL Requirements
 1. **Use Lex V2 via `LexV2Bot.AliasArn` for new flows**. Lex V1 (`LexBot` object) is still
    supported by the action but is legacy — prefer V2.
-2. Provide exactly ONE of `Text` | `SSML` | `PromptId` | `Media` (not multiple).
-3. MUST include `Errors` with `NoMatchingError`. Include `NoMatchingCondition` when you
-   branch on Intent, and `InputTimeLimitExceeded` when using `LexTimeoutSeconds`.
+2. Provide exactly ONE of `Text` | `SSML` | `PromptId` | `Media` | `LexInitializationData`
+   (not multiple).
+3. MUST include BOTH `NoMatchingError` and `NoMatchingCondition` in `Errors` — both are
+   unconditionally required error types (omitting either fails import). Add
+   `InputTimeLimitExceeded` only when using `LexTimeoutSeconds`.
 4. For voice, set up `UpdateContactTextToSpeechVoice` BEFORE this block.
-5. For voice, set `UpdateContactRecordingBehavior` with Voice `AnalyticsModes: ["PostContact"]`
-   (do NOT use `RealTime` — Connect rejects it on import unless real-time Contact Lens
-   preconditions are met; Q in Connect assistance is driven by the Lex/Wisdom session, not
-   by real-time voice analytics in this block).
+5. For voice, set `UpdateContactRecordingBehavior` with Voice `AnalyticsModes: ["PostContact"]`.
+   `RealTime` passes CreateContactFlow structural validation (it is NOT rejected at import
+   time), but it requires real-time Contact Lens enabled on the instance or it fails at
+   runtime. Q in Connect assistance is driven by the Lex/Wisdom session, not by real-time
+   voice analytics in this block, so `PostContact` is the safe default.
 
 ### Lex V2 Bot Alias ARN Format
 ```
@@ -86,7 +101,10 @@ After the Lex interaction, these attributes are available:
  },
  "Transitions": {
    "NextAction": "check-result",
-   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
+   "Errors": [
+     {"ErrorType": "NoMatchingError", "NextAction": "error-handler"},
+     {"ErrorType": "NoMatchingCondition", "NextAction": "error-handler"}
+   ]
  }}
 
 {"Identifier": "check-result", "Type": "Compare",
@@ -122,7 +140,10 @@ After the Lex interaction, these attributes are available:
  },
  "Transitions": {
    "NextAction": "check-result",
-   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
+   "Errors": [
+     {"ErrorType": "NoMatchingError", "NextAction": "error-handler"},
+     {"ErrorType": "NoMatchingCondition", "NextAction": "error-handler"}
+   ]
  }}
 ```
 

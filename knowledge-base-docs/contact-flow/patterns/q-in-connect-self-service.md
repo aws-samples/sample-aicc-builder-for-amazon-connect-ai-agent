@@ -21,8 +21,9 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
 11. **ConnectParticipantWithLexBot** - Q in Connect AI interaction
 12. **Compare** - Check Lex result for escalation
 13. **UpdateContactAttributes** - Set context for agent
-14. **TransferContactToQueue** - Escalate to agent
-15. **DisconnectParticipant** - End contact
+14. **UpdateContactTargetQueue** - Set the working queue (carries the queue ARN)
+15. **TransferContactToQueue** - Escalate to agent (takes NO parameters)
+16. **DisconnectParticipant** - End contact
 
 ## Complete JSON Implementation
 
@@ -54,6 +55,7 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
       "check-result": {"position": {"x": 280, "y": 2380}, "isFriendlyName": true},
       "set-context": {"position": {"x": 0, "y": 2640}, "isFriendlyName": true},
       "transfer-message": {"position": {"x": 0, "y": 2900}, "isFriendlyName": true},
+      "set-queue": {"position": {"x": 0, "y": 3030}, "isFriendlyName": true},
       "transfer-queue": {"position": {"x": 0, "y": 3160}, "isFriendlyName": true},
       "goodbye": {"position": {"x": 560, "y": 2640}, "isFriendlyName": true},
       "error-handler": {"position": {"x": 840, "y": 1600}, "isFriendlyName": true},
@@ -208,7 +210,10 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
       },
       "Transitions": {
         "NextAction": "check-result",
-        "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
+        "Errors": [
+          {"ErrorType": "NoMatchingCondition", "NextAction": "check-result"},
+          {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
+        ]
       }
     },
     {
@@ -244,14 +249,23 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
       "Type": "MessageParticipant",
       "Parameters": {"Text": "Please hold while I transfer you to an agent."},
       "Transitions": {
+        "NextAction": "set-queue",
+        "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "set-queue"}]
+      }
+    },
+    {
+      "Identifier": "set-queue",
+      "Type": "UpdateContactTargetQueue",
+      "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
+      "Transitions": {
         "NextAction": "transfer-queue",
-        "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "transfer-queue"}]
+        "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
       }
     },
     {
       "Identifier": "transfer-queue",
       "Type": "TransferContactToQueue",
-      "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
+      "Parameters": {},
       "Transitions": {
         "NextAction": "disconnect",
         "Errors": [
@@ -297,8 +311,10 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
 | Contact Lens (AnalyticsModes) | Voice: `["PostContact"]` | Chat: `["ContactLens"]` |
 | Profile Lookup | _phone | _email |
 
-> ⚠️ Do NOT use `RealTime` in Voice `AnalyticsModes` — Amazon Connect rejects it on
-> import unless real-time Contact Lens preconditions are met. Use `["PostContact"]`.
+> ⚠️ `RealTime` in Voice `AnalyticsModes` passes CreateContactFlow structural
+> validation (it does **not** fail import), but it requires real-time Contact Lens
+> to be enabled on the instance — otherwise it fails at contact runtime. Use
+> `["PostContact"]` unless real-time Contact Lens is provisioned.
 
 ### Lex Session Attributes for Escalation
 The Lex bot should set these attributes:
@@ -307,10 +323,22 @@ The Lex bot should set these attributes:
 - `escalationReason`: Why escalating to agent
 - `conversationSummary`: Summary for agent
 
+### Escalation: setting the queue
+`TransferContactToQueue` takes **no** parameters — it transfers to whatever the
+*working queue* currently is. Set that queue with a preceding
+`UpdateContactTargetQueue` block carrying `{"QueueId": "{{QUEUE_ARN}}"}`. Passing
+`QueueId` (or `QueueArn`) directly on `TransferContactToQueue` fails import with
+`Invalid Action property name`.
+
+### ConnectParticipantWithLexBot error handling
+`ConnectParticipantWithLexBot` requires **both** required error types in
+`Transitions.Errors` — `NoMatchingCondition` **and** `NoMatchingError`. Omitting
+either one fails import with `Action is missing required error`.
+
 ### Required Placeholders
 - `{{WISDOM_ASSISTANT_ARN}}`: Connect Assistant (Wisdom) domain ARN
 - `{{LEX_BOT_ALIAS_ARN}}`: Q in Connect Lex bot alias ARN
-- `{{QUEUE_ARN}}`: Target queue for escalation
+- `{{QUEUE_ARN}}`: Target queue for escalation (consumed by `UpdateContactTargetQueue`, not `TransferContactToQueue`)
 - `{{UPDATE_Q_SESSION_LAMBDA}}`: Lambda to update Q session data
 - `{{WELCOME_MESSAGE}}`: Welcome message for customers
 
@@ -318,6 +346,8 @@ The Lex bot should set these attributes:
 - UpdateContactRecordingBehavior
 - GetCustomerProfile
 - ConnectParticipantWithLexBot
+- UpdateContactTargetQueue
+- TransferContactToQueue
 - Compare Block
 
 ---

@@ -32,6 +32,29 @@ The UpdateContactAttributes block sets or updates custom contact attributes. The
 |-----------|------|-------------|
 | Attributes | Object | Key-value pairs of attributes to set |
 
+### Optional Parameters
+| Parameter | Type | Allowed Values | Description |
+|-----------|------|----------------|-------------|
+| TargetContact | String | `Current` (default), `Related` | Selects whether the attributes are set on the current contact or a related/linked contact. Omit it to target the current contact. Unrecognized values are rejected at import with `Invalid Action property value. Path: Actions[0].Parameters.TargetContact`. |
+
+Example targeting a related contact:
+```json
+{
+  "Identifier": "set-attrs-related",
+  "Type": "UpdateContactAttributes",
+  "Parameters": {
+    "TargetContact": "Related",
+    "Attributes": {
+      "linkedFlag": "true"
+    }
+  },
+  "Transitions": {
+    "NextAction": "next-block",
+    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "next-block"}]
+  }
+}
+```
+
 ### Error Types
 - **NoMatchingError**: Failed to set attributes (32KB limit exceeded, invalid values)
 

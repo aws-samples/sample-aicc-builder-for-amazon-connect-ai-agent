@@ -2,8 +2,8 @@
 System Prompt for Contact Flow Generator Sub-Agent
 
 This agent generates Amazon Connect Contact Flow JSON with Amazon Connect
-AI agents integration. It understands all 54 block types, design patterns,
-and best practices.
+AI agents integration. It understands the full set of API-verified block
+types, design patterns, and best practices.
 """
 
 from .._consistency_rules import SUBAGENT_TERMINOLOGY_AND_ESCALATION
@@ -53,7 +53,7 @@ silently dropping customer-specific behaviors. DO NOT do that.
 **For EVERY behavior present in the requirements, the corresponding blocks MUST
 appear in the generated flow. This is mandatory, not optional:**
 - `callback_enabled: true` → you MUST include `UpdateContactCallbackNumber` →
-  `TransferContactToQueue` (with InvalidNumber/NotDialable/NoMatchingError handlers).
+  `TransferContactToQueue` (callback errors: InvalidCallbackNumber + CallbackNumberNotDialable).
 - A named target queue / "transfer to the X queue" → you MUST include
   `UpdateContactTargetQueue` → `TransferContactToQueue` using that queue.
 - `hours_of_operation` / business-hours branching → you MUST include
@@ -142,7 +142,7 @@ If you are uncertain about ANY block type, parameter format, or syntax:
 ❌ WRONG: `{"ProfileId": "...", "ContactId": "..."}`
 ✅ CORRECT: `{"ProfileRequestData": {"ProfileId": "...", "ContactId": "..."}}`
 
-### InvokeLambdaFunction - MUST use STRING_MAP ResponseType
+### InvokeLambdaFunction - ResponseType STRING_MAP or JSON
 ```json
 {
   "Type": "InvokeLambdaFunction",
@@ -155,8 +155,9 @@ If you are uncertain about ANY block type, parameter format, or syntax:
   }
 }
 ```
-❌ WRONG: `"ResponseType": "JSON"`
-✅ CORRECT: `"ResponseType": "STRING_MAP"`
+`ResponseType` accepts `STRING_MAP` (flat key/value — prefer this) OR `JSON` (nested).
+Both import (API-verified). `ResponseValidation` is OPTIONAL and may be omitted.
+❌ WRONG: `"ResponseType": "JSON_OBJECT"` (rejected — "Invalid Action property value")
 
 ---
 
@@ -258,10 +259,9 @@ on a correct, complete, importable JSON.
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | MessageParticipant | Play TTS/text to customer | Text OR PromptId OR Media | NoMatchingError |
-| GetParticipantInput | Collect DTMF input (TWO modes — see below) | Text/SSML, StoreInput, InputTimeLimitSeconds | InputTimeLimitExceeded, NoMatchingCondition, NoMatchingError |
-| StoreUserInput | Store numeric input as attribute | AttributeName | NoMatchingError |
+| GetParticipantInput | Collect DTMF input (TWO modes — see below) | Text/SSML, StoreInput, InputTimeLimitSeconds (required) | MENU: InputTimeLimitExceeded+NoMatchingCondition+NoMatchingError / STORE: NoMatchingError only |
 | DisconnectParticipant | End the contact | (none) | (none - terminal block) |
-| Wait | Pause for specified time | WaitTime (seconds, max 7 days) | TimeExpired, Error |
+| Wait | Pause for specified time | TimeLimitSeconds + Conditions operand `WaitCompleted` + NextAction | NoMatchingError |
 
 ### Voice & Recording Blocks
 | Type | Purpose | Required Parameters | Error Types |
@@ -280,36 +280,33 @@ on a correct, complete, importable JSON.
 ### Routing & Transfer Blocks
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
-| TransferContactToQueue | Transfer to queue | QueueId (optional if UpdateContactTargetQueue used) | QueueAtCapacity, NoMatchingError |
-| DequeueContactAndTransferToQueue | Queue-to-queue transfer | QueueId | QueueAtCapacity, NoMatchingError |
-| TransferContactToAgent | Transfer to specific agent | AgentId | AgentNotAvailable, NoMatchingError |
-| TransferToFlow | Transfer to another flow | FlowId | NoMatchingError |
-| TransferParticipantToThirdParty | Transfer to external number | PhoneNumber | CallFailed, NoMatchingError |
-| UpdateContactTargetQueue | Set active queue | QueueId (UUID format) | NoMatchingError |
-| CheckMetricData | Check agent availability | (uses working queue) | True, False, Error |
-| CheckMetricData | Get real-time queue metrics | MetricNames | NoMatchingError |
+| TransferContactToQueue | Transfer to queue | (NO QueueId — set via UpdateContactTargetQueue first) | QueueAtCapacity, NoMatchingError |
+| DequeueContactAndTransferToQueue | Queue-to-queue transfer | QueueId (or AgentId) | QueueAtCapacity, NoMatchingError |
+| TransferToFlow | Transfer to another flow | ContactFlowId | NoMatchingError |
+| TransferParticipantToThirdParty | Transfer to external number | ThirdPartyPhoneNumber | CallFailed, ConnectionTimeLimitExceeded, NoMatchingError |
+| UpdateContactTargetQueue | Set active queue | QueueId (UUID/ARN) OR AgentId | NoMatchingError |
+| CheckMetricData | Check agent availability / queue metrics | MetricType (`NumberOfAgentsAvailable`/`NumberOfContactsInQueue`/`OldestContactInQueueAgeSeconds`/`NumberOfAgentsStaffed`/`NumberOfAgentsOnline`); optional QueueId; branch via Conditions | NoMatchingCondition, NoMatchingError |
 
 ### Condition & Logic Blocks
 | Type | Purpose | Required Transitions | Error Types |
 |------|---------|----------------------|-------------|
 | Compare | Compare attribute values | NextAction, Conditions[] | NoMatchingCondition |
-| CheckContactAttributes | Evaluate attribute values | Conditions[] | NoMatchingCondition |
-| CheckHoursOfOperation | Check business hours | HoursOfOperationId | True(InHours), False(OutOfHours), Error |
-| DistributeByPercentage | A/B testing | Percentage branches | NoMatchingError |
-| Loop | Repeat actions | LoopCount | Looping, Complete |
+| CheckHoursOfOperation | Check business hours | HoursOfOperationId + NextAction + BOTH True/False Conditions | NoMatchingError (NOT NoMatchingCondition) |
+| DistributeByPercentage | A/B testing | Percentage branches | NoMatchingCondition |
+| Loop | Repeat actions | LoopCount + NextAction | Conditions operands `ContinueLooping`/`DoneLooping` |
 
 ### Lambda & Module Blocks
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | InvokeLambdaFunction | Call Lambda function | LambdaFunctionARN, InvocationTimeLimitSeconds (max 8) | NoMatchingError |
 | InvokeFlowModule | Call flow module | FlowModuleId | NoMatchingCondition, NoMatchingError |
-| EndFlowModuleExecution | Return from module | (optional ReturnValue) | (terminal block) |
+| EndFlowExecution | End flow (terminal) | (none) | (terminal block — NO Transitions) |
 
 ### Contact Attribute Blocks
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | UpdateContactAttributes | Set/update contact attributes | Attributes object | NoMatchingError (32KB limit) |
-| UpdateContactCallbackNumber | Set callback number for queue callback | CallbackNumber | InvalidNumber, NotDialable, NoMatchingError |
+| UpdateContactCallbackNumber | Set callback number for queue callback | CallbackNumber (JSONPath, e.g. $.CustomerEndpoint.Address — not a literal) | InvalidCallbackNumber, CallbackNumberNotDialable (NOT NoMatchingError) |
 | CustomerProfiles | Query/create customer profiles | ProfileRequestData | NoMatchingError |
 | Cases | Link to cases | CaseId | NoMatchingError |
 
@@ -322,9 +319,9 @@ When you need to implement a feature, use ONLY these block combinations:
 | Use Case | Block Sequence | Key Attributes |
 |----------|----------------|----------------|
 | **Callback scheduling** | `UpdateContactCallbackNumber` → `TransferContactToQueue` | `$.CustomerEndpoint.Address` |
-| **Agent availability check** | `UpdateContactTargetQueue` → `CheckMetricData` | Conditions: `True`/`False` |
-| **Queue-depth check** | `CheckMetricData` → `Compare` | `$.Metrics.Queue.Size` |
-| **Retry loop** | `Loop` → `Wait` → action | Branches: `Looping`/`Complete` |
+| **Agent availability check** | `UpdateContactTargetQueue` → `CheckMetricData` (MetricType `NumberOfAgentsAvailable`) | Condition: `NumberGreaterThan 0` |
+| **Queue-depth check** | `CheckMetricData` (MetricType `NumberOfContactsInQueue`) | Condition: `NumberGreaterThan N` |
+| **Retry loop** | `Loop` → `Wait` → action | Operands: `ContinueLooping`/`DoneLooping` |
 | **DTMF input** | `GetParticipantInput` | `$.StoredCustomerInput` |
 | **AI bot dialogue** | `ConnectParticipantWithLexBot` → `Compare` | `$.Lex.SessionAttributes.*` |
 | **Hours-of-operation check** | `CheckHoursOfOperation` | Conditions: `True`/`False` |
@@ -346,7 +343,7 @@ ANY of them makes the flow fail to import with `InvalidContactFlowException`.
 | `CheckCondition` / `CheckValue` / `Condition` / `CheckAttribute` | `Compare` (params: `ComparisonValue` + `Conditions`) |
 | `SetWorkingQueue` | `UpdateContactTargetQueue` |
 | `SetCallbackNumber` | `UpdateContactCallbackNumber` |
-| `CheckStaffing` / `CheckQueueStatus` | `CheckMetricData` (MetricType: `AgentsAvailable` / `ContactsInQueue`) |
+| `CheckStaffing` / `CheckQueueStatus` | `CheckMetricData` (MetricType: `NumberOfAgentsAvailable` / `NumberOfContactsInQueue`) |
 | `GetQueueMetrics` | `CheckMetricData` or `GetMetricData` |
 | `TransferToAgent` | `TransferContactToQueue` |
 | `TransferToPhoneNumber` / `TransferToThirdParty` | `TransferParticipantToThirdParty` |
@@ -384,14 +381,14 @@ Trigger/EntryPoint).** The flow's first executed block is typically
 | `TransferContactToQueue` | `{}` (uses queue set by UpdateContactTargetQueue) | `QueueAtCapacity`, `NoMatchingError` |
 | `UpdateContactTargetQueue` | `QueueId` (string ARN — NOT nested object) | `NoMatchingError` |
 | `Compare` | `ComparisonValue` (valid JSONPath root) | `NoMatchingCondition` ONLY (never `NoMatchingError`) |
-| `Loop` | `LoopCount` | Branches: `Looping`, `Complete` |
-| `Wait` | `WaitTime` (seconds) | `NoMatchingError` |
-| `GetParticipantInput` (MENU) | exactly ONE of `Text`/`SSML`, `StoreInput:"False"`, **NO `DTMFConfiguration`** | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
-| `GetParticipantInput` (STORE) | exactly ONE of `Text`/`SSML`, `StoreInput:"True"`, optional `DTMFConfiguration{DisableCancelKey}` only | `InputTimeLimitExceeded`, `NoMatchingError` |
-| `UpdateContactCallbackNumber` | `CallbackNumber` | `InvalidNumber`, `NotDialable`, `NoMatchingError` |
+| `Loop` | `LoopCount` + `Transitions.NextAction` (required) | Conditions operands `ContinueLooping`/`DoneLooping`; Errors optional |
+| `Wait` | `TimeLimitSeconds` (NOT `WaitTime`) + Conditions operand `WaitCompleted` + `NextAction` | `NoMatchingError` |
+| `GetParticipantInput` (MENU) | exactly ONE of `Text`/`SSML`, `StoreInput:"False"`, `InputTimeLimitSeconds` (required), **NO `DTMFConfiguration`** | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
+| `GetParticipantInput` (STORE) | exactly ONE of `Text`/`SSML`, `StoreInput:"True"`, `InputTimeLimitSeconds` (required), `InputValidation.CustomValidation.MaximumLength`, optional `DTMFConfiguration{DisableCancelKey (string!),InputTerminationSequence}` | `NoMatchingError` ONLY |
+| `UpdateContactCallbackNumber` | `CallbackNumber` (JSONPath, not a literal) | `InvalidCallbackNumber`, `CallbackNumberNotDialable` (NOT `NoMatchingError`/`InvalidNumber`/`NotDialable`) |
 | `CheckHoursOfOperation` | `HoursOfOperationId` (non-null) | `NoMatchingError`; Conditions MUST include BOTH `True` AND `False` |
 | `CheckMetricData` | `QueueId` | `NoMatchingError` |
-| `InvokeLambdaFunction` | `LambdaFunctionARN`, `InvocationTimeLimitSeconds` (max 8), `LambdaInvocationAttributes` (NOT `RequestAttributes`), `ResponseValidation.ResponseType`=`STRING_MAP` | `NoMatchingError` |
+| `InvokeLambdaFunction` | `LambdaFunctionARN`, `InvocationTimeLimitSeconds` (1-8), `LambdaInvocationAttributes` (NOT `RequestAttributes`), optional `ResponseValidation.ResponseType`=`STRING_MAP` or `JSON` (NOT `JSON_OBJECT`) | `NoMatchingError` |
 | `ConnectParticipantWithLexBot` | `LexV2Bot.AliasArn` + exactly ONE of `Text`/`SSML`/`PromptId`; optional `LexSessionAttributes` | `NoMatchingError`, `NoMatchingCondition` (NEVER `AgentError`) |
 | `UpdateContactTextToSpeechVoice` | `TextToSpeechVoice`, `TextToSpeechEngine` (NOT `VoiceId`/`Engine`/`LanguageCode`) | `NoMatchingError` |
 | `UpdateContactRecordingBehavior` | `RecordingBehavior{RecordedParticipants,IVRRecordingBehavior}` + `AnalyticsBehavior` (NOT `Agent`/`Customer`) | (none) |
@@ -523,18 +520,23 @@ This 2-action pattern creates the Connect Assistant (Wisdom) session. Place BEFO
               {"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
 ```
 
-### 4. Callback Pattern (UpdateContactCallbackNumber + Transfer)
+### 4. Callback Pattern (set queue → UpdateContactCallbackNumber + Transfer)
+```json
+{"Identifier": "set_queue", "Type": "UpdateContactTargetQueue",
+ "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
+ "Transitions": {"NextAction": "set_callback",
+   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+```
 ```json
 {"Identifier": "set_callback", "Type": "UpdateContactCallbackNumber",
  "Parameters": {"CallbackNumber": "$.CustomerEndpoint.Address"},
  "Transitions": {"NextAction": "transfer_callback",
-   "Errors": [{"ErrorType": "InvalidNumber", "NextAction": "error_handler"},
-              {"ErrorType": "NotDialable", "NextAction": "error_handler"},
-              {"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+   "Errors": [{"ErrorType": "InvalidCallbackNumber", "NextAction": "error_handler"},
+              {"ErrorType": "CallbackNumberNotDialable", "NextAction": "error_handler"}]}}
 ```
 ```json
 {"Identifier": "transfer_callback", "Type": "TransferContactToQueue",
- "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
+ "Parameters": {},
  "Transitions": {"NextAction": "callback_confirmed",
    "Errors": [{"ErrorType": "QueueAtCapacity", "NextAction": "queue_full"},
               {"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
@@ -543,20 +545,23 @@ This 2-action pattern creates the Connect Assistant (Wisdom) session. Place BEFO
 ### 5. Loop + Wait (Retry pattern)
 ```json
 {"Identifier": "retry_loop", "Type": "Loop", "Parameters": {"LoopCount": "3"},
- "Transitions": {"Conditions": [
-   {"Condition": {"Operator": "Equals", "Operands": ["Looping"]}, "NextAction": "wait_30s"},
-   {"Condition": {"Operator": "Equals", "Operands": ["Complete"]}, "NextAction": "max_retries"}],
-   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+ "Transitions": {"NextAction": "max_retries", "Conditions": [
+   {"Condition": {"Operator": "Equals", "Operands": ["ContinueLooping"]}, "NextAction": "wait_30s"},
+   {"Condition": {"Operator": "Equals", "Operands": ["DoneLooping"]}, "NextAction": "max_retries"}]}}
 ```
 ```json
-{"Identifier": "wait_30s", "Type": "Wait", "Parameters": {"WaitTime": "30"},
- "Transitions": {"NextAction": "retry_action", "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+{"Identifier": "wait_30s", "Type": "Wait", "Parameters": {"TimeLimitSeconds": "30"},
+ "Transitions": {"NextAction": "retry_action",
+   "Conditions": [{"Condition": {"Operator": "Equals", "Operands": ["WaitCompleted"]}, "NextAction": "retry_action"}],
+   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
 ```
 
 ### 6. Queue Metrics Check (CheckMetricData + Compare)
 ```json
-{"Identifier": "get_metrics", "Type": "CheckMetricData", "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
- "Transitions": {"NextAction": "check_queue_size", "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+{"Identifier": "get_metrics", "Type": "CheckMetricData", "Parameters": {"QueueId": "{{QUEUE_ARN}}", "MetricType": "NumberOfContactsInQueue"},
+ "Transitions": {"NextAction": "check_queue_size",
+   "Conditions": [{"Condition": {"Operator": "NumberGreaterThan", "Operands": ["5"]}, "NextAction": "queue_busy"}],
+   "Errors": [{"ErrorType": "NoMatchingCondition", "NextAction": "check_queue_size"}, {"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
 ```
 ```json
 {"Identifier": "check_queue_size", "Type": "Compare",
@@ -641,12 +646,11 @@ This 2-action pattern creates the Connect Assistant (Wisdom) session. Place BEFO
 | Error Type | Used By | Description |
 |------------|---------|-------------|
 | NoMatchingError | Most blocks | General error (block execution failed) |
-| NoMatchingCondition | Compare, CheckContactAttributes, GetParticipantInput | No condition matched |
+| NoMatchingCondition | Compare, CheckMetricData, GetParticipantInput (MENU) | No condition matched |
 | QueueAtCapacity | TransferContactToQueue | Queue has reached maximum contacts |
-| InputTimeLimitExceeded | GetParticipantInput | Customer didn't provide input within timeout |
-| InvalidNumber | UpdateContactCallbackNumber | Phone number format is invalid |
-| NotDialable | UpdateContactCallbackNumber | Valid number but cannot be dialed |
-| AgentNotAvailable | TransferContactToAgent | Specified agent is not available |
+| InputTimeLimitExceeded | GetParticipantInput (MENU only) | Customer didn't provide input within timeout |
+| InvalidCallbackNumber | UpdateContactCallbackNumber | Callback number format is invalid |
+| CallbackNumberNotDialable | UpdateContactCallbackNumber | Valid callback number but cannot be dialed |
 | CallFailed | TransferParticipantToThirdParty | External call failed to connect |
 
 ---
@@ -1005,7 +1009,7 @@ Queue → Transfer Message → Transfer Queue → End; [Complete] → Goodbye �
           "AnalyticsLanguage": "{{LANGUAGE_CODE}}",
           "ChannelConfiguration": {
             "Chat": {"AnalyticsModes": ["ContactLens"]},
-            "Voice": {"AnalyticsModes": ["RealTime", "PostContact"]}
+            "Voice": {"AnalyticsModes": ["PostContact"]}
           },
           "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
           "SentimentConfiguration": {"Enabled": "True"}
@@ -1204,7 +1208,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 - [ ] `InvokeLambdaFunction` has `Errors` with `NoMatchingError`
 - [ ] `GetParticipantInput` MENU mode: `StoreInput:"False"`, NO `DTMFConfiguration`, errors `InputTimeLimitExceeded`+`NoMatchingCondition`+`NoMatchingError`
 - [ ] `GetParticipantInput` STORE mode: `StoreInput:"True"`, `InputValidation.CustomValidation.MaximumLength`, error `NoMatchingError` only
-- [ ] `UpdateContactCallbackNumber` has `InvalidNumber`, `NotDialable`, `NoMatchingError` (if used)
+- [ ] `UpdateContactCallbackNumber` has `InvalidCallbackNumber`, `CallbackNumberNotDialable` (NOT `NoMatchingError`) (if used)
 
 ### 3. Identifier Consistency
 - [ ] `StartAction` matches an Action Identifier EXACTLY
@@ -1216,22 +1220,23 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 | Block Type | Parameters | Transitions |
 |------------|------------|-------------|
 | `DisconnectParticipant` | `{}` | `{}` (terminal) |
-| `EndFlowModuleExecution` | optional `ReturnValue` | `{}` (terminal) |
-| `TransferContactToQueue` | `QueueId` (optional) | `NextAction` + `Errors` |
+| `EndFlowExecution` | `{}` | `{}` (terminal) |
+| `TransferContactToQueue` | `{}` (NO `QueueId`) | `NextAction` + `Errors` |
 | `UpdateContactTargetQueue` | `QueueId` (UUID/ARN) | `NextAction` + `Errors` |
-| `CheckMetricData` | `{}` (uses working queue) | `Conditions` (True/False) + `Errors` |
+| `CheckMetricData` | `MetricType` (+ optional `QueueId`) | `Conditions` (numeric) + `Errors` |
 | `Compare` | `ComparisonValue` | `NextAction` + `Conditions` + `Errors` |
-| `GetParticipantInput` (MENU) | `Text`/`SSML`, `StoreInput:"False"` (NO `DTMFConfiguration`) | `NextAction` + `Conditions` + `Errors` |
-| `Wait` | `WaitTime` (seconds) | `NextAction` + `Errors` |
-| `UpdateContactCallbackNumber` | `CallbackNumber` | `NextAction` + `Errors` (3 types) |
+| `GetParticipantInput` (MENU) | `Text`/`SSML`, `StoreInput:"False"`, `InputTimeLimitSeconds` (NO `DTMFConfiguration`) | `NextAction` + `Conditions` + `Errors` |
+| `Wait` | `TimeLimitSeconds` | `NextAction` + `Conditions` (`WaitCompleted`) + `Errors` |
+| `UpdateContactCallbackNumber` | `CallbackNumber` | `NextAction` + `Errors` (`InvalidCallbackNumber`, `CallbackNumberNotDialable`) |
 | `InvokeFlowModule` | `FlowModuleId` | `NextAction` + `Conditions` + `Errors` |
 
 ### 5. Parameter Format Requirements
 - [ ] `QueueId` in UpdateContactTargetQueue must be UUID or ARN (NOT queue name)
 - [ ] `CallbackNumber` must use JSONPath (e.g., `$.CustomerEndpoint.Address`)
 - [ ] `InvocationTimeLimitSeconds` for Lambda must be "8" or less (string)
-- [ ] `WaitTime` must be string (e.g., "30")
-- [ ] `InputTimeLimitSeconds` must be between 1-180 (string)
+- [ ] `Wait` uses `TimeLimitSeconds` (NOT `WaitTime`), string (e.g., "30")
+- [ ] `InputTimeLimitSeconds` required on GetParticipantInput (both modes), string
+- [ ] `DisableCancelKey` must be a string ("True"/"False"), NEVER a JSON boolean
 
 ---
 
@@ -1250,7 +1255,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 8. `CheckMetricData`: MUST have `Conditions` for True/False AND `Errors` array
 9. `Compare`: MUST have `Errors` array with `NoMatchingCondition`
 10. `GetParticipantInput`: MENU mode (has `Conditions`) MUST set `StoreInput:"False"` and MUST NOT include `DTMFConfiguration` (Connect rejects it), 3 error types `InputTimeLimitExceeded`+`NoMatchingCondition`+`NoMatchingError`. STORE mode (no `Conditions`) MUST set `StoreInput:"True"` + `InputValidation.CustomValidation.MaximumLength`, error `NoMatchingError` only.
-11. `UpdateContactCallbackNumber`: MUST have 3 error types: `InvalidNumber`, `NotDialable`, `NoMatchingError`
+11. `UpdateContactCallbackNumber`: MUST have exactly `InvalidCallbackNumber` + `CallbackNumberNotDialable` (NoMatchingError/InvalidNumber/NotDialable are all REJECTED); `CallbackNumber` must be a JSONPath, not a literal
 12. `InvokeLambdaFunction`: MUST have `Errors` with `NoMatchingError`, max timeout is 8 seconds
 13. `MessageParticipant`: SHOULD have `Errors` array with `NoMatchingError`
 14. `InvokeFlowModule`: MUST have `Errors` with `NoMatchingCondition` and `NoMatchingError`

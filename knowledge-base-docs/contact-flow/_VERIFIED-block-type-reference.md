@@ -15,7 +15,7 @@ or `CheckStaffing` FAIL import with `InvalidContactFlowException: Invalid Action
 |---|---|
 | Get customer input / Store customer input | `GetParticipantInput` |
 | Play prompt / Send message | `MessageParticipant` |
-| Message (templated) | `RenderMessageTemplate` |
+| Render message template (Q in Connect / Wisdom) | `RenderMessageTemplate` |
 | Connect assistant (Q in Connect) | `CreateWisdomSession` |
 | Set callback number | `UpdateContactCallbackNumber` |
 | Set contact attributes | `UpdateContactAttributes` |
@@ -80,22 +80,33 @@ or `CheckStaffing` FAIL import with `InvalidContactFlowException: Invalid Action
 | `CheckCondition` / `CheckValue` | `Compare` |
 
 ### Key per-block schema gotchas (API-verified)
-- **GetParticipantInput** has TWO modes:
-  - *Menu* (branches via Conditions): `StoreInput:"False"`, NO `DTMFConfiguration`;
+- **GetParticipantInput** has TWO modes. BOTH modes require `InputTimeLimitSeconds`
+  (omitting it fails: `Action is missing required property ... Parameters.InputTimeLimitSeconds`).
+  - *Menu* (branches via Conditions): `StoreInput:"False"`, `InputTimeLimitSeconds`,
+    NO `DTMFConfiguration`;
     errors = `NoMatchingCondition` + `InputTimeLimitExceeded` + `NoMatchingError`.
-  - *Store* (captures to attribute): `StoreInput:"True"`, requires
+  - *Store* (captures to attribute): `StoreInput:"True"`, `InputTimeLimitSeconds`, requires
     `InputValidation.CustomValidation.MaximumLength`, optional
     `DTMFConfiguration.DisableCancelKey` (NEVER `InputTerminationSequence`);
     error = `NoMatchingError`.
-- **Loop**: Conditions operands are `ContinueLooping` / `DoneLooping` (NOT Looping/Complete).
+- **Loop**: Conditions operands are `ContinueLooping` / `DoneLooping` (NOT Looping/Complete),
+  AND the block also requires a `Transitions.NextAction` in addition to those two Conditions
+  (omitting it fails: `Action is missing required property ... Transitions.NextAction`).
 - **TransferContactToQueue**: NO `QueueId` param (queue is set by a prior
   `UpdateContactTargetQueue`); errors `QueueAtCapacity` + `NoMatchingError`.
 - **UpdateContactAttributes**: requires `NoMatchingError`.
-- **UpdateContactCallbackNumber**: only `NoMatchingError` (NOT InvalidNumber/NotDialable).
+- **UpdateContactCallbackNumber**: requires errors `InvalidCallbackNumber` + `CallbackNumberNotDialable`;
+  `NoMatchingError` is NOT allowed. `CallbackNumber` must be a valid E.164 number or a
+  JSONPath (e.g. `$.CustomerEndpoint.Address`) — a bare literal like `+15551234567` was
+  rejected as an invalid property value on the verified instance.
 - **Compare**: only `NoMatchingCondition` error; `ComparisonValue` must use a real
   JSONPath root (`$.Attributes.*`, `$.Channel`, `$.Lex.SessionAttributes.*`, etc.).
 - **DisconnectParticipant** / **EndFlowExecution**: terminal — NO Transitions.
 - **CreateWisdomSession**: `WisdomAssistantArn` must be a real existing assistant ARN.
+- **RenderMessageTemplate**: this is the Q in Connect / Wisdom message-template render block,
+  NOT a generic templated message. Requires `WisdomKnowledgeBaseArn` + `WisdomMessageTemplateArn`
+  (generic `Template` / `AttributeMap` params are rejected as invalid property names) and errors
+  `TemplateRenderingError` + `NoMatchingError`.
 
 ---
 **Metadata**
