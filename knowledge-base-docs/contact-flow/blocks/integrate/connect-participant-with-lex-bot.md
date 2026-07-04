@@ -66,11 +66,12 @@ Properties: [Text, LexInitializationData]`). Use `LexInitializationData.InitialM
    unconditionally required error types (omitting either fails import). Add
    `InputTimeLimitExceeded` only when using `LexTimeoutSeconds`.
 4. For voice, set up `UpdateContactTextToSpeechVoice` BEFORE this block.
-5. For voice, set `UpdateContactRecordingBehavior` with Voice `AnalyticsModes: ["PostContact"]`.
-   `RealTime` passes CreateContactFlow structural validation (it is NOT rejected at import
-   time), but it requires real-time Contact Lens enabled on the instance or it fails at
-   runtime. Q in Connect assistance is driven by the Lex/Wisdom session, not by real-time
-   voice analytics in this block, so `PostContact` is the safe default.
+5. For voice, set `UpdateContactRecordingBehavior` with Voice `AnalyticsModes: ["RealTime"]`
+   (preferred for AI-agent / Q in Connect flows — live transcript + sentiment give the
+   assistant and any escalated human real-time context). Voice `AnalyticsModes` takes
+   EXACTLY ONE mode: `["RealTime"]` OR `["PostContact"]`, never both (the combined array
+   fails import). `RealTime` requires real-time Contact Lens enabled on the instance
+   (enforced at runtime, not at import); if it is not provisioned, use `["PostContact"]`.
 
 ### Lex V2 Bot Alias ARN Format
 ```
@@ -129,7 +130,7 @@ After the Lex interaction, these attributes are available:
  "Parameters": {
    "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
    "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
-     "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["PostContact"]}}}
+     "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["RealTime"]}}}
  },
  "Transitions": {"NextAction": "lex-bot"}}
 

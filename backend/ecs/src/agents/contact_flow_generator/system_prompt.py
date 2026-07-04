@@ -457,18 +457,19 @@ Voice recording (when channel is VOICE):
  "Parameters": {
    "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
    "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
-     "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["PostContact"]}},
+     "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["RealTime"]}},
      "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
      "SentimentConfiguration": {"Enabled": "True"}}},
  "Transitions": {"NextAction": "next_block"}}
 ```
-⚠️ **Voice `AnalyticsModes` MUST be `["PostContact"]` (NOT `["RealTime", ...]`).**
-`RealTime` in `Voice.AnalyticsModes` is rejected by Amazon Connect on import
-(`InvalidContactFlowException: Invalid Action property value ... ChannelConfiguration.Voice`)
-unless the instance/flow meets real-time Contact Lens preconditions — it breaks
-import for everyone. Use `PostContact`. (Q in Connect real-time assistance does
-NOT require RealTime voice *analytics* in this block — the Lex/Wisdom session
-drives the assistant; post-contact analytics is the safe, always-importable choice.)
+⚠️ **Voice `AnalyticsModes` takes EXACTLY ONE of `["RealTime"]` or `["PostContact"]` —
+never both.** Combining them (`["RealTime", "PostContact"]`) fails import with
+`Invalid Action property value ... ChannelConfiguration.Voice`, and an empty
+`[]` is also rejected. **Prefer `["RealTime"]` for AI-agent / Q in Connect voice
+flows** — real-time transcript + sentiment give the assistant and the escalated
+human live context. `RealTime` requires real-time Contact Lens to be enabled on
+the instance (enforced at runtime, not at import); if that is not provisioned,
+use `["PostContact"]` instead. Chat uses `["ContactLens"]` (Chat does not accept `RealTime`).
 Chat recording (when channel is CHAT):
 ```json
 {"Identifier": "chat-recording", "Type": "UpdateContactRecordingBehavior",
@@ -663,7 +664,7 @@ The workshop uses a 3-module structure. Your generated flow MUST include these p
 - **UpdateFlowLoggingBehavior**: Enable flow logging (REQUIRED - often missing!)
 - **Compare**: Check channel (VOICE vs CHAT) for recording settings
 - **UpdateContactRecordingBehavior**:
-  - VOICE: Record Agent+Customer, Voice `AnalyticsModes: ["PostContact"]` (NOT RealTime — import-safe)
+  - VOICE: Record Agent+Customer, Voice `AnalyticsModes: ["RealTime"]` (single mode — prefer RealTime for AI-agent flows; `["PostContact"]` if real-time Contact Lens is not provisioned; never both)
   - CHAT: No recording, Contact Lens only
 
 Reference: `static/contact-flows/basic-setting-configurations.json`
@@ -1009,7 +1010,7 @@ Queue → Transfer Message → Transfer Queue → End; [Complete] → Goodbye �
           "AnalyticsLanguage": "{{LANGUAGE_CODE}}",
           "ChannelConfiguration": {
             "Chat": {"AnalyticsModes": ["ContactLens"]},
-            "Voice": {"AnalyticsModes": ["PostContact"]}
+            "Voice": {"AnalyticsModes": ["RealTime"]}
           },
           "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
           "SentimentConfiguration": {"Enabled": "True"}

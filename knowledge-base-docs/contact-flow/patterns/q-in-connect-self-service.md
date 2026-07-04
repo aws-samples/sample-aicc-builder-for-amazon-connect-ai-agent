@@ -109,7 +109,7 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
       "Parameters": {
         "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
         "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
-          "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["PostContact"]}}}
+          "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["RealTime"]}}}
       },
       "Transitions": {"NextAction": "get-profile"}
     },
@@ -308,13 +308,14 @@ This pattern implements AI-powered self-service using Amazon Q in Connect (forme
 | Feature | VOICE | CHAT |
 |---------|-------|------|
 | Recording | Agent + Customer | None |
-| Contact Lens (AnalyticsModes) | Voice: `["PostContact"]` | Chat: `["ContactLens"]` |
+| Contact Lens (AnalyticsModes) | Voice: `["RealTime"]` | Chat: `["ContactLens"]` |
 | Profile Lookup | _phone | _email |
 
-> ⚠️ `RealTime` in Voice `AnalyticsModes` passes CreateContactFlow structural
-> validation (it does **not** fail import), but it requires real-time Contact Lens
-> to be enabled on the instance — otherwise it fails at contact runtime. Use
-> `["PostContact"]` unless real-time Contact Lens is provisioned.
+> ⚠️ Voice `AnalyticsModes` takes EXACTLY ONE mode — `["RealTime"]` OR `["PostContact"]`,
+> never both (the combined array fails import) and never empty. **Prefer `["RealTime"]`
+> for Q in Connect voice flows** so the assistant and any escalated human get live
+> transcript + sentiment. `RealTime` requires real-time Contact Lens enabled on the
+> instance (enforced at runtime, not at import); use `["PostContact"]` if it is not provisioned.
 
 ### Lex Session Attributes for Escalation
 The Lex bot should set these attributes:
