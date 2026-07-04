@@ -29,7 +29,7 @@ The MessageParticipant block plays text-to-speech (TTS) messages or audio prompt
   "Identifier": "play-audio",
   "Type": "MessageParticipant",
   "Parameters": {
-    "PromptId": "arn:aws:connect:us-east-1:123456789012:instance/xxx/prompt/yyy"
+    "PromptId": "<PROMPT_ARN>"
   },
   "Transitions": {
     "NextAction": "next-block",
@@ -39,24 +39,40 @@ The MessageParticipant block plays text-to-speech (TTS) messages or audio prompt
   }
 }
 ```
+`PromptId` must be a **real, resolvable prompt ARN on the target instance** (format `arn:aws:connect:<region>:<account>:instance/<instance-id>/prompt/<prompt-id>`). A placeholder ARN, or one from a different region/instance, fails at import with `Failed to convert id: <arn>` — this is a resource-resolution error, not a structural one; the `PromptId` parameter name itself is valid.
 
 ### Parameters (Choose ONE)
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| Text | String | TTS message to speak |
+| Text | String | Plain-text TTS message to speak |
+| SSML | String | SSML-markup message to speak |
 | PromptId | String | ARN of pre-recorded audio prompt |
 | Media | Object | S3 audio file reference |
+
+The valid mutually-exclusive set is **Text | SSML | PromptId | Media** — exactly one is required. Supplying more than one (e.g. Text + PromptId, or Text + SSML) is rejected with `Only one of these properties may be defined`. Supplying none is rejected with `At least one of the following properties must be set. Properties: [Parameters.PromptId, Parameters.Text, Parameters.SSML, Parameters.Media]`.
 
 ### Error Types
 - **NoMatchingError**: Message playback failed
 
 ### CRITICAL Requirements
-1. Use ONE of: Text, PromptId, or Media (not multiple)
-2. SHOULD have `Errors` with `NoMatchingError` for robustness
+1. Use exactly ONE of: Text, SSML, PromptId, or Media (not multiple)
+2. SHOULD have `Errors` with `NoMatchingError` for robustness (the `Errors` array is optional — a Text-only block with no `Errors` still imports)
 3. For TTS, set voice with `UpdateContactTextToSpeechVoice` first
+4. All Parameter values must be JSON **strings** — e.g. `"SkipWhenDTMFBufferEnabled": "True"`, not the boolean `true`. A boolean value fails with a misleading `Invalid Action type` error rather than a clear type error. (`SkipWhenDTMFBufferEnabled` is itself a valid optional Parameter accepting the string values `"True"`/`"False"`.)
 
-### SSML Support in Text
-You can use SSML tags for advanced TTS control:
+### SSML Support
+SSML markup can be supplied two ways (they are mutually exclusive with each other and with Text):
+
+**1. As the standalone `SSML` parameter** (preferred for full SSML documents):
+```json
+{
+  "Parameters": {
+    "SSML": "<speak>Welcome. <break time='500ms'/> Your account balance is <say-as interpret-as='currency'>$123.45</say-as></speak>"
+  }
+}
+```
+
+**2. Embedded as tags inside the `Text` parameter** (also accepted by the API):
 ```json
 {
   "Parameters": {
@@ -64,6 +80,7 @@ You can use SSML tags for advanced TTS control:
   }
 }
 ```
+Note: `SSML` is a first-class parameter — do not set both `Text` and `SSML` in the same block (`Only one of these properties may be defined. Properties: [Text, SSML]`).
 
 ### Using Contact Attributes in Text
 ```json

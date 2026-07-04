@@ -514,6 +514,7 @@ VALID_CONTACT_FLOW_ACTION_TYPES = frozenset({
     "AuthenticateParticipant", "ShowView", "ResumeContact",
     # Transfer / terminate
     "TransferContactToQueue", "TransferParticipantToThirdParty", "TransferToFlow",
+    "DequeueContactAndTransferToQueue",
     "DisconnectParticipant", "EndFlowExecution",
 })
 
@@ -587,20 +588,37 @@ NO_TRANSITION_ACTION_TYPES = frozenset({
 # CreateContactFlow API (create → inspect problems → delete, ap-northeast-2).
 # NOTE: GetParticipantInput is intentionally absent — its required errors depend
 # on mode (menu vs store) and are handled in the dedicated normalizer above.
+# NOTE: MessageParticipant is intentionally absent — API-verified (2026-07-04)
+# that it imports with NO Errors, so NoMatchingError is recommended (see prompt)
+# but NOT import-required; force-injecting it would over-normalize a valid flow.
 REQUIRED_ERRORS_BY_TYPE = {
-    "MessageParticipant": ["NoMatchingError"],
     "Compare": ["NoMatchingCondition"],
     "ConnectParticipantWithLexBot": ["NoMatchingError", "NoMatchingCondition"],
     "InvokeLambdaFunction": ["NoMatchingError"],
     "CreateWisdomSession": ["NoMatchingError"],
     "UpdateContactData": ["NoMatchingError"],
     "TransferContactToQueue": ["QueueAtCapacity", "NoMatchingError"],
+    "DequeueContactAndTransferToQueue": ["QueueAtCapacity", "NoMatchingError"],
     "UpdateContactTargetQueue": ["NoMatchingError"],
     "UpdateContactAttributes": ["NoMatchingError"],   # API-verified: required
     "CheckHoursOfOperation": ["NoMatchingError"],     # branches via True/False Conditions; needs NoMatchingError
     # API-verified (2026-06-18): UpdateContactCallbackNumber requires BOTH of these
     # and rejects NoMatchingError / InvalidNumber / NotDialable.
     "UpdateContactCallbackNumber": ["InvalidCallbackNumber", "CallbackNumberNotDialable"],
+    # API-verified (2026-07-03) exhaustive per-parameter probe of the 10 blocks that
+    # the RAG sweep never exercised. Each block imports only with these error branches.
+    "AuthenticateParticipant": ["NoMatchingError", "TimeLimitExceeded"],
+    "CheckOutboundCallStatus": ["NoMatchingError"],
+    "CreatePersistentContactAssociation": ["NoMatchingError"],
+    "DistributeByPercentage": ["NoMatchingCondition"],
+    "EvaluateDataTableValues": ["NoMatchingError"],
+    "GetCustomerProfileObject": ["NoMatchingError", "NoneFoundError"],
+    "LoadContactContent": ["NoMatchingError"],
+    "UpdateContactRoutingCriteria": ["NoMatchingError"],
+    # NOTE: UpdateContactRoutingBehavior has CONDITIONAL errors — NoMatchingError is
+    # required ONLY for the RoutingProficiencies variant and MUST be absent for the
+    # QueuePriority / QueueTimeAdjustmentSeconds variants. Left out of this static map
+    # on purpose; enforcing a fixed set here would break the priority variant.
 }
 
 # Error types that are NOT valid for a given block — strip them on import.
@@ -752,9 +770,11 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
             if "RequestAttributes" in p:
                 p.setdefault("LambdaInvocationAttributes", p.pop("RequestAttributes"))
                 fixes.append(f"[{aid}] InvokeLambdaFunction: RequestAttributes → LambdaInvocationAttributes")
-            # ResponseValidation.ResponseType must be STRING_MAP (JSON is not accepted)
+            # ResponseValidation.ResponseType must be STRING_MAP or JSON (API-verified
+            # 2026-07-03: both import; JSON_OBJECT is REJECTED with "Invalid Action
+            # property value"). ResponseValidation itself is optional.
             rv = p.get("ResponseValidation")
-            if isinstance(rv, dict) and rv.get("ResponseType") not in ("STRING_MAP", "JSON_OBJECT"):
+            if isinstance(rv, dict) and rv.get("ResponseType") not in ("STRING_MAP", "JSON"):
                 rv["ResponseType"] = "STRING_MAP"
                 fixes.append(f"[{aid}] InvokeLambdaFunction: ResponseValidation.ResponseType → STRING_MAP")
 
@@ -844,14 +864,30 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
         #     InputTimeLimitExceeded + NoMatchingError.
         #   STORE mode (captures input to an attribute): StoreInput=True,
         #     requires InputValidation.CustomValidation.MaximumLength, optional
-        #     DTMFConfiguration{DisableCancelKey} (NEVER InputTerminationSequence),
+        #     DTMFConfiguration{DisableCancelKey, InputTerminationSequence},
         #     errors = NoMatchingError only.
+        # Both modes REQUIRE InputTimeLimitSeconds (string) at the Parameters root.
+        # DisableCancelKey MUST be a string "True"/"False" — a JSON boolean makes the
+        # whole block fail import with a MISLEADING "Invalid Action type" error.
         # (Both verified against CreateContactFlow; the empty/guessed forms the
         #  model emits otherwise fail import with misleading "Invalid Action type".)
         if t == "GetParticipantInput":
             tr_gp = a.get("Transitions") or a.get("transitions") or {}
             conds_gp = tr_gp.get("Conditions") or tr_gp.get("conditions") or []
             is_menu = bool(conds_gp)
+            # DisableCancelKey must be a string, never a JSON boolean (bool → misleading
+            # "Invalid Action type" on import).
+            _dtmf = p.get("DTMFConfiguration")
+            if isinstance(_dtmf, dict) and isinstance(_dtmf.get("DisableCancelKey"), bool):
+                _dtmf["DisableCancelKey"] = "True" if _dtmf["DisableCancelKey"] else "False"
+                fixes.append(f"[{aid}] GetParticipantInput: DisableCancelKey boolean → string")
+            # Both modes require InputTimeLimitSeconds (string) at the Parameters root.
+            # A value mistakenly nested in DTMFConfiguration is re-homed by the store-mode
+            # normalizer below; only inject a default when it exists in neither place.
+            _nested_itl = isinstance(_dtmf, dict) and "InputTimeLimitSeconds" in _dtmf
+            if "InputTimeLimitSeconds" not in p and not _nested_itl:
+                p["InputTimeLimitSeconds"] = "5"
+                fixes.append(f"[{aid}] GetParticipantInput: added required InputTimeLimitSeconds")
             if is_menu:
                 if str(p.get("StoreInput")) != "False":
                     p["StoreInput"] = "False"
@@ -864,13 +900,14 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
                 if str(p.get("StoreInput")) != "True":
                     p["StoreInput"] = "True"
                     fixes.append(f"[{aid}] GetParticipantInput(store): StoreInput=True")
-                # DTMFConfiguration in store mode accepts ONLY DisableCancelKey.
-                # Any other key (InputTerminationSequence, InputTimeLimitSeconds,
-                # FinishKey, ...) is rejected — InputTimeLimitSeconds belongs at the
-                # Parameters root, not inside DTMFConfiguration.
+                # DTMFConfiguration in store mode accepts DisableCancelKey and
+                # InputTerminationSequence (API-verified 2026-07-03 — the terminator
+                # key imports fine). InputTimeLimitSeconds belongs at the Parameters
+                # root, not inside DTMFConfiguration; any other key is rejected.
                 dtmf = p.get("DTMFConfiguration")
                 if isinstance(dtmf, dict):
-                    bad = [k for k in list(dtmf.keys()) if k != "DisableCancelKey"]
+                    allowed = {"DisableCancelKey", "InputTerminationSequence"}
+                    bad = [k for k in list(dtmf.keys()) if k not in allowed]
                     if bad:
                         # InputTimeLimitSeconds is a real top-level param — re-home it.
                         if "InputTimeLimitSeconds" in dtmf and "InputTimeLimitSeconds" not in p:

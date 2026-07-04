@@ -15,6 +15,7 @@ The CheckHoursOfOperation block checks if the current time is within defined bus
     "HoursOfOperationId": "{{HOURS_ARN}}"
   },
   "Transitions": {
+    "NextAction": "in-hours",
     "Conditions": [
       {"Condition": {"Operator": "Equals", "Operands": ["True"]}, "NextAction": "in-hours"},
       {"Condition": {"Operator": "Equals", "Operands": ["False"]}, "NextAction": "out-of-hours"}
@@ -39,10 +40,11 @@ The CheckHoursOfOperation block checks if the current time is within defined bus
 - **NoMatchingError**: Unable to check hours (invalid ARN, permissions)
 
 ### CRITICAL Requirements
-1. MUST have `Conditions` for both "True" and "False"
-2. MUST have `Errors` with `NoMatchingError`
-3. Condition values are strings: `"True"` and `"False"` (not booleans)
-4. HoursOfOperationId must be an ARN, not a name
+1. MUST have a top-level `NextAction` in `Transitions` (the default branch) — without it import fails with `Action is missing required property. Path: Actions[0].Transitions.NextAction`
+2. MUST have `Conditions` for both "True" and "False"
+3. MUST have `Errors` with `NoMatchingError` (`NoMatchingCondition` is explicitly rejected on this block)
+4. Condition values are strings: `"True"` and `"False"` (not booleans)
+5. HoursOfOperationId must be an ARN, not a name — a non-ARN value (e.g. `"Basic Hours"`) is rejected by the service with `Not a supported id format`
 
 ### Valid HoursOfOperationId Formats
 ```
@@ -58,6 +60,7 @@ arn:aws:connect:us-east-1:123456789012:instance/xxx/operating-hours/yyy
 {"Identifier": "check-hours", "Type": "CheckHoursOfOperation",
  "Parameters": {"HoursOfOperationId": "{{HOURS_ARN}}"},
  "Transitions": {
+   "NextAction": "in-hours-flow",
    "Conditions": [
      {"Condition": {"Operator": "Equals", "Operands": ["True"]}, "NextAction": "in-hours-flow"},
      {"Condition": {"Operator": "Equals", "Operands": ["False"]}, "NextAction": "closed-message"}
@@ -73,11 +76,8 @@ arn:aws:connect:us-east-1:123456789012:instance/xxx/operating-hours/yyy
 {"Identifier": "offer-callback", "Type": "GetParticipantInput",
  "Parameters": {
    "Text": "Press 1 to leave a message or press 2 to receive a callback when we open.",
-   "InputTimeLimitSeconds": "5",
-   "DTMFConfiguration": {
-     "InputTerminationSequence": "#",
-     "DisableCancelKey": false
-   }
+   "StoreInput": "False",
+   "InputTimeLimitSeconds": "5"
  },
  "Transitions": {"NextAction": "disconnect",
    "Conditions": [
@@ -85,8 +85,8 @@ arn:aws:connect:us-east-1:123456789012:instance/xxx/operating-hours/yyy
      {"Condition": {"Operator": "Equals", "Operands": ["2"]}, "NextAction": "schedule-callback"}
    ],
    "Errors": [
-     {"ErrorType": "InputTimeLimitExceeded", "NextAction": "disconnect"},
      {"ErrorType": "NoMatchingCondition", "NextAction": "disconnect"},
+     {"ErrorType": "InputTimeLimitExceeded", "NextAction": "disconnect"},
      {"ErrorType": "NoMatchingError", "NextAction": "disconnect"}
    ]
  }}
@@ -103,6 +103,7 @@ If you omit the HoursOfOperationId, it uses the hours configured on the working 
 {"Identifier": "check-queue-hours", "Type": "CheckHoursOfOperation",
  "Parameters": {},
  "Transitions": {
+   "NextAction": "transfer",
    "Conditions": [
      {"Condition": {"Operator": "Equals", "Operands": ["True"]}, "NextAction": "transfer"},
      {"Condition": {"Operator": "Equals", "Operands": ["False"]}, "NextAction": "closed"}

@@ -35,12 +35,12 @@ The InvokeLambdaFunction block calls an AWS Lambda function and can pass/receive
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | LambdaFunctionARN | String | The ARN of the Lambda function |
-| InvocationTimeLimitSeconds | String | Timeout in seconds (max 8) |
-| ResponseValidation | Object | Must contain `ResponseType: "STRING_MAP"` or `"JSON"` |
+| InvocationTimeLimitSeconds | String or Number | Timeout in seconds, 1–8 inclusive (string `"8"` recommended; a bare number `8` is also accepted) |
 
 ### Optional Parameters
 | Parameter | Type | Description |
 |-----------|------|-------------|
+| ResponseValidation | Object | Optional. When present, must contain `ResponseType: "STRING_MAP"` or `"JSON"`. If omitted, no response validation is applied |
 | LambdaInvocationAttributes | Object | Key-value pairs to pass to Lambda |
 | InvocationType | String | `"SYNCHRONOUS"` (default) or `"ASYNCHRONOUS"` |
 
@@ -48,8 +48,8 @@ The InvokeLambdaFunction block calls an AWS Lambda function and can pass/receive
 - **NoMatchingError**: Lambda failed, timed out, or returned invalid response
 
 ### CRITICAL Requirements
-1. `InvocationTimeLimitSeconds` MUST be a string (e.g., "8"), 1–8 inclusive
-2. `ResponseType` MUST be `"STRING_MAP"` OR `"JSON"` — both are officially supported
+1. `InvocationTimeLimitSeconds` value must be 1–8 inclusive. The API accepts either a quoted string (`"8"`) or a bare number (`8`); the string form is recommended for consistency.
+2. `ResponseValidation` is optional. If you include it, `ResponseType` MUST be `"STRING_MAP"` OR `"JSON"` — both are officially supported. Omitting `ResponseValidation` entirely is also valid (no response validation is applied).
    - Use `STRING_MAP` for flat key/value string maps (simpler, stricter validation)
    - Use `JSON` when the Lambda returns nested JSON that must preserve its structure
 3. MUST have `Errors` array with `NoMatchingError`

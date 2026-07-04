@@ -8,9 +8,11 @@
 How do I check agent availability / queue metrics in Amazon Connect Contact Flow?
 
 ## Answer
-Use **`CheckMetricData`**: it reads a real-time metric (`MetricType`) for the
-working queue and branches via `Conditions`. Use before `TransferContactToQueue`
-to handle the no-agents case.
+Use **`CheckMetricData`**: it reads a real-time numeric metric (`MetricType`) for
+the working queue and branches via `Conditions` using **numeric** operators
+(`NumberGreaterThan`, `NumberGreaterOrEqualTo`, etc.). Use before
+`TransferContactToQueue` to handle the no-agents case — check
+`NumberOfAgentsAvailable > 0`.
 
 ### JSON Structure (API-verified)
 ```json
@@ -18,10 +20,10 @@ to handle the no-agents case.
   "Identifier": "check-staffing",
   "Type": "CheckMetricData",
   "Parameters": {
-    "MetricType": "AgentsAvailable"
+    "MetricType": "NumberOfAgentsAvailable"
   },
   "Transitions": {
-    "NextAction": "agents-available",
+    "NextAction": "no-agents",
     "Conditions": [
       {"Condition": {"Operator": "NumberGreaterThan", "Operands": ["0"]}, "NextAction": "agents-available"}
     ],
@@ -33,30 +35,45 @@ to handle the no-agents case.
 }
 ```
 
-Real `MetricType` values: `AgentsAvailable`, `OldestContactInQueueAgeSeconds`,
-`ContactsInQueue`. Required errors: `NoMatchingCondition` + `NoMatchingError`.
+Real `MetricType` values (API-verified 2026-07-03, case-sensitive — exactly these five):
+`NumberOfAgentsAvailable`, `NumberOfContactsInQueue`, `OldestContactInQueueAgeSeconds`,
+`NumberOfAgentsStaffed`, `NumberOfAgentsOnline`. The shorthand `AgentsAvailable` /
+`ContactsInQueue` are REJECTED. Required errors: `NoMatchingCondition` + `NoMatchingError`.
 
 ### Required Parameters
-None - uses the working queue set by UpdateContactTargetQueue
+`MetricType` — one of `NumberOfAgentsAvailable`, `NumberOfContactsInQueue`,
+`OldestContactInQueueAgeSeconds`, `NumberOfAgentsStaffed`, `NumberOfAgentsOnline`.
+(Omitting it fails import with "Action is missing
+required property. Path: Actions[N].Parameters.MetricType".) The metric is read
+for the working queue set by `UpdateContactTargetQueue`.
 
 ### Condition Values
-- **True**: At least one agent is available in the queue
-- **False**: No agents are available (all busy, offline, or not staffed)
+`CheckMetricData` returns a **numeric** metric value, not a True/False binary.
+Branch on it with numeric operators, e.g. for `NumberOfAgentsAvailable`:
+- **`NumberGreaterThan` `["0"]`**: At least one agent is available in the queue
+- **`NoMatchingCondition`**: No condition matched (e.g. zero agents available)
 
 ### Error Types
-- **NoMatchingError**: Unable to check staffing (no working queue set, permissions issue)
+- **NoMatchingCondition**: No `Conditions` entry matched the returned metric value
+- **NoMatchingError**: Unable to read the metric (no working queue set, permissions issue)
+
+Both `NoMatchingCondition` and `NoMatchingError` are **required** — omitting either
+fails import ("missing required error"). `QueueAtCapacity` is **not** a valid error
+for this block.
 
 ### CRITICAL Requirements
-1. MUST call `UpdateContactTargetQueue` before using CheckStaffing
-2. MUST have `Conditions` array with both "True" and "False" conditions
-3. MUST have `Errors` array with `NoMatchingError`
-4. Condition values are strings: `"True"` and `"False"` (not booleans)
+1. MUST call `UpdateContactTargetQueue` before using CheckMetricData
+2. MUST supply a valid `MetricType` parameter
+3. MUST have an `Errors` array with **both** `NoMatchingCondition` and `NoMatchingError`
+4. `Conditions` use numeric operators against the metric value (operands are strings, e.g. `"0"`)
 
 ### WRONG vs CORRECT
 
-#### WRONG (Missing conditions, using booleans)
+#### WRONG (invalid metric name, no numeric condition, missing required errors)
 ```json
 {
+  "Type": "CheckMetricData",
+  "Parameters": {"MetricType": "AgentsAvailable"},
   "Transitions": {
     "NextAction": "transfer-queue",
     "Conditions": [
@@ -69,12 +86,15 @@ None - uses the working queue set by UpdateContactTargetQueue
 #### CORRECT
 ```json
 {
+  "Type": "CheckMetricData",
+  "Parameters": {"MetricType": "NumberOfAgentsAvailable"},
   "Transitions": {
+    "NextAction": "no-agents",
     "Conditions": [
-      {"Condition": {"Operator": "Equals", "Operands": ["True"]}, "NextAction": "agents-available"},
-      {"Condition": {"Operator": "Equals", "Operands": ["False"]}, "NextAction": "no-agents"}
+      {"Condition": {"Operator": "NumberGreaterThan", "Operands": ["0"]}, "NextAction": "agents-available"}
     ],
     "Errors": [
+      {"ErrorType": "NoMatchingCondition", "NextAction": "no-agents"},
       {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
     ]
   }
@@ -88,21 +108,24 @@ None - uses the working queue set by UpdateContactTargetQueue
  "Transitions": {"NextAction": "check-staffing",
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]}}
 
-{"Identifier": "check-staffing", "Type": "CheckStaffing",
- "Parameters": {},
+{"Identifier": "check-staffing", "Type": "CheckMetricData",
+ "Parameters": {"MetricType": "NumberOfAgentsAvailable"},
  "Transitions": {
+   "NextAction": "no-agents-message",
    "Conditions": [
-     {"Condition": {"Operator": "Equals", "Operands": ["True"]}, "NextAction": "transfer-queue"},
-     {"Condition": {"Operator": "Equals", "Operands": ["False"]}, "NextAction": "no-agents-message"}
+     {"Condition": {"Operator": "NumberGreaterThan", "Operands": ["0"]}, "NextAction": "transfer-queue"}
    ],
-   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]
+   "Errors": [
+     {"ErrorType": "NoMatchingCondition", "NextAction": "no-agents-message"},
+     {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
+   ]
  }}
 
 {"Identifier": "transfer-queue", "Type": "TransferContactToQueue",
  "Parameters": {},
  "Transitions": {"NextAction": "disconnect",
    "Errors": [
-     {"ErrorType": "QueueAtCapacity", "NextAction": "queue-full"},
+     {"ErrorType": "QueueAtCapacity", "NextAction": "no-agents-message"},
      {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
    ]}}
 
@@ -112,17 +135,17 @@ None - uses the working queue set by UpdateContactTargetQueue
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "offer-callback"}]}}
 ```
 
-### CheckStaffing vs GetQueueMetrics
-| Feature | CheckStaffing | GetQueueMetrics |
-|---------|---------------|-----------------|
-| Purpose | Binary check (available/not) | Detailed metrics |
+### CheckMetricData vs GetQueueMetrics
+| Feature | CheckMetricData | GetQueueMetrics |
+|---------|-----------------|-----------------|
+| Purpose | Read one real-time metric and branch on it | Detailed metrics |
 | Speed | Faster | Slower |
-| Output | True/False condition | Multiple metric values |
-| Use Case | Simple routing | Complex routing decisions |
+| Output | Single numeric metric value | Multiple metric values |
+| Use Case | Simple routing (e.g. agents available > 0) | Complex routing decisions |
 
 ### When to Use
-- **CheckStaffing**: Simple "are agents available?" check
-- **GetQueueMetrics**: Need queue size, wait times, or other details
+- **CheckMetricData**: Simple "are agents available?" / "queue too deep?" check on one metric
+- **GetQueueMetrics**: Need queue size, wait times, or other details together
 
 ## Related Topics
 - UpdateContactTargetQueue
@@ -133,5 +156,5 @@ None - uses the working queue set by UpdateContactTargetQueue
 ---
 **Metadata**
 - Category: Branch
-- BlockType: CheckStaffing
-- Keywords: staffing, agents, availability, queue, True, False
+- BlockType: CheckMetricData
+- Keywords: staffing, agents, availability, queue, metric, NumberOfAgentsAvailable, NumberOfContactsInQueue, OldestContactInQueueAgeSeconds

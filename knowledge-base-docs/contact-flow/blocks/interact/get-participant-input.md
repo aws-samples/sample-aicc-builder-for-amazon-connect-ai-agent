@@ -43,7 +43,7 @@ The GetParticipantInput block plays a message and collects DTMF (touch-tone) inp
 ### MODE 2 — STORE (capture digits to a contact attribute)
 - `StoreInput` MUST be `"True"`.
 - Requires `InputValidation.CustomValidation.MaximumLength`.
-- `DTMFConfiguration` may carry `DisableCancelKey` only — NEVER `InputTerminationSequence`.
+- `DTMFConfiguration` may carry `InputTerminationSequence` (the terminator key, e.g. `"#"`) and/or `DisableCancelKey`. `DisableCancelKey` MUST be the string `"True"`/`"False"`, never a JSON boolean.
 - Only error: `NoMatchingError`. No Conditions.
 
 ```json
@@ -70,10 +70,12 @@ The GetParticipantInput block plays a message and collects DTMF (touch-tone) inp
 - **NoMatchingError**: general error (both modes)
 
 ### CRITICAL Requirements
-1. MUST have all THREE error types for production flows
-2. `InputTimeLimitSeconds` must be a string ("5"), not a number
-3. MUST have `Conditions` array for expected inputs
-4. Input is stored in `$.StoredCustomerInput` for later use
+1. `StoreInput` is a **required** property in BOTH modes (string `"True"`/`"False"`) — omitting it fails import with `Action is missing required property. Path: ...Parameters.StoreInput`.
+2. In MENU mode MUST have all THREE error types (`NoMatchingCondition` + `InputTimeLimitExceeded` + `NoMatchingError`); in STORE mode the ONLY allowed error is `NoMatchingError`.
+3. `DisableCancelKey` MUST be the string `"True"`/`"False"`, never a JSON boolean. A boolean value produces a misleading top-level `Invalid Action type. Type: GetParticipantInput` error.
+4. `InputTimeLimitSeconds` — the API accepts both a string (`"5"`) and a JSON number (`5`); prefer the string for consistency with `StoreInput`/`DisableCancelKey`.
+5. MENU mode uses a `Conditions` array to branch on the pressed key; STORE mode must NOT use `Conditions`.
+6. In STORE mode, input is stored in `$.StoredCustomerInput` for later use.
 
 ### Accessing Customer Input
 After this block, the input is available at:
@@ -84,8 +86,8 @@ After this block, the input is available at:
 {"Identifier": "main-menu", "Type": "GetParticipantInput",
  "Parameters": {
    "Text": "Main menu. Press 1 for account balance, press 2 for recent transactions, press 3 for customer service.",
-   "InputTimeLimitSeconds": "10",
-   "DTMFConfiguration": {"InputTerminationSequence": "#", "DisableCancelKey": false}
+   "StoreInput": "False",
+   "InputTimeLimitSeconds": "10"
  },
  "Transitions": {"NextAction": "repeat-menu",
    "Conditions": [
@@ -116,13 +118,13 @@ After this block, the input is available at:
 {"Identifier": "collect-account", "Type": "GetParticipantInput",
  "Parameters": {
    "Text": "Please enter your 10-digit account number, followed by the pound key.",
+   "StoreInput": "True",
    "InputTimeLimitSeconds": "30",
-   "DTMFConfiguration": {"InputTerminationSequence": "#", "DisableCancelKey": false}
+   "DTMFConfiguration": {"InputTerminationSequence": "#", "DisableCancelKey": "False"},
+   "InputValidation": {"CustomValidation": {"MaximumLength": "10"}}
  },
  "Transitions": {"NextAction": "validate-account",
    "Errors": [
-     {"ErrorType": "InputTimeLimitExceeded", "NextAction": "input-timeout"},
-     {"ErrorType": "NoMatchingCondition", "NextAction": "validate-account"},
      {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
    ]
  }}
@@ -143,8 +145,8 @@ After this block, the input is available at:
 {"Identifier": "confirm-callback", "Type": "GetParticipantInput",
  "Parameters": {
    "Text": "We will call you back at this number. Press 1 to confirm, or press 2 to enter a different number.",
-   "InputTimeLimitSeconds": "5",
-   "DTMFConfiguration": {"DisableCancelKey": false}
+   "StoreInput": "False",
+   "InputTimeLimitSeconds": "5"
  },
  "Transitions": {"NextAction": "use-current-number",
    "Conditions": [

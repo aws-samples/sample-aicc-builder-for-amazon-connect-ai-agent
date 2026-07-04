@@ -79,12 +79,17 @@ None - Transitions MUST be empty `{}` (terminal block)
 ```
 
 ### Terminal Blocks in Amazon Connect
-Only these block types can be terminal (no Transitions):
+Only these two block types can be terminal (Parameters `{}` and Transitions `{}`) in a standard contact flow:
 1. **DisconnectParticipant** - End the contact
-2. **EndFlowModuleExecution** - Return from a flow module
-3. **TransferContactToQueue** (after successful transfer)
-4. **TransferToFlow** (after successful transfer)
-5. **TransferToPhoneNumber** (after successful transfer)
+2. **EndFlowExecution** - End / return from flow execution
+
+> API-verified. `EndFlowExecution` is the correct end/return terminal type. `EndFlowModuleExecution` is module-only — importing it in a standard contact flow fails with `Action ... is not supported in contact flow type contactFlow`.
+
+The `Transfer*` blocks are **NOT** terminal — each requires a `NextAction` transition plus specific error branches, so even a "successful transfer" path still routes onward (typically to `DisconnectParticipant`):
+
+- **TransferContactToQueue** - requires `NextAction` plus `QueueAtCapacity` and `NoMatchingError` error branches (takes no `QueueId` parameter).
+- **TransferToFlow** - requires `Parameters.ContactFlowId` (a real flow ARN), a `NextAction` transition, and a `NoMatchingError` error branch.
+- **TransferParticipantToThirdParty** (this is the correct API type name — `TransferToPhoneNumber` is **not** a valid `Type`) - requires a `NextAction` transition plus error branches (`ConnectionTimeLimitExceeded`, `CallFailed`, `NoMatchingError`).
 
 ### Metadata for DisconnectParticipant
 ```json
@@ -102,8 +107,8 @@ Only these block types can be terminal (no Transitions):
 
 ## Related Topics
 - MessageParticipant (for goodbye messages before disconnect)
-- TransferContactToQueue (alternative endpoint)
-- EndFlowModuleExecution (for flow modules)
+- TransferContactToQueue (alternative endpoint — note: not terminal, still needs a NextAction and error branches)
+- EndFlowExecution (the other true terminal block in a standard flow)
 
 ---
 **Metadata**

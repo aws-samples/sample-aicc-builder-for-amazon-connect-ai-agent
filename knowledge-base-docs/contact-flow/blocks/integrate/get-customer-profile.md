@@ -41,14 +41,16 @@ The GetCustomerProfile block retrieves customer profile data from Amazon Connect
 |-----------|------|-------------|
 | ProfileResponseData | Array | List of profile fields to retrieve |
 
-### Error Types
+### Required Error Types
+All three error transitions below are **structurally required** — the flow will FAIL to import if any one is omitted (this is not merely a production recommendation). Each is individually mandatory: omitting any triggers `InvalidContactFlowException` with `Action is missing required error. Error: <Type>`.
+
 - **MultipleFoundError**: Multiple profiles match the identifier
 - **NoneFoundError**: No profile found for the identifier
-- **NoMatchingError**: General error (service unavailable, etc.)
+- **NoMatchingError**: General error / catch-all (service unavailable, etc.) — required for import, not just an optional catch-all
 
 ### CRITICAL Requirements
 1. MUST use `ProfileRequestData` wrapper object (NOT flat parameters!)
-2. MUST handle all three error types for production flows
+2. MUST wire ALL THREE error transitions (`MultipleFoundError`, `NoneFoundError`, `NoMatchingError`). These are individually required for import — omitting any one fails import with `Action is missing required error. Error: <Type>`.
 3. Identifier values starting with "_" are reserved (e.g., "_phone", "_email")
 
 ### WRONG vs CORRECT
@@ -144,7 +146,12 @@ After successful retrieval:
      "IdentifierValue": "$.CustomerEndpoint.Address"
    }
  },
- "Transitions": {...}}
+ "Transitions": {"NextAction": "greet-customer",
+   "Errors": [
+     {"ErrorType": "MultipleFoundError", "NextAction": "greet-customer"},
+     {"ErrorType": "NoneFoundError", "NextAction": "greet-customer"},
+     {"ErrorType": "NoMatchingError", "NextAction": "greet-customer"}
+   ]}}
 
 {"Identifier": "chat-lookup", "Type": "GetCustomerProfile",
  "Parameters": {
@@ -153,7 +160,12 @@ After successful retrieval:
      "IdentifierValue": "$.Attributes.customerEmail"
    }
  },
- "Transitions": {...}}
+ "Transitions": {"NextAction": "greet-customer",
+   "Errors": [
+     {"ErrorType": "MultipleFoundError", "NextAction": "greet-customer"},
+     {"ErrorType": "NoneFoundError", "NextAction": "greet-customer"},
+     {"ErrorType": "NoMatchingError", "NextAction": "greet-customer"}
+   ]}}
 ```
 
 ## Related Topics

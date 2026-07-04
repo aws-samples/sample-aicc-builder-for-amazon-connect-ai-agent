@@ -36,15 +36,19 @@ The Compare block evaluates a contact attribute value against conditions. It's u
 ### Comparison Operators
 | Operator | Description | Example |
 |----------|-------------|---------|
-| Equals | Exact string match | `{"Operator": "Equals", "Operands": ["VALUE"]}` |
-| Contains | String contains | `{"Operator": "Contains", "Operands": ["substring"]}` |
-| StartsWith | String starts with | `{"Operator": "StartsWith", "Operands": ["prefix"]}` |
-| EndsWith | String ends with | `{"Operator": "EndsWith", "Operands": ["suffix"]}` |
-| NumberEquals | Numeric equality | `{"Operator": "NumberEquals", "Operands": ["5"]}` |
+| Equals | Exact string match (also used for numeric equality) | `{"Operator": "Equals", "Operands": ["VALUE"]}` |
+| TextContains | String contains | `{"Operator": "TextContains", "Operands": ["substring"]}` |
+| TextStartsWith | String starts with | `{"Operator": "TextStartsWith", "Operands": ["prefix"]}` |
+| TextEndsWith | String ends with | `{"Operator": "TextEndsWith", "Operands": ["suffix"]}` |
 | NumberGreaterThan | Numeric > | `{"Operator": "NumberGreaterThan", "Operands": ["10"]}` |
 | NumberLessThan | Numeric < | `{"Operator": "NumberLessThan", "Operands": ["100"]}` |
 | NumberGreaterOrEqualTo | Numeric >= | `{"Operator": "NumberGreaterOrEqualTo", "Operands": ["0"]}` |
-| NumberLessThanOrEqualTo | Numeric <= | `{"Operator": "NumberLessThanOrEqualTo", "Operands": ["99"]}` |
+| NumberLessOrEqualTo | Numeric <= | `{"Operator": "NumberLessOrEqualTo", "Operands": ["99"]}` |
+
+> **Note:** There is no `NumberEquals` operator. Use plain `Equals` for numeric
+> equality (e.g. `{"Operator": "Equals", "Operands": ["5"]}`). Also note the
+> asymmetry: the `>=` operator is `NumberGreaterOrEqualTo` and the `<=` operator
+> is `NumberLessOrEqualTo` (both drop the "Than").
 
 ### Error Types
 - **NoMatchingCondition**: No condition matched the value
@@ -52,8 +56,8 @@ The Compare block evaluates a contact attribute value against conditions. It's u
 ### CRITICAL Requirements
 1. MUST have `Errors` array with `NoMatchingCondition`
 2. `NextAction` in Transitions is the default fallback (also handles NoMatchingCondition)
-3. Operands are always arrays: `["VALUE"]` not `"VALUE"`
-4. Numbers are passed as strings: `["10"]` not `[10]`
+3. Operands are always arrays: `["VALUE"]` not `"VALUE"` (a bare string is rejected)
+4. Pass numbers as strings: `["10"]` (recommended). A bare int `[10]` also passes structural validation, but the quoted-string form is the safe convention for runtime.
 
 ### Common JSONPath Values
 | Source | JSONPath | Description |
@@ -63,15 +67,21 @@ The Compare block evaluates a contact attribute value against conditions. It's u
 | Lex Slots | $.Lex.Slots.{slotName} | Slot value |
 | Lambda | $.External.{key} | Lambda response |
 | Custom | $.Attributes.{name} | Custom contact attribute |
-| Queue Metrics | $.Metrics.Queue.Size | Contacts in queue |
 | Channel | $.Channel | VOICE, CHAT, or TASK |
+
+> **Queue metrics:** To branch on queue depth or agent availability, use the
+> `CheckMetricData` block (it branches on the metric value directly) rather than a
+> Compare on a `$.Metrics.*` path. See the Queue Size Check pattern below.
 
 ### Pattern: Lex Bot Result Routing
 ```json
 {"Identifier": "lex-bot", "Type": "ConnectParticipantWithLexBot",
  "Parameters": {"Text": "Welcome", "LexV2Bot": {"AliasArn": "{{LEX_BOT_ALIAS_ARN}}"}},
  "Transitions": {"NextAction": "check-result",
-   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]}}
+   "Errors": [
+     {"ErrorType": "NoMatchingCondition", "NextAction": "error-handler"},
+     {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
+   ]}}
 
 {"Identifier": "check-result", "Type": "Compare",
  "Parameters": {"ComparisonValue": "$.Lex.SessionAttributes.toolResult"},
@@ -96,24 +106,34 @@ The Compare block evaluates a contact attribute value against conditions. It's u
 ```
 
 ### Pattern: Queue Size Check
+There is **no** `GetQueueMetrics` block type (it fails import with "Invalid Action
+type"). To branch on queue depth, use **`CheckMetricData`** — it reads one
+real-time metric (`MetricType`) for the working queue and branches on the value
+itself via `Conditions`. There is no need for a separate Compare block on
+`$.Metrics.Queue.Size`. Set the working queue with `UpdateContactTargetQueue`
+first, and use `MetricType: NumberOfContactsInQueue`.
+
 ```json
-{"Identifier": "get-metrics", "Type": "GetQueueMetrics",
+{"Identifier": "set-queue", "Type": "UpdateContactTargetQueue",
  "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
  "Transitions": {"NextAction": "check-queue-size",
    "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error-handler"}]}}
 
-{"Identifier": "check-queue-size", "Type": "Compare",
- "Parameters": {"ComparisonValue": "$.Metrics.Queue.Size"},
+{"Identifier": "check-queue-size", "Type": "CheckMetricData",
+ "Parameters": {"MetricType": "NumberOfContactsInQueue"},
  "Transitions": {"NextAction": "queue-busy",
    "Conditions": [
      {"Condition": {"Operator": "NumberLessThan", "Operands": ["5"]}, "NextAction": "transfer-queue"}
    ],
-   "Errors": [{"ErrorType": "NoMatchingCondition", "NextAction": "queue-busy"}]}}
+   "Errors": [
+     {"ErrorType": "NoMatchingCondition", "NextAction": "queue-busy"},
+     {"ErrorType": "NoMatchingError", "NextAction": "error-handler"}
+   ]}}
 ```
 
 ## Related Topics
 - CheckContactAttributes (alternative for attribute checks)
-- GetQueueMetrics
+- CheckMetricData (queue/staffing metrics — the real block; no `GetQueueMetrics` type exists)
 - ConnectParticipantWithLexBot
 - InvokeLambdaFunction
 
@@ -121,4 +141,4 @@ The Compare block evaluates a contact attribute value against conditions. It's u
 **Metadata**
 - Category: Branch
 - BlockType: Compare
-- Keywords: compare, condition, routing, Equals, NumberLessThan, NoMatchingCondition
+- Keywords: compare, condition, routing, Equals, TextContains, TextStartsWith, TextEndsWith, NumberLessOrEqualTo, NumberGreaterOrEqualTo, NumberLessThan, NoMatchingCondition
