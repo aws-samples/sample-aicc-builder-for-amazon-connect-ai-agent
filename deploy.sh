@@ -494,7 +494,7 @@ if [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
         # Check if image already exists in ECR (skip build if unchanged)
         IMAGE_EXISTS=$(aws ecr describe-images --repository-name "$ECR_REPO_NAME" --image-ids imageTag=latest --region "$AWS_DEFAULT_REGION" 2>/dev/null && echo "yes" || echo "no")
 
-        if [ "$IMAGE_EXISTS" = "no" ] || check_hash_changed "ecs-backend-src${STAGE_SUFFIX}" "$BACKEND_HASH"; then
+        if [ "$IMAGE_EXISTS" = "no" ] || check_hash_changed "ecs-backend-src${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"; then
             echo "Preparing ECS build context..."
             # backend/ecs/src/ is the source of truth for ECS mode.
 
@@ -530,7 +530,7 @@ if [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
             docker push "${ECR_REPO_URI}:latest"
 
             echo -e "${GREEN}Docker image pushed to ECR (pre-CDK)${NC}"
-            save_hash "ecs-backend-src${STAGE_SUFFIX}" "$BACKEND_HASH"
+            save_hash "ecs-backend-src${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"
         else
             echo -e "${GREEN}[SKIP] Docker image unchanged, already in ECR${NC}"
         fi
@@ -662,7 +662,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
     ECS_APP_HASH=$(md5sum "$SCRIPT_DIR/backend/ecs/app.py" 2>/dev/null | cut -d' ' -f1 || echo "none")
     BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}"
 
-    if check_hash_changed "ecs-backend-cfg${STAGE_SUFFIX}" "$BACKEND_HASH"; then
+    if check_hash_changed "ecs-backend-cfg${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"; then
 
         # Patch ECS task definition with runtime env vars
         # (S3 Files volume is now managed entirely by CDK — see infrastructure/lib/ecs-stack.ts)
@@ -736,7 +736,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
                 echo -e "${GREEN}ECS service update triggered${NC}" || \
                 echo -e "${YELLOW}Warning: ECS service update failed — service may need to be recreated via CDK${NC}"
         fi
-        save_hash "ecs-backend-cfg${STAGE_SUFFIX}" "$BACKEND_HASH"
+        save_hash "ecs-backend-cfg${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"
     else
         echo -e "${GREEN}[SKIP] ECS backend config unchanged${NC}"
     fi
