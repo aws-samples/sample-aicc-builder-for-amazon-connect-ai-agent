@@ -1214,7 +1214,7 @@ for a in json.load(sys.stdin).get('Applications', []):
         # functions referenced by the flow's {{X_LAMBDA_ARN}} placeholders
         flow_lambda_arns=$(python3 - "$FLOW_JSON" <<'PYEOF' 2>/dev/null || true
 import sys, json, re
-tokens = set(re.findall(r'\{\{([A-Z_]+)_LAMBDA_ARN\}\}', open(sys.argv[1]).read()))
+tokens = set(re.findall(r'\{\{([A-Z_]+?)_LAMBDA(?:_ARN)?\}\}', open(sys.argv[1]).read()))
 for t in tokens: print(t.lower())
 PYEOF
 )
