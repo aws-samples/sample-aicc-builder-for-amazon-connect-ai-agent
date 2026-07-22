@@ -1267,13 +1267,12 @@ except Exception: pass
     #    catalog is per-language (polyglot voices Katie/Blake/Brooke/Ronald/Gemma
     #    cover En/De/Es/Fr/Hi/It/Ja/No/Pt/Ru; other locales have locale-specific
     #    voices selectable only in the console) and its flow JSON representation
-    #    is undocumented. The reliable automation is therefore: do NOT override
-    #    TTS in the flow (agentic voice is the default provider on instances with
-    #    Amazon Connect Customer enabled) + set the language attribute so ASR
-    #    routes to the right engine. Fine-tune the exact voice in the console.
+    #    is undocumented. Either way the flow keeps a proper Set Voice block with
+    #    a working Polly voice; picking "agentic" adds a documented ~1-min console
+    #    step (switch the block's Voice Provider) printed in the deploy summary.
     VOICE_PROVIDER="polly"
     choose "Select the voice provider for the Contact Flow" 1 \
-        "Amazon Connect agentic voice  (expressive, 50+ languages; default provider on new instances — pick the exact voice in console)" \
+        "Amazon Connect agentic voice  (expressive, 50+ languages — deployed with a Polly fallback; switch the Set voice block's provider in console after deploy, ~1 min)" \
         "Amazon Polly                  (fully scripted here — voice/engine selected below)"
     [ "$CHOICE" = "1" ] && VOICE_PROVIDER="agentic"
     state_set VOICE_PROVIDER "$VOICE_PROVIDER"
@@ -1298,10 +1297,11 @@ for v in json.load(sys.stdin).get('Voices', []):
         warn "No Polly voices for '$FLOW_LANG'. Falling back to Joanna/neural"
         LEX_VOICE_ID="Joanna"; LEX_VOICE_ENGINE="neural"
     elif [ "$VOICE_PROVIDER" = "agentic" ]; then
-        # no prompt — best Polly voice is kept only as the Lex bot's fallback TTS
+        # keep a working Polly voice in the Set Voice block until the provider is
+        # switched in console — auto-pick the best one for the language
         LEX_VOICE_ID="${voice_ids[0]}"
         LEX_VOICE_ENGINE="${voice_engines[0]}"
-        info "Agentic voice selected — flow TTS override removed; Lex fallback voice: $LEX_VOICE_ID/$LEX_VOICE_ENGINE"
+        info "Agentic voice selected — Set voice block keeps Polly fallback ($LEX_VOICE_ID/$LEX_VOICE_ENGINE) until you switch the provider in console"
         case "$FLOW_LANG" in
             en-*|de-*|es-*|fr-*|hi-*|it-*|ja-*|no-*|pt-*|ru-*)
                 info "Polyglot agentic voices available for this language: Katie, Blake, Brooke, Ronald, Gemma" ;;
@@ -1678,28 +1678,21 @@ d = json.load(open(path))
 actions = d.get('Actions', [])
 meta = d.setdefault('Metadata', {}).setdefault('ActionMetadata', {})
 
-# 1) Apply the selected voice/engine to set-voice blocks
-if provider == 'agentic':
-    # Amazon Connect agentic voice is the instance-default TTS provider (next-gen
-    # instances) and has no public flow-JSON representation — a Polly override
-    # here would DISABLE it. Convert each set-voice block into the language
-    # attribute setter instead (required for correct ASR routing), preserving
-    # transitions. Pick the exact agentic voice in console if desired.
-    for a in actions:
-        if a.get('Type') == 'UpdateContactTextToSpeechVoice':
-            a['Type'] = 'UpdateContactData'
-            a['Parameters'] = {"LanguageCode": lang}
-            pos = meta.get(a['Identifier'], {}).get('position', {'x': 0, 'y': 0})
-            meta[a['Identifier']] = {"position": pos, "isFriendlyName": True, "dynamicParams": []}
-else:
-    for a in actions:
-        if a.get('Type') == 'UpdateContactTextToSpeechVoice':
-            a['Parameters']['TextToSpeechVoice'] = voice
-            a['Parameters']['TextToSpeechEngine'] = engine.capitalize()
-            # also refresh the display language code in metadata
-            m = meta.get(a['Identifier'], {})
-            if isinstance(m.get('parameters', {}).get('TextToSpeechVoice'), dict):
-                m['parameters']['TextToSpeechVoice']['languageCode'] = lang
+# 1) Apply the selected voice/engine to set-voice blocks.
+#    NOTE: even when the user picked "Amazon Connect agentic voice", the Set
+#    Voice block is kept INTACT with a working Polly voice — the agentic
+#    provider has no public API/flow-JSON representation, so switching the
+#    block's Voice Provider is a documented ~1-min console step after deploy
+#    (printed in the summary). Converting/removing the block here would leave
+#    the flow without a proper voice configuration block, which is worse UX.
+for a in actions:
+    if a.get('Type') == 'UpdateContactTextToSpeechVoice':
+        a['Parameters']['TextToSpeechVoice'] = voice
+        a['Parameters']['TextToSpeechEngine'] = engine.capitalize()
+        # also refresh the display language code in metadata
+        m = meta.get(a['Identifier'], {})
+        if isinstance(m.get('parameters', {}).get('TextToSpeechVoice'), dict):
+            m['parameters']['TextToSpeechVoice']['languageCode'] = lang
 
 # 2) Automate "Set language attribute":
 #    inject an UpdateContactData(LanguageCode) action right after set-voice
@@ -1724,16 +1717,41 @@ if not has_lang:
                              "isFriendlyName": True, "dynamicParams": []}
             break
 
-# 3) Fix known import bug: strip RealTime voice analytics from recording blocks
+# 3) Upgrade legacy recording blocks to the current console block type.
+#    UpdateContactRecordingBehavior is the OUTDATED block — the console now
+#    uses UpdateContactRecordingAndAnalyticsBehavior (VoiceBehavior shape),
+#    which supports RealTime + AutomatedInteraction analytics. API-verified:
+#    the new type requires NoMatchingError + ChannelMismatch error branches.
 for a in actions:
+    if a.get('Type') != 'UpdateContactRecordingBehavior':
+        continue
     p = a.get('Parameters', {})
-    ab = p.get('AnalyticsBehavior')
-    if isinstance(ab, dict):
-        cc = ab.get('ChannelConfiguration', {})
-        v = cc.get('Voice', {})
-        modes = v.get('AnalyticsModes')
-        if isinstance(modes, list) and 'RealTime' in modes:
-            v['AnalyticsModes'] = [m for m in modes if m != 'RealTime'] or ['PostContact']
+    rb = p.get('RecordingBehavior', {}) or {}
+    ab = p.get('AnalyticsBehavior', {}) or {}
+    vab = {
+        "Enabled": ab.get('Enabled', 'True'),
+        "AnalyticsLanguage": ab.get('AnalyticsLanguage', lang),
+        "AnalyticsModes": ["RealTime", "AutomatedInteraction"],
+        "ConversationalAnalyticsRedactionConfiguration": {"Enabled": "False"},
+        "SentimentConfiguration": ab.get('SentimentConfiguration', {"Enabled": "True"}),
+        "SummaryConfiguration": {"SummaryModes": ["PostContact", "AutomatedInteraction"]},
+    }
+    a['Type'] = 'UpdateContactRecordingAndAnalyticsBehavior'
+    a['Parameters'] = {"VoiceBehavior": {
+        "VoiceRecordingBehavior": {
+            "RecordedParticipants": rb.get('RecordedParticipants', ["Agent", "Customer"]),
+            "IVRRecordingBehavior": rb.get('IVRRecordingBehavior', 'Enabled'),
+        },
+        "VoiceAnalyticsBehavior": vab,
+    }}
+    # required error branches for the new block type
+    tr = a.setdefault('Transitions', {})
+    nxt = tr.get('NextAction')
+    have = {e.get('ErrorType') for e in tr.get('Errors', [])}
+    tr.setdefault('Errors', [])
+    for et in ('NoMatchingError', 'ChannelMismatch'):
+        if et not in have and nxt:
+            tr['Errors'].append({"ErrorType": et, "NextAction": nxt})
 
 # 4) Agentic voice ASR tuning: set Lex session attributes on the
 #    Get customer input (ConnectParticipantWithLexBot) block per best practices
@@ -2244,7 +2262,7 @@ do_summary() {
     echo "  Contact Flow:      ${CONTACT_FLOW_ID:-N/A} ($FLOW_NAME)"
     echo "  AI Agent:          ${AI_AGENT_ID:-N/A} ($AGENT_NAME)"
     if [ "${VOICE_PROVIDER:-polly}" = "agentic" ]; then
-        echo "  Voice:             Amazon Connect agentic voice (instance default; Lex fallback: ${LEX_VOICE_ID:-N/A})"
+        echo "  Voice:             Polly ${LEX_VOICE_ID:-N/A} (temporary) -> switch to Amazon Connect agentic voice in console (see below)"
     else
         echo "  Voice:             ${LEX_VOICE_ID:-N/A}/${LEX_VOICE_ENGINE:-} (${FLOW_LANG:-})"
     fi
@@ -2263,12 +2281,13 @@ do_summary() {
     echo "      --session-id <last UUID of WisdomSessionArn> --region $REGION"
     echo ""
     if [ "${VOICE_PROVIDER:-polly}" = "agentic" ]; then
-        echo "  ─── Agentic voice — pick the exact voice (console, ~1 min) ───"
-        echo "  The flow leaves TTS on the instance default (Amazon Connect agentic voice)."
-        echo "  To choose a specific voice/persona for ${FLOW_LANG:-your language}:"
-        echo "    Flows > $FLOW_NAME > add/open a 'Set voice' block >"
+        echo "  ─── ⚠️  REQUIRED console step — switch to agentic voice (~1 min) ───"
+        echo "  The flow currently speaks with Polly ${LEX_VOICE_ID:-} (a working fallback)."
+        echo "  To use Amazon Connect agentic voice as selected:"
+        echo "    Flows > $FLOW_NAME > open the 'Set voice' block >"
         echo "    Voice Provider: Amazon Connect agentic voice > Language: ${FLOW_LANG:-} >"
-        echo "    pick a voice (Listen to voice sample) > Save > Publish"
+        echo "    pick a voice (Listen to voice sample) > keep 'Set language attribute' ON >"
+        echo "    Save > Publish"
         echo "  (AWS exposes no API to list/set agentic voices yet — console only)"
         echo ""
     fi
