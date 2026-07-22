@@ -2092,9 +2092,14 @@ for s in json.load(sys.stdin).get('SecurityProfileSummaryList', []):
             warn "AI Agent ARN could not be resolved — security profile NOT attached."
             warn "Attach manually: Connect console > AI agents > ${AGENT_NAME} > Security Profiles > ${SP_NAME}"
         elif [ -n "$SP_ID" ]; then
-            # entity ARN must carry a version qualifier (:$LATEST or :N)
+            # The entity ARN must carry a version qualifier, and the profile
+            # must be attached to BOTH :$LATEST (what the console editor shows
+            # as the draft) AND the PUBLISHED version (what the default
+            # self-service assignment actually runs). Attaching only $LATEST
+            # passes a naive check while runtime tool calls still fail with
+            # "Tool is not allowed" — found in live workshop QA.
             local BASE_ARN="${AI_AGENT_ARN%:\$LATEST}"
-            local ATTACHED=""
+            local PUBLISHED_OK="" LATEST_OK=""
             for QUAL in "\$LATEST" "${AGENT_VERSION:-1}"; do
                 local ENTITY_ARN="${BASE_ARN}:${QUAL}"
                 aws connect associate-security-profiles \
@@ -2103,8 +2108,9 @@ for s in json.load(sys.stdin).get('SecurityProfileSummaryList', []):
                     --entity-type AI_AGENT \
                     --entity-arn "$ENTITY_ARN" \
                     --region "$REGION" >/dev/null 2>&1 || true
-                # verify — never trust the call alone (user-reported silent failure)
-                ATTACHED=$(aws connect list-entity-security-profiles \
+                # verify — never trust the call alone
+                local VERIFIED
+                VERIFIED=$(aws connect list-entity-security-profiles \
                     --instance-id "$CONNECT_INSTANCE_ID" \
                     --entity-type AI_AGENT --entity-arn "$ENTITY_ARN" \
                     --region "$REGION" --output json 2>/dev/null | python3 -c "
@@ -2114,12 +2120,12 @@ try:
         if p.get('Id') == '${SP_ID}': print('yes'); break
 except Exception: pass
 " 2>/dev/null || echo "")
-                [ "$ATTACHED" = "yes" ] && break
+                if [ "$QUAL" = "\$LATEST" ]; then LATEST_OK="$VERIFIED"; else PUBLISHED_OK="$VERIFIED"; fi
             done
-            if [ "$ATTACHED" = "yes" ]; then
-                ok "Security profile attached to AI Agent — verified (tool access granted)"
+            if [ "$PUBLISHED_OK" = "yes" ]; then
+                ok "Security profile attached to AI Agent v${AGENT_VERSION:-1} + \$LATEST — verified (tool access granted)"
             else
-                warn "Security profile attachment could NOT be verified."
+                warn "Security profile attachment to the PUBLISHED agent version could NOT be verified (\$LATEST: ${LATEST_OK:-no})."
                 warn "Without it, tool calls fail with 'Tool is not allowed' (MCP -32001)."
                 warn "Attach manually: Connect console > AI agents > ${AGENT_NAME} > Security Profiles > select '${SP_NAME}' > Publish"
             fi
