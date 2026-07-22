@@ -538,12 +538,38 @@ unzip """ + project_name + """.zip && cd """ + project_name + """
 chmod +x deploy.sh && ./deploy.sh
 ```
 
-The script automatically:
-- ✅ Uploads large templates to S3 (bypasses 51KB CloudFormation limit)
-- ✅ Deploys infrastructure stack
-- ✅ Updates all Lambda function code
-- ✅ Uploads OpenAPI spec and FAQ documents
-- ✅ Provides Contact Flow placeholder values
+The script automatically (13 phases, idempotent — safe to re-run):
+- ✅ Asks for a deployment name (stack/resource prefix) so multiple PoCs can coexist
+- ✅ Deploys the CloudFormation stack (S3 upload for large templates)
+- ✅ Updates all Lambda function code + uploads OpenAPI spec / FAQ documents
+- ✅ Creates/selects the Amazon Connect instance (interactive menu) and enables
+  the required instance attributes (incl. `BOT_MANAGEMENT` so Lex bots are
+  manageable from the Connect console Flows > Bots tab)
+- ✅ Creates the Q in Connect Assistant + Knowledge Base
+- ✅ Injects env vars into the update-q-session Lambda AND grants its role the
+  runtime permissions it needs (`connect:DescribeContact` + `wisdom:UpdateSessionData`)
+  — without these the AI agent can't see the caller's phone number
+- ✅ Creates the AgentCore Gateway (MCP server) and fixes the JWT audience
+- ✅ Registers the MCP server with Connect + associates Lambda functions
+- ✅ Creates the Lex bot with the Connect-assistant link
+  (`AMAZON.QInConnectIntent` bound to the assistant ARN — backfilled on
+  existing bots too) and your choice of speech model:
+  Nova Sonic speech-to-speech / agentic-voice Advanced ASR / standard
+- ✅ Lets you pick the voice provider: **Amazon Connect agentic voice**
+  (expressive, 50+ languages — flow leaves TTS on the instance default and sets
+  the language attribute for correct ASR routing; pick the exact voice in the
+  console) or **Amazon Polly** (voice + engine fully selected in the script)
+- ✅ Imports the Contact Flow with all placeholders auto-resolved
+- ✅ Creates the AI Prompt + AI Agent, attaches the security profile with
+  per-tool MCP permissions, and **verifies the attachment via the API**
+  (an unattached profile = every tool call fails with "Tool is not allowed")
+- ✅ Optionally claims a US phone number and attaches it to the flow
+
+Every decision point is an interactive multiple-choice prompt (language, voice
+provider, speech model, ASR tuning, model, queue, phone number, ...), with
+options listed live from your account via the AWS CLI. A full transcript is
+saved to `aicc_deploy_*.log`. Run `./deploy.sh status` to inspect the
+deployment and `./deploy.sh cleanup` to tear everything down.
 
 ### Option 2: Manual Deployment
 
