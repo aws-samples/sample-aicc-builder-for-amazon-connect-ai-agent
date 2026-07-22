@@ -44,11 +44,12 @@ against live AWS accounts (including a customer workshop account).
   optional phone-number claim. Every decision point is a multiple-choice menu
   populated live from the account via the AWS CLI; `status` / `cleanup`
   subcommands and a full session transcript (`aicc_deploy_*.log`) included.
-- **Voice provider choice — Amazon Connect agentic voice or Polly.** Choosing
-  agentic voice removes the flow's Polly TTS override (agentic voice is the
-  instance-default provider) and sets the language attribute for correct ASR
-  routing; Polly mode scripts the voice + engine end-to-end. Speech model is a
-  separate 3-tier choice: Nova Sonic S2S / Advanced ASR / standard.
+- **Voice provider choice — Amazon Connect agentic voice or Polly.** The flow
+  always ships a working Polly Set Voice block (agentic voice has no public
+  API); choosing agentic prints a required ~1-min console step to switch the
+  block's Voice Provider, and the language attribute is set for correct ASR
+  routing either way. Speech model is a separate choice: Nova Sonic S2S /
+  Advanced ASR / standard.
 - **Security-profile attachment is now verified, not assumed** — after
   associating the MCP-tool security profile to the AI Agent, the script
   confirms it via `list-entity-security-profiles` and prints exact console

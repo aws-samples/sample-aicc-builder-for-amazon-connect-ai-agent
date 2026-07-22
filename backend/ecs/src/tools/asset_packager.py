@@ -556,9 +556,9 @@ The script automatically (13 phases, idempotent — safe to re-run):
   existing bots too) and your choice of speech model:
   Nova Sonic speech-to-speech / agentic-voice Advanced ASR / standard
 - ✅ Lets you pick the voice provider: **Amazon Connect agentic voice**
-  (expressive, 50+ languages — flow leaves TTS on the instance default and sets
-  the language attribute for correct ASR routing; pick the exact voice in the
-  console) or **Amazon Polly** (voice + engine fully selected in the script)
+  (expressive, 50+ languages — flow ships with a working Polly fallback and the
+  summary prints the ~1-min console step to switch the Set voice block's
+  provider) or **Amazon Polly** (voice + engine fully selected in the script)
 - ✅ Imports the Contact Flow with all placeholders auto-resolved
 - ✅ Creates the AI Prompt + AI Agent, attaches the security profile with
   per-tool MCP permissions, and **verifies the attachment via the API**
