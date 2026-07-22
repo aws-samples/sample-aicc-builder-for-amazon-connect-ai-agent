@@ -1604,7 +1604,7 @@ PYEOF
                 value="${LEX_BOT_ALIAS_ARN:-}"
                 [ -n "$value" ] && info "$token -> $BOT_NAME TestBotAlias (auto)"
                 ;;
-            QUEUE_ARN)
+            QUEUE_ARN|*_QUEUE_ARN)
                 [ -z "$QUEUES_JSON" ] && QUEUES_JSON=$(aws connect list-queues \
                     --instance-id "$CONNECT_INSTANCE_ID" --queue-types STANDARD \
                     --region "$REGION" --output json 2>/dev/null || echo '{"QueueSummaryList":[]}')
@@ -1619,11 +1619,11 @@ for q in json.load(sys.stdin).get('QueueSummaryList', []):
     print((q.get('Name') or 'N/A') + '\t' + q['Arn'])
 ")
                 if [ ${#qarns[@]} -gt 0 ]; then
-                    choose "Select the escalation queue" "$qdefault" "${qmenu[@]}"
+                    choose "Select the queue for placeholder {{$token}}" "$qdefault" "${qmenu[@]}"
                     value="${qarns[$((CHOICE-1))]}"
                 fi
                 ;;
-            HOURS_ARN)
+            HOURS_ARN|*_HOURS_ARN|*HOURS_OF_OPERATION*ARN)
                 [ -z "$HOURS_JSON" ] && HOURS_JSON=$(aws connect list-hours-of-operations \
                     --instance-id "$CONNECT_INSTANCE_ID" \
                     --region "$REGION" --output json 2>/dev/null || echo '{"HoursOfOperationSummaryList":[]}')
@@ -1636,7 +1636,7 @@ for h in json.load(sys.stdin).get('HoursOfOperationSummaryList', []):
     print((h.get('Name') or 'N/A') + '\t' + h['Arn'])
 ")
                 if [ ${#harns[@]} -gt 0 ]; then
-                    choose "Select the hours of operation" 1 "${hmenu[@]}"
+                    choose "Select the hours of operation for placeholder {{$token}}" 1 "${hmenu[@]}"
                     value="${harns[$((CHOICE-1))]}"
                 fi
                 ;;
