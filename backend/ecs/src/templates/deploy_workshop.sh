@@ -2281,6 +2281,21 @@ do_deploy() {
         exit 1
     fi
     do_preflight
+
+    # ── Deployment scope ─────────────────────────────────────────────────────
+    #    full: everything through AI agent + phone number (chapters 2-6)
+    #    core: infrastructure/gateway only (chapters 5-6 done by hand in the
+    #          console — the workshop learning path)
+    #    Env override: DEPLOY_SCOPE=full|core
+    local SCOPE="${DEPLOY_SCOPE:-}"
+    if [ -z "$SCOPE" ]; then
+        choose "Select the deployment scope" 1 \
+            "Full automation      — everything incl. Lex bot, Contact Flow, AI Agent, security profile (workshop chapters 2-6)" \
+            "Core infrastructure  — stack/Lambda/Connect/Assistant/Gateway/MCP only; do Lex/Flow/AI Agent yourself in the console (learning path)"
+        [ "$CHOICE" = "2" ] && SCOPE="core" || SCOPE="full"
+    fi
+    state_set DEPLOY_SCOPE "$SCOPE"
+
     phase_cloudformation
     phase_lambda_code
     phase_openapi
@@ -2290,6 +2305,14 @@ do_deploy() {
     phase_env_vars
     phase_gateway
     phase_connect_integrations
+    if [ "$SCOPE" = "core" ]; then
+        echo ""
+        info "Core scope selected — stopping after MCP registration."
+        info "Continue in the console with workshop chapters 5-6 (Lex bot, Contact Flow, AI Agent),"
+        info "or re-run './deploy.sh' and pick Full automation at any time (idempotent)."
+        do_summary
+        return 0
+    fi
     phase_lex_bot
     phase_contact_flow
     phase_ai_agent
