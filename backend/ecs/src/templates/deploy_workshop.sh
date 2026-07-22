@@ -556,6 +556,32 @@ phase_lambda_code() {
             fi
         done
         rm -f /tmp/_deploy.zip
+
+        # ── Reconcile the Handler config with the code's actual entry point ──
+        #    The CFN placeholder may declare index.lambda_handler while the
+        #    generated code defines `def handler` (or vice versa) — that
+        #    mismatch surfaces only at call time as Runtime.HandlerNotFound
+        #    (found live: customer-lookup broke personalization mid-call).
+        local WANT_HANDLER=""
+        case "$entry_file" in
+            *.py)
+                if grep -qE '^def lambda_handler\b' "$func_dir/$entry_file"; then WANT_HANDLER="index.lambda_handler"
+                elif grep -qE '^def handler\b' "$func_dir/$entry_file"; then WANT_HANDLER="index.handler"; fi ;;
+            *.js|*.mjs)
+                if grep -qE 'exports\.handler|export const handler|export async function handler' "$func_dir/$entry_file"; then WANT_HANDLER="index.handler"; fi ;;
+        esac
+        if [ -n "$WANT_HANDLER" ]; then
+            local CUR_HANDLER
+            CUR_HANDLER=$(aws lambda get-function-configuration --function-name "$aws_func" \
+                --region "$REGION" --query 'Handler' --output text 2>/dev/null || echo "")
+            if [ -n "$CUR_HANDLER" ] && [ "$CUR_HANDLER" != "$WANT_HANDLER" ]; then
+                aws lambda update-function-configuration --function-name "$aws_func" \
+                    --handler "$WANT_HANDLER" --region "$REGION" >/dev/null 2>&1 \
+                    && aws lambda wait function-updated --function-name "$aws_func" --region "$REGION" 2>/dev/null \
+                    && info "$aws_func: handler fixed ($CUR_HANDLER -> $WANT_HANDLER)" \
+                    || warn "$aws_func: handler mismatch ($CUR_HANDLER vs code's $WANT_HANDLER) — fix manually"
+            fi
+        fi
     done
 }
 
@@ -1345,24 +1371,41 @@ for v in json.load(sys.stdin).get('Voices', []):
     SPEECH_SENSITIVITY=$(echo "$CHOICE_VALUE" | awk '{print $1}')
     info "Speech detection sensitivity: $SPEECH_SENSITIVITY"
 
-    # ── Lex service-linked role ─────────────────────────────────────────────
-    LEX_ROLE_ARN=$(aws iam get-role --role-name "AWSServiceRoleForLexV2Bots" \
+    # ── Lex bot runtime role (custom, NOT the SLR) ──────────────────────────
+    #    AMAZON.QInConnectIntent needs the bot role to carry wisdom:CreateSession/
+    #    GetAssistant/SendMessage/GetNextMessage on the assistant. The Connect
+    #    console injects that inline policy into a protected SLR — which the CLI
+    #    CANNOT modify (UnmodifiableEntity). Without it every Lex call fails with
+    #    "Invalid Bot Configuration: Amazon Lex could not access your Q In
+    #    Connect Assistant" (found live in a workshop). So we use a customer-
+    #    managed role with the same permissions instead.
+    local LEX_ROLE_NAME="${PROJECT_NAME}-lex-bot-role"
+    LEX_ROLE_ARN=$(aws iam get-role --role-name "$LEX_ROLE_NAME" \
         --query 'Role.Arn' --output text 2>/dev/null || echo "")
-    if [ -z "$LEX_ROLE_ARN" ]; then
-        # find any lexv2 SLR (suffixed) or create one
-        LEX_ROLE_ARN=$(aws iam list-roles --path-prefix "/aws-service-role/lexv2.amazonaws.com/" \
-            --query 'Roles[0].Arn' --output text 2>/dev/null || echo "")
-        [ "$LEX_ROLE_ARN" = "None" ] && LEX_ROLE_ARN=""
-    fi
-    if [ -z "$LEX_ROLE_ARN" ]; then
-        info "Creating LexV2 service-linked role..."
-        LEX_ROLE_ARN=$(aws iam create-service-linked-role \
-            --aws-service-name lexv2.amazonaws.com \
-            --custom-suffix "AICC" \
+    if [ -z "$LEX_ROLE_ARN" ] || [ "$LEX_ROLE_ARN" = "None" ]; then
+        info "Creating Lex bot role: $LEX_ROLE_NAME"
+        LEX_ROLE_ARN=$(aws iam create-role --role-name "$LEX_ROLE_NAME" \
+            --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lexv2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
             --query 'Role.Arn' --output text 2>/dev/null || echo "")
-        sleep 5
+        [ -n "$LEX_ROLE_ARN" ] && sleep 10   # IAM propagation
     fi
-    [ -z "$LEX_ROLE_ARN" ] && { warn "Could not obtain Lex role — skipping bot creation"; return 0; }
+    [ -z "$LEX_ROLE_ARN" ] && { warn "Could not create Lex bot role — skipping bot creation"; return 0; }
+    aws iam put-role-policy --role-name "$LEX_ROLE_NAME" --policy-name polly \
+        --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"polly:SynthesizeSpeech","Resource":"*"}]}' 2>/dev/null || true
+    aws iam put-role-policy --role-name "$LEX_ROLE_NAME" --policy-name qinconnect \
+        --policy-document "{
+  \"Version\": \"2012-10-17\",
+  \"Statement\": [
+    {\"Sid\": \"QInConnectAssistantPolicy\", \"Effect\": \"Allow\",
+     \"Action\": [\"wisdom:CreateSession\", \"wisdom:GetAssistant\"],
+     \"Resource\": [\"arn:aws:wisdom:*:${ACCOUNT_ID}:assistant/${AI_ASSISTANT_ID}\",
+                    \"arn:aws:wisdom:*:${ACCOUNT_ID}:assistant/${AI_ASSISTANT_ID}/*\"]},
+    {\"Sid\": \"QInConnectSessionsPolicy\", \"Effect\": \"Allow\",
+     \"Action\": [\"wisdom:SendMessage\", \"wisdom:GetNextMessage\"],
+     \"Resource\": [\"arn:aws:wisdom:*:${ACCOUNT_ID}:session/${AI_ASSISTANT_ID}/*\"]}
+  ]
+}" 2>/dev/null && info "Lex bot role has Q in Connect permissions" \
+        || warn "Could not attach Q in Connect policy to $LEX_ROLE_NAME"
 
     # ── Create or reuse the bot ─────────────────────────────────────────────
     BOT_ID=$(aws lexv2-models list-bots --region "$REGION" \
@@ -1371,12 +1414,17 @@ for v in json.load(sys.stdin).get('Voices', []):
     [ "$BOT_ID" = "None" ] && BOT_ID=""
     if [ -z "$BOT_ID" ]; then
         info "Creating bot: $BOT_NAME"
+        # AmazonConnectEnabled tag is REQUIRED for the Connect console's
+        # bot-management page (Flows > Bots) — without it the console shows
+        # "The Conversational AI bot does not have the required tag set".
         BOT_RESULT=$(aws lexv2-models create-bot \
             --bot-name "$BOT_NAME" \
             --description "AI agent entry bot for ${PROJECT_NAME}" \
             --role-arn "$LEX_ROLE_ARN" \
             --data-privacy '{"childDirected":false}' \
             --idle-session-ttl-in-seconds 600 \
+            --bot-tags "AmazonConnectEnabled=True,AssistantArn=${ASSISTANT_ARN}" \
+            --test-bot-alias-tags "AmazonConnectEnabled=True" \
             --region "$REGION" --output json)
         BOT_ID=$(jget "$BOT_RESULT" "botId")
         echo -n "   Waiting for bot..."
@@ -1455,6 +1503,36 @@ for v in json.load(sys.stdin).get('Voices', []):
                 --region "$REGION" >/dev/null 2>&1 && info "Locale speech settings updated (Standard)" || true
         fi
     fi
+
+    # ── Ensure the bot uses the custom role (backfill for existing bots) ────
+    CUR_BOT_ROLE=$(aws lexv2-models describe-bot --bot-id "$BOT_ID" --region "$REGION" \
+        --query 'roleArn' --output text 2>/dev/null || echo "")
+    if [ -n "$CUR_BOT_ROLE" ] && [ "$CUR_BOT_ROLE" != "$LEX_ROLE_ARN" ]; then
+        info "Switching bot role to $LEX_ROLE_NAME (Q in Connect access)..."
+        aws lexv2-models update-bot --bot-id "$BOT_ID" --bot-name "$BOT_NAME" \
+            --role-arn "$LEX_ROLE_ARN" \
+            --data-privacy '{"childDirected":false}' --idle-session-ttl-in-seconds 600 \
+            --region "$REGION" >/dev/null 2>&1 \
+            && info "Bot role updated" || warn "Could not update bot role"
+        sleep 3
+    fi
+
+    # ── Console-manageability tags (backfill for existing bots) ─────────────
+    #    The Connect console bot page requires the AmazonConnectEnabled tag.
+    #    BOTH the bot AND its TestBotAlias need the tag — bot-only tagging still
+    #    shows "AI agent is not supported for bots created outside Connect console".
+    for TAG_ARN in "arn:aws:lex:${REGION}:${ACCOUNT_ID}:bot/${BOT_ID}" \
+                   "arn:aws:lex:${REGION}:${ACCOUNT_ID}:bot-alias/${BOT_ID}/TSTALIASID"; do
+        HAS_TAG=$(aws lexv2-models list-tags-for-resource --resource-arn "$TAG_ARN" \
+            --region "$REGION" --query 'tags.AmazonConnectEnabled' --output text 2>/dev/null || echo "")
+        if [ "$HAS_TAG" != "True" ]; then
+            aws lexv2-models tag-resource --resource-arn "$TAG_ARN" \
+                --tags "AmazonConnectEnabled=True,AssistantArn=${ASSISTANT_ARN}" \
+                --region "$REGION" 2>/dev/null \
+                && info "Tagged $(basename $TAG_ARN) for Connect console manageability" \
+                || warn "Could not tag $TAG_ARN — the Connect console bot page may show 'required tag' error"
+        fi
+    done
 
     # ── AI agent intent (AMAZON.QInConnectIntent) ───────────────────────────
     QIC_INTENT=$(aws lexv2-models list-intents --bot-id "$BOT_ID" --bot-version DRAFT \
@@ -2491,6 +2569,11 @@ for s in json.load(sys.stdin).get('SecurityProfileSummaryList', []):
         aws lexv2-models delete-bot --bot-id "$LEX_BOT_ID" \
             --skip-resource-in-use-check --region "$REGION" >/dev/null 2>&1 && info "Bot deleted: $BOT_NAME" || true
     fi
+    # bot runtime role
+    for POL in polly qinconnect; do
+        aws iam delete-role-policy --role-name "${PROJECT_NAME}-lex-bot-role" --policy-name "$POL" 2>/dev/null || true
+    done
+    aws iam delete-role --role-name "${PROJECT_NAME}-lex-bot-role" 2>/dev/null && info "Lex bot role deleted" || true
 
     # ── MCP integration ─────────────────────────────────────────────────────
     echo "🔗 Removing MCP integration..."

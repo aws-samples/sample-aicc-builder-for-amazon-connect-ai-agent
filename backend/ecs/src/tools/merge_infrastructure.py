@@ -149,6 +149,28 @@ def _fix_qconnect_namespace(yaml_str: str) -> str:
     return new_yaml
 
 
+def _fix_customer_lookup_handler(yaml_str: str) -> str:
+    """Force CustomerLookupFunction's Handler to index.handler.
+
+    The Lambda Generator always emits ``def handler`` and deploy.sh replaces
+    the placeholder code, but the LLM recurrently declares
+    ``Handler: index.lambda_handler`` on CustomerLookupFunction — which only
+    surfaces at call time as Runtime.HandlerNotFound (broke caller
+    personalization in a live workshop). Other inline-code functions
+    (seeder/api-key retriever) legitimately keep lambda_handler.
+    """
+    m = re.search(r'(^  CustomerLookupFunction:\n(?:^(?:    |\n).*\n?)*)', yaml_str, re.M)
+    if not m:
+        return yaml_str
+    block = m.group(1)
+    if 'Handler: index.lambda_handler' not in block:
+        return yaml_str
+    fixed = block.replace('Handler: index.lambda_handler', 'Handler: index.handler')
+    logger.info("[MERGE] CustomerLookupFunction Handler: index.lambda_handler → index.handler "
+                "(matches generated code entry point)")
+    return yaml_str.replace(block, fixed, 1)
+
+
 def _fix_common_property_hallucinations(yaml_str: str) -> str:
     """Fix common LLM-hallucinated CloudFormation property names.
 
@@ -446,6 +468,7 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     final_yaml = _fix_common_property_hallucinations(final_yaml)
     final_yaml = _fix_qconnect_namespace(final_yaml)
     final_yaml = _ensure_qsession_role_permissions(final_yaml)
+    final_yaml = _fix_customer_lookup_handler(final_yaml)
     final_yaml = _deduplicate_resources(final_yaml)
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)
