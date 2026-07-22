@@ -1652,9 +1652,9 @@ PYEOF
     for token in $placeholders; do
         local value=""
         case "$token" in
-            *_LAMBDA_ARN)
+            *_LAMBDA_ARN|*_LAMBDA)
                 local stem
-                stem=$(echo "$token" | sed 's/_LAMBDA_ARN$//' | tr '[:upper:]' '[:lower:]')
+                stem=$(echo "$token" | sed 's/_LAMBDA_ARN$//; s/_LAMBDA$//' | tr '[:upper:]' '[:lower:]')
                 local fn
                 fn=$(resolve_stack_function "$stem")
                 if [ -n "$fn" ]; then
