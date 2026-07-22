@@ -674,16 +674,36 @@ if [ "$DEPLOY_BACKEND" = true ]; then
             # exported var from a previous (different-region) session must not win,
             # or the wrong USER_POOL_ID gets baked into the task def and JWT
             # validation fails (JWKS 404). Env var is a fallback only.
-            if [ -f "$CDK_OUTPUTS_FILE" ]; then
-                _OUT_POOL=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
-                _OUT_CLIENT=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolClientId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
-                _OUT_BUCKET=$(jq -r --arg s "$STACK_NAME" '.[$s].AssetsBucketName // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
-                _OUT_KB=$(jq -r --arg s "$KB_STACK_NAME" '.[$s].ContactFlowKnowledgeBaseId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+            # LIVE CloudFormation outputs are the real authority — the local
+            # cdk-outputs file is shared across regions/accounts for the same
+            # stage and gets overwritten by whichever deploy ran last (found
+            # live: a us-east-1 deploy poisoned the Seoul dev backend with a
+            # us-east-1 USER_POOL_ID, breaking all JWT validation). Query the
+            # region-scoped stack first; fall back to the file, then env.
+            _LIVE_OUTS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                --region "$AWS_DEFAULT_REGION" \
+                --query 'Stacks[0].Outputs' --output json 2>/dev/null || echo "")
+            if [ -n "$_LIVE_OUTS" ] && [ "$_LIVE_OUTS" != "null" ]; then
+                _OUT_POOL=$(echo "$_LIVE_OUTS" | jq -r '.[] | select(.OutputKey=="UserPoolId") | .OutputValue // empty' 2>/dev/null)
+                _OUT_CLIENT=$(echo "$_LIVE_OUTS" | jq -r '.[] | select(.OutputKey=="UserPoolClientId") | .OutputValue // empty' 2>/dev/null)
+                _OUT_BUCKET=$(echo "$_LIVE_OUTS" | jq -r '.[] | select(.OutputKey=="AssetsBucketName") | .OutputValue // empty' 2>/dev/null)
                 USER_POOL_ID=${_OUT_POOL:-$USER_POOL_ID}
                 USER_POOL_CLIENT_ID=${_OUT_CLIENT:-$USER_POOL_CLIENT_ID}
                 ASSETS_BUCKET_NAME=${_OUT_BUCKET:-$ASSETS_BUCKET_NAME}
-                CONTACT_FLOW_KB_ID=${_OUT_KB:-$CONTACT_FLOW_KB_ID}
+            elif [ -f "$CDK_OUTPUTS_FILE" ]; then
+                _OUT_POOL=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                _OUT_CLIENT=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolClientId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                _OUT_BUCKET=$(jq -r --arg s "$STACK_NAME" '.[$s].AssetsBucketName // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                USER_POOL_ID=${_OUT_POOL:-$USER_POOL_ID}
+                USER_POOL_CLIENT_ID=${_OUT_CLIENT:-$USER_POOL_CLIENT_ID}
+                ASSETS_BUCKET_NAME=${_OUT_BUCKET:-$ASSETS_BUCKET_NAME}
             fi
+            _OUT_KB=$(aws cloudformation describe-stacks --stack-name "$KB_STACK_NAME" \
+                --region "$AWS_DEFAULT_REGION" \
+                --query 'Stacks[0].Outputs[?OutputKey==`ContactFlowKnowledgeBaseId`].OutputValue | [0]' \
+                --output text 2>/dev/null | grep -v None || true)
+            [ -z "$_OUT_KB" ] && [ -f "$CDK_OUTPUTS_FILE" ] && _OUT_KB=$(jq -r --arg s "$KB_STACK_NAME" '.[$s].ContactFlowKnowledgeBaseId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+            CONTACT_FLOW_KB_ID=${_OUT_KB:-$CONTACT_FLOW_KB_ID}
 
             echo "Patching task definition (runtime env vars)..."
 
