@@ -78,7 +78,11 @@ def _get_model(temperature: float, max_tokens: int, model_id: Optional[str] = No
     """
     model_id = model_id or resolve_model_id()
     region = os.environ.get("AWS_REGION", "ap-northeast-1")
-    cache_key = f"{model_id}:{temperature}:{max_tokens}"
+    # effort participates in the cache key so switching it mid-session does not
+    # silently reuse a model built with the previous effort level
+    from tools.model_selection import resolve_effort
+    _effort = resolve_effort()
+    cache_key = f"{model_id}:{temperature}:{max_tokens}:{_effort or 'default'}"
     if cache_key not in _model_cache:
         logger.info(f"Creating model: {model_id} (temperature={temperature}, max_tokens={max_tokens})")
 

@@ -328,6 +328,25 @@ def set_selected_model(session_id: str, model_id: str) -> None:
     logger.info(f"[selected_model] {session_id}: -> {model_id}")
 
 
+def get_selected_effort(session_id: str) -> Optional[str]:
+    """Read the persisted Anthropic effort level for this session (None if unset)."""
+    state = _read_state(session_id)
+    return state.get("selected_effort")
+
+
+def set_selected_effort(session_id: str, effort: Optional[str]) -> None:
+    """Persist the selected effort level; None/"" clears it (model default)."""
+    state = _read_state(session_id)
+    if state.get("selected_effort") == effort:
+        return
+    if effort:
+        state["selected_effort"] = effort
+    else:
+        state.pop("selected_effort", None)
+    _write_state(session_id, state)
+    logger.info(f"[selected_effort] {session_id}: -> {effort or '(default)'}")
+
+
 def get_generation_scope(session_id: str) -> List[str]:
     """Return the requested generation scope as asset ids.
 

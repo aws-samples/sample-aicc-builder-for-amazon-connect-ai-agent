@@ -139,13 +139,18 @@ from context.generation_progress import get_frontend_progress_state as _get_fron
 from context.generation_progress import (
     get_selected_model as _get_selected_model,
     set_selected_model as _set_selected_model,
+    get_selected_effort as _get_selected_effort,
+    set_selected_effort as _set_selected_effort,
     get_generation_scope as _get_generation_scope,
     set_generation_scope as _set_generation_scope,
     mark_imported_session as _mark_imported_session,
     FULL_ASSET_SET as _FULL_ASSET_SET,
 )
-from tools.model_selection import resolve_model_id, build_model_kwargs, validate_model_id
+from tools.model_selection import (
+    resolve_model_id, build_model_kwargs, validate_model_id, validate_effort, resolve_effort,
+)
 from tools.session_context import current_selected_model as _current_selected_model
+from tools.session_context import current_selected_effort as _current_selected_effort
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("aicc-ecs")
@@ -624,6 +629,9 @@ def get_or_create_session(session_id: str) -> Dict[str, Any]:
         persisted_model = _get_selected_model(session_id)
         if persisted_model and validate_model_id(persisted_model):
             _current_selected_model.set(persisted_model)
+        persisted_effort = validate_effort(_get_selected_effort(session_id))
+        if persisted_effort:
+            _current_selected_effort.set(persisted_effort)
     except Exception as _model_err:
         logger.warning(f"[session] model rehydrate failed for {session_id}: {_model_err}")
 
@@ -663,6 +671,7 @@ def get_or_create_session(session_id: str) -> Dict[str, Any]:
         "agent": agent,
         "model": model,
         "selected_model_id": resolve_model_id(),
+        "selected_effort": resolve_effort(),
         "tools": tools,
         "conversation_history": conversation_history,
         "session_data": {},
@@ -1863,6 +1872,11 @@ async def websocket_handler(
                 if _req_model:
                     _set_selected_model(_eff_sid, _req_model)
                 _current_selected_model.set(_req_model or _get_selected_model(_eff_sid))
+                # effort: explicit value persists; explicit "" / "default" clears
+                if "effort" in data:
+                    _req_effort = validate_effort(data.get("effort"))
+                    _set_selected_effort(_eff_sid, _req_effort)
+                _current_selected_effort.set(validate_effort(_get_selected_effort(_eff_sid)))
             except Exception as _model_bind_err:
                 logger.warning(f"[WS] model bind failed: {_model_bind_err}")
 
@@ -1956,16 +1970,20 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
 
     session = get_or_create_session(session_id)
 
-    # Mid-session model switch: if the resolved model (ContextVar/persisted/env)
-    # differs from what this session's orchestrator model was built against,
-    # rebuild it so the per-turn streaming_agent (which reads session["model"])
-    # uses the newly selected model.
+    # Mid-session model/effort switch: if the resolved model or effort differs
+    # from what this session's orchestrator model was built against, rebuild it
+    # so the per-turn streaming_agent (which reads session["model"]) uses the
+    # newly selected configuration.
     try:
         _resolved_model = resolve_model_id()
-        if _resolved_model != session.get("selected_model_id"):
+        _resolved_effort = resolve_effort()
+        if (_resolved_model != session.get("selected_model_id")
+                or _resolved_effort != session.get("selected_effort")):
             session["model"] = get_model_config()
             session["selected_model_id"] = _resolved_model
-            logger.info(f"[model] rebuilt orchestrator model for {session_id} -> {_resolved_model}")
+            session["selected_effort"] = _resolved_effort
+            logger.info(f"[model] rebuilt orchestrator model for {session_id} -> "
+                        f"{_resolved_model} (effort={_resolved_effort or 'default'})")
     except Exception as _model_err:
         logger.warning(f"[model] orchestrator rebuild failed for {session_id}: {_model_err}")
 
@@ -2890,6 +2908,10 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
         if _model:
             _set_selected_model(_eff_for_state, _model)
             _current_selected_model.set(_model)
+        if "effort" in data:
+            _effort = validate_effort(data.get("effort"))
+            _set_selected_effort(_eff_for_state, _effort)
+            _current_selected_effort.set(_effort)
     except Exception as _me:
         logger.warning(f"[createNewSession] set model failed: {_me}")
 

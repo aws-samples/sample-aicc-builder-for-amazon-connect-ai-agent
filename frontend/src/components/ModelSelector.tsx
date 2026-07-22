@@ -8,8 +8,8 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Zap, ChevronDown, Check } from 'lucide-react';
-import { useBuilderStore, MODELS } from '../stores/builderStore';
+import { Zap, ChevronDown, Check, Gauge } from 'lucide-react';
+import { useBuilderStore, MODELS, EFFORT_LEVELS } from '../stores/builderStore';
 import type { Language } from '../types';
 import { cn } from '../lib/utils';
 
@@ -20,19 +20,22 @@ interface ModelSelectorProps {
   className?: string;
 }
 
-const STRINGS: Record<Language, { label: string; aria: string }> = {
-  'en-US': { label: 'Model', aria: 'Select Claude model' },
-  'ko-KR': { label: '모델', aria: 'Claude 모델 선택' },
-  'ja-JP': { label: 'モデル', aria: 'Claudeモデルを選択' },
+const STRINGS: Record<Language, { label: string; aria: string; effort: string; effortDefault: string }> = {
+  'en-US': { label: 'Model', aria: 'Select Claude model', effort: 'Effort', effortDefault: 'Default (model decides)' },
+  'ko-KR': { label: '모델', aria: 'Claude 모델 선택', effort: '추론 강도 (Effort)', effortDefault: '기본값 (모델 판단)' },
+  'ja-JP': { label: 'モデル', aria: 'Claudeモデルを選択', effort: '推論強度 (Effort)', effortDefault: 'デフォルト' },
 };
 
 export function ModelSelector({ language, variant = 'header', className }: ModelSelectorProps) {
   const selectedModel = useBuilderStore((s) => s.selectedModel);
   const setSelectedModel = useBuilderStore((s) => s.setSelectedModel);
+  const selectedEffort = useBuilderStore((s) => s.selectedEffort);
+  const setSelectedEffort = useBuilderStore((s) => s.setSelectedEffort);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   const current = MODELS.find((m) => m.id === selectedModel) || MODELS[0];
+  const currentEffort = EFFORT_LEVELS.find((e) => e.id === selectedEffort) || EFFORT_LEVELS[0];
   const t = STRINGS[language] || STRINGS['en-US'];
 
   // Close on outside click / Escape
@@ -76,7 +79,12 @@ export function ModelSelector({ language, variant = 'header', className }: Model
         )}
       >
         <Zap className="w-4 h-4 text-primary-500 dark:text-primary-400" />
-        <span className="font-medium">{current.label}</span>
+        <span className="font-medium">
+          {current.label}
+          {selectedEffort !== 'default' && (
+            <span className="opacity-70"> · {currentEffort.label}</span>
+          )}
+        </span>
         <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', open && 'rotate-180')} />
       </button>
 
@@ -85,7 +93,7 @@ export function ModelSelector({ language, variant = 'header', className }: Model
           role="listbox"
           aria-label={t.aria}
           className={cn(
-            'absolute right-0 z-50 mt-1 min-w-[10rem] rounded-lg overflow-hidden',
+            'absolute right-0 z-50 mt-1 min-w-[12rem] rounded-lg overflow-hidden',
             'border border-surface-200 dark:border-surface-700',
             'bg-white dark:bg-surface-850 shadow-lg'
           )}
@@ -113,6 +121,41 @@ export function ModelSelector({ language, variant = 'header', className }: Model
                   <Zap className="w-3.5 h-3.5 opacity-70" />
                   {m.label}
                 </span>
+                {active && <Check className="w-4 h-4" />}
+              </button>
+            );
+          })}
+
+          {/* Effort control — Anthropic output_config.effort (Claude 4.6+) */}
+          <div
+            className="px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide
+                       text-surface-400 dark:text-surface-500 border-t border-surface-200 dark:border-surface-700
+                       flex items-center gap-1.5"
+          >
+            <Gauge className="w-3 h-3" />
+            {t.effort}
+          </div>
+          {EFFORT_LEVELS.map((e) => {
+            const active = e.id === selectedEffort;
+            const label = e.id === 'default' ? t.effortDefault : e.label;
+            return (
+              <button
+                key={e.id}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => {
+                  setSelectedEffort(e.id);
+                  setOpen(false);
+                }}
+                className={cn(
+                  'w-full flex items-center justify-between gap-2 px-3 py-1.5 text-sm text-left transition-colors',
+                  active
+                    ? 'bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300'
+                    : 'text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800'
+                )}
+              >
+                <span>{label}</span>
                 {active && <Check className="w-4 h-4" />}
               </button>
             );

@@ -38,6 +38,25 @@ export const MODELS: ModelOption[] = [
 
 export const DEFAULT_MODEL_ID = 'global.anthropic.claude-opus-4-8';
 
+// ── Effort selection ─────────────────────────────────────────────────────
+// Anthropic `effort` output control (Claude 4.6+, stable API). 'default' omits
+// the parameter (= model default, maximum effort). Sent alongside `model` on
+// every outbound WS message.
+export interface EffortOption {
+  id: string; // 'default' | 'max' | 'high' | 'medium' | 'low'
+  label: string;
+}
+
+export const EFFORT_LEVELS: EffortOption[] = [
+  { id: 'default', label: 'Default' },
+  { id: 'max', label: 'Max' },
+  { id: 'high', label: 'High' },
+  { id: 'medium', label: 'Medium' },
+  { id: 'low', label: 'Low' },
+];
+
+export const DEFAULT_EFFORT_ID = 'default';
+
 // ── Start-screen mode / generation scope ─────────────────────────────────
 export type StartMode = 'full' | 'segment' | 'improve';
 export type SegmentType = 'contact_flow' | 'prompt' | 'faq';
@@ -115,6 +134,7 @@ interface BuilderState {
 
   // Selected Claude model (sent on every outbound WS message)
   selectedModel: string;
+  selectedEffort: string;
 
   // Start-screen mode + active generation scope
   startMode: StartMode;
@@ -166,6 +186,7 @@ interface BuilderState {
   setInputHint: (hint: { placeholder: string; phase?: string } | null) => void;
   setLanguage: (language: Language) => void;
   setSelectedModel: (modelId: string) => void;
+  setSelectedEffort: (effortId: string) => void;
   setStartMode: (mode: StartMode) => void;
   setSegment: (segment: SegmentType | null) => void;
   setScope: (scope: string[] | null) => void;
@@ -333,6 +354,17 @@ const getInitialModel = (): string => {
   return DEFAULT_MODEL_ID;
 };
 
+// Get initial effort from localStorage (defaults to model default)
+const getInitialEffort = (): string => {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('selectedEffort');
+    if (stored && EFFORT_LEVELS.some((e) => e.id === stored)) {
+      return stored;
+    }
+  }
+  return DEFAULT_EFFORT_ID;
+};
+
 export const useBuilderStore = create<BuilderState>((set) => ({
   // Initial state
   theme: getInitialTheme(),
@@ -356,6 +388,7 @@ export const useBuilderStore = create<BuilderState>((set) => ({
   workspaceRefreshTrigger: 0,
   language: getInitialLanguage(),
   selectedModel: getInitialModel(),
+  selectedEffort: getInitialEffort(),
   startMode: 'full',
   segment: null,
   scope: null,
@@ -713,6 +746,13 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       localStorage.setItem('selectedModel', modelId);
     }
     return set({ selectedModel: modelId });
+  },
+
+  setSelectedEffort: (effortId) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('selectedEffort', effortId);
+    }
+    return set({ selectedEffort: effortId });
   },
 
   setStartMode: (mode) =>
