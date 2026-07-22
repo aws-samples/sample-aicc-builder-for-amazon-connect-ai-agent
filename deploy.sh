@@ -487,7 +487,7 @@ if [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
 
     # 0.5b) Build and push Docker image (if repo exists and backend sources changed)
     if [ -n "$ECR_REPO_URI" ]; then
-        BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*.py")
+        BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*")
         ECS_APP_HASH=$(md5sum "$SCRIPT_DIR/backend/ecs/app.py" 2>/dev/null | cut -d' ' -f1 || echo "none")
         BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}"
 
@@ -658,7 +658,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
 
     # Docker image was already built & pushed in Step 0.5 (pre-CDK).
     # This section handles post-CDK configuration: S3 Files volume + force deployment.
-    BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*.py")
+    BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*")
     ECS_APP_HASH=$(md5sum "$SCRIPT_DIR/backend/ecs/app.py" 2>/dev/null | cut -d' ' -f1 || echo "none")
     BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}"
 
