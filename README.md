@@ -27,7 +27,51 @@ https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
 
 ---
 
-## What's New in v2.2
+## What's New in v2.3
+
+A fully-automated workshop deploy script, live-QA permission hardening, a new
+deterministic IAM validation gate, and a model *effort* control — all verified
+against live AWS accounts (including a customer workshop account).
+
+- **`deploy.sh` in the downloaded bundle now automates the entire workshop
+  (chapters 3–6) from the CLI** — 13 idempotent phases: CloudFormation,
+  Lambda/OpenAPI/FAQ upload, Connect instance create/select (+ required
+  instance attributes incl. `BOT_MANAGEMENT`), Q in Connect Assistant + KB,
+  AgentCore Gateway (MCP) with JWT-audience auto-fix, MCP registration,
+  Lex bot with the Connect-assistant link (`AMAZON.QInConnectIntent` bound to
+  the assistant ARN, backfilled on existing bots), Contact Flow import with
+  placeholder auto-resolution, AI Prompt + AI Agent + security profile, and
+  optional phone-number claim. Every decision point is a multiple-choice menu
+  populated live from the account via the AWS CLI; `status` / `cleanup`
+  subcommands and a full session transcript (`aicc_deploy_*.log`) included.
+- **Voice provider choice — Amazon Connect agentic voice or Polly.** Choosing
+  agentic voice removes the flow's Polly TTS override (agentic voice is the
+  instance-default provider) and sets the language attribute for correct ASR
+  routing; Polly mode scripts the voice + engine end-to-end. Speech model is a
+  separate 3-tier choice: Nova Sonic S2S / Advanced ASR / standard.
+- **Security-profile attachment is now verified, not assumed** — after
+  associating the MCP-tool security profile to the AI Agent, the script
+  confirms it via `list-entity-security-profiles` and prints exact console
+  steps if verification fails (the cause of "Tool is not allowed" MCP -32001).
+- **update-q-session runtime permissions fixed at three layers** (found in a
+  live workshop: `AccessDeniedException` on `connect:DescribeContact` left the
+  AI agent unable to see the caller's phone number): deploy.sh grants the role
+  scoped runtime permissions at deploy time, the infrastructure merge injects
+  the inline policy whenever the LLM omits it, and…
+- **New deterministic validation gate: Lambda IAM permission check** —
+  `validate_parameter_consistency` now derives required IAM actions from each
+  handler's SDK calls (Python boto3 + JS SDK v3, `qconnect:`→`wisdom:`
+  namespace mapping) and cross-checks them against the merged CloudFormation
+  roles, so missing runtime permissions are caught at review time.
+- **Model effort control** — pick Anthropic `effort` (max / high / medium /
+  low, or model default) next to the model selector; applied to the
+  orchestrator and every sub-agent via `output_config.effort`, persisted per
+  session, switchable mid-session.
+
+---
+
+<details>
+<summary><strong>What's New in v2.2</strong> — model choice, segment-scoped generation, import-and-improve, UI redesign (click to expand)</summary>
 
 Model choice, segment-scoped generation, import-and-improve, a UI redesign, and a
 contact-flow correctness pass re-verified against the live Amazon Connect
@@ -44,7 +88,7 @@ Verified end-to-end against the real backend + live Connect API: a Full Build to
 completion (all 6 asset families), single-segment Prompt-only / FAQ-only runs, and
 the Improve-Existing import→repair→edit cycle.
 
----
+</details>
 
 <details>
 <summary><strong>What's New in v2.1</strong> — validation gates, Contact Flow import-safety, spec fidelity (click to expand)</summary>
