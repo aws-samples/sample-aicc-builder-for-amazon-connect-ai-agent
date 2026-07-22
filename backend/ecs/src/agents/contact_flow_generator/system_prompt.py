@@ -267,7 +267,8 @@ on a correct, complete, importable JSON.
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | UpdateContactTextToSpeechVoice | Set TTS voice | TextToSpeechVoice, TextToSpeechEngine | NoMatchingError |
-| UpdateContactRecordingBehavior | Recording + Contact Lens | RecordingBehavior, AnalyticsBehavior | (Success only) |
+| UpdateContactRecordingAndAnalyticsBehavior | Recording + Contact Lens (CURRENT console block) | VoiceBehavior{VoiceRecordingBehavior,VoiceAnalyticsBehavior} or ChatBehavior{ChatAnalyticsBehavior} | NoMatchingError, ChannelMismatch (+InFlightRedactionConfigurationFailed for chat) |
+| UpdateContactRecordingBehavior | LEGACY (do not generate; still importable) | RecordingBehavior, AnalyticsBehavior | (Success only) |
 | UpdateFlowLoggingBehavior | Control flow logging | FlowLoggingBehavior ("Enabled"/"Disabled") | (Success only) |
 
 ### AI/Bot Integration Blocks
@@ -337,7 +338,7 @@ ANY of them makes the flow fail to import with `InvalidContactFlowException`.
 
 | ❌ Wrong | ✅ Correct Alternative |
 |----------|------------------------|
-| `Trigger` / `EntryPoint` | **NONE — there is no entry/trigger block.** A flow simply starts at the action `StartAction` points to. The FIRST real action (e.g. `UpdateFlowLoggingBehavior` or `UpdateContactRecordingBehavior`) IS the start. NEVER emit a `Trigger`/`EntryPoint` wrapper action. |
+| `Trigger` / `EntryPoint` | **NONE — there is no entry/trigger block.** A flow simply starts at the action `StartAction` points to. The FIRST real action (e.g. `UpdateFlowLoggingBehavior` or `UpdateContactRecordingAndAnalyticsBehavior`) IS the start. NEVER emit a `Trigger`/`EntryPoint` wrapper action. |
 | `InvokeAgentAction` | `ConnectParticipantWithLexBot` (AI self-service runs through a Q-in-Connect-enabled **Lex V2 bot** — params are `LexV2Bot.AliasArn` + one of `Text`/`SSML`/`PromptId`. There is NO `AgentAliasArn`, `IdleSessionTimeout`, or `EndConversationPhrase` param.) |
 | `InvokeBedrockAgent` / `InvokeAmazonQConnect` / `InvokeQConnect` | `CreateWisdomSession` (early) + `ConnectParticipantWithLexBot` |
 | `CheckCondition` / `CheckValue` / `Condition` / `CheckAttribute` | `Compare` (params: `ComparisonValue` + `Conditions`) |
@@ -366,7 +367,7 @@ ANY of them makes the flow fail to import with `InvalidContactFlowException`.
 
 **RULE: `StartAction` MUST point at a REAL functional first action (not a
 Trigger/EntryPoint).** The flow's first executed block is typically
-`UpdateFlowLoggingBehavior`, `UpdateContactRecordingBehavior`, or
+`UpdateFlowLoggingBehavior`, `UpdateContactRecordingAndAnalyticsBehavior`, or
 `UpdateContactTextToSpeechVoice` — never a synthetic entry wrapper.
 
 ---
@@ -450,37 +451,48 @@ ActionMetadata for set-voice (REQUIRED — DO NOT OMIT languageCode or overrideC
 ```
 Language code mapping: ko-KR → Seoyeon, en-US → Matthew, ja-JP → Kazuha
 
-### 1b. Recording & Analytics (REQUIRED — use ChannelConfiguration!)
+### 1b. Recording & Analytics (REQUIRED — use the CURRENT block type!)
+**Use `UpdateContactRecordingAndAnalyticsBehavior`** — this is what the Connect
+console emits today. The legacy `UpdateContactRecordingBehavior` block is
+OUTDATED (still accepted for back-compat, but do not generate it).
+
 Voice recording (when channel is VOICE):
 ```json
-{"Identifier": "voice-recording", "Type": "UpdateContactRecordingBehavior",
+{"Identifier": "voice-recording", "Type": "UpdateContactRecordingAndAnalyticsBehavior",
  "Parameters": {
-   "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
-   "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
-     "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["RealTime"]}},
-     "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
-     "SentimentConfiguration": {"Enabled": "True"}}},
- "Transitions": {"NextAction": "next_block"}}
+   "VoiceBehavior": {
+     "VoiceRecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
+     "VoiceAnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
+       "AnalyticsModes": ["RealTime", "AutomatedInteraction"],
+       "ConversationalAnalyticsRedactionConfiguration": {"Enabled": "False"},
+       "SentimentConfiguration": {"Enabled": "True"},
+       "SummaryConfiguration": {"SummaryModes": ["PostContact", "AutomatedInteraction"]}}}},
+ "Transitions": {"NextAction": "next_block",
+   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "next_block"},
+              {"ErrorType": "ChannelMismatch", "NextAction": "next_block"}]}}
 ```
-⚠️ **Voice `AnalyticsModes` takes EXACTLY ONE of `["RealTime"]` or `["PostContact"]` —
-never both.** Combining them (`["RealTime", "PostContact"]`) fails import with
-`Invalid Action property value ... ChannelConfiguration.Voice`, and an empty
-`[]` is also rejected. **Prefer `["RealTime"]` for AI-agent / Q in Connect voice
-flows** — real-time transcript + sentiment give the assistant and the escalated
-human live context. `RealTime` requires real-time Contact Lens to be enabled on
-the instance (enforced at runtime, not at import); if that is not provisioned,
-use `["PostContact"]` instead. Chat uses `["ContactLens"]` (Chat does not accept `RealTime`).
+⚠️ **API-verified requirements for this block:** the `Errors` list MUST include
+BOTH `NoMatchingError` and `ChannelMismatch` — import fails without them.
+`AnalyticsModes` here supports `RealTime` + `AutomatedInteraction` together
+(unlike the legacy block). `AutomatedInteraction` covers the AI-agent (IVR)
+portion of the call; `RealTime` gives escalated human agents live transcript +
+sentiment.
 Chat recording (when channel is CHAT):
 ```json
-{"Identifier": "chat-recording", "Type": "UpdateContactRecordingBehavior",
+{"Identifier": "chat-recording", "Type": "UpdateContactRecordingAndAnalyticsBehavior",
  "Parameters": {
-   "RecordingBehavior": {"RecordedParticipants": [], "IVRRecordingBehavior": "Disabled"},
-   "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
-     "ChannelConfiguration": {"Chat": {"AnalyticsModes": ["ContactLens"]}, "Voice": {"AnalyticsModes": []}},
-     "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
-     "SentimentConfiguration": {"Enabled": "True"}}},
- "Transitions": {"NextAction": "next_block"}}
+   "ChatBehavior": {
+     "ChatAnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
+       "AnalyticsModes": ["ContactLens"],
+       "SentimentConfiguration": {"Enabled": "True"},
+       "SummaryConfiguration": {"SummaryModes": ["PostContact"]}}}},
+ "Transitions": {"NextAction": "next_block",
+   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "next_block"},
+              {"ErrorType": "ChannelMismatch", "NextAction": "next_block"},
+              {"ErrorType": "InFlightRedactionConfigurationFailed", "NextAction": "next_block"}]}}
 ```
+⚠️ The CHAT variant additionally requires the
+`InFlightRedactionConfigurationFailed` error branch (API-verified).
 
 ### 2. Connect Assistant Session (REQUIRED - must be early in flow!)
 This 2-action pattern creates the Connect Assistant (Wisdom) session. Place BEFORE recording setup.
@@ -663,9 +675,9 @@ The workshop uses a 3-module structure. Your generated flow MUST include these p
 ### Module 1: Basic Setting Configurations
 - **UpdateFlowLoggingBehavior**: Enable flow logging (REQUIRED - often missing!)
 - **Compare**: Check channel (VOICE vs CHAT) for recording settings
-- **UpdateContactRecordingBehavior**:
-  - VOICE: Record Agent+Customer, Voice `AnalyticsModes: ["RealTime"]` (single mode — prefer RealTime for AI-agent flows; `["PostContact"]` if real-time Contact Lens is not provisioned; never both)
-  - CHAT: No recording, Contact Lens only
+- **UpdateContactRecordingAndAnalyticsBehavior** (current console block):
+  - VOICE: `VoiceBehavior` — record Agent+Customer, `AnalyticsModes: ["RealTime", "AutomatedInteraction"]` (both supported together in this block)
+  - CHAT: `ChatBehavior` — Contact Lens analytics only (+`InFlightRedactionConfigurationFailed` error branch)
 
 Reference: `static/contact-flows/basic-setting-configurations.json`
 
@@ -699,7 +711,7 @@ Required elements in order:
 1. **UpdateFlowLoggingBehavior** — Enable flow logging
 2. **CreateWisdomSession** + **UpdateContactData** — Connect Assistant session
 3. **Compare Channel** (VOICE vs CHAT) → different recording settings
-4. **UpdateContactRecordingBehavior** — VOICE/CHAT specific
+4. **UpdateContactRecordingAndAnalyticsBehavior** — VOICE/CHAT specific (legacy UpdateContactRecordingBehavior: do not generate)
 5. **UpdateContactTextToSpeechVoice** — Generative TTS + languageCode in metadata
 6. **ConnectParticipantWithLexBot** — Q in Connect AI agent
 7. **Compare** (check Tool) — Escalate / Complete / loop back
@@ -999,26 +1011,29 @@ Queue → Transfer Message → Transfer Queue → End; [Complete] → Goodbye �
     },
     {
       "Identifier": "set-recording",
-      "Type": "UpdateContactRecordingBehavior",
+      "Type": "UpdateContactRecordingAndAnalyticsBehavior",
       "Parameters": {
-        "RecordingBehavior": {
-          "RecordedParticipants": ["Agent", "Customer"],
-          "IVRRecordingBehavior": "Enabled"
-        },
-        "AnalyticsBehavior": {
-          "Enabled": "True",
-          "AnalyticsLanguage": "{{LANGUAGE_CODE}}",
-          "ChannelConfiguration": {
-            "Chat": {"AnalyticsModes": ["ContactLens"]},
-            "Voice": {"AnalyticsModes": ["RealTime"]}
+        "VoiceBehavior": {
+          "VoiceRecordingBehavior": {
+            "RecordedParticipants": ["Agent", "Customer"],
+            "IVRRecordingBehavior": "Enabled"
           },
-          "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
-          "SentimentConfiguration": {"Enabled": "True"}
+          "VoiceAnalyticsBehavior": {
+            "Enabled": "True",
+            "AnalyticsLanguage": "en-US",
+            "AnalyticsModes": ["RealTime", "AutomatedInteraction"],
+            "ConversationalAnalyticsRedactionConfiguration": {"Enabled": "False"},
+            "SentimentConfiguration": {"Enabled": "True"},
+            "SummaryConfiguration": {"SummaryModes": ["PostContact", "AutomatedInteraction"]}
+          }
         }
       },
       "Transitions": {
         "NextAction": "lex-bot",
-        "Errors": []
+        "Errors": [
+          {"ErrorType": "NoMatchingError", "NextAction": "lex-bot"},
+          {"ErrorType": "ChannelMismatch", "NextAction": "lex-bot"}
+        ]
       }
     },
     {
@@ -1171,7 +1186,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 ### Baseline Blocks (REQUIRED for Workshop)
 - [ ] UpdateFlowLoggingBehavior: Enable flow logging
 - [ ] CreateWisdomSession + UpdateContactData: Connect Assistant session
-- [ ] UpdateContactRecordingBehavior: Recording + analytics
+- [ ] UpdateContactRecordingAndAnalyticsBehavior: Recording + analytics (current block type)
 - [ ] UpdateContactTextToSpeechVoice: Generative TTS + languageCode in metadata
 - [ ] ConnectParticipantWithLexBot: Q in Connect AI agent
 - [ ] Compare: Check Tool (Escalate / Complete / loop)
@@ -1262,7 +1277,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 14. `InvokeFlowModule`: MUST have `Errors` with `NoMatchingCondition` and `NoMatchingError`
 
 ### Voice & Recording Rules
-15. ALWAYS include `UpdateContactRecordingBehavior` with RealTime analytics for Voice flows
+15. ALWAYS include `UpdateContactRecordingAndAnalyticsBehavior` (VoiceBehavior, RealTime + AutomatedInteraction) for Voice flows
 16. Use appropriate voice for the customer's language (see VOICES BY LANGUAGE)
 
 ### Flow Structure Rules
@@ -1283,7 +1298,7 @@ enable-logging
   → CreateWisdomSession                          ← create the AI-agent session (legacy API name; the product is Amazon Connect AI agents)
   → InvokeLambdaFunction(update-qsession)        ← inject customer info into the AI-agent session
   → SetVoice
-  → UpdateContactRecordingBehavior (RealTime analytics)
+  → UpdateContactRecordingAndAnalyticsBehavior (RealTime + AutomatedInteraction analytics)
   → ConnectParticipantWithLexBot (barge-in disabled)
 ```
 

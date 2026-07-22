@@ -496,6 +496,7 @@ VALID_CONTACT_FLOW_ACTION_TYPES = frozenset({
     "ConnectParticipantWithLexBot", "RenderMessageTemplate",
     # Set / update
     "UpdateContactAttributes", "UpdateContactData", "UpdateContactRecordingBehavior",
+    "UpdateContactRecordingAndAnalyticsBehavior",
     "UpdateContactRecordingAndAnalyticsBehavior", "UpdateContactTextToSpeechVoice",
     "UpdateContactTargetQueue", "UpdateContactCallbackNumber", "UpdateContactEventHooks",
     "UpdateContactRoutingBehavior", "UpdateContactRoutingCriteria",
@@ -706,6 +707,22 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
             p = {}
         pkey = "Parameters" if "Parameters" in a or "parameters" not in a else "parameters"
         aid = a.get("Identifier") or a.get("identifier")
+
+        # --- UpdateContactRecordingAndAnalyticsBehavior (current console block):
+        #     API requires NoMatchingError + ChannelMismatch error branches
+        #     (+ InFlightRedactionConfigurationFailed when ChatBehavior present)
+        if t == "UpdateContactRecordingAndAnalyticsBehavior":
+            tr = a.setdefault("Transitions", {})
+            nxt = tr.get("NextAction") or fallback
+            errs = tr.setdefault("Errors", [])
+            have = {e.get("ErrorType") for e in errs if isinstance(e, dict)}
+            required = ["NoMatchingError", "ChannelMismatch"]
+            if isinstance(p, dict) and "ChatBehavior" in p:
+                required.append("InFlightRedactionConfigurationFailed")
+            for et in required:
+                if et not in have and nxt:
+                    errs.append({"ErrorType": et, "NextAction": nxt})
+                    fixes.append(f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: added required {et} error branch")
 
         # --- UpdateContactRecordingBehavior: {Agent, Customer} → RecordingBehavior
         if t == "UpdateContactRecordingBehavior":
