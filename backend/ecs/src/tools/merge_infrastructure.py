@@ -90,6 +90,53 @@ def _remove_anchor_comment(yaml_str: str) -> str:
 _QCONNECT_ACTION_RE = re.compile(r'qconnect:([A-Za-z]\w*)')
 
 
+# The update_q_session Lambda resolves the Wisdom session ARN via
+# connect:DescribeContact and writes via wisdom:UpdateSessionData at runtime.
+# The system prompt instructs the LLM to emit an inline policy with these
+# actions on UpdateQSessionRole, but the LLM recurrently omits it, leaving only
+# AWSLambdaBasicExecutionRole — which fails mid-call with AccessDeniedException
+# (verified in live workshop QA). This deterministic backstop injects the
+# inline policy whenever UpdateQSessionRole lacks the required actions.
+_QSESSION_POLICY_BLOCK = """\
+      Policies:
+        - PolicyName: UpdateQSessionRuntimePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - wisdom:UpdateSessionData
+                  - wisdom:GetSession
+                  - wisdom:ListSessions
+                  - connect:DescribeContact
+                  - connect:GetContactAttributes
+                Resource: "*"
+"""
+
+
+def _ensure_qsession_role_permissions(yaml_str: str) -> str:
+    """Ensure UpdateQSessionRole carries connect:DescribeContact + wisdom perms.
+
+    If an UpdateQSessionRole resource exists but its section does not mention
+    connect:DescribeContact, append the inline runtime policy right after its
+    ManagedPolicyArns block (same indentation level as other Properties keys).
+    """
+    m = re.search(r'(^  UpdateQSessionRole:\n(?:^(?:    |\n).*\n?)*)', yaml_str, re.M)
+    if not m:
+        return yaml_str
+    block = m.group(1)
+    if 'connect:DescribeContact' in block:
+        return yaml_str
+    mp = re.search(
+        r'(^      ManagedPolicyArns:\n(?:^        .*\n)+)', block, re.M)
+    if not mp:
+        return yaml_str
+    new_block = block.replace(mp.group(1), mp.group(1) + _QSESSION_POLICY_BLOCK, 1)
+    logger.info("[MERGE] Injected UpdateQSessionRuntimePolicy into UpdateQSessionRole "
+                "(missing connect:DescribeContact — recurrent LLM omission)")
+    return yaml_str.replace(block, new_block, 1)
+
+
 def _fix_qconnect_namespace(yaml_str: str) -> str:
     """Rewrite `qconnect:Action` IAM actions to `wisdom:Action`.
 
@@ -398,6 +445,7 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     final_yaml = _remove_anchor_comment(merged)
     final_yaml = _fix_common_property_hallucinations(final_yaml)
     final_yaml = _fix_qconnect_namespace(final_yaml)
+    final_yaml = _ensure_qsession_role_permissions(final_yaml)
     final_yaml = _deduplicate_resources(final_yaml)
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)
