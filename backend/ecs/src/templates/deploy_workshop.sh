@@ -626,8 +626,18 @@ phase_openapi() {
     [ -d "$SCRIPT_DIR/openapi" ] || { info "No openapi/ directory, skipping"; return 0; }
 
     API_HOST=$(echo "$API_ENDPOINT" | sed -E 's|^https?://||; s|/+$||; s|/tools/?$||')
+    if [ -z "$API_HOST" ] || [ "$API_HOST" = "None" ]; then
+        warn "API endpoint unresolved — skipping OpenAPI host substitution (re-run after the stack is healthy)"
+        return 0
+    fi
     find "$SCRIPT_DIR/openapi" -name "*.yaml" | while read -r f; do
-        sed -i.bak "s|{API_ENDPOINT}|$API_HOST|g" "$f" && rm -f "${f}.bak"
+        # Substitute from a pristine copy so a failed earlier run (which may
+        # have baked in a stale/None host) can never poison later runs.
+        [ -f "${f}.orig" ] || cp "$f" "${f}.orig"
+        sed "s|{API_ENDPOINT}|$API_HOST|g" "${f}.orig" > "$f"
+        # If the pristine copy predates this fix and lacks the placeholder,
+        # also rewrite any literal host (incl. a broken https://None).
+        sed -i.bak -E "s|https://[A-Za-z0-9.-]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com/[A-Za-z0-9]+|https://$API_HOST|g; s|https://None|https://$API_HOST|g" "$f" && rm -f "${f}.bak"
         info "Updated: ${f#$SCRIPT_DIR/}"
     done
     if [ -n "${KB_BUCKET:-}" ]; then
