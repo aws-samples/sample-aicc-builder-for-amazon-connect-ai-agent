@@ -149,6 +149,28 @@ def _fix_qconnect_namespace(yaml_str: str) -> str:
     return new_yaml
 
 
+def _fix_cfnresponse_import(yaml_str: str) -> str:
+    """Split comma-form imports that include cfnresponse onto their own lines.
+
+    CloudFormation only injects the cfnresponse module into an inline ZipFile
+    when it detects the literal line ``import cfnresponse`` — a comma-form
+    ``import boto3, cfnresponse`` is NOT recognized, so the function dies at
+    init with Runtime.ImportModuleError and the custom resource hangs the
+    stack for an hour until timeout (found live in scenario-3 E2E).
+    """
+    pattern = re.compile(r'^(\s*)import\s+([\w ,]*\bcfnresponse\b[\w ,]*)$', re.M)
+
+    def _split(m):
+        indent, mods = m.group(1), [x.strip() for x in m.group(2).split(',')]
+        return '\n'.join(f"{indent}import {mod}" for mod in mods if mod)
+
+    new_yaml, n = pattern.subn(_split, yaml_str)
+    if n:
+        logger.info(f"[MERGE] Split {n}x comma-form cfnresponse import(s) — "
+                    "CFN only auto-vends cfnresponse for the standalone form")
+    return new_yaml
+
+
 def _fix_customer_lookup_handler(yaml_str: str) -> str:
     """Force CustomerLookupFunction's Handler to index.handler.
 
@@ -469,6 +491,7 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     final_yaml = _fix_qconnect_namespace(final_yaml)
     final_yaml = _ensure_qsession_role_permissions(final_yaml)
     final_yaml = _fix_customer_lookup_handler(final_yaml)
+    final_yaml = _fix_cfnresponse_import(final_yaml)
     final_yaml = _deduplicate_resources(final_yaml)
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)

@@ -321,7 +321,7 @@ This allows immediate testing after CloudFormation deployment.
         ZipFile: |
           import json
           import boto3
-          import cfnresponse
+          import cfnresponse   # MUST be its own line: CFN only injects the module for the standalone `import cfnresponse` form (comma-form imports fail at runtime)
           from datetime import datetime, timedelta
           import random
           import string
