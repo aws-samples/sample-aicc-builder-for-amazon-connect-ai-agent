@@ -687,7 +687,7 @@ phase_connect_instance() {
                 CONNECT_INSTANCE_ID=$(jget "$CREATE_RESULT" "Id")
                 [ -n "$CONNECT_INSTANCE_ID" ] && break
                 if echo "$CREATE_RESULT" | grep -q "alias is already used"; then
-                    ALIAS="aicc-workshop-${ACCOUNT_ID: -4}-$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 4)"
+                    ALIAS="aicc-workshop-${ACCOUNT_ID: -4}-$(openssl rand -hex 2 2>/dev/null || printf '%04x' $((RANDOM % 65536)))"
                     warn "Instance alias taken (aliases are globally unique) — retrying as: $ALIAS"
                 else
                     warn "create-instance failed: $(echo "$CREATE_RESULT" | head -2)"
