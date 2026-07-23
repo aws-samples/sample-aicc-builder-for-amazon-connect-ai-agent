@@ -674,13 +674,27 @@ phase_connect_instance() {
 
         if [ "$INSTANCE_COUNT" -eq 0 ]; then
             info "No Connect instance found. Creating a new one..."
+            # Instance aliases are GLOBALLY unique (like S3 buckets) — retry
+            # with a random suffix if the deterministic name is taken.
             ALIAS="aicc-workshop-${ACCOUNT_ID: -4}"
-            CREATE_RESULT=$(aws connect create-instance \
-                --identity-management-type "CONNECT_MANAGED" \
-                --instance-alias "$ALIAS" \
-                --inbound-calls-enabled --outbound-calls-enabled \
-                --region "$REGION" --output json)
-            CONNECT_INSTANCE_ID=$(jget "$CREATE_RESULT" "Id")
+            CONNECT_INSTANCE_ID=""
+            for alias_try in 1 2 3; do
+                CREATE_RESULT=$(aws connect create-instance \
+                    --identity-management-type "CONNECT_MANAGED" \
+                    --instance-alias "$ALIAS" \
+                    --inbound-calls-enabled --outbound-calls-enabled \
+                    --region "$REGION" --output json 2>&1) || true
+                CONNECT_INSTANCE_ID=$(jget "$CREATE_RESULT" "Id")
+                [ -n "$CONNECT_INSTANCE_ID" ] && break
+                if echo "$CREATE_RESULT" | grep -q "alias is already used"; then
+                    ALIAS="aicc-workshop-${ACCOUNT_ID: -4}-$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 4)"
+                    warn "Instance alias taken (aliases are globally unique) — retrying as: $ALIAS"
+                else
+                    warn "create-instance failed: $(echo "$CREATE_RESULT" | head -2)"
+                    break
+                fi
+            done
+            [ -z "$CONNECT_INSTANCE_ID" ] && { echo "❌ Could not create a Connect instance."; exit 1; }
             info "Created: $CONNECT_INSTANCE_ID (alias: $ALIAS)"
             echo -n "   Waiting for ACTIVE..."
             for i in $(seq 1 60); do
