@@ -209,6 +209,84 @@ def _autofix_openapi(doc: dict) -> tuple[dict, list[str]]:
                     }
                     fixes.append(f"Added minimal 200 response to {verb.upper()} {p}")
 
+    # pattern ↔ minLength/maxLength contradiction fix.
+    # The LLM recurrently writes e.g. pattern '^FF-\d{8}$' (11 chars) with
+    # maxLength: 8 (it counts only the digits). The MCP gateway enforces
+    # length bounds BEFORE the pattern, so every valid-looking value is
+    # rejected with "maxLength validation failed" at runtime (hit live).
+    # When a fixed-length pattern's implied length falls outside the declared
+    # bounds, widen the bounds to match the pattern (the pattern is the
+    # stronger, more intentional constraint).
+    def _pattern_fixed_length(pattern: str):
+        """Return exact length implied by an anchored fixed-width regex, else None."""
+        if not (pattern.startswith("^") and pattern.endswith("$")):
+            return None
+        body = pattern[1:-1]
+        length, i = 0, 0
+        while i < len(body):
+            ch = body[i]
+            if ch == "\\" and i + 1 < len(body):
+                nxt = body[i + 1]
+                if i + 2 < len(body) and body[i + 2] == "{":
+                    end = body.find("}", i + 2)
+                    if end == -1:
+                        return None
+                    rep = body[i + 3:end]
+                    if not rep.isdigit():
+                        return None  # {m,n} → not fixed width
+                    length += int(rep)
+                    i = end + 1
+                else:
+                    length += 1
+                    i += 2
+                continue
+            if ch == "[":
+                end = body.find("]", i)
+                if end == -1:
+                    return None
+                if end + 1 < len(body) and body[end + 1] == "{":
+                    e2 = body.find("}", end + 1)
+                    rep = body[end + 2:e2]
+                    if not rep.isdigit():
+                        return None
+                    length += int(rep)
+                    i = e2 + 1
+                else:
+                    length += 1
+                    i = end + 1
+                continue
+            if ch in "*+?|(){":
+                return None  # variable width / groups — bail out
+            length += 1
+            i += 1
+        return length
+
+    def _fix_length_bounds(node, path="$"):
+        if isinstance(node, dict):
+            pat = node.get("pattern")
+            if isinstance(pat, str) and node.get("type") == "string":
+                implied = _pattern_fixed_length(pat)
+                if implied is not None:
+                    if isinstance(node.get("maxLength"), int) and node["maxLength"] < implied:
+                        fixes.append(
+                            f"maxLength {node['maxLength']} contradicts pattern "
+                            f"'{pat}' (implies {implied}) at {path} — raised to {implied}"
+                        )
+                        node["maxLength"] = implied
+                    if isinstance(node.get("minLength"), int) and node["minLength"] > implied:
+                        fixes.append(
+                            f"minLength {node['minLength']} contradicts pattern "
+                            f"'{pat}' (implies {implied}) at {path} — lowered to {implied}"
+                        )
+                        node["minLength"] = implied
+            for k, v in node.items():
+                _fix_length_bounds(v, f"{path}.{k}")
+        elif isinstance(node, list):
+            for idx, item in enumerate(node):
+                _fix_length_bounds(item, f"{path}[{idx}]")
+
+    _fix_length_bounds(doc)
+
     return doc, fixes
 
 
@@ -496,6 +574,7 @@ VALID_CONTACT_FLOW_ACTION_TYPES = frozenset({
     "ConnectParticipantWithLexBot", "RenderMessageTemplate",
     # Set / update
     "UpdateContactAttributes", "UpdateContactData", "UpdateContactRecordingBehavior",
+    "UpdateContactRecordingAndAnalyticsBehavior",
     "UpdateContactRecordingAndAnalyticsBehavior", "UpdateContactTextToSpeechVoice",
     "UpdateContactTargetQueue", "UpdateContactCallbackNumber", "UpdateContactEventHooks",
     "UpdateContactRoutingBehavior", "UpdateContactRoutingCriteria",
@@ -706,6 +785,22 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
             p = {}
         pkey = "Parameters" if "Parameters" in a or "parameters" not in a else "parameters"
         aid = a.get("Identifier") or a.get("identifier")
+
+        # --- UpdateContactRecordingAndAnalyticsBehavior (current console block):
+        #     API requires NoMatchingError + ChannelMismatch error branches
+        #     (+ InFlightRedactionConfigurationFailed when ChatBehavior present)
+        if t == "UpdateContactRecordingAndAnalyticsBehavior":
+            tr = a.setdefault("Transitions", {})
+            nxt = tr.get("NextAction") or fallback
+            errs = tr.setdefault("Errors", [])
+            have = {e.get("ErrorType") for e in errs if isinstance(e, dict)}
+            required = ["NoMatchingError", "ChannelMismatch"]
+            if isinstance(p, dict) and "ChatBehavior" in p:
+                required.append("InFlightRedactionConfigurationFailed")
+            for et in required:
+                if et not in have and nxt:
+                    errs.append({"ErrorType": et, "NextAction": nxt})
+                    fixes.append(f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: added required {et} error branch")
 
         # --- UpdateContactRecordingBehavior: {Agent, Customer} → RecordingBehavior
         if t == "UpdateContactRecordingBehavior":

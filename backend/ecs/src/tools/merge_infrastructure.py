@@ -90,6 +90,53 @@ def _remove_anchor_comment(yaml_str: str) -> str:
 _QCONNECT_ACTION_RE = re.compile(r'qconnect:([A-Za-z]\w*)')
 
 
+# The update_q_session Lambda resolves the Wisdom session ARN via
+# connect:DescribeContact and writes via wisdom:UpdateSessionData at runtime.
+# The system prompt instructs the LLM to emit an inline policy with these
+# actions on UpdateQSessionRole, but the LLM recurrently omits it, leaving only
+# AWSLambdaBasicExecutionRole — which fails mid-call with AccessDeniedException
+# (verified in live workshop QA). This deterministic backstop injects the
+# inline policy whenever UpdateQSessionRole lacks the required actions.
+_QSESSION_POLICY_BLOCK = """\
+      Policies:
+        - PolicyName: UpdateQSessionRuntimePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - wisdom:UpdateSessionData
+                  - wisdom:GetSession
+                  - wisdom:ListSessions
+                  - connect:DescribeContact
+                  - connect:GetContactAttributes
+                Resource: "*"
+"""
+
+
+def _ensure_qsession_role_permissions(yaml_str: str) -> str:
+    """Ensure UpdateQSessionRole carries connect:DescribeContact + wisdom perms.
+
+    If an UpdateQSessionRole resource exists but its section does not mention
+    connect:DescribeContact, append the inline runtime policy right after its
+    ManagedPolicyArns block (same indentation level as other Properties keys).
+    """
+    m = re.search(r'(^  UpdateQSessionRole:\n(?:^(?:    |\n).*\n?)*)', yaml_str, re.M)
+    if not m:
+        return yaml_str
+    block = m.group(1)
+    if 'connect:DescribeContact' in block:
+        return yaml_str
+    mp = re.search(
+        r'(^      ManagedPolicyArns:\n(?:^        .*\n)+)', block, re.M)
+    if not mp:
+        return yaml_str
+    new_block = block.replace(mp.group(1), mp.group(1) + _QSESSION_POLICY_BLOCK, 1)
+    logger.info("[MERGE] Injected UpdateQSessionRuntimePolicy into UpdateQSessionRole "
+                "(missing connect:DescribeContact — recurrent LLM omission)")
+    return yaml_str.replace(block, new_block, 1)
+
+
 def _fix_qconnect_namespace(yaml_str: str) -> str:
     """Rewrite `qconnect:Action` IAM actions to `wisdom:Action`.
 
@@ -100,6 +147,50 @@ def _fix_qconnect_namespace(yaml_str: str) -> str:
     if n:
         logger.info(f"[MERGE] Rewrote {n}x qconnect: → wisdom: (invalid IAM namespace)")
     return new_yaml
+
+
+def _fix_cfnresponse_import(yaml_str: str) -> str:
+    """Split comma-form imports that include cfnresponse onto their own lines.
+
+    CloudFormation only injects the cfnresponse module into an inline ZipFile
+    when it detects the literal line ``import cfnresponse`` — a comma-form
+    ``import boto3, cfnresponse`` is NOT recognized, so the function dies at
+    init with Runtime.ImportModuleError and the custom resource hangs the
+    stack for an hour until timeout (found live in scenario-3 E2E).
+    """
+    pattern = re.compile(r'^(\s*)import\s+([\w ,]*\bcfnresponse\b[\w ,]*)$', re.M)
+
+    def _split(m):
+        indent, mods = m.group(1), [x.strip() for x in m.group(2).split(',')]
+        return '\n'.join(f"{indent}import {mod}" for mod in mods if mod)
+
+    new_yaml, n = pattern.subn(_split, yaml_str)
+    if n:
+        logger.info(f"[MERGE] Split {n}x comma-form cfnresponse import(s) — "
+                    "CFN only auto-vends cfnresponse for the standalone form")
+    return new_yaml
+
+
+def _fix_customer_lookup_handler(yaml_str: str) -> str:
+    """Force CustomerLookupFunction's Handler to index.handler.
+
+    The Lambda Generator always emits ``def handler`` and deploy.sh replaces
+    the placeholder code, but the LLM recurrently declares
+    ``Handler: index.lambda_handler`` on CustomerLookupFunction — which only
+    surfaces at call time as Runtime.HandlerNotFound (broke caller
+    personalization in a live workshop). Other inline-code functions
+    (seeder/api-key retriever) legitimately keep lambda_handler.
+    """
+    m = re.search(r'(^  CustomerLookupFunction:\n(?:^(?:    |\n).*\n?)*)', yaml_str, re.M)
+    if not m:
+        return yaml_str
+    block = m.group(1)
+    if 'Handler: index.lambda_handler' not in block:
+        return yaml_str
+    fixed = block.replace('Handler: index.lambda_handler', 'Handler: index.handler')
+    logger.info("[MERGE] CustomerLookupFunction Handler: index.lambda_handler → index.handler "
+                "(matches generated code entry point)")
+    return yaml_str.replace(block, fixed, 1)
 
 
 def _fix_common_property_hallucinations(yaml_str: str) -> str:
@@ -398,6 +489,9 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     final_yaml = _remove_anchor_comment(merged)
     final_yaml = _fix_common_property_hallucinations(final_yaml)
     final_yaml = _fix_qconnect_namespace(final_yaml)
+    final_yaml = _ensure_qsession_role_permissions(final_yaml)
+    final_yaml = _fix_customer_lookup_handler(final_yaml)
+    final_yaml = _fix_cfnresponse_import(final_yaml)
     final_yaml = _deduplicate_resources(final_yaml)
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)

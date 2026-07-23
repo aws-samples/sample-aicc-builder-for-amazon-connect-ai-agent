@@ -20,6 +20,188 @@ from .s3_asset_storage import list_session_assets, get_asset_from_s3
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Lambda IAM permission check (D2)
+#
+# Root cause this guards against (live workshop QA): a generated Lambda calls
+# an AWS API at runtime (e.g. update_q_session calling connect:DescribeContact +
+# wisdom:UpdateSessionData) but the CFN role for that function only carries
+# AWSLambdaBasicExecutionRole → AccessDeniedException mid-call. The LLM
+# recurrently omits inline policies even when instructed. This deterministic
+# check derives required IAM actions from the SDK calls in each handler and
+# cross-checks them against the merged infrastructure template.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# boto3/aws-sdk service name → IAM action prefix (only where they differ)
+_IAM_PREFIX_OVERRIDES = {
+    "qconnect": "wisdom",   # qconnect: is NOT a real IAM namespace
+    "wisdom": "wisdom",
+    "sesv2": "ses",
+    "ses": "ses",
+}
+
+# JS v3 client class name → IAM service prefix
+_JS_CLIENT_PREFIXES = {
+    "QConnectClient": "wisdom",
+    "ConnectClient": "connect",
+    "DynamoDBClient": "dynamodb",
+    "DynamoDBDocumentClient": "dynamodb",
+    "S3Client": "s3",
+    "LambdaClient": "lambda",
+    "SNSClient": "sns",
+    "SQSClient": "sqs",
+    "SESv2Client": "ses",
+    "SESClient": "ses",
+    "SecretsManagerClient": "secretsmanager",
+    "RDSDataClient": "rds-data",
+    "BedrockRuntimeClient": "bedrock",
+    "PinpointClient": "mobiletargeting",
+}
+
+# Actions implicitly granted (basic execution role) — never reported
+_IMPLICITLY_GRANTED = {"logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"}
+
+
+def _snake_to_pascal(name: str) -> str:
+    return "".join(w.capitalize() for w in name.split("_"))
+
+
+def _extract_required_iam_actions(code: str) -> set:
+    """Derive IAM actions a Lambda handler needs from its AWS SDK calls.
+
+    Handles Python boto3 (client/resource method calls) and JS SDK v3
+    (``new XClient`` + ``XCommand``). Best-effort static analysis: unknown
+    services fall back to using the SDK service name as the IAM prefix.
+    """
+    required: set = set()
+
+    # ---- Python: boto3.client("svc") / boto3.resource("svc") ----
+    var_to_svc: Dict[str, str] = {}
+    for m in re.finditer(
+            r'(\w+)\s*=\s*boto3\.(?:client|resource)\(\s*[\'"]([\w-]+)[\'"]', code):
+        var_to_svc[m.group(1)] = m.group(2)
+    for var, svc in var_to_svc.items():
+        prefix = _IAM_PREFIX_OVERRIDES.get(svc, svc)
+        for cm in re.finditer(rf'\b{re.escape(var)}\.([a-z_]+)\(', code):
+            method = cm.group(1)
+            if method in ("close", "get_paginator", "get_waiter", "Table", "meta"):
+                continue
+            required.add(f"{prefix}:{_snake_to_pascal(method)}")
+    # boto3 dynamodb resource Table(...) usage
+    if re.search(r'boto3\.resource\(\s*[\'"]dynamodb[\'"]', code):
+        for cm in re.finditer(r'\btable\.([a-z_]+)\(', code, re.IGNORECASE):
+            method = cm.group(1)
+            if method in ("close",):
+                continue
+            required.add(f"dynamodb:{_snake_to_pascal(method)}")
+
+    # ---- JS SDK v3: new XClient(...) + new YCommand(...) via .send() ----
+    js_prefixes = {
+        _JS_CLIENT_PREFIXES[c] for c in _JS_CLIENT_PREFIXES if c in code
+    }
+    if js_prefixes:
+        commands = set(re.findall(r'new\s+(\w+)Command\(', code))
+        for cmd in commands:
+            # A command belongs to whichever imported client package declares it;
+            # with a single client the mapping is unambiguous, with several we
+            # attribute conservatively to all imported prefixes that Amazon
+            # scopes that action under (best-effort: first import wins).
+            for m in re.finditer(
+                    r'require\([\'"]@aws-sdk/client-([\w-]+)[\'"]\)|from\s+[\'"]@aws-sdk/client-([\w-]+)[\'"]',
+                    code):
+                pkg = (m.group(1) or m.group(2) or "").replace("-", "")
+                # match command to package by import statement co-occurrence
+            if len(js_prefixes) == 1:
+                required.add(f"{next(iter(js_prefixes))}:{cmd}")
+            else:
+                # map per import block: find the import line that mentions the command
+                for m in re.finditer(
+                        r'(?:const|import)\s*\{([^}]*)\}\s*(?:=\s*require\([\'"]@aws-sdk/client-([\w-]+)[\'"]\)|from\s+[\'"]@aws-sdk/client-([\w-]+)[\'"])',
+                        code):
+                    names, pkg = m.group(1), (m.group(2) or m.group(3) or "")
+                    if f"{cmd}Command" in names:
+                        svc = pkg.replace("qconnect", "wisdom")
+                        prefix = _IAM_PREFIX_OVERRIDES.get(svc, svc)
+                        required.add(f"{prefix}:{cmd}")
+                        break
+
+    return {a for a in required if a not in _IMPLICITLY_GRANTED}
+
+
+def _extract_role_actions_from_template(infra_yaml: str) -> Dict[str, set]:
+    """Map each Lambda function logical/FunctionName to the IAM actions its role grants.
+
+    Best-effort YAML parse tolerant of CFN intrinsics (!Sub/!Ref/!GetAtt).
+    Returns {function_key: {actions...}} where '*'-style wildcards are expanded
+    conceptually via prefix matching in the caller.
+    """
+    try:
+        # neutralize CFN short-form intrinsics for safe_load
+        sanitized = re.sub(r'!(Sub|Ref|GetAtt|Join|If|ImportValue|Select|FindInMap)\b', '', infra_yaml)
+        doc = yaml.safe_load(sanitized) or {}
+    except Exception as e:
+        logger.warning(f"[VALIDATE] Could not parse infrastructure template for IAM check: {e}")
+        return {}
+
+    resources = doc.get("Resources", {}) or {}
+
+    # role logical id -> set of actions
+    role_actions: Dict[str, set] = {}
+    for rid, res in resources.items():
+        if not isinstance(res, dict) or res.get("Type") != "AWS::IAM::Role":
+            continue
+        actions: set = set()
+        props = res.get("Properties", {}) or {}
+        for pol in (props.get("Policies") or []):
+            stmts = ((pol or {}).get("PolicyDocument") or {}).get("Statement") or []
+            for st in stmts:
+                if not isinstance(st, dict) or st.get("Effect") != "Allow":
+                    continue
+                acts = st.get("Action")
+                acts = acts if isinstance(acts, list) else [acts]
+                actions.update(a for a in acts if isinstance(a, str))
+        for mp in (props.get("ManagedPolicyArns") or []):
+            if isinstance(mp, str) and "AWSLambdaBasicExecutionRole" in mp:
+                actions.update(_IMPLICITLY_GRANTED)
+        role_actions[rid] = actions
+
+    # function -> role
+    fn_actions: Dict[str, set] = {}
+    for rid, res in resources.items():
+        if not isinstance(res, dict) or res.get("Type") != "AWS::Lambda::Function":
+            continue
+        props = res.get("Properties", {}) or {}
+        role_ref = props.get("Role")
+        role_id = ""
+        if isinstance(role_ref, str):
+            # sanitized "!GetAtt X.Arn" became " X.Arn"
+            role_id = role_ref.strip().split(".")[0]
+        elif isinstance(role_ref, dict):
+            ga = role_ref.get("Fn::GetAtt")
+            if isinstance(ga, list) and ga:
+                role_id = ga[0]
+            elif isinstance(ga, str):
+                role_id = ga.split(".")[0]
+        fn_actions[rid] = role_actions.get(role_id, set())
+    return fn_actions
+
+
+def _action_granted(action: str, granted: set) -> bool:
+    """True if *action* is covered by *granted*, honoring '*' wildcards."""
+    if action in granted:
+        return True
+    svc, _, op = action.partition(":")
+    for g in granted:
+        if g == "*":
+            return True
+        gsvc, _, gop = g.partition(":")
+        if gsvc != svc:
+            continue
+        if gop == "*" or (gop.endswith("*") and op.startswith(gop[:-1])):
+            return True
+    return False
+
+
 def _extract_lambda_fields(code: str) -> set:
     """Extract field names accessed via body.get/event.get/body[...] in Lambda code."""
     patterns = [
@@ -133,7 +315,9 @@ def validate_parameter_consistency(session_id: str) -> dict:
     # Load assets from S3
     asset_keys = list_session_assets(session_id) if session_id else []
     lambda_code: Dict[str, str] = {}  # op_id -> code
+    lambda_all_code: Dict[str, str] = {}  # op_id -> code (any handler file, for IAM check)
     openapi_yaml: Optional[str] = None
+    infra_yaml: Optional[str] = None
     infra_schema: Optional[str] = None
 
     for key in asset_keys:
@@ -146,10 +330,21 @@ def validate_parameter_consistency(session_id: str) -> dict:
             content = get_asset_from_s3(key)
             if content:
                 lambda_code[op_id] = content
+                lambda_all_code[op_id] = content
+        elif asset_type == "lambda" and (key.endswith("index.py") or key.endswith("index.js")):
+            # supporting lambdas (update_q_session, customer_lookup, ...) — IAM check only
+            op_id = parts[3] if len(parts) > 4 else "default"
+            content = get_asset_from_s3(key)
+            if content:
+                lambda_all_code[op_id] = content
         elif asset_type == "openapi" and (key.endswith(".yaml") or key.endswith(".yml")):
             content = get_asset_from_s3(key)
             if content:
                 openapi_yaml = content
+        elif asset_type == "infrastructure" and (key.endswith(".yaml") or key.endswith(".yml")):
+            content = get_asset_from_s3(key)
+            if content:
+                infra_yaml = content
 
     # Auto-load infrastructure schema from registry
     try:
@@ -367,6 +562,37 @@ def validate_parameter_consistency(session_id: str) -> dict:
                     "operation_id": tool_id, "field": field,
                     "asset_type": "lambda_tool",
                     "issue": f"ToolSpec input field '{field}' not found in Lambda handler for tool '{tool_id}'",
+                })
+
+    # D2: Lambda runtime AWS calls vs IAM role grants in the infrastructure template
+    #     (catches AccessDeniedException-at-runtime before deployment; e.g. the
+    #     update_q_session connect:DescribeContact omission found in workshop QA)
+    if infra_yaml and lambda_all_code:
+        fn_actions = _extract_role_actions_from_template(infra_yaml)
+        # index CFN function grants by normalized name for fuzzy matching
+        norm_grants = {re.sub(r'(function|lambda)$', '', k.lower()): v
+                       for k, v in fn_actions.items()}
+        for op_id, code in lambda_all_code.items():
+            required = _extract_required_iam_actions(code)
+            if not required:
+                continue
+            norm_op = op_id.replace("_", "").replace("-", "").lower()
+            granted = None
+            for nk, v in norm_grants.items():
+                if norm_op in nk or nk in norm_op:
+                    granted = v
+                    break
+            if granted is None:
+                continue  # function not in template (deployed elsewhere) — skip
+            missing = sorted(a for a in required if not _action_granted(a, granted))
+            if missing:
+                mismatches.append({
+                    "operation_id": op_id, "field": "",
+                    "asset_type": "iam_permissions",
+                    "issue": f"Lambda '{op_id}' calls AWS APIs requiring {missing} but its "
+                             f"IAM role in infrastructure.yaml does not grant them — this "
+                             f"fails with AccessDeniedException at runtime. Add an inline "
+                             f"policy with these actions to the function's role.",
                 })
 
     summary = f"Found {len(mismatches)} mismatches across {len(expected)} operations"

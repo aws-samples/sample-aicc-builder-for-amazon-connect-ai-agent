@@ -487,14 +487,14 @@ if [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
 
     # 0.5b) Build and push Docker image (if repo exists and backend sources changed)
     if [ -n "$ECR_REPO_URI" ]; then
-        BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*.py")
+        BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*")
         ECS_APP_HASH=$(md5sum "$SCRIPT_DIR/backend/ecs/app.py" 2>/dev/null | cut -d' ' -f1 || echo "none")
         BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}"
 
         # Check if image already exists in ECR (skip build if unchanged)
         IMAGE_EXISTS=$(aws ecr describe-images --repository-name "$ECR_REPO_NAME" --image-ids imageTag=latest --region "$AWS_DEFAULT_REGION" 2>/dev/null && echo "yes" || echo "no")
 
-        if [ "$IMAGE_EXISTS" = "no" ] || check_hash_changed "ecs-backend-src${STAGE_SUFFIX}" "$BACKEND_HASH"; then
+        if [ "$IMAGE_EXISTS" = "no" ] || check_hash_changed "ecs-backend-src${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"; then
             echo "Preparing ECS build context..."
             # backend/ecs/src/ is the source of truth for ECS mode.
 
@@ -530,7 +530,7 @@ if [ "$DEPLOY_BACKEND" = true ] || [ "$DEPLOY_INFRA" = true ]; then
             docker push "${ECR_REPO_URI}:latest"
 
             echo -e "${GREEN}Docker image pushed to ECR (pre-CDK)${NC}"
-            save_hash "ecs-backend-src${STAGE_SUFFIX}" "$BACKEND_HASH"
+            save_hash "ecs-backend-src${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"
         else
             echo -e "${GREEN}[SKIP] Docker image unchanged, already in ECR${NC}"
         fi
@@ -658,11 +658,11 @@ if [ "$DEPLOY_BACKEND" = true ]; then
 
     # Docker image was already built & pushed in Step 0.5 (pre-CDK).
     # This section handles post-CDK configuration: S3 Files volume + force deployment.
-    BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*.py")
+    BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*")
     ECS_APP_HASH=$(md5sum "$SCRIPT_DIR/backend/ecs/app.py" 2>/dev/null | cut -d' ' -f1 || echo "none")
     BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}"
 
-    if check_hash_changed "ecs-backend-cfg${STAGE_SUFFIX}" "$BACKEND_HASH"; then
+    if check_hash_changed "ecs-backend-cfg${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"; then
 
         # Patch ECS task definition with runtime env vars
         # (S3 Files volume is now managed entirely by CDK — see infrastructure/lib/ecs-stack.ts)
@@ -674,16 +674,36 @@ if [ "$DEPLOY_BACKEND" = true ]; then
             # exported var from a previous (different-region) session must not win,
             # or the wrong USER_POOL_ID gets baked into the task def and JWT
             # validation fails (JWKS 404). Env var is a fallback only.
-            if [ -f "$CDK_OUTPUTS_FILE" ]; then
-                _OUT_POOL=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
-                _OUT_CLIENT=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolClientId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
-                _OUT_BUCKET=$(jq -r --arg s "$STACK_NAME" '.[$s].AssetsBucketName // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
-                _OUT_KB=$(jq -r --arg s "$KB_STACK_NAME" '.[$s].ContactFlowKnowledgeBaseId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+            # LIVE CloudFormation outputs are the real authority — the local
+            # cdk-outputs file is shared across regions/accounts for the same
+            # stage and gets overwritten by whichever deploy ran last (found
+            # live: a us-east-1 deploy poisoned the Seoul dev backend with a
+            # us-east-1 USER_POOL_ID, breaking all JWT validation). Query the
+            # region-scoped stack first; fall back to the file, then env.
+            _LIVE_OUTS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                --region "$AWS_DEFAULT_REGION" \
+                --query 'Stacks[0].Outputs' --output json 2>/dev/null || echo "")
+            if [ -n "$_LIVE_OUTS" ] && [ "$_LIVE_OUTS" != "null" ]; then
+                _OUT_POOL=$(echo "$_LIVE_OUTS" | jq -r '.[] | select(.OutputKey=="UserPoolId") | .OutputValue // empty' 2>/dev/null)
+                _OUT_CLIENT=$(echo "$_LIVE_OUTS" | jq -r '.[] | select(.OutputKey=="UserPoolClientId") | .OutputValue // empty' 2>/dev/null)
+                _OUT_BUCKET=$(echo "$_LIVE_OUTS" | jq -r '.[] | select(.OutputKey=="AssetsBucketName") | .OutputValue // empty' 2>/dev/null)
                 USER_POOL_ID=${_OUT_POOL:-$USER_POOL_ID}
                 USER_POOL_CLIENT_ID=${_OUT_CLIENT:-$USER_POOL_CLIENT_ID}
                 ASSETS_BUCKET_NAME=${_OUT_BUCKET:-$ASSETS_BUCKET_NAME}
-                CONTACT_FLOW_KB_ID=${_OUT_KB:-$CONTACT_FLOW_KB_ID}
+            elif [ -f "$CDK_OUTPUTS_FILE" ]; then
+                _OUT_POOL=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                _OUT_CLIENT=$(jq -r --arg s "$STACK_NAME" '.[$s].UserPoolClientId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                _OUT_BUCKET=$(jq -r --arg s "$STACK_NAME" '.[$s].AssetsBucketName // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+                USER_POOL_ID=${_OUT_POOL:-$USER_POOL_ID}
+                USER_POOL_CLIENT_ID=${_OUT_CLIENT:-$USER_POOL_CLIENT_ID}
+                ASSETS_BUCKET_NAME=${_OUT_BUCKET:-$ASSETS_BUCKET_NAME}
             fi
+            _OUT_KB=$(aws cloudformation describe-stacks --stack-name "$KB_STACK_NAME" \
+                --region "$AWS_DEFAULT_REGION" \
+                --query 'Stacks[0].Outputs[?OutputKey==`ContactFlowKnowledgeBaseId`].OutputValue | [0]' \
+                --output text 2>/dev/null | grep -v None || true)
+            [ -z "$_OUT_KB" ] && [ -f "$CDK_OUTPUTS_FILE" ] && _OUT_KB=$(jq -r --arg s "$KB_STACK_NAME" '.[$s].ContactFlowKnowledgeBaseId // empty' "$CDK_OUTPUTS_FILE" 2>/dev/null)
+            CONTACT_FLOW_KB_ID=${_OUT_KB:-$CONTACT_FLOW_KB_ID}
 
             echo "Patching task definition (runtime env vars)..."
 
@@ -736,7 +756,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
                 echo -e "${GREEN}ECS service update triggered${NC}" || \
                 echo -e "${YELLOW}Warning: ECS service update failed — service may need to be recreated via CDK${NC}"
         fi
-        save_hash "ecs-backend-cfg${STAGE_SUFFIX}" "$BACKEND_HASH"
+        save_hash "ecs-backend-cfg${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"
     else
         echo -e "${GREEN}[SKIP] ECS backend config unchanged${NC}"
     fi

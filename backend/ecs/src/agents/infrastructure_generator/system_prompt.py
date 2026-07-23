@@ -321,7 +321,7 @@ This allows immediate testing after CloudFormation deployment.
         ZipFile: |
           import json
           import boto3
-          import cfnresponse
+          import cfnresponse   # MUST be its own line: CFN only injects the module for the standalone `import cfnresponse` form (comma-form imports fail at runtime)
           from datetime import datetime, timedelta
           import random
           import string
@@ -1026,7 +1026,9 @@ When `Include Customer Phone Lookup: False` or not mentioned, do NOT add these r
 - Purpose: Query DynamoDB by phone number, return customer info as STRING_MAP
 - Called DIRECTLY from Contact Flow — NOT via API Gateway
 - ⚠️ Do NOT create API Gateway Resource/Method/Options for this Lambda
-- **Handler: index.lambda_handler** (CloudFormation uses standard lambda_handler entry point)
+- **Handler: index.handler** — MUST match the Lambda Generator's entry point
+  (`def handler`). `index.lambda_handler` breaks at call time with
+  Runtime.HandlerNotFound once deploy.sh uploads the generated code.
 - 🚨 **PLACEHOLDER CODE ONLY — DO NOT INLINE BUSINESS LOGIC.** Like every other
   Lambda in this template, `CustomerLookupFunction` MUST use a 501-return
   placeholder `ZipFile`. The real DynamoDB-query handler is produced separately
@@ -1037,7 +1039,7 @@ When `Include Customer Phone Lookup: False` or not mentioned, do NOT add these r
   ```yaml
   Code:
     ZipFile: |
-      def lambda_handler(event, context):
+      def handler(event, context):
           return {"statusCode": 501, "body": "Replace with customer_lookup/index.py from downloaded assets"}
   ```
 - IAM: dynamodb:Query on the main table + phone GSI

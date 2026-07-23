@@ -47,6 +47,37 @@ MODELS_WITHOUT_TEMPERATURE = {
     "global.anthropic.claude-opus-4-7",
 }
 
+# Valid values for the Anthropic `effort` control (output_config.effort).
+# Stable API for Claude 4.6+ — no beta header. "high" equals omitting the
+# parameter; lower levels trade capability for speed/cost. "max" spends even
+# more tokens than high (hardest reasoning problems).
+ALLOWED_EFFORT_LEVELS = {"low", "medium", "high", "max"}
+
+
+def validate_effort(effort: Optional[str]) -> Optional[str]:
+    """Return *effort* lower-cased if it is a valid level, else None."""
+    if isinstance(effort, str) and effort.lower() in ALLOWED_EFFORT_LEVELS:
+        return effort.lower()
+    return None
+
+
+def resolve_effort() -> Optional[str]:
+    """Resolve the effective effort level (None = model default / omit).
+
+    Precedence:
+      1. ``current_selected_effort`` ContextVar (user's pick for this request)
+      2. ``os.environ["BEDROCK_EFFORT"]`` (deployment default)
+      3. None — parameter omitted entirely (model default behavior).
+    """
+    try:
+        from tools.session_context import current_selected_effort
+        ctx_val = validate_effort(current_selected_effort.get())
+        if ctx_val:
+            return ctx_val
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"[model_selection] effort ContextVar lookup failed: {e}")
+    return validate_effort(os.environ.get("BEDROCK_EFFORT"))
+
 
 def validate_model_id(model_id: Optional[str]) -> Optional[str]:
     """Return *model_id* if it is in the allowlist, else None."""
@@ -104,8 +135,20 @@ def build_model_kwargs(
     Always includes ``model_id`` and everything in *rest*. Includes ``temperature``
     ONLY when a temperature was provided AND the model accepts it — this is the one
     place the 4.6-vs-4.7/4.8 branch lives.
+
+    Also injects the user-selected Anthropic ``effort`` level (if any) via
+    ``additional_request_fields.output_config.effort`` — merged non-destructively
+    with any caller-provided ``additional_request_fields``.
     """
     kwargs: dict[str, Any] = {"model_id": model_id, **rest}
     if temperature is not None and supports_temperature(model_id):
         kwargs["temperature"] = temperature
+
+    effort = resolve_effort()
+    if effort:
+        arf = dict(kwargs.get("additional_request_fields") or {})
+        out_cfg = dict(arf.get("output_config") or {})
+        out_cfg.setdefault("effort", effort)
+        arf["output_config"] = out_cfg
+        kwargs["additional_request_fields"] = arf
     return kwargs

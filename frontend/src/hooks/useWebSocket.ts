@@ -1568,6 +1568,7 @@ export function useWebSocket() {
               message: buffered.message,
               language: useBuilderStore.getState().language,
               model: useBuilderStore.getState().selectedModel,
+          effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
             }));
             console.log("[useWebSocket] Flushed buffered message after session rotation");
           }
@@ -1583,6 +1584,7 @@ export function useWebSocket() {
               ...(imp.imageFormat ? { imageFormat: imp.imageFormat } : {}),
               language: useBuilderStore.getState().language,
               model: useBuilderStore.getState().selectedModel,
+          effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
             }));
             console.log("[useWebSocket] Flushed buffered importAsset after session rotation");
           }
@@ -2257,6 +2259,7 @@ export function useWebSocket() {
           message,
           language: useBuilderStore.getState().language,
           model: useBuilderStore.getState().selectedModel,
+          effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
         })
       );
 
@@ -2413,6 +2416,7 @@ export function useWebSocket() {
               s3Attachments,
               language: useBuilderStore.getState().language,
               model: useBuilderStore.getState().selectedModel,
+          effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
             })
           );
 
@@ -2457,6 +2461,7 @@ export function useWebSocket() {
               attachments: attachmentData,
               language: useBuilderStore.getState().language,
               model: useBuilderStore.getState().selectedModel,
+          effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
             })
           );
 
@@ -2502,6 +2507,7 @@ export function useWebSocket() {
             ...(imageFormat ? { imageFormat } : {}),
             language: useBuilderStore.getState().language,
             model: useBuilderStore.getState().selectedModel,
+          effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
           })
         );
         console.log("[useWebSocket] Sent importAsset on ready session");
@@ -2704,6 +2710,7 @@ export function useWebSocket() {
                 // Scope = [] for full build, [segment] for a single segment.
                 scope: st.scope ?? [],
                 model: st.selectedModel,
+                effort: st.selectedEffort === 'default' ? '' : st.selectedEffort,
               })
             );
             // DO NOT set isSessionReady here!

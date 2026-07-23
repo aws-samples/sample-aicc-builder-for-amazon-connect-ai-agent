@@ -46,6 +46,13 @@ current_selected_model: contextvars.ContextVar[Optional[str]] = contextvars.Cont
     "current_selected_model", default=None
 )
 
+# The Anthropic effort level selected for this request (frontend-driven).
+# Validated by tools.model_selection.validate_effort; None means "omit the
+# parameter" (model default = maximum effort).
+current_selected_effort: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_selected_effort", default=None
+)
+
 current_streaming_callback: contextvars.ContextVar[Optional[Callable]] = contextvars.ContextVar(
     "current_streaming_callback", default=None
 )
@@ -268,6 +275,7 @@ async def session_scope(
     """
     tok_sid = current_session_id.set(session_id)
     tok_model = current_selected_model.set(current_selected_model.get())
+    tok_effort = current_selected_effort.set(current_selected_effort.get())
     tok_cb = current_callback_handler.set(callback_handler)
     tok_sc = current_streaming_callback.set(streaming_callback)
     tok_mi = current_message_index.set(message_index)
@@ -278,6 +286,7 @@ async def session_scope(
         current_streaming_callback.reset(tok_sc)
         current_callback_handler.reset(tok_cb)
         current_selected_model.reset(tok_model)
+        current_selected_effort.reset(tok_effort)
         current_session_id.reset(tok_sid)
 
 
