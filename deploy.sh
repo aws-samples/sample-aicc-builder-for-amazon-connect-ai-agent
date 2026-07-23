@@ -816,17 +816,34 @@ EOF
     FRONTEND_ENV_HASH=$(md5sum "$SCRIPT_DIR/frontend/.env" | cut -d' ' -f1)
     FRONTEND_HASH="${FRONTEND_SRC_HASH}-${FRONTEND_ENV_HASH}"
 
-    if check_hash_changed "frontend-src${STAGE_SUFFIX}" "$FRONTEND_HASH"; then
+    # Vite loads .env.local OVER .env — a leftover developer .env.local
+    # silently overrides every deploy-generated value (found live: a Tokyo
+    # prod frontend shipped a Seoul dev user pool). Neutralize it for builds.
+    if [ -f ".env.local" ]; then
+        echo -e "${YELLOW}[WARN] frontend/.env.local found — it would override deploy config. Renaming to .env.local.bak for this build.${NC}"
+        mv .env.local .env.local.bak
+    fi
+
+    # Scope the hash by region+account (like the backend): the same checkout
+    # can deploy multiple stages/regions, and dist/ is shared between them.
+    _FE_SCOPE="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo na)-${AWS_DEFAULT_REGION}"
+    if check_hash_changed "frontend-src${STAGE_SUFFIX}-${_FE_SCOPE}" "$FRONTEND_HASH"        || [ "$(cat dist/.build_hash 2>/dev/null)" != "$FRONTEND_HASH" ]; then
+        # Second condition: dist/ may hold a build from ANOTHER stage/region
+        # (its Cognito pool is baked into the bundle). Found live: a Tokyo
+        # prod deploy synced a dist/ built for Seoul dev, shipping the wrong
+        # user pool and breaking all auth.
         echo "Building frontend..."
         npm run build
-        save_hash "frontend-src${STAGE_SUFFIX}" "$FRONTEND_HASH"
+        echo "$FRONTEND_HASH" > dist/.build_hash
+        save_hash "frontend-src${STAGE_SUFFIX}-${_FE_SCOPE}" "$FRONTEND_HASH"
     else
         echo -e "${GREEN}[SKIP] Frontend source unchanged, using existing build${NC}"
         # Still need dist/ directory
         if [ ! -d "dist" ]; then
             echo "No existing build found, building..."
             npm run build
-            save_hash "frontend-src${STAGE_SUFFIX}" "$FRONTEND_HASH"
+            echo "$FRONTEND_HASH" > dist/.build_hash
+            save_hash "frontend-src${STAGE_SUFFIX}-${_FE_SCOPE}" "$FRONTEND_HASH"
         fi
     fi
 
