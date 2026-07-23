@@ -2231,7 +2231,22 @@ for s in json.load(sys.stdin).get('SecurityProfileSummaryList', []):
             # "Tool is not allowed" — found in live workshop QA.
             local BASE_ARN="${AI_AGENT_ARN%:\$LATEST}"
             local PUBLISHED_OK="" LATEST_OK=""
-            for QUAL in "\$LATEST" "${AGENT_VERSION:-1}"; do
+            # Resolve the ACTUAL published version list — never assume ":1".
+            # (On re-runs create-ai-agent-version mints v2, v3, ... and the
+            # default self-service assignment points at the newest one; if the
+            # version probe failed we'd otherwise attach to the wrong version.)
+            local VERSION_QUALS
+            VERSION_QUALS=$(aws qconnect list-ai-agent-versions \
+                --assistant-id "$AI_ASSISTANT_ID" --ai-agent-id "$AI_AGENT_ID" \
+                --region "$REGION" --output json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    vs = sorted(v.get('versionNumber') for v in json.load(sys.stdin).get('aiAgentVersionSummaries', []) if v.get('versionNumber'))
+    print(' '.join(str(v) for v in vs[-3:]))  # newest 3 is plenty
+except Exception: pass
+" 2>/dev/null || echo "")
+            [ -z "$VERSION_QUALS" ] && VERSION_QUALS="${AGENT_VERSION:-1}"
+            for QUAL in "\$LATEST" $VERSION_QUALS; do
                 local ENTITY_ARN="${BASE_ARN}:${QUAL}"
                 aws connect associate-security-profiles \
                     --instance-id "$CONNECT_INSTANCE_ID" \
@@ -2251,7 +2266,27 @@ try:
         if p.get('Id') == '${SP_ID}': print('yes'); break
 except Exception: pass
 " 2>/dev/null || echo "")
-                if [ "$QUAL" = "\$LATEST" ]; then LATEST_OK="$VERIFIED"; else PUBLISHED_OK="$VERIFIED"; fi
+                if [ -z "$VERIFIED" ]; then
+                    # eventual consistency — retry once after a short wait
+                    sleep 5
+                    aws connect associate-security-profiles \
+                        --instance-id "$CONNECT_INSTANCE_ID" \
+                        --security-profiles "[{\"Id\":\"$SP_ID\"}]" \
+                        --entity-type AI_AGENT \
+                        --entity-arn "$ENTITY_ARN" \
+                        --region "$REGION" >/dev/null 2>&1 || true
+                    VERIFIED=$(aws connect list-entity-security-profiles \
+                        --instance-id "$CONNECT_INSTANCE_ID" \
+                        --entity-type AI_AGENT --entity-arn "$ENTITY_ARN" \
+                        --region "$REGION" --output json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    for p in json.load(sys.stdin).get('SecurityProfiles', []):
+        if p.get('Id') == '${SP_ID}': print('yes'); break
+except Exception: pass
+" 2>/dev/null || echo "")
+                fi
+                if [ "$QUAL" = "\$LATEST" ]; then LATEST_OK="$VERIFIED"; else [ "$VERIFIED" = "yes" ] && PUBLISHED_OK="yes"; fi
             done
             if [ "$PUBLISHED_OK" = "yes" ]; then
                 ok "Security profile attached to AI Agent v${AGENT_VERSION:-1} + \$LATEST — verified (tool access granted)"
