@@ -406,6 +406,38 @@ phase_cloudformation() {
     fi
 
     if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" &>/dev/null; then
+        # If a previous run (or its crashed remains) left the stack mid-operation,
+        # wait for it to settle first — updating/reading an IN_PROGRESS stack
+        # races into missing outputs and NoSuchBucket errors downstream.
+        local CUR_STATUS
+        CUR_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "")
+        if echo "$CUR_STATUS" | grep -q "IN_PROGRESS"; then
+            info "Stack is $CUR_STATUS (probably from a previous run) — waiting for it to finish..."
+            case "$CUR_STATUS" in
+                CREATE_IN_PROGRESS)  aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --region "$REGION" 2>/dev/null || true ;;
+                UPDATE_IN_PROGRESS|UPDATE_COMPLETE_CLEANUP_IN_PROGRESS) aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --region "$REGION" 2>/dev/null || true ;;
+                DELETE_IN_PROGRESS)  aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" 2>/dev/null || true ;;
+                *) sleep 30 ;;
+            esac
+        fi
+        # Unrecoverable states: a ROLLBACK_COMPLETE stack can never be updated,
+        # and DELETE_FAILED needs a retried delete. Clean up and fall through to
+        # fresh creation.
+        CUR_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "")
+        if echo "$CUR_STATUS" | grep -qE "ROLLBACK_COMPLETE|ROLLBACK_FAILED|DELETE_FAILED|CREATE_FAILED"; then
+            warn "Stack is in $CUR_STATUS — deleting it before re-creating"
+            aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION" 2>/dev/null || true
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" 2>/dev/null || {
+                # DELETE_FAILED again — retain the blockers and force delete
+                aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION" \
+                    --deletion-mode FORCE_DELETE_STACK 2>/dev/null || true
+                aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" 2>/dev/null || true
+            }
+        fi
+    fi
+    if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" &>/dev/null; then
         # A same-named stack exists. It may be from an OLDER asset bundle
         # (different resources / Environment) — blindly reusing it poisons
         # every later phase with stale outputs. Check compatibility first.
@@ -599,9 +631,12 @@ phase_openapi() {
         info "Updated: ${f#$SCRIPT_DIR/}"
     done
     if [ -n "${KB_BUCKET:-}" ]; then
-        aws s3 sync "$SCRIPT_DIR/openapi" "s3://$KB_BUCKET/openapi/" \
-            --exclude "*.DS_Store" --exclude "*.bak" --region "$REGION" >/dev/null
-        ok "Uploaded to s3://$KB_BUCKET/openapi/"
+        if aws s3 sync "$SCRIPT_DIR/openapi" "s3://$KB_BUCKET/openapi/" \
+            --exclude "*.DS_Store" --exclude "*.bak" --region "$REGION" >/dev/null 2>&1; then
+            ok "Uploaded to s3://$KB_BUCKET/openapi/"
+        else
+            warn "OpenAPI upload failed (bucket missing?) — check the stack, then re-run"
+        fi
     fi
 }
 
