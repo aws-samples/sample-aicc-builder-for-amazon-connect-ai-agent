@@ -783,6 +783,25 @@ if [ -f "$CDK_OUTPUTS_FILE" ]; then
     KB_DOCS_BUCKET_NAME=$(jq -r --arg s "$KB_STACK_NAME" '.[$s].KnowledgeBaseDocsBucketName // empty' "$CDK_OUTPUTS_FILE")
 fi
 
+# The outputs file is stage-scoped but NOT region-scoped: deploying the same
+# stage to a second region leaves the file holding the FIRST region's values
+# (wrong Cognito pool baked into the frontend). Prefer the LIVE stack outputs
+# for the region being deployed; fall back to the file when unreachable.
+_LIVE_OUTS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+    --region "$AWS_DEFAULT_REGION" \
+    --query 'Stacks[0].Outputs' --output json 2>/dev/null || echo "")
+if [ -n "$_LIVE_OUTS" ] && [ "$_LIVE_OUTS" != "null" ]; then
+    _jout() { echo "$_LIVE_OUTS" | jq -r --arg k "$1" '.[] | select(.OutputKey==$k) | .OutputValue // empty'; }
+    _v=$(_jout FrontendUrl);          [ -n "$_v" ] && FRONTEND_URL="$_v"
+    _v=$(_jout FrontendBucketName);   [ -n "$_v" ] && FRONTEND_BUCKET="$_v"
+    _v=$(_jout UserPoolId);           [ -n "$_v" ] && USER_POOL_ID="$_v"
+    _v=$(_jout UserPoolClientId);     [ -n "$_v" ] && USER_POOL_CLIENT_ID="$_v"
+    _v=$(_jout IdentityPoolId);       [ -n "$_v" ] && IDENTITY_POOL_ID="$_v"
+    _v=$(_jout SessionApiUrl);        [ -n "$_v" ] && SESSION_API_URL="$_v"
+    _v=$(_jout AssetsBucketName);     [ -n "$_v" ] && ASSETS_BUCKET_NAME="$_v"
+    echo -e "${GREEN}Frontend config resolved from live stack ($STACK_NAME @ $AWS_DEFAULT_REGION)${NC}"
+fi
+
 # Wait for frontend npm install before build
 if [ -n "$FRONTEND_NPM_PID" ]; then
     echo -e "${CYAN}Waiting for frontend dependencies...${NC}"
