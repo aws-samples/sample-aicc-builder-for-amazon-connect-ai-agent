@@ -8,7 +8,7 @@ same id.
 
 API quirk this module exists to handle:
   * Opus 4.6 **accepts** ``temperature``.
-  * Opus 4.7 and 4.8 **removed** ``temperature`` — sending it returns HTTP 400.
+  * Opus 4.7, 4.8 and 5 **removed** ``temperature`` — sending it returns HTTP 400.
 
 So model construction must conditionally include ``temperature``. ``build_model_kwargs``
 centralizes that branch: every construction site routes through it, passing whatever
@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # region) — note 4.6 carries a `-v1` suffix while 4.7/4.8 do not. Using the wrong
 # form 404s at invoke time.
 ALLOWED_MODEL_IDS = {
+    "global.anthropic.claude-opus-5",
     "global.anthropic.claude-opus-4-8",
     "global.anthropic.claude-opus-4-7",
     "global.anthropic.claude-opus-4-6-v1",
@@ -41,8 +42,11 @@ ALLOWED_MODEL_IDS = {
 DEFAULT_MODEL_ID = "global.anthropic.claude-opus-4-8"
 
 # Models that REMOVED the `temperature` parameter (sending it → HTTP 400).
-# Opus 4.6 still ACCEPTS temperature; 4.7 and 4.8 removed it.
+# Opus 4.6 still ACCEPTS temperature; 4.7, 4.8 and 5 removed it (verified live
+# against Converse in ap-northeast-2: Opus 5 returns ValidationException
+# "`temperature` is deprecated for this model").
 MODELS_WITHOUT_TEMPERATURE = {
+    "global.anthropic.claude-opus-5",
     "global.anthropic.claude-opus-4-8",
     "global.anthropic.claude-opus-4-7",
 }

@@ -15,7 +15,11 @@ import {
 // Configuration from environment variables
 const userPoolId = (import.meta as any).env?.VITE_USER_POOL_ID || "";
 const clientId = (import.meta as any).env?.VITE_USER_POOL_CLIENT_ID || "";
-const region = (import.meta as any).env?.VITE_COGNITO_REGION || "ap-northeast-1";
+// NOTE: `region` is informational only (exposed via `authConfig` for debugging).
+// amazon-cognito-identity-js derives the Cognito endpoint from the pool id's
+// region prefix, so this value never affects auth. Default matches deploy.sh's
+// default region so the debug output can't imply the wrong one.
+const region = (import.meta as any).env?.VITE_COGNITO_REGION || "ap-northeast-2";
 
 // ── Dev-only auth bypass (local E2E) ──────────────────────────────────────
 // When VITE_DEV_AUTH=1 AND running a dev build, skip Cognito entirely so the
@@ -205,6 +209,59 @@ export async function completeNewPasswordChallenge(
       resolve({
         success: false,
         error: error instanceof Error ? error.message : "Password change failed",
+      });
+    }
+  });
+}
+
+/**
+ * Start a self-service password reset.
+ *
+ * Cognito emails a verification code to the user's *verified* email
+ * (the pool's AccountRecoverySetting is `verified_email`). Users created by an
+ * admin without `email_verified=true` therefore cannot use this — Cognito
+ * replies with an InvalidParameterException about no registered/verified email.
+ */
+export async function requestPasswordReset(username: string): Promise<AuthResult> {
+  return new Promise((resolve) => {
+    try {
+      const pool = getUserPool();
+      const cognitoUser = new CognitoUser({ Username: username, Pool: pool });
+      cognitoUser.forgotPassword({
+        onSuccess: () => resolve({ success: true }),
+        onFailure: (err: Error) =>
+          resolve({ success: false, error: err.message || "Failed to start password reset" }),
+      });
+    } catch (error) {
+      resolve({
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to start password reset",
+      });
+    }
+  });
+}
+
+/**
+ * Complete a password reset with the emailed verification code.
+ */
+export async function confirmPasswordReset(
+  username: string,
+  code: string,
+  newPassword: string
+): Promise<AuthResult> {
+  return new Promise((resolve) => {
+    try {
+      const pool = getUserPool();
+      const cognitoUser = new CognitoUser({ Username: username, Pool: pool });
+      cognitoUser.confirmPassword(code, newPassword, {
+        onSuccess: () => resolve({ success: true }),
+        onFailure: (err: Error) =>
+          resolve({ success: false, error: err.message || "Failed to reset password" }),
+      });
+    } catch (error) {
+      resolve({
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to reset password",
       });
     }
   });

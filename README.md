@@ -317,7 +317,7 @@ Then trigger with `/aicc-builder`. Full install + usage details:
 Runtime highlights:
 
 - Runtime: ECS Fargate (ARM64 Graviton) running FastAPI + Uvicorn
-- Model: **Claude Opus** on Amazon Bedrock — selectable per session: **Opus 4.8** (default, `global.anthropic.claude-opus-4-8`), **4.7** (`global.anthropic.claude-opus-4-7`), or **4.6** (`global.anthropic.claude-opus-4-6-v1`) — applied to the orchestrator and every sub-agent, with cross-region inference + prompt caching
+- Model: **Claude Opus** on Amazon Bedrock — selectable per session: **Opus 5** (`global.anthropic.claude-opus-5`), **4.8** (default, `global.anthropic.claude-opus-4-8`), **4.7** (`global.anthropic.claude-opus-4-7`), or **4.6** (`global.anthropic.claude-opus-4-6-v1`) — applied to the orchestrator and every sub-agent, with cross-region inference + prompt caching
 - WebSocket: ALB with Cognito JWT (sticky sessions, 4h idle timeout), proxied same-origin through CloudFront
 - Session storage: 3-tier — in-memory → S3 Files NFS (`/mnt/s3/`) → DynamoDB
 - Contact Flow RAG: Bedrock Knowledge Base backed by **Amazon S3 Vectors** (replaced OpenSearch Serverless in v2.1 — far lower idle cost for a small, infrequently-queried corpus). The ECS task gets `CONTACT_FLOW_KB_ID` two ways: `deploy.sh` injects it from the KB stack output, and (v2.2) the KB stack also publishes it to SSM for the task to resolve at startup — so RAG stays on even when the deploy-time output isn't resolvable (e.g. KB stack deployed separately)
@@ -384,14 +384,23 @@ cd backend/ecs && uvicorn app:app --port 8080
 
 ```bash
 # UserPoolId is printed by deploy.sh
+#
+# NOTE: the pool uses email as an ALIAS, so `--username` must NOT be an email
+# address (Cognito rejects it with InvalidParameterException). Use a plain
+# username and attach the email as an attribute — `email_verified=true` is what
+# makes sign-in by email (and the "Forgot password?" flow) work.
 aws cognito-idp admin-create-user \
   --user-pool-id <UserPoolId> \
-  --username <email> \
-  --user-attributes Name=email,Value=<email> \
+  --username <username> \
+  --user-attributes Name=email,Value=<email> Name=email_verified,Value=true \
   --temporary-password "TempPass123!" \
   --message-action SUPPRESS \
   --region ap-northeast-2
 ```
+
+The user signs in with `<email>` and is prompted to set a new password on first
+login. Password policy: 8+ characters with an uppercase letter, a lowercase
+letter, and a number (no symbol required).
 
 ---
 
@@ -412,7 +421,7 @@ aws cognito-idp admin-create-user \
 
 | Layer | Technologies |
 |---|---|
-| **AI** | Strands Agents SDK · **Claude Opus 4.8 (default), 4.7, 4.6** on Amazon Bedrock (`global.anthropic.claude-opus-4-8`, cross-region inference) · Context Engineering (CLUES format) |
+| **AI** | Strands Agents SDK · **Claude Opus 5, 4.8 (default), 4.7, 4.6** on Amazon Bedrock (`global.anthropic.claude-opus-4-8`, cross-region inference) · Context Engineering (CLUES format) |
 | **Frontend** | React 18 · TypeScript · Vite · Tailwind CSS · Zustand · React Flow |
 | **Backend** | Python 3.11 · FastAPI · Uvicorn · S3 Files NFS · DynamoDB |
 | **Infra** | AWS CDK · CloudFront · Cognito · ECS Fargate · ALB · X-Ray |
@@ -684,6 +693,27 @@ export S3FILES_MOUNT_PATH=/tmp/s3files SESSION_STORE_BACKEND=s3files
 cd backend/ecs && uvicorn app:app --port 8080
 # wscat -c "ws://localhost:8080/ws?sessionId=test-1"
 ```
+
+### 관리자 사용자 생성
+
+```bash
+# UserPoolId는 deploy.sh 출력에 표시됩니다
+#
+# 주의: 이 유저풀은 이메일을 ALIAS로 사용하므로 `--username`에 이메일 주소를
+# 넣을 수 없습니다(InvalidParameterException으로 거부됩니다). username은 일반
+# 문자열로 두고 이메일은 속성으로 넣으세요. 이메일 로그인과 "비밀번호를
+# 잊으셨나요?" 플로우는 `email_verified=true`가 있어야 동작합니다.
+aws cognito-idp admin-create-user \
+  --user-pool-id <UserPoolId> \
+  --username <username> \
+  --user-attributes Name=email,Value=<email> Name=email_verified,Value=true \
+  --temporary-password "TempPass123!" \
+  --message-action SUPPRESS \
+  --region ap-northeast-2
+```
+
+사용자는 `<email>`로 로그인하며 첫 로그인 시 새 비밀번호를 설정하게 됩니다.
+비밀번호 정책: 8자 이상, 대문자·소문자·숫자 각 1자 이상(특수문자 불필요).
 
 ---
 
@@ -1027,14 +1057,24 @@ cd backend/ecs && uvicorn app:app --port 8080
 
 ```bash
 # UserPoolId は deploy.sh の出力に表示されます
+#
+# 注意: このユーザープールはメールを ALIAS として使うため、`--username` に
+# メールアドレスは指定できません（InvalidParameterException になります）。
+# username は通常の文字列にし、メールは属性として付与してください。
+# `email_verified=true` があって初めてメールでのサインイン（および
+# 「パスワードをお忘れですか?」）が機能します。
 aws cognito-idp admin-create-user \
   --user-pool-id <UserPoolId> \
-  --username <email> \
-  --user-attributes Name=email,Value=<email> \
+  --username <username> \
+  --user-attributes Name=email,Value=<email> Name=email_verified,Value=true \
   --temporary-password "TempPass123!" \
   --message-action SUPPRESS \
   --region ap-northeast-2
 ```
+
+ユーザーは `<email>` でサインインし、初回ログイン時に新しいパスワードの設定を
+求められます。パスワードポリシー: 8 文字以上、大文字・小文字・数字を各 1 つ以上
+（記号は不要）。
 
 ---
 
