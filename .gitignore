@@ -38,6 +38,9 @@ content/
 .env
 .env.local
 .env.*.local
+# deploy.sh renames a developer's .env.local out of the way before a build so it
+# can't override deploy-generated config; the backup is a local artifact.
+.env.local.bak
 
 # === Work in Progress ===
 

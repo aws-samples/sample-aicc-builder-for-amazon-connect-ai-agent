@@ -642,13 +642,41 @@ if [ "$DEPLOY_BACKEND" = true ]; then
     echo -e "\n${YELLOW}Step 3: Configuring ECS Fargate Backend...${NC}"
 
     # Extract ECS outputs (ECR_REPO_URI may already be set from Step 0.5)
-    if [ -f "$CDK_OUTPUTS_FILE" ]; then
+    #
+    # LIVE CloudFormation outputs are the authority. `cdk deploy --outputs-file`
+    # OVERWRITES the file and only includes stacks it actually deployed in that
+    # invocation — so on any re-run where the ECS stack is unchanged, the file
+    # contains only the app stack and every ECS value below resolves to "".
+    # That silently skipped the task-definition patch step (found live: the dev
+    # task kept the USER_POOL_ID baked into the image by an earlier us-east-1
+    # deploy, so every WebSocket handshake failed JWKS lookup with a 404 and was
+    # rejected 403). Query the region-scoped stack first, fall back to the file.
+    _ECS_OUTS=$(aws cloudformation describe-stacks --stack-name "$ECS_STACK_NAME" \
+        --region "$AWS_DEFAULT_REGION" \
+        --query 'Stacks[0].Outputs' --output json 2>/dev/null || echo "")
+    if [ -n "$_ECS_OUTS" ] && [ "$_ECS_OUTS" != "null" ]; then
+        _ecs_out() { echo "$_ECS_OUTS" | jq -r --arg k "$1" '.[] | select(.OutputKey==$k) | .OutputValue // empty' 2>/dev/null; }
+        ECR_REPO_URI=${ECR_REPO_URI:-$(_ecs_out EcrRepositoryUri)}
+        ALB_DNS_NAME=$(_ecs_out AlbDnsName)
+        ECS_CLUSTER_NAME=$(_ecs_out EcsClusterName)
+        ECS_SERVICE_NAME=$(_ecs_out EcsServiceName)
+        TASK_DEF_ARN=$(_ecs_out TaskDefinitionArn)
+        TASK_ROLE_ARN=$(_ecs_out TaskRoleArn)
+        echo -e "${GREEN}ECS config resolved from live stack ($ECS_STACK_NAME @ $AWS_DEFAULT_REGION)${NC}"
+    elif [ -f "$CDK_OUTPUTS_FILE" ]; then
         ECR_REPO_URI=${ECR_REPO_URI:-$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].EcrRepositoryUri // empty' "$CDK_OUTPUTS_FILE")}
         ALB_DNS_NAME=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].AlbDnsName // empty' "$CDK_OUTPUTS_FILE")
         ECS_CLUSTER_NAME=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].EcsClusterName // empty' "$CDK_OUTPUTS_FILE")
         ECS_SERVICE_NAME=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].EcsServiceName // empty' "$CDK_OUTPUTS_FILE")
         TASK_DEF_ARN=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].TaskDefinitionArn // empty' "$CDK_OUTPUTS_FILE")
         TASK_ROLE_ARN=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].TaskRoleArn // empty' "$CDK_OUTPUTS_FILE")
+    fi
+
+    # The task-def patch is the ONLY thing that makes runtime env authoritative
+    # over the values baked into the image at build time. If we can't resolve the
+    # task definition, say so loudly instead of shipping a stale-pool container.
+    if [ -z "$TASK_DEF_ARN" ]; then
+        echo -e "${YELLOW}[WARN] TaskDefinitionArn not resolved for $ECS_STACK_NAME — runtime env (USER_POOL_ID etc.) will NOT be patched; the container will fall back to values baked at image build time.${NC}"
     fi
 
     if [ -z "$ECR_REPO_URI" ]; then
@@ -660,7 +688,15 @@ if [ "$DEPLOY_BACKEND" = true ]; then
     # This section handles post-CDK configuration: S3 Files volume + force deployment.
     BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*")
     ECS_APP_HASH=$(md5sum "$SCRIPT_DIR/backend/ecs/app.py" 2>/dev/null | cut -d' ' -f1 || echo "none")
-    BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}"
+    # The runtime config the task def carries is part of what this step deploys,
+    # so it must be part of the hash. Source-only hashing meant a re-created or
+    # different Cognito pool with unchanged source was treated as "unchanged",
+    # skipping the patch and leaving the image's stale USER_POOL_ID in effect.
+    _CFG_POOL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+        --region "$AWS_DEFAULT_REGION" \
+        --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue | [0]' \
+        --output text 2>/dev/null | grep -v None || true)
+    BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}-${_CFG_POOL:-nopool}-${TASK_DEF_ARN:-notd}"
 
     if check_hash_changed "ecs-backend-cfg${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"; then
 
@@ -711,19 +747,26 @@ if [ "$DEPLOY_BACKEND" = true ]; then
             JQ_FILTER='.taskDefinition
                 | del(.taskDefinitionArn, .revision, .status, .registeredAt, .registeredBy, .compatibilities, .requiresAttributes)'
 
-            # Always inject/update runtime env vars into container definition
-            # Uses reduce to upsert: update existing var or append new one
+            # Always inject/update runtime env vars into the APP container.
+            # Target it BY NAME, never by index: the task def also carries the
+            # X-Ray sidecar and CDK emits it first, so containerDefinitions[0]
+            # is the sidecar. Patching index 0 silently wrote USER_POOL_ID onto
+            # xray-daemon and left the app on the value baked into the image
+            # (found live: JWKS 404 -> every WebSocket rejected 403).
             JQ_FILTER="${JQ_FILTER}
-                | .containerDefinitions[0].environment as \$env
-                | .containerDefinitions[0].environment = (
-                    [\$env[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"AGENTCORE_GATEWAY_URL\",\"AGENTCORE_GATEWAY_REGION\") | not)]
-                    + [{\"name\":\"ASSETS_BUCKET_NAME\",\"value\":\$bucket},
+                | .containerDefinitions = (.containerDefinitions | map(
+                    if .name == \"app\" then
+                      .environment = (
+                        [(.environment // [])[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"AGENTCORE_GATEWAY_URL\",\"AGENTCORE_GATEWAY_REGION\") | not)]
+                        + [{\"name\":\"ASSETS_BUCKET_NAME\",\"value\":\$bucket},
                        {\"name\":\"USER_POOL_ID\",\"value\":\$pool},
                        {\"name\":\"USER_POOL_CLIENT_ID\",\"value\":\$poolclient},
                        {\"name\":\"CONTACT_FLOW_KB_ID\",\"value\":\$kbid},
                        {\"name\":\"AGENTCORE_GATEWAY_URL\",\"value\":\$gateway},
                        {\"name\":\"AGENTCORE_GATEWAY_REGION\",\"value\":\"us-east-1\"}]
-                  )"
+                      )
+                    else . end
+                  ))"
 
             aws ecs describe-task-definition --task-definition "$TASK_DEF_FAMILY" --region "$AWS_DEFAULT_REGION" \
                 | jq --arg bucket "${ASSETS_BUCKET_NAME:-}" \
