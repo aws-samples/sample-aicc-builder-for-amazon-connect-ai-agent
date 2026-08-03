@@ -13,7 +13,8 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuthStore } from "../stores/authStore";
 import { useBuilderStore } from "../stores/builderStore";
-import { Loader2, Lock, Mail, Eye, EyeOff, AlertCircle, Globe, Check, X } from "lucide-react";
+import { requestPasswordReset, confirmPasswordReset } from "../services/auth";
+import { Loader2, Lock, Mail, Eye, EyeOff, AlertCircle, Globe, Check, X, KeyRound } from "lucide-react";
 import type { Language } from "../types";
 import { LANGUAGES } from "../types";
 import { cn } from "../lib/utils";
@@ -45,6 +46,21 @@ const STRINGS: Record<Language, Record<string, string>> = {
     policyUpper: 'An uppercase letter',
     policyLower: 'A lowercase letter',
     policyNum: 'A number',
+    forgotLink: 'Forgot your password?',
+    resetTitle: 'Reset Password',
+    resetSubtitle: "Enter your email and we'll send you a verification code",
+    sendCode: 'Send Verification Code',
+    sendingCode: 'Sending code…',
+    enterEmail: 'Please enter your email',
+    resetConfirmTitle: 'Enter Verification Code',
+    resetConfirmSubtitle: 'Check your email for the code, then set a new password',
+    code: 'Verification Code',
+    codePlaceholder: 'Enter the 6-digit code',
+    enterCode: 'Please enter the verification code',
+    resetPassword: 'Reset Password',
+    resettingPassword: 'Resetting password…',
+    resetDone: 'Password reset. Please sign in with your new password.',
+    backToSignIn: 'Back to sign in',
   },
   'ko-KR': {
     title: 'AICC Builder',
@@ -72,6 +88,21 @@ const STRINGS: Record<Language, Record<string, string>> = {
     policyUpper: '대문자 포함',
     policyLower: '소문자 포함',
     policyNum: '숫자 포함',
+    forgotLink: '비밀번호를 잊으셨나요?',
+    resetTitle: '비밀번호 재설정',
+    resetSubtitle: '이메일을 입력하시면 인증 코드를 보내드립니다',
+    sendCode: '인증 코드 받기',
+    sendingCode: '인증 코드 전송 중…',
+    enterEmail: '이메일을 입력하세요',
+    resetConfirmTitle: '인증 코드 입력',
+    resetConfirmSubtitle: '이메일로 받은 코드를 입력하고 새 비밀번호를 설정하세요',
+    code: '인증 코드',
+    codePlaceholder: '6자리 코드를 입력하세요',
+    enterCode: '인증 코드를 입력하세요',
+    resetPassword: '비밀번호 재설정',
+    resettingPassword: '비밀번호 재설정 중…',
+    resetDone: '비밀번호가 재설정되었습니다. 새 비밀번호로 로그인하세요.',
+    backToSignIn: '로그인으로 돌아가기',
   },
   'ja-JP': {
     title: 'AICC Builder',
@@ -99,6 +130,21 @@ const STRINGS: Record<Language, Record<string, string>> = {
     policyUpper: '大文字を含む',
     policyLower: '小文字を含む',
     policyNum: '数字を含む',
+    forgotLink: 'パスワードをお忘れですか?',
+    resetTitle: 'パスワードの再設定',
+    resetSubtitle: 'メールアドレスを入力すると確認コードを送信します',
+    sendCode: '確認コードを送信',
+    sendingCode: '確認コード送信中…',
+    enterEmail: 'メールアドレスを入力してください',
+    resetConfirmTitle: '確認コードの入力',
+    resetConfirmSubtitle: 'メールに届いたコードを入力し、新しいパスワードを設定してください',
+    code: '確認コード',
+    codePlaceholder: '6桁のコードを入力',
+    enterCode: '確認コードを入力してください',
+    resetPassword: 'パスワードを再設定',
+    resettingPassword: 'パスワード再設定中…',
+    resetDone: 'パスワードを再設定しました。新しいパスワードでサインインしてください。',
+    backToSignIn: 'サインインに戻る',
   },
 };
 
@@ -138,6 +184,13 @@ export function LoginPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+
+  // Self-service password reset (Cognito forgotPassword / confirmPassword).
+  // 'request' = ask for the code, 'confirm' = code + new password.
+  const [resetStage, setResetStage] = useState<null | 'request' | 'confirm'>(null);
+  const [resetCode, setResetCode] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Redirect if already authenticated
   useEffect(() => {
@@ -183,8 +236,76 @@ export function LoginPage() {
     if (success) navigate("/");
   };
 
-  const displayError = localError || error;
+  const openReset = () => {
+    setLocalError(null);
+    setNotice(null);
+    clearError();
+    setNewPasswordValue("");
+    setConfirmPassword("");
+    setResetCode("");
+    setResetStage('request');
+  };
 
+  const closeReset = () => {
+    setLocalError(null);
+    setNotice(null);
+    clearError();
+    setResetStage(null);
+    setResetCode("");
+    setNewPasswordValue("");
+    setConfirmPassword("");
+  };
+
+  const handleResetRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLocalError(null);
+    setNotice(null);
+    clearError();
+    if (!email) {
+      setLocalError(t.enterEmail);
+      return;
+    }
+    setResetBusy(true);
+    const res = await requestPasswordReset(email);
+    setResetBusy(false);
+    if (res.success) {
+      setResetStage('confirm');
+    } else {
+      setLocalError(res.error || t.enterEmail);
+    }
+  };
+
+  const handleResetConfirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLocalError(null);
+    setNotice(null);
+    clearError();
+    if (!resetCode) {
+      setLocalError(t.enterCode);
+      return;
+    }
+    if (!newPasswordValue || !confirmPassword) {
+      setLocalError(t.enterConfirm);
+      return;
+    }
+    if (newPasswordValue !== confirmPassword) {
+      setLocalError(t.noMatch);
+      return;
+    }
+    if (!policyOk) return;
+    setResetBusy(true);
+    const res = await confirmPasswordReset(email, resetCode, newPasswordValue);
+    setResetBusy(false);
+    if (res.success) {
+      closeReset();
+      setPassword("");
+      setNotice(t.resetDone);
+    } else {
+      setLocalError(res.error || t.resetPassword);
+    }
+  };
+
+  const displayError = localError || error;
   const inputClasses =
     'w-full pl-10 pr-12 py-3 bg-surface-50 dark:bg-surface-900 border border-surface-300 dark:border-surface-600 rounded-lg ' +
     'text-surface-900 dark:text-surface-100 placeholder-surface-400 dark:placeholder-surface-500 ' +
@@ -209,6 +330,191 @@ export function LoginPage() {
       </div>
     </div>
   );
+
+  const ErrorBanner = displayError ? (
+    <div role="alert" aria-live="assertive" className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg flex items-start gap-3">
+      <AlertCircle className="w-5 h-5 text-red-500 dark:text-red-400 flex-shrink-0 mt-0.5" />
+      <p className="text-red-600 dark:text-red-300 text-sm">{displayError}</p>
+    </div>
+  ) : null;
+
+  const PasswordPolicyList = (
+    <ul className="space-y-1.5 text-xs">
+      <PolicyItem ok={policy.len} label={t.policyLen} />
+      <PolicyItem ok={policy.upper} label={t.policyUpper} />
+      <PolicyItem ok={policy.lower} label={t.policyLower} />
+      <PolicyItem ok={policy.num} label={t.policyNum} />
+    </ul>
+  );
+
+  const BackToSignIn = (
+    <div className="mt-6 text-center">
+      <button
+        type="button"
+        onClick={closeReset}
+        className="text-sm text-primary-600 dark:text-primary-400 hover:underline"
+      >
+        {t.backToSignIn}
+      </button>
+    </div>
+  );
+
+  // Password reset — step 1: request a verification code by email.
+  if (resetStage === 'request') {
+    return (
+      <div className="relative min-h-screen bg-surface-50 dark:bg-gradient-dark flex items-center justify-center p-4">
+        {LanguagePicker}
+        <div className="w-full max-w-md">
+          <div className="bg-white dark:bg-surface-850 backdrop-blur-sm rounded-2xl border border-surface-200 dark:border-surface-700 p-8 shadow-xl dark:shadow-glow">
+            <div className="text-center mb-8">
+              <h1 className="text-2xl font-bold text-surface-900 dark:text-surface-100 mb-2">{t.resetTitle}</h1>
+              <p className="text-surface-500 dark:text-surface-400 text-sm">{t.resetSubtitle}</p>
+            </div>
+
+            {ErrorBanner}
+
+            <form onSubmit={handleResetRequest} className="space-y-6">
+              <div>
+                <label htmlFor="resetEmail" className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+                  {t.email}
+                </label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-surface-400" />
+                  <input
+                    id="resetEmail"
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className={inputClasses}
+                    placeholder={t.emailPlaceholder}
+                    disabled={resetBusy}
+                    autoComplete="email"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={resetBusy}
+                className="w-full py-3 bg-primary-600 dark:bg-primary-500 hover:bg-primary-700 dark:hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+              >
+                {resetBusy ? (
+                  <><Loader2 className="w-5 h-5 animate-spin" />{t.sendingCode}</>
+                ) : (
+                  t.sendCode
+                )}
+              </button>
+            </form>
+
+            {BackToSignIn}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Password reset — step 2: emailed code + new password.
+  if (resetStage === 'confirm') {
+    return (
+      <div className="relative min-h-screen bg-surface-50 dark:bg-gradient-dark flex items-center justify-center p-4">
+        {LanguagePicker}
+        <div className="w-full max-w-md">
+          <div className="bg-white dark:bg-surface-850 backdrop-blur-sm rounded-2xl border border-surface-200 dark:border-surface-700 p-8 shadow-xl dark:shadow-glow">
+            <div className="text-center mb-8">
+              <h1 className="text-2xl font-bold text-surface-900 dark:text-surface-100 mb-2">{t.resetConfirmTitle}</h1>
+              <p className="text-surface-500 dark:text-surface-400 text-sm">{t.resetConfirmSubtitle}</p>
+            </div>
+
+            {ErrorBanner}
+
+            <form onSubmit={handleResetConfirm} className="space-y-6">
+              <div>
+                <label htmlFor="resetCode" className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+                  {t.code}
+                </label>
+                <div className="relative">
+                  <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-surface-400" />
+                  <input
+                    id="resetCode"
+                    type="text"
+                    inputMode="numeric"
+                    value={resetCode}
+                    onChange={(e) => setResetCode(e.target.value.trim())}
+                    className={inputClasses}
+                    placeholder={t.codePlaceholder}
+                    disabled={resetBusy}
+                    autoComplete="one-time-code"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="resetNewPassword" className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+                  {t.newPassword}
+                </label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-surface-400" />
+                  <input
+                    id="resetNewPassword"
+                    type={showPassword ? "text" : "password"}
+                    value={newPasswordValue}
+                    onChange={(e) => setNewPasswordValue(e.target.value)}
+                    className={inputClasses}
+                    placeholder={t.newPasswordPlaceholder}
+                    disabled={resetBusy}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 hover:text-surface-600 dark:hover:text-surface-300"
+                  >
+                    {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="resetConfirmPassword" className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+                  {t.confirmPassword}
+                </label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-surface-400" />
+                  <input
+                    id="resetConfirmPassword"
+                    type={showPassword ? "text" : "password"}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className={inputClasses}
+                    placeholder={t.confirmPlaceholder}
+                    disabled={resetBusy}
+                    autoComplete="new-password"
+                  />
+                </div>
+              </div>
+
+              {PasswordPolicyList}
+
+              <button
+                type="submit"
+                disabled={resetBusy || !policyOk}
+                className="w-full py-3 bg-primary-600 dark:bg-primary-500 hover:bg-primary-700 dark:hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+              >
+                {resetBusy ? (
+                  <><Loader2 className="w-5 h-5 animate-spin" />{t.resettingPassword}</>
+                ) : (
+                  t.resetPassword
+                )}
+              </button>
+            </form>
+
+            {BackToSignIn}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // New password form (for first-time login)
   if (needsNewPassword) {
@@ -321,6 +627,13 @@ export function LoginPage() {
             </div>
           )}
 
+          {notice && !displayError && (
+            <div role="status" aria-live="polite" className="mb-6 p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg flex items-start gap-3">
+              <Check className="w-5 h-5 text-green-500 dark:text-green-400 flex-shrink-0 mt-0.5" />
+              <p className="text-green-700 dark:text-green-300 text-sm">{notice}</p>
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-6">
             <div>
               <label htmlFor="email" className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
@@ -364,6 +677,15 @@ export function LoginPage() {
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 hover:text-surface-600 dark:hover:text-surface-300"
                 >
                   {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                </button>
+              </div>
+              <div className="mt-2 text-right">
+                <button
+                  type="button"
+                  onClick={openReset}
+                  className="text-xs text-primary-600 dark:text-primary-400 hover:underline"
+                >
+                  {t.forgotLink}
                 </button>
               </div>
             </div>
