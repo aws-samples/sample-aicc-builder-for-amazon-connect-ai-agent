@@ -29,10 +29,11 @@ export interface ModelOption {
 }
 
 export const MODELS: ModelOption[] = [
+  { id: 'global.anthropic.claude-opus-5', label: 'Opus 5' },
   { id: 'global.anthropic.claude-opus-4-8', label: 'Opus 4.8' },
   { id: 'global.anthropic.claude-opus-4-7', label: 'Opus 4.7' },
   // NOTE: 4.6 carries the `-v1` suffix in Bedrock (verified ACTIVE inference
-  // profile in ap-northeast-2); 4.7/4.8 do not. Must match the backend allowlist.
+  // profile in ap-northeast-2); 4.7/4.8/5 do not. Must match the backend allowlist.
   { id: 'global.anthropic.claude-opus-4-6-v1', label: 'Opus 4.6' },
 ];
 
