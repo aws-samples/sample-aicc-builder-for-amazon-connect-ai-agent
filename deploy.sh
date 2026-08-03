@@ -642,13 +642,41 @@ if [ "$DEPLOY_BACKEND" = true ]; then
     echo -e "\n${YELLOW}Step 3: Configuring ECS Fargate Backend...${NC}"
 
     # Extract ECS outputs (ECR_REPO_URI may already be set from Step 0.5)
-    if [ -f "$CDK_OUTPUTS_FILE" ]; then
+    #
+    # LIVE CloudFormation outputs are the authority. `cdk deploy --outputs-file`
+    # OVERWRITES the file and only includes stacks it actually deployed in that
+    # invocation — so on any re-run where the ECS stack is unchanged, the file
+    # contains only the app stack and every ECS value below resolves to "".
+    # That silently skipped the task-definition patch step (found live: the dev
+    # task kept the USER_POOL_ID baked into the image by an earlier us-east-1
+    # deploy, so every WebSocket handshake failed JWKS lookup with a 404 and was
+    # rejected 403). Query the region-scoped stack first, fall back to the file.
+    _ECS_OUTS=$(aws cloudformation describe-stacks --stack-name "$ECS_STACK_NAME" \
+        --region "$AWS_DEFAULT_REGION" \
+        --query 'Stacks[0].Outputs' --output json 2>/dev/null || echo "")
+    if [ -n "$_ECS_OUTS" ] && [ "$_ECS_OUTS" != "null" ]; then
+        _ecs_out() { echo "$_ECS_OUTS" | jq -r --arg k "$1" '.[] | select(.OutputKey==$k) | .OutputValue // empty' 2>/dev/null; }
+        ECR_REPO_URI=${ECR_REPO_URI:-$(_ecs_out EcrRepositoryUri)}
+        ALB_DNS_NAME=$(_ecs_out AlbDnsName)
+        ECS_CLUSTER_NAME=$(_ecs_out EcsClusterName)
+        ECS_SERVICE_NAME=$(_ecs_out EcsServiceName)
+        TASK_DEF_ARN=$(_ecs_out TaskDefinitionArn)
+        TASK_ROLE_ARN=$(_ecs_out TaskRoleArn)
+        echo -e "${GREEN}ECS config resolved from live stack ($ECS_STACK_NAME @ $AWS_DEFAULT_REGION)${NC}"
+    elif [ -f "$CDK_OUTPUTS_FILE" ]; then
         ECR_REPO_URI=${ECR_REPO_URI:-$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].EcrRepositoryUri // empty' "$CDK_OUTPUTS_FILE")}
         ALB_DNS_NAME=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].AlbDnsName // empty' "$CDK_OUTPUTS_FILE")
         ECS_CLUSTER_NAME=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].EcsClusterName // empty' "$CDK_OUTPUTS_FILE")
         ECS_SERVICE_NAME=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].EcsServiceName // empty' "$CDK_OUTPUTS_FILE")
         TASK_DEF_ARN=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].TaskDefinitionArn // empty' "$CDK_OUTPUTS_FILE")
         TASK_ROLE_ARN=$(jq -r --arg s "$ECS_STACK_NAME" '.[$s].TaskRoleArn // empty' "$CDK_OUTPUTS_FILE")
+    fi
+
+    # The task-def patch is the ONLY thing that makes runtime env authoritative
+    # over the values baked into the image at build time. If we can't resolve the
+    # task definition, say so loudly instead of shipping a stale-pool container.
+    if [ -z "$TASK_DEF_ARN" ]; then
+        echo -e "${YELLOW}[WARN] TaskDefinitionArn not resolved for $ECS_STACK_NAME — runtime env (USER_POOL_ID etc.) will NOT be patched; the container will fall back to values baked at image build time.${NC}"
     fi
 
     if [ -z "$ECR_REPO_URI" ]; then
@@ -660,7 +688,15 @@ if [ "$DEPLOY_BACKEND" = true ]; then
     # This section handles post-CDK configuration: S3 Files volume + force deployment.
     BACKEND_SRC_HASH=$(compute_hash "$SCRIPT_DIR/backend/ecs/src" "*")
     ECS_APP_HASH=$(md5sum "$SCRIPT_DIR/backend/ecs/app.py" 2>/dev/null | cut -d' ' -f1 || echo "none")
-    BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}"
+    # The runtime config the task def carries is part of what this step deploys,
+    # so it must be part of the hash. Source-only hashing meant a re-created or
+    # different Cognito pool with unchanged source was treated as "unchanged",
+    # skipping the patch and leaving the image's stale USER_POOL_ID in effect.
+    _CFG_POOL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+        --region "$AWS_DEFAULT_REGION" \
+        --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue | [0]' \
+        --output text 2>/dev/null | grep -v None || true)
+    BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}-${_CFG_POOL:-nopool}-${TASK_DEF_ARN:-notd}"
 
     if check_hash_changed "ecs-backend-cfg${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"; then
 
@@ -711,19 +747,26 @@ if [ "$DEPLOY_BACKEND" = true ]; then
             JQ_FILTER='.taskDefinition
                 | del(.taskDefinitionArn, .revision, .status, .registeredAt, .registeredBy, .compatibilities, .requiresAttributes)'
 
-            # Always inject/update runtime env vars into container definition
-            # Uses reduce to upsert: update existing var or append new one
+            # Always inject/update runtime env vars into the APP container.
+            # Target it BY NAME, never by index: the task def also carries the
+            # X-Ray sidecar and CDK emits it first, so containerDefinitions[0]
+            # is the sidecar. Patching index 0 silently wrote USER_POOL_ID onto
+            # xray-daemon and left the app on the value baked into the image
+            # (found live: JWKS 404 -> every WebSocket rejected 403).
             JQ_FILTER="${JQ_FILTER}
-                | .containerDefinitions[0].environment as \$env
-                | .containerDefinitions[0].environment = (
-                    [\$env[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"AGENTCORE_GATEWAY_URL\",\"AGENTCORE_GATEWAY_REGION\") | not)]
-                    + [{\"name\":\"ASSETS_BUCKET_NAME\",\"value\":\$bucket},
+                | .containerDefinitions = (.containerDefinitions | map(
+                    if .name == \"app\" then
+                      .environment = (
+                        [(.environment // [])[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"AGENTCORE_GATEWAY_URL\",\"AGENTCORE_GATEWAY_REGION\") | not)]
+                        + [{\"name\":\"ASSETS_BUCKET_NAME\",\"value\":\$bucket},
                        {\"name\":\"USER_POOL_ID\",\"value\":\$pool},
                        {\"name\":\"USER_POOL_CLIENT_ID\",\"value\":\$poolclient},
                        {\"name\":\"CONTACT_FLOW_KB_ID\",\"value\":\$kbid},
                        {\"name\":\"AGENTCORE_GATEWAY_URL\",\"value\":\$gateway},
                        {\"name\":\"AGENTCORE_GATEWAY_REGION\",\"value\":\"us-east-1\"}]
-                  )"
+                      )
+                    else . end
+                  ))"
 
             aws ecs describe-task-definition --task-definition "$TASK_DEF_FAMILY" --region "$AWS_DEFAULT_REGION" \
                 | jq --arg bucket "${ASSETS_BUCKET_NAME:-}" \
@@ -783,6 +826,25 @@ if [ -f "$CDK_OUTPUTS_FILE" ]; then
     KB_DOCS_BUCKET_NAME=$(jq -r --arg s "$KB_STACK_NAME" '.[$s].KnowledgeBaseDocsBucketName // empty' "$CDK_OUTPUTS_FILE")
 fi
 
+# The outputs file is stage-scoped but NOT region-scoped: deploying the same
+# stage to a second region leaves the file holding the FIRST region's values
+# (wrong Cognito pool baked into the frontend). Prefer the LIVE stack outputs
+# for the region being deployed; fall back to the file when unreachable.
+_LIVE_OUTS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+    --region "$AWS_DEFAULT_REGION" \
+    --query 'Stacks[0].Outputs' --output json 2>/dev/null || echo "")
+if [ -n "$_LIVE_OUTS" ] && [ "$_LIVE_OUTS" != "null" ]; then
+    _jout() { echo "$_LIVE_OUTS" | jq -r --arg k "$1" '.[] | select(.OutputKey==$k) | .OutputValue // empty'; }
+    _v=$(_jout FrontendUrl);          [ -n "$_v" ] && FRONTEND_URL="$_v"
+    _v=$(_jout FrontendBucketName);   [ -n "$_v" ] && FRONTEND_BUCKET="$_v"
+    _v=$(_jout UserPoolId);           [ -n "$_v" ] && USER_POOL_ID="$_v"
+    _v=$(_jout UserPoolClientId);     [ -n "$_v" ] && USER_POOL_CLIENT_ID="$_v"
+    _v=$(_jout IdentityPoolId);       [ -n "$_v" ] && IDENTITY_POOL_ID="$_v"
+    _v=$(_jout SessionApiUrl);        [ -n "$_v" ] && SESSION_API_URL="$_v"
+    _v=$(_jout AssetsBucketName);     [ -n "$_v" ] && ASSETS_BUCKET_NAME="$_v"
+    echo -e "${GREEN}Frontend config resolved from live stack ($STACK_NAME @ $AWS_DEFAULT_REGION)${NC}"
+fi
+
 # Wait for frontend npm install before build
 if [ -n "$FRONTEND_NPM_PID" ]; then
     echo -e "${CYAN}Waiting for frontend dependencies...${NC}"
@@ -816,17 +878,34 @@ EOF
     FRONTEND_ENV_HASH=$(md5sum "$SCRIPT_DIR/frontend/.env" | cut -d' ' -f1)
     FRONTEND_HASH="${FRONTEND_SRC_HASH}-${FRONTEND_ENV_HASH}"
 
-    if check_hash_changed "frontend-src${STAGE_SUFFIX}" "$FRONTEND_HASH"; then
+    # Vite loads .env.local OVER .env — a leftover developer .env.local
+    # silently overrides every deploy-generated value (found live: a Tokyo
+    # prod frontend shipped a Seoul dev user pool). Neutralize it for builds.
+    if [ -f ".env.local" ]; then
+        echo -e "${YELLOW}[WARN] frontend/.env.local found — it would override deploy config. Renaming to .env.local.bak for this build.${NC}"
+        mv .env.local .env.local.bak
+    fi
+
+    # Scope the hash by region+account (like the backend): the same checkout
+    # can deploy multiple stages/regions, and dist/ is shared between them.
+    _FE_SCOPE="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo na)-${AWS_DEFAULT_REGION}"
+    if check_hash_changed "frontend-src${STAGE_SUFFIX}-${_FE_SCOPE}" "$FRONTEND_HASH"        || [ "$(cat dist/.build_hash 2>/dev/null)" != "$FRONTEND_HASH" ]; then
+        # Second condition: dist/ may hold a build from ANOTHER stage/region
+        # (its Cognito pool is baked into the bundle). Found live: a Tokyo
+        # prod deploy synced a dist/ built for Seoul dev, shipping the wrong
+        # user pool and breaking all auth.
         echo "Building frontend..."
         npm run build
-        save_hash "frontend-src${STAGE_SUFFIX}" "$FRONTEND_HASH"
+        echo "$FRONTEND_HASH" > dist/.build_hash
+        save_hash "frontend-src${STAGE_SUFFIX}-${_FE_SCOPE}" "$FRONTEND_HASH"
     else
         echo -e "${GREEN}[SKIP] Frontend source unchanged, using existing build${NC}"
         # Still need dist/ directory
         if [ ! -d "dist" ]; then
             echo "No existing build found, building..."
             npm run build
-            save_hash "frontend-src${STAGE_SUFFIX}" "$FRONTEND_HASH"
+            echo "$FRONTEND_HASH" > dist/.build_hash
+            save_hash "frontend-src${STAGE_SUFFIX}-${_FE_SCOPE}" "$FRONTEND_HASH"
         fi
     fi
 
