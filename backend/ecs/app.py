@@ -2454,9 +2454,27 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                     tool_name = tool_use.get("name", "")
                     tool_use_id = tool_use.get("toolUseId", "")
 
+                    # Strands streams the tool arguments as a PARTIAL JSON STRING and
+                    # only json.loads() it at content_block_stop (see
+                    # strands/event_loop/streaming.py: current_tool_use["input"] starts
+                    # as "" and is +='d per delta). So during streaming this is a str,
+                    # not a dict — an isinstance(..., dict) guard here silently drops
+                    # every input, leaving tool_inputs empty and the UI with no
+                    # operation name on its tool cards. Accept both shapes: keep the
+                    # dict when it finally arrives, and parse the string opportunistically
+                    # (a fragment simply fails to parse and is skipped, so the last
+                    # successful parse wins — which is the complete object).
                     tool_input = tool_use.get("input", {})
-                    if tool_use_id and isinstance(tool_input, dict) and tool_input:
-                        tool_inputs[tool_use_id] = tool_input
+                    if tool_use_id and tool_input:
+                        if isinstance(tool_input, dict):
+                            tool_inputs[tool_use_id] = tool_input
+                        elif isinstance(tool_input, str):
+                            try:
+                                parsed = json.loads(tool_input)
+                                if isinstance(parsed, dict) and parsed:
+                                    tool_inputs[tool_use_id] = parsed
+                            except (ValueError, TypeError):
+                                pass  # still a partial fragment — wait for more deltas
 
                     if tool_use_id and tool_use_id not in tool_invocations_started:
                         tool_invocations_started.add(tool_use_id)
@@ -2474,7 +2492,13 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                             "type": "tool_start",
                             "tool": tool_name,
                             "toolUseId": tool_use_id,
-                            "input": tool_input,
+                            # Always a dict (possibly empty), never the raw partial
+                            # JSON string: the client does Object.keys(input), which on
+                            # a string yields char indices — that renders a tool card
+                            # with a garbled char-by-char "input". tool_start fires on
+                            # the first delta, so this is usually {} and gets filled in
+                            # by the throttled tool_status/tool_end updates.
+                            "input": tool_inputs.get(tool_use_id, {}),
                         })
 
                 # ToolResultMessageEvent
