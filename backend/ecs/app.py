@@ -1187,6 +1187,34 @@ def _sanitize_messages_for_agent(messages: list) -> list:
 # ========================================
 # Interview State — authoritative "what is already saved"
 # ========================================
+# Session ids are minted by the frontend as `session-<uuid4>` and are the only
+# user-controlled value that reaches the filesystem here. Validate against an
+# ALLOWLIST rather than stripping bad characters: a blocklist has to anticipate
+# every encoding (".." , "%2e%2e", "....//", backslashes, NUL) whereas this
+# rejects anything that isn't a plain id outright.
+_SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _session_base_dir(session_id: str) -> Optional[Path]:
+    """Resolve the on-NFS directory for a session, or None if the id is unsafe.
+
+    Two independent checks, because either alone can be argued with:
+      1. the id must match the allowlist (no separators, no dots, bounded), and
+      2. the resolved path must still sit inside <mount>/sessions.
+    (2) is the backstop that makes traversal impossible even if (1) is ever
+    loosened — and it's what makes the safety local and checkable here.
+    """
+    if not session_id or not _SAFE_SESSION_ID.match(session_id):
+        logger.warning(f"[interview_state] rejected unsafe session id: {session_id!r}")
+        return None
+    sessions_root = (Path(S3FILES_MOUNT) / "sessions").resolve()
+    candidate = (sessions_root / session_id).resolve()
+    if candidate != sessions_root and sessions_root not in candidate.parents:
+        logger.warning(f"[interview_state] path escaped sessions root: {session_id!r}")
+        return None
+    return candidate
+
+
 def _read_interview_state(session_id: str) -> Optional[str]:
     """Summarize what the interview has ALREADY persisted, straight off NFS.
 
@@ -1202,8 +1230,9 @@ def _read_interview_state(session_id: str) -> Optional[str]:
     result each turn. Mirrors the `<generation_state>` block that already does
     this for the generation phase.
     """
-    safe_id = session_id.replace("..", "_").replace("/", "_").replace("\\", "_")
-    base = Path(S3FILES_MOUNT) / "sessions" / safe_id
+    base = _session_base_dir(session_id)
+    if base is None:
+        return None
     lines: list[str] = []
 
     # Operation specs → assets/specs/{op_id}.json

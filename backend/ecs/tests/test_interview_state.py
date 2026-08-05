@@ -154,24 +154,64 @@ def test_reader_never_raises_on_broken_state(app_mod, tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "hostile_id",
     [
-        # Each of these resolves to <mount>/sessions/victim if left unsanitized,
-        # i.e. it would read another user's specs.
+        # Traversal in several encodings — each resolves INTO another session's
+        # directory (or outside the mount entirely) if used verbatim.
         "../sessions/victim",
         "..%s..%ssessions%svictim" % (os.sep, os.sep, os.sep),
         "sub/../victim",
+        "....//sessions//victim",
+        "/etc/passwd",
+        "..\\..\\sessions\\victim",
+        # Absolute-ish and NUL-byte attempts.
+        "sessions/victim",
+        "victim\x00",
+        # Shapes that are simply not session ids.
+        "",
+        ".",
+        "..",
+        "a" * 200,
     ],
 )
-def test_path_traversal_in_session_id_is_neutralized(app_mod, tmp_path, hostile_id):
-    """The session id reaches the filesystem, so it must be sanitized. These
-    ids all resolve INTO another session's directory when used verbatim, so if
-    the sanitization is dropped the victim's operation ids leak into the block."""
+def test_unsafe_session_ids_are_rejected(app_mod, tmp_path, hostile_id):
+    """The session id is the only user-controlled value that reaches the
+    filesystem here (CodeQL "uncontrolled data in path expression"). Real ids
+    are `session-<uuid4>`, so anything outside the allowlist must be REFUSED —
+    not scrubbed into some neighbouring path. Refusing returns None, which the
+    caller treats as "no block to inject".
+    """
     victim = _session_dir(tmp_path, "victim")
     (victim / "assets" / "specs" / "secret_op.json").write_text("{}", encoding="utf-8")
 
-    out = app_mod._read_interview_state(hostile_id)
+    assert app_mod._session_base_dir(hostile_id) is None
+    assert app_mod._read_interview_state(hostile_id) is None
 
-    assert "secret_op" not in out
-    assert "⏳ Operation specs: none saved yet" in out
+
+@pytest.mark.parametrize(
+    "good_id",
+    [
+        "session-3f2b1c9a-7d4e-4a1b-9c8f-0e5d6a7b8c9d",  # the real shape
+        "test-1",
+        "abc_123",
+        "A" * 128,  # exactly at the length bound
+    ],
+)
+def test_legitimate_session_ids_are_accepted(app_mod, tmp_path, good_id):
+    """The allowlist must not be so tight that real sessions break — that would
+    silently disable the whole <interview_state> fix."""
+    base = app_mod._session_base_dir(good_id)
+    assert base is not None
+    assert base.name == good_id
+    assert base.parent.name == "sessions"
+
+
+def test_resolved_path_stays_inside_the_sessions_root(app_mod, tmp_path):
+    """Second, independent guarantee: whatever the allowlist admits must still
+    resolve inside <mount>/sessions. This is the backstop that keeps traversal
+    impossible even if the pattern is later loosened."""
+    sessions_root = (tmp_path / "sessions").resolve()
+    base = app_mod._session_base_dir("session-abc")
+    assert base is not None
+    assert sessions_root in base.parents
 
 
 def test_interview_state_is_injected_only_during_the_interview(app_mod):
