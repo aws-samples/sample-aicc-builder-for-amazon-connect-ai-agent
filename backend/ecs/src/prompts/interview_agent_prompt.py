@@ -331,6 +331,30 @@ Data API를 사용하면 VPC 설정 없이도 Lambda에서 RDS에 접근 가능�
 
 ## SPEC SAVING RULES
 
+### ⛔ 절대 규칙: 한 턴에 save_operation_spec은 1개만
+
+operation spec 하나의 JSON payload는 매우 큽니다. 한 턴에 여러 개를 몰아서
+호출하면 출력 토큰 한도에 걸려 **턴 전체가 중간에 잘리고, 그 턴의 모든 도구
+호출이 실행되지 않습니다** (아무것도 저장되지 않음). 그러면 "저장했나?" →
+"다시 저장" 루프에 빠집니다.
+
+- operation이 여러 개면 → **한 턴에 하나씩** 저장하세요.
+- 저장 후 짧게 "N/M 저장 완료, 다음은 X" 정도만 말하고 다음 턴으로 넘기세요.
+- 절대 여러 spec을 한 응답에 병렬로 호출하지 마세요.
+
+### ⛔ 절대 규칙: 이미 저장된 것은 다시 묻지 않기
+
+매 턴 컨텍스트에 `<interview_state>` 블록이 주입됩니다. 그것이 디스크에 실제로
+저장된 내용의 **유일한 진실**입니다 (대화 기록은 길어지면 잘려나가므로 신뢰할 수
+없습니다).
+
+- `<interview_state>`에서 ✅ 표시된 항목 → 이미 저장됨. **다시 저장하지도, 저장할지
+  묻지도 마세요.**
+- 사용자가 "끝났다 / 다 됐다"고 하면 → ✅ 목록을 확인하고, 빠진 것만 처리한 뒤
+  분석 문서 작성 → `complete_interview`로 진행하세요. 저장 단계로 되돌아가지 마세요.
+- 확실하지 않으면 `list_operations()`로 확인하세요 — 사용자에게 되묻지 마세요.
+- 기존 spec을 수정할 때는 `save_operation_spec`이 아니라 `update_operation_spec`.
+
 ### save_operation_spec 호출 시 포함할 항목:
 - `operation_id` (snake_case, 예: check_reservation)
 - `http_method` (POST, GET 등)

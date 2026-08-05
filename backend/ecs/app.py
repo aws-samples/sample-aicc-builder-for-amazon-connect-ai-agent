@@ -29,6 +29,7 @@ import time
 import traceback
 from typing import Optional, Dict, Any
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
@@ -1184,6 +1185,76 @@ def _sanitize_messages_for_agent(messages: list) -> list:
 
 
 # ========================================
+# Interview State — authoritative "what is already saved"
+# ========================================
+def _read_interview_state(session_id: str) -> Optional[str]:
+    """Summarize what the interview has ALREADY persisted, straight off NFS.
+
+    Why this exists: conversation history is pruned (MAX_HISTORY_MESSAGES) and
+    tool payloads are truncated (MAX_TOOL_INPUT_LENGTH / MAX_TOOL_RESULT_LENGTH),
+    so in a long interview the evidence that a spec was saved falls out of
+    context. A max_tokens truncation makes it worse: Strands rewrites the
+    toolUse blocks as "incomplete" text, so the record of the save disappears
+    entirely. The agent then re-asks "shall I save the specs?" and re-saves the
+    same specs in a loop.
+
+    The files on NFS are the ground truth, so read them directly and inject the
+    result each turn. Mirrors the `<generation_state>` block that already does
+    this for the generation phase.
+    """
+    safe_id = session_id.replace("..", "_").replace("/", "_").replace("\\", "_")
+    base = Path(S3FILES_MOUNT) / "sessions" / safe_id
+    lines: list[str] = []
+
+    # Operation specs → assets/specs/{op_id}.json
+    try:
+        specs_dir = base / "assets" / "specs"
+        spec_ids = sorted(
+            p.stem for p in specs_dir.iterdir()
+            if p.is_file() and p.suffix == ".json" and p.stem != "infrastructure_spec"
+        ) if specs_dir.is_dir() else []
+    except Exception:
+        spec_ids = []
+    if spec_ids:
+        lines.append(f"✅ Operation specs SAVED ({len(spec_ids)}): {', '.join(spec_ids)}")
+    else:
+        lines.append("⏳ Operation specs: none saved yet")
+
+    # Session-level artifacts → state/*.json
+    state_dir = base / "state"
+    for filename, label in (
+        ("infrastructure_spec.json", "Infrastructure spec"),
+        ("flow_config.json", "Session flow config"),
+    ):
+        try:
+            exists = (state_dir / filename).is_file()
+        except Exception:
+            exists = False
+        lines.append(f"{'✅' if exists else '⏳'} {label}: {'SAVED' if exists else 'not saved yet'}")
+
+    # Requirement documents → state/requirements/{doc_type}.txt
+    try:
+        req_dir = state_dir / "requirements"
+        docs = sorted(p.stem for p in req_dir.iterdir() if p.is_file()) if req_dir.is_dir() else []
+    except Exception:
+        docs = []
+    if docs:
+        lines.append(f"✅ Requirement documents SAVED: {', '.join(docs)}")
+    else:
+        lines.append("⏳ Requirement documents: none saved yet")
+
+    # Interview handoff marker (complete_interview already called?)
+    try:
+        handoff = check_interview_handoff(session_id) is not None
+    except Exception:
+        handoff = False
+    if handoff:
+        lines.append("✅ complete_interview: ALREADY CALLED (interview is finished)")
+
+    return "\n".join(lines) if lines else None
+
+
+# ========================================
 # Health Check
 # ========================================
 @app.get("/ping")
@@ -2159,6 +2230,37 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     ui_language = message.get("language", "ko-KR")
     context_prefix = f'[Session: session_id="{effective_session_id}" language="{ui_language}"]'
 
+    # Interview phase: inject the authoritative list of already-saved specs.
+    # Read from NFS, not from conversation memory — history gets pruned and tool
+    # payloads truncated, and a max_tokens truncation erases toolUse records
+    # entirely, which is what made the agent re-ask "shall I save the specs?"
+    # and save the same specs over and over.
+    interview_state_block = ""
+    if current_phase == "interview":
+        try:
+            interview_state = _read_interview_state(effective_session_id)
+            if interview_state:
+                interview_state_block = (
+                    "\n<interview_state>\n"
+                    "Authoritative record of what is ALREADY PERSISTED on disk for this\n"
+                    "session. Trust this over conversation memory — the chat log is pruned,\n"
+                    "so an earlier save may no longer appear above.\n"
+                    "⛔ Items marked ✅ are SAVED. Do NOT re-save them and do NOT ask the\n"
+                    "   user whether to save them again.\n"
+                    "⛔ Only call save_operation_spec for operations NOT in the saved list,\n"
+                    "   or when the user explicitly asks to change an existing one\n"
+                    "   (then prefer update_operation_spec).\n"
+                    "⛔ If everything needed is ✅ and the user says they are done, move on to\n"
+                    "   the analysis document / complete_interview — do not loop back to saving.\n"
+                    "⚠️ Emit ONE save_operation_spec call per turn. Batching several large spec\n"
+                    "   payloads into a single turn can hit the output token limit, which\n"
+                    "   silently discards ALL of them.\n\n"
+                    f"{interview_state}\n"
+                    "</interview_state>\n\n"
+                )
+        except Exception as iv_err:
+            logger.warning(f"[interview_state] read failed (non-critical): {iv_err}")
+
     # Structured Note-Taking: inject generation progress into context
     # This survives conversation history pruning and gives the orchestrator
     # full awareness of what has been generated/reviewed/fixed.
@@ -2220,7 +2322,10 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     except Exception as scope_err:
         logger.warning(f"[generation_scope] inject failed (non-critical): {scope_err}")
 
-    combined_state = f"{generation_state_block}{modification_state_block}{generation_scope_block}"
+    combined_state = (
+        f"{interview_state_block}{generation_state_block}"
+        f"{modification_state_block}{generation_scope_block}"
+    )
 
     if content_blocks:
         # Multimodal: prepend session context to the text block in content_blocks
