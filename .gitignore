@@ -38,6 +38,9 @@ content/
 .env
 .env.local
 .env.*.local
+# Backups of a generated .env.local still contain real Cognito/API identifiers.
+.env.local.bak
+.env*.bak
 
 # === Work in Progress ===
 
@@ -107,6 +110,15 @@ questionnaire/*.docx
 frontend/playwright-report/
 frontend/test-results/
 frontend/e2e/.auth/
+
+# The Playwright e2e harness stays LOCAL — it is not part of the published
+# sample. It drives our deployed dev environment and carries environment
+# specifics (URLs, saved Cognito state, transcripts of real runs) that must not
+# land in the public repo. Keep it out of git entirely rather than trying to
+# scrub it per-file.
+frontend/e2e/
+frontend/playwright.config.ts
+frontend/.env.e2e
 
 .e2e-tmp/
 
