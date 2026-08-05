@@ -307,3 +307,61 @@ def test_getparticipantinput_store_mode_strips_invalid_dtmf_and_errors():
     # only NoMatchingError remains
     types = {e["ErrorType"] for e in a["Transitions"]["Errors"]}
     assert types == {"NoMatchingError"}
+
+
+def _analytics_flow(language="ko-KR", redaction_enabled=True):
+    """A flow whose recording block asks for Contact Lens redaction."""
+    flow = _valid_flow()
+    vab = {
+        "Enabled": "True",
+        "AnalyticsModes": ["RealTime", "AutomatedInteraction"],
+        "SentimentConfiguration": {"Enabled": "True"},
+    }
+    if language is not None:
+        vab["AnalyticsLanguage"] = language
+    if redaction_enabled is not None:
+        vab["ConversationalAnalyticsRedactionConfiguration"] = {
+            "Enabled": "True" if redaction_enabled else "False",
+            "RedactionResults": "RedactedAndOriginal",
+            "RedactionEntities": ["ALL"],
+        }
+    flow["Actions"].insert(1, {
+        "Identifier": "rec", "Type": "UpdateContactRecordingAndAnalyticsBehavior",
+        "Parameters": {"VoiceBehavior": {
+            "VoiceRecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"]},
+            "VoiceAnalyticsBehavior": vab}},
+        "Transitions": {"NextAction": "end"}})
+    flow["Actions"][0]["Transitions"]["NextAction"] = "rec"
+    return flow
+
+
+def _voice_analytics(flow, identifier="rec"):
+    a, _ = _fixed_action(flow, identifier)
+    return a["Parameters"]["VoiceBehavior"]["VoiceAnalyticsBehavior"]
+
+
+def test_redaction_disabled_for_unsupported_analytics_language():
+    # ko-KR + redaction is rejected by CreateContactFlow, and the error names
+    # AnalyticsLanguage. The language is required, so redaction is what must go.
+    vab = _voice_analytics(_analytics_flow(language="ko-KR"))
+    assert vab["AnalyticsLanguage"] == "ko-KR"
+    assert vab["ConversationalAnalyticsRedactionConfiguration"] == {"Enabled": "False"}
+
+
+def test_redaction_kept_for_supported_analytics_language():
+    vab = _voice_analytics(_analytics_flow(language="en-US"))
+    assert vab["AnalyticsLanguage"] == "en-US"
+    assert vab["ConversationalAnalyticsRedactionConfiguration"]["Enabled"] == "True"
+
+
+def test_missing_analytics_language_is_added():
+    # AnalyticsLanguage is required whenever analytics is enabled; without it the
+    # API fails with "Action is missing required property".
+    vab = _voice_analytics(_analytics_flow(language=None, redaction_enabled=False))
+    assert vab["AnalyticsLanguage"]
+
+
+def test_redaction_already_disabled_is_left_alone():
+    flow = _analytics_flow(language="ko-KR", redaction_enabled=False)
+    vab = _voice_analytics(flow)
+    assert vab["ConversationalAnalyticsRedactionConfiguration"]["Enabled"] == "False"

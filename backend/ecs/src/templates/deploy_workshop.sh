@@ -1965,11 +1965,49 @@ import sys, json, re
 problems = '''$RESULT'''
 path = sys.argv[1]
 d = json.load(open(path))
-# Invalid Action property name. Path: Actions[i].Parameters.X -> drop that parameter
-for m in re.finditer(r'Actions\[(\d+)\]\.Parameters\.([A-Za-z]+)', problems):
-    idx, prop = int(m.group(1)), m.group(2)
-    if idx < len(d['Actions']):
-        d['Actions'][idx]['Parameters'].pop(prop, None)
+
+# Redaction/language conflict. Contact Lens real-time redaction is only offered
+# for some languages; requesting it with any other AnalyticsLanguage is rejected
+# with a message that blames AnalyticsLanguage, not the redaction block. Deleting
+# the language then yields "missing required property" (it IS required), so the
+# generic rules below can never converge — handle it explicitly, first.
+# Verified against CreateContactFlow (2026-08-06): en-US + redaction passes,
+# ko-KR + redaction fails, ko-KR without redaction passes.
+REDACTION_OK = {'en-US','en-GB','en-AU','en-IN','es-US','fr-CA','fr-FR','de-DE','it-IT','pt-BR'}
+if 'AnalyticsLanguage' in problems:
+    for a in d.get('Actions', []):
+        vab = ((a.get('Parameters') or {}).get('VoiceBehavior') or {}).get('VoiceAnalyticsBehavior')
+        if not isinstance(vab, dict):
+            continue
+        red = vab.get('ConversationalAnalyticsRedactionConfiguration')
+        if isinstance(red, dict) and str(red.get('Enabled','')).lower() == 'true' \
+           and str(vab.get('AnalyticsLanguage','')) not in REDACTION_OK:
+            vab['ConversationalAnalyticsRedactionConfiguration'] = {'Enabled': 'False'}
+
+# Generic: drop the property the API called invalid. Two things matter here.
+#  1. Delete the LEAF named in the path, not the top-level branch. The old code
+#     matched only the first path segment, so a complaint about
+#     Parameters.VoiceBehavior.VoiceAnalyticsBehavior.AnalyticsLanguage deleted
+#     the whole VoiceBehavior and left Parameters {} — itself invalid, turning a
+#     fixable flow into an unfixable one.
+#  2. Only act on "Invalid ..." problems. For "missing required property",
+#     deleting things is exactly backwards.
+for pm in re.finditer(r'(Invalid Action property (?:value|name)|Action is missing required property)\.\s*Path:\s*Actions\[(\d+)\]\.Parameters((?:\.[A-Za-z0-9_]+)*)', problems):
+    kind, idx, rest = pm.group(1), int(pm.group(2)), pm.group(3)
+    if kind.startswith('Action is missing') or idx >= len(d.get('Actions', [])):
+        continue
+    segs = [s for s in rest.split('.') if s]
+    if not segs:
+        continue  # "Parameters" itself — nothing safe to delete generically
+    node = d['Actions'][idx].get('Parameters')
+    for s in segs[:-1]:
+        if not isinstance(node, dict):
+            node = None
+            break
+        node = node.get(s)
+    if isinstance(node, dict):
+        node.pop(segs[-1], None)
+
 json.dump(d, open(path, 'w'), ensure_ascii=False, indent=1)
 PYEOF
         attempt=$((attempt+1))

@@ -332,6 +332,8 @@ export const MessageBubble = memo(function MessageBubble({ message }: MessageBub
         'flex animate-fade-in',
         isUser ? 'justify-end' : 'justify-start'
       )}
+      data-testid="chat-message"
+      data-role={message.role}
     >
       <div
         className={cn(
@@ -617,7 +619,7 @@ function ToolCallBubble({ message }: MessageBubbleProps) {
   const toolSummary = getToolSummary(toolCall.tool, toolCall.input, toolCall.result);
 
   return (
-    <div className="flex justify-start animate-fade-in">
+    <div className="flex justify-start animate-fade-in" data-testid="tool-message">
       <div
         className={cn(
           'max-w-[80%] rounded-2xl px-4 py-3 border',

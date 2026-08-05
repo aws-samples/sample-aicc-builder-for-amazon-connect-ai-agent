@@ -1809,6 +1809,60 @@ CloudFormation, Lambda, and OpenAPI, each operation MUST include these fields:
      Same for length/pattern/format: the field's constraints travel with the
      field wherever it appears.
 
+7. **🚨 `error_responses[].status_code` is ALWAYS 200 for business outcomes**
+   (BUSINESS_OUTCOME_200_RULE — this spec field is what every generator reads).
+
+   An Amazon Connect AI agent treats **any non-2xx tool response as an execution
+   failure**: it never reads the body, so it cannot tell the customer what
+   happened — it just says there is a problem with the tool and the turn is lost.
+
+   So a *business outcome* is never an HTTP error. When you record an
+   `error_responses` entry for any outcome the AI agent must SPEAK ABOUT, set
+   `status_code: 200` and put the outcome in the body via `error_code`:
+
+   | Outcome the customer hears about | `status_code` | `error_code` |
+   |---|---|---|
+   | auth digits / SSN / PIN mismatch | **200** | `UNAUTHORIZED` |
+   | record / reservation not found | **200** | `NOT_FOUND` |
+   | too many attempts, locked out | **200** | `RATE_LIMITED` |
+   | date unavailable, seat taken | **200** | `CONFLICT` / `DATE_UNAVAILABLE` |
+   | missing or invalid input the customer can supply | **200** | `VALIDATION_ERROR` |
+   | unhandled exception, database down | 500 | `INTERNAL_ERROR` |
+
+   `500` is the ONLY status that stays non-2xx (Connect retries 5xx, which is
+   correct for a transient fault).
+
+   Also make sure `output_fields` includes an explicit **discriminator** the model
+   can branch on — `verified`, `found`, `available`, `success` or `status` — plus a
+   customer-readable `message`. Without it a 200 cannot express "failed", and the
+   agent cannot tell a negative outcome from a positive one.
+
+   ```python
+   # ✅ authentication operation: the failure modes are 200 + a discriminator
+   save_operation_spec(
+       operation_id="verifyCaller",
+       output_fields=[
+           {"name": "verified", "type": "boolean"},        # ← discriminator
+           {"name": "remainingAttempts", "type": "number"},
+           {"name": "lockout", "type": "boolean"},
+           {"name": "message", "type": "string"},
+       ],
+       error_responses=[
+           {"status_code": 200, "error_code": "UNAUTHORIZED",
+            "message": "The digits provided do not match our records.",
+            "condition": "lastFourDigits mismatch"},
+           {"status_code": 200, "error_code": "RATE_LIMITED",
+            "message": "Too many attempts — transferring you to an agent.",
+            "condition": "attempts >= 3"},
+           {"status_code": 500, "error_code": "INTERNAL_ERROR",
+            "message": "Internal error", "condition": "unhandled exception"},
+       ],
+   )
+   ```
+
+   ❌ Never write `{"status_code": 403, "error_code": "UNAUTHORIZED"}` — that is
+   the exact drift that makes a working Lambda look like a broken tool.
+
 ### Example: Calling Infrastructure Generator (Recommended)
 ```python
 # After interview is complete, generate complete CloudFormation template

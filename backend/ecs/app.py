@@ -29,6 +29,7 @@ import time
 import traceback
 from typing import Optional, Dict, Any
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
@@ -39,6 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from strands import Agent
 from strands.models import BedrockModel
+from strands.types.exceptions import MaxTokensReachedException
 from botocore.config import Config as BotocoreConfig
 
 # Import shared modules from src/
@@ -485,6 +487,31 @@ async def validate_cognito_token(token: str) -> Optional[Dict]:
 # ========================================
 # Model Configuration (same as AgentCore)
 # ========================================
+# Output token budget for the ORCHESTRATOR.
+#
+# ⚠️ This MUST be set explicitly. Strands omits `maxTokens` from
+# `inferenceConfig` when `max_tokens` is None, and Bedrock's default in that
+# case is only **4096** output tokens (verified live against
+# global.anthropic.claude-opus-4-8 in ap-northeast-2: omitting maxTokens with a
+# long-output prompt returns stopReason=max_tokens at outputTokens=4096).
+#
+# 4096 is far too small for the orchestrator: a single `save_operation_spec`
+# toolUse payload can exceed it, and an interview turn that saves several specs
+# is truncated mid-toolUse. Strands then replaces EVERY toolUse in that turn
+# with "tool use was incomplete due to maximum token limits being reached",
+# so the saves never register in history and the agent asks to save again —
+# the repeated-spec-saving loop.
+#
+# 128000 is the hard model ceiling (Bedrock rejects 128001 with "exceeds the
+# model limit of 128000") for Opus 4.6/4.7/4.8/5. Sub-agents in
+# `agents/agent_pool.py` already use 128000; the orchestrator emits chat text
+# plus tool inputs rather than whole files, so 64000 gives ~16x headroom over
+# the old effective budget while keeping a sane cutoff.
+ORCHESTRATOR_MAX_TOKENS = min(
+    int(os.environ.get("ORCHESTRATOR_MAX_TOKENS", "64000")), 128000
+)
+
+
 def get_model_config(model_id: Optional[str] = None):
     # Orchestrator model follows the per-request/persisted selection.
     # No temperature is passed (orchestrator never set one), so the
@@ -494,6 +521,7 @@ def get_model_config(model_id: Optional[str] = None):
     kwargs = build_model_kwargs(
         model_id,
         region_name=AWS_REGION,
+        max_tokens=ORCHESTRATOR_MAX_TOKENS,
         boto_client_config=BotocoreConfig(
             read_timeout=300,
             retries={"max_attempts": 3, "mode": "adaptive"},
@@ -1154,6 +1182,123 @@ def _sanitize_messages_for_agent(messages: list) -> list:
     sanitized = [m for m in sanitized if m and m.get("content")]
 
     return sanitized
+
+
+# ========================================
+# Interview State — authoritative "what is already saved"
+# ========================================
+# Session ids are minted by the frontend as `session-<uuid4>` and are the only
+# user-controlled value that reaches the filesystem here. Validate against an
+# ALLOWLIST rather than stripping bad characters: a blocklist has to anticipate
+# every encoding (".." , "%2e%2e", "....//", backslashes, NUL) whereas this
+# rejects anything that isn't a plain id outright.
+_SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _is_safe_session_id(session_id: str) -> bool:
+    """True only for ids that look like a real session id."""
+    return bool(session_id) and bool(_SAFE_SESSION_ID.match(session_id))
+
+
+def _session_base_dir(session_id: str) -> Optional[Path]:
+    """The on-NFS directory for a session, or None if it isn't there (yet).
+
+    The path is never built by concatenating the caller's string. The id is
+    matched against the allowlist and then looked up among the directory entries
+    that ACTUALLY exist under <mount>/sessions, and the returned Path comes from
+    that listing. So the only reachable values are real children of the sessions
+    root — traversal is impossible by construction rather than by
+    after-the-fact validation, which also means no user-controlled string ever
+    flows into a filesystem path (CodeQL py/path-injection).
+
+    Returns None both for an unsafe id and for a session whose directory doesn't
+    exist yet (the first interview turn) — callers treat both as "nothing saved".
+    """
+    if not _is_safe_session_id(session_id):
+        logger.warning("[interview_state] rejected unsafe session id: %r", session_id)
+        return None
+    sessions_root = Path(S3FILES_MOUNT) / "sessions"
+    try:
+        for entry in sessions_root.iterdir():
+            if entry.name == session_id and entry.is_dir():
+                return entry
+    except OSError as e:
+        logger.warning("[interview_state] cannot list sessions root: %s", e)
+    return None
+
+
+def _read_interview_state(session_id: str) -> Optional[str]:
+    """Summarize what the interview has ALREADY persisted, straight off NFS.
+
+    Why this exists: conversation history is pruned (MAX_HISTORY_MESSAGES) and
+    tool payloads are truncated (MAX_TOOL_INPUT_LENGTH / MAX_TOOL_RESULT_LENGTH),
+    so in a long interview the evidence that a spec was saved falls out of
+    context. A max_tokens truncation makes it worse: Strands rewrites the
+    toolUse blocks as "incomplete" text, so the record of the save disappears
+    entirely. The agent then re-asks "shall I save the specs?" and re-saves the
+    same specs in a loop.
+
+    The files on NFS are the ground truth, so read them directly and inject the
+    result each turn. Mirrors the `<generation_state>` block that already does
+    this for the generation phase.
+    """
+    # An unsafe id gets nothing at all. A safe id whose directory doesn't exist
+    # yet (first turn) still gets the block: the ⏳ lines and the accompanying
+    # rules are exactly what's needed while the first specs are being saved.
+    if not _is_safe_session_id(session_id):
+        logger.warning("[interview_state] rejected unsafe session id: %r", session_id)
+        return None
+    base = _session_base_dir(session_id)
+    lines: list[str] = []
+
+    # Operation specs → assets/specs/{op_id}.json
+    try:
+        specs_dir = (base / "assets" / "specs") if base is not None else None
+        spec_ids = sorted(
+            p.stem for p in specs_dir.iterdir()
+            if p.is_file() and p.suffix == ".json" and p.stem != "infrastructure_spec"
+        ) if specs_dir is not None and specs_dir.is_dir() else []
+    except Exception:
+        spec_ids = []
+    if spec_ids:
+        lines.append(f"✅ Operation specs SAVED ({len(spec_ids)}): {', '.join(spec_ids)}")
+    else:
+        lines.append("⏳ Operation specs: none saved yet")
+
+    # Session-level artifacts → state/*.json
+    state_dir = (base / "state") if base is not None else None
+    for filename, label in (
+        ("infrastructure_spec.json", "Infrastructure spec"),
+        ("flow_config.json", "Session flow config"),
+    ):
+        try:
+            exists = state_dir is not None and (state_dir / filename).is_file()
+        except Exception:
+            exists = False
+        lines.append(f"{'✅' if exists else '⏳'} {label}: {'SAVED' if exists else 'not saved yet'}")
+
+    # Requirement documents → state/requirements/{doc_type}.txt
+    try:
+        req_dir = (state_dir / "requirements") if state_dir is not None else None
+        docs = sorted(
+            p.stem for p in req_dir.iterdir() if p.is_file()
+        ) if req_dir is not None and req_dir.is_dir() else []
+    except Exception:
+        docs = []
+    if docs:
+        lines.append(f"✅ Requirement documents SAVED: {', '.join(docs)}")
+    else:
+        lines.append("⏳ Requirement documents: none saved yet")
+
+    # Interview handoff marker (complete_interview already called?)
+    try:
+        handoff = check_interview_handoff(session_id) is not None
+    except Exception:
+        handoff = False
+    if handoff:
+        lines.append("✅ complete_interview: ALREADY CALLED (interview is finished)")
+
+    return "\n".join(lines) if lines else None
 
 
 # ========================================
@@ -2132,6 +2277,37 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     ui_language = message.get("language", "ko-KR")
     context_prefix = f'[Session: session_id="{effective_session_id}" language="{ui_language}"]'
 
+    # Interview phase: inject the authoritative list of already-saved specs.
+    # Read from NFS, not from conversation memory — history gets pruned and tool
+    # payloads truncated, and a max_tokens truncation erases toolUse records
+    # entirely, which is what made the agent re-ask "shall I save the specs?"
+    # and save the same specs over and over.
+    interview_state_block = ""
+    if current_phase == "interview":
+        try:
+            interview_state = _read_interview_state(effective_session_id)
+            if interview_state:
+                interview_state_block = (
+                    "\n<interview_state>\n"
+                    "Authoritative record of what is ALREADY PERSISTED on disk for this\n"
+                    "session. Trust this over conversation memory — the chat log is pruned,\n"
+                    "so an earlier save may no longer appear above.\n"
+                    "⛔ Items marked ✅ are SAVED. Do NOT re-save them and do NOT ask the\n"
+                    "   user whether to save them again.\n"
+                    "⛔ Only call save_operation_spec for operations NOT in the saved list,\n"
+                    "   or when the user explicitly asks to change an existing one\n"
+                    "   (then prefer update_operation_spec).\n"
+                    "⛔ If everything needed is ✅ and the user says they are done, move on to\n"
+                    "   the analysis document / complete_interview — do not loop back to saving.\n"
+                    "⚠️ Emit ONE save_operation_spec call per turn. Batching several large spec\n"
+                    "   payloads into a single turn can hit the output token limit, which\n"
+                    "   silently discards ALL of them.\n\n"
+                    f"{interview_state}\n"
+                    "</interview_state>\n\n"
+                )
+        except Exception as iv_err:
+            logger.warning(f"[interview_state] read failed (non-critical): {iv_err}")
+
     # Structured Note-Taking: inject generation progress into context
     # This survives conversation history pruning and gives the orchestrator
     # full awareness of what has been generated/reviewed/fixed.
@@ -2193,7 +2369,10 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     except Exception as scope_err:
         logger.warning(f"[generation_scope] inject failed (non-critical): {scope_err}")
 
-    combined_state = f"{generation_state_block}{modification_state_block}{generation_scope_block}"
+    combined_state = (
+        f"{interview_state_block}{generation_state_block}"
+        f"{modification_state_block}{generation_scope_block}"
+    )
 
     if content_blocks:
         # Multimodal: prepend session context to the text block in content_blocks
@@ -2275,9 +2454,27 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                     tool_name = tool_use.get("name", "")
                     tool_use_id = tool_use.get("toolUseId", "")
 
+                    # Strands streams the tool arguments as a PARTIAL JSON STRING and
+                    # only json.loads() it at content_block_stop (see
+                    # strands/event_loop/streaming.py: current_tool_use["input"] starts
+                    # as "" and is +='d per delta). So during streaming this is a str,
+                    # not a dict — an isinstance(..., dict) guard here silently drops
+                    # every input, leaving tool_inputs empty and the UI with no
+                    # operation name on its tool cards. Accept both shapes: keep the
+                    # dict when it finally arrives, and parse the string opportunistically
+                    # (a fragment simply fails to parse and is skipped, so the last
+                    # successful parse wins — which is the complete object).
                     tool_input = tool_use.get("input", {})
-                    if tool_use_id and isinstance(tool_input, dict) and tool_input:
-                        tool_inputs[tool_use_id] = tool_input
+                    if tool_use_id and tool_input:
+                        if isinstance(tool_input, dict):
+                            tool_inputs[tool_use_id] = tool_input
+                        elif isinstance(tool_input, str):
+                            try:
+                                parsed = json.loads(tool_input)
+                                if isinstance(parsed, dict) and parsed:
+                                    tool_inputs[tool_use_id] = parsed
+                            except (ValueError, TypeError):
+                                pass  # still a partial fragment — wait for more deltas
 
                     if tool_use_id and tool_use_id not in tool_invocations_started:
                         tool_invocations_started.add(tool_use_id)
@@ -2295,7 +2492,13 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                             "type": "tool_start",
                             "tool": tool_name,
                             "toolUseId": tool_use_id,
-                            "input": tool_input,
+                            # Always a dict (possibly empty), never the raw partial
+                            # JSON string: the client does Object.keys(input), which on
+                            # a string yields char indices — that renders a tool card
+                            # with a garbled char-by-char "input". tool_start fires on
+                            # the first delta, so this is usually {} and gets filled in
+                            # by the throttled tool_status/tool_end updates.
+                            "input": tool_inputs.get(tool_use_id, {}),
                         })
 
                 # ToolResultMessageEvent
@@ -2445,6 +2648,57 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                 "message": "생성이 취소됐어요.",
             })
             raise
+        except MaxTokensReachedException as e:
+            # The turn was cut off mid-toolUse because the model hit its output
+            # cap. Strands has already replaced every toolUse block in that
+            # assistant message with "tool use was incomplete…" text, so those
+            # tool calls did NOT execute — nothing was saved.
+            #
+            # Surface this as an actionable notice instead of a raw stack-trace
+            # error, and tell the agent (via the persisted history) exactly what
+            # happened so the next turn splits the work instead of retrying the
+            # same oversized batch. Without this the agent re-asks "should I save
+            # the specs?" and re-saves in a loop.
+            logger.warning(
+                f"[BG] max_tokens reached for {session_id} "
+                f"(cap={ORCHESTRATOR_MAX_TOKENS}): {e}"
+            )
+            await safe_send_or_log({
+                "type": "max_tokens_truncated",
+                "content": (
+                    "응답이 출력 토큰 한도에 도달해서 중간에 끊겼어요. "
+                    "직전 도구 호출은 실행되지 않았습니다 — 저장된 내용은 없어요. "
+                    "이어서 진행하려면 '계속'이라고 말씀해 주세요 (한 번에 하나씩 나눠서 처리합니다)."
+                ),
+            })
+            try:
+                partial = _extract_new_messages(streaming_agent.messages, pre_stream_message_count)
+                if partial:
+                    try:
+                        _update_generation_progress(effective_session_id, partial)
+                    except Exception:
+                        pass
+                    # Leave an explicit breadcrumb so the next turn's context
+                    # states that the truncated tool calls never ran.
+                    partial.append({
+                        "role": "user",
+                        "content": [{"text": (
+                            "[System] The previous assistant turn was truncated at the output "
+                            "token limit. Any tool calls in that turn did NOT execute — nothing "
+                            "was saved by them. Do NOT assume they succeeded, and do NOT ask the "
+                            "user to re-confirm work that was already saved in EARLIER turns. "
+                            "Verify current state with list_operations() / get_all_tool_ids() "
+                            "first, then emit ONE tool call per turn to finish the remaining work."
+                        )}],
+                    })
+                    session["conversation_history"].extend(partial)
+                    session["conversation_history"] = _prune_conversation_history(
+                        session["conversation_history"], max_messages=MAX_HISTORY_MESSAGES
+                    )
+                    _context_store.save_conversation_history(session_id, session["conversation_history"])
+            except Exception as save_err:
+                logger.error(f"[BG] Failed to save history after max_tokens for {session_id}: {save_err}")
+            await safe_send_or_log({"type": "stream_end"})
         except Exception as e:
             logger.error(f"[BG] Streaming error for {session_id}: {e}\n{traceback.format_exc()}")
             await safe_send_or_log({"type": "error", "content": str(e)})
@@ -2851,8 +3105,40 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
     partial run) and ``model`` (one of the allowlisted Bedrock ids) chosen on the
     start screen. Both are persisted to NFS so detect_phase / the phase prompt /
     every BedrockModel construction reason about the right values from turn one.
+
+    NEVER purge state while an agent task is running for this session. The
+    frontend fires createNewSession on reconnect-with-no-history (useWebSocket.ts),
+    and on a WS flap right after the kickoff message that arrives mid-turn: the
+    agent is already streaming, and clear_all_specs()/cleanup_session() would drop
+    its ProjectWorkspace out from under it. Every later workspace-mediated write in
+    that turn then fails — save_requirement_document returns
+    "Workspace not initialised (no session)" and the S3 backup of specs/state is
+    silently skipped (observed on prod 2026-08-05: the NFS fast-path still wrote,
+    so nothing looked broken until the analysis document failed to save).
     """
     data = data or {}
+
+    # A running agent owns this session's state — reset would yank it mid-turn.
+    async with _background_tasks_lock:
+        _bg = _background_tasks.get(session_id)
+        _bg_running = bool(_bg and not _bg["task"].done())
+    if _bg_running:
+        logger.warning(
+            f"[createNewSession] ignored for {session_id}: an agent task is still "
+            "running; keeping the live workspace/specs instead of resetting."
+        )
+        _eff_live = session_store.get(session_id, {}).get("session_data", {}).get("original_session_id", session_id) \
+            if isinstance(session_store.get(session_id), dict) else session_id
+        _live_scope = _get_generation_scope(_eff_live)
+        await safe_send_json(websocket, {
+            "type": "session_created",
+            "sessionId": session_id,
+            "phase": _detect_phase(session_id),
+            "scope": [] if set(_live_scope) >= set(_FULL_ASSET_SET) else _live_scope,
+            "selectedModel": _get_selected_model(_eff_live) or resolve_model_id(),
+        })
+        return
+
     if session_id in session_store:
         # Flush before clearing
         try:

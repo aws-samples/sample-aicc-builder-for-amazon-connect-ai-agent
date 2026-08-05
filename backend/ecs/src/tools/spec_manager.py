@@ -29,6 +29,36 @@ from tools.session_context import (
 logger = logging.getLogger(__name__)
 
 
+def _gsi_name_list(gsi) -> list[str]:
+    """GSI index names, whatever shape gsi_indexes happens to be in.
+
+    DataSourceSpec normalizes this on the way in, but specs already persisted to
+    NFS can hold the raw shape, so every reader goes through here.
+
+    The trap: ``for g in gsi_indexes`` over a bare string iterates CHARACTERS, so
+    "phone-index" renders as "p, h, o, n, e, -, i, n, d, e, x" (seen on prod
+    2026-08-05). A string is therefore treated as one name — or as a
+    comma-separated list of names — never as a sequence of characters.
+    """
+    if not gsi:
+        return []
+    if isinstance(gsi, str):
+        return [p.strip() for p in gsi.split(",") if p.strip()]
+    if isinstance(gsi, dict):
+        gsi = [gsi]
+    names: list[str] = []
+    for g in gsi:
+        if isinstance(g, dict):
+            names.append(str(g.get("name") or g.get("index_name") or "?"))
+        elif isinstance(g, str):
+            names.append(g)
+        elif hasattr(g, "name"):
+            names.append(str(getattr(g, "name", "?")))
+        else:
+            names.append(str(g))
+    return names
+
+
 class FlexibleBaseModel(BaseModel):
     """
     Base model with flexible configuration for LLM compatibility.
@@ -171,13 +201,43 @@ class BusinessRule(FlexibleBaseModel):
 
 
 class ErrorResponse(FlexibleBaseModel):
-    """Specification for an error response."""
+    """Specification for an error response.
+
+    NOTE on ``status_code``: an Amazon Connect AI agent treats any non-2xx tool
+    response as an execution failure — it never reads the body, so it cannot relay
+    the outcome and simply reports that the tool is broken. Business outcomes are
+    therefore coerced to 200 here (BUSINESS_OUTCOME_200_RULE); only 5xx, a genuine
+    fault Connect should retry, is preserved.
+    """
 
     status_code: Optional[int] = Field(
         default=None,
-        description="HTTP status code",
+        description="HTTP status code (business outcomes are always 200; only 5xx faults differ)",
         validation_alias=AliasChoices("status_code", "statusCode", "status", "code")
     )
+
+    @field_validator("status_code", mode="before")
+    @classmethod
+    def _coerce_business_outcome_to_200(cls, v):
+        """Rewrite a 4xx business outcome to 200.
+
+        The orchestrator prompt already says to record 200, but the spec is what
+        every downstream generator reads, so the invariant is enforced here rather
+        than trusted. Non-int values are passed through untouched for Pydantic's
+        own error reporting.
+        """
+        try:
+            code = int(v)
+        except (TypeError, ValueError):
+            return v
+        if 400 <= code < 500:
+            logger.warning(
+                f"[SPEC] error_responses.status_code {code} → 200: a business outcome "
+                "must be 2xx or the Connect AI agent reads it as a tool failure "
+                "(BUSINESS_OUTCOME_200_RULE)"
+            )
+            return 200
+        return code
     error_code: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("error_code", "errorCode")
@@ -268,6 +328,35 @@ class DataSourceSpec(FlexibleBaseModel):
     )
     connection_secret_arn: Optional[str] = Field(default=None)
     region: Optional[str] = Field(default=None)
+
+    @field_validator("gsi_indexes", mode="before")
+    @classmethod
+    def _coerce_gsi_indexes(cls, v):
+        """Accept a bare string / dict for gsi_indexes and wrap it in a list.
+
+        Found on prod 2026-08-05: the model sometimes passes a single index as a
+        plain string ("phone-index") rather than a list. `Optional[list]` allows a
+        str through (a str IS iterable), and every reader does
+        ``for g in gsi_indexes`` — which iterates a string CHARACTER BY CHARACTER
+        and renders "p, h, o, n, e, -, i, n, d, e, x". The agent noticed this in
+        its own summary and "corrected" a spec that was never actually wrong.
+
+        Normalizing here fixes all readers at once instead of hardening each
+        loop, and keeps what's stored on disk in one predictable shape.
+        """
+        if v is None or isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            # "phone-index, reservation-index" → two entries.
+            return [{"name": part.strip()} for part in s.split(",") if part.strip()]
+        if isinstance(v, dict):
+            return [v]
+        if isinstance(v, tuple):
+            return list(v)
+        return v
 
 
 class ToolSpec(FlexibleBaseModel):
@@ -882,10 +971,9 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
         table = getattr(ds, 'table_name', None) or '?'
         pk = getattr(ds, 'partition_key', None) or '?'
         lines += ["", "### Data Source", f"- Table: `{table}` (PK: `{pk}`)"]
-        gsi = getattr(ds, 'gsi_indexes', None) or []
+        gsi = _gsi_name_list(getattr(ds, 'gsi_indexes', None))
         if gsi:
-            gsi_names = [g.get('name', '?') if isinstance(g, dict) else str(g) for g in gsi]
-            lines.append(f"- GSI: {', '.join(gsi_names)}")
+            lines.append(f"- GSI: {', '.join(gsi)}")
 
     # Business rules
     if spec.business_rules:
@@ -1214,8 +1302,8 @@ def save_operation_spec(
         if sid:
             _nfs_persist_spec(sid, operation_id, spec.model_dump())
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 ws.save_spec(operation_id, spec.model_dump())
         except Exception as e:
@@ -1303,8 +1391,8 @@ def get_operation_spec(operation_id: str) -> dict:
 
         # S3 fallback (A2)
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 spec_dict = ws.load_spec(operation_id)
                 if spec_dict:
@@ -1374,8 +1462,8 @@ def get_all_specs() -> dict[str, OperationSpec]:
         # S3 fallback if still empty
         if not _specs_bucket():
             try:
-                from tools.project_workspace import get_workspace
-                ws = get_workspace()
+                from tools.project_workspace import ensure_workspace
+                ws = ensure_workspace()
                 if ws:
                     all_dicts = ws.load_all_specs()
                     for op_id, spec_dict in all_dicts.items():
@@ -1528,8 +1616,8 @@ def restore_specs_from_workspace():
 
     # S3 fallback for any missing specs
     try:
-        from tools.project_workspace import get_workspace
-        ws = get_workspace()
+        from tools.project_workspace import ensure_workspace
+        ws = ensure_workspace()
         if ws:
             all_dicts = ws.load_all_specs()
             s3_restored = 0
@@ -1572,8 +1660,8 @@ def update_operation_spec(
     # Load existing spec (memory first, then S3 fallback)
     if operation_id not in _specs_bucket():
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 spec_dict = ws.load_spec(operation_id)
                 if spec_dict:
@@ -1632,8 +1720,8 @@ def update_operation_spec(
         if sid:
             _nfs_persist_spec(sid, operation_id, updated_spec.model_dump())
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 ws.save_spec(operation_id, updated_spec.model_dump())
         except Exception as e:
@@ -1676,8 +1764,8 @@ def format_operation_summary() -> dict:
     # Ensure specs are loaded from S3 if memory is empty
     if not _specs_bucket():
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 all_dicts = ws.load_all_specs()
                 for op_id, spec_dict in all_dicts.items():
@@ -1710,15 +1798,7 @@ def format_operation_summary() -> dict:
         if ds:
             table = getattr(ds, "table_name", None) or "?"
             pk = getattr(ds, "partition_key", None) or "?"
-            gsi_list = getattr(ds, "gsi_indexes", None) or []
-            gsi_names = []
-            for g in gsi_list:
-                if isinstance(g, dict):
-                    gsi_names.append(g.get("name", "?"))
-                elif hasattr(g, "name"):
-                    gsi_names.append(getattr(g, "name", "?"))
-                else:
-                    gsi_names.append(str(g))
+            gsi_names = _gsi_name_list(getattr(ds, "gsi_indexes", None))
             gsi_str = ", ".join(gsi_names) if gsi_names else "none"
             ds_info = f"{table} (PK: {pk}, GSI: {gsi_str})"
 
@@ -1856,8 +1936,8 @@ def get_session_flow_config() -> Optional[SessionFlowConfig]:
         # S3 fallback
         if cfg is None:
             try:
-                from tools.project_workspace import get_workspace
-                ws = get_workspace()
+                from tools.project_workspace import ensure_workspace
+                ws = ensure_workspace()
                 if ws:
                     data = ws.load_flow_config()
                     if data:
@@ -1941,8 +2021,8 @@ def save_session_flow_config(
                 except Exception as e:
                     logger.warning(f"[SpecManager] NFS persist failed for flow config: {e}")
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 ws.save_flow_config(config.model_dump())
         except Exception as e:
@@ -2007,8 +2087,8 @@ def get_contact_flow_spec() -> Optional[ContactFlowSpec]:
         logger.warning(f"[SpecManager] NFS contact_flow_spec restore failed: {e}")
     # S3 fallback
     try:
-        from tools.project_workspace import get_workspace
-        ws = get_workspace()
+        from tools.project_workspace import ensure_workspace
+        ws = ensure_workspace()
         if ws and hasattr(ws, "_load_json"):
             data = ws._load_json(["contact_flow_spec.json"])
             if data:
@@ -2084,8 +2164,8 @@ def save_contact_flow_spec(
                 except Exception as e:
                     logger.warning(f"[SpecManager] NFS persist failed for contact_flow_spec: {e}")
             try:
-                from tools.project_workspace import get_workspace
-                ws = get_workspace()
+                from tools.project_workspace import ensure_workspace
+                ws = ensure_workspace()
                 if ws and hasattr(ws, "_save_json"):
                     ws._save_json(["contact_flow_spec.json"], spec.model_dump())
             except Exception as e:
@@ -2221,8 +2301,8 @@ def save_infrastructure_spec(
 
         # Persist to S3
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 ws.save_infrastructure_spec(spec_dict)
         except Exception as e:
@@ -2275,8 +2355,8 @@ def get_infrastructure_spec() -> Optional[InfrastructureSpec]:
         # S3 fallback
         if spec is None:
             try:
-                from tools.project_workspace import get_workspace
-                ws = get_workspace()
+                from tools.project_workspace import ensure_workspace
+                ws = ensure_workspace()
                 if ws:
                     data = ws.load_infrastructure_spec()
                     if data:
@@ -2379,8 +2459,8 @@ def restore_flow_config_from_workspace():
 
     # S3 fallback
     try:
-        from tools.project_workspace import get_workspace
-        ws = get_workspace()
+        from tools.project_workspace import ensure_workspace
+        ws = ensure_workspace()
         if ws:
             data = ws.load_flow_config()
             if data:

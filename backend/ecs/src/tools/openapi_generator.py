@@ -393,22 +393,13 @@ def _build_responses(op_spec: OperationSpec, success_schema_name: str) -> dict:
             }
         }
 
-    # Add standard error responses if not already present
-    if "400" not in responses:
-        responses["400"] = {
-            "description": "Bad request - validation error",
-            "content": {
-                "application/json": {
-                    "schema": error_schema
-                }
-            }
-        }
-
-    if "401" not in responses and op_spec.requires_authentication:
-        responses["401"] = {
-            "description": "Unauthorized - API key required"
-        }
-
+    # Deliberately NO 4xx entries here (BUSINESS_OUTCOME_200_RULE). An Amazon
+    # Connect AI agent reads any non-2xx as a tool execution failure — it never
+    # looks at the body — so declaring a 400/401 teaches the model to expect a
+    # failure it cannot relay to the customer. Business outcomes (validation,
+    # not-found, auth mismatch, conflict) are 200 with a discriminator in the
+    # body; ErrorResponse.status_code coerces them. Only 5xx stays non-2xx,
+    # because a genuine fault is exactly what Connect should retry.
     if "500" not in responses:
         responses["500"] = {
             "description": "Internal server error",

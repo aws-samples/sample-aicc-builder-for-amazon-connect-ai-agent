@@ -513,6 +513,158 @@ def lint_python_source(code: str) -> dict:
         return {"ok": False, "errors": [{"line": None, "message": str(e)[:120]}]}
 
 
+# An Amazon Connect AI agent treats any non-2xx tool response as an execution
+# failure: it never reads the body, so it cannot relay the outcome and just says
+# the tool is broken. Business outcomes ("digits didn't match", "not found",
+# "locked out", "date unavailable") MUST therefore be 200 with a discriminator in
+# the body. 5xx is left alone — a genuine fault, and Connect's retry is correct.
+# See BUSINESS_OUTCOME_200_RULE in agents/_consistency_rules.py.
+_BUSINESS_OUTCOME_4XX = range(400, 500)
+
+# A 200 body has to let the model tell outcomes apart without the status code.
+_DISCRIMINATOR_KEYS = frozenset({
+    "verified", "found", "success", "available", "status", "outcome", "lockout",
+    "eligible", "valid", "matched", "exists", "authenticated", "allowed",
+    "isvalid", "iseligible", "errorcode", "resultcode",
+})
+
+
+def _status_code_nodes(tree) -> list:
+    """Collect AST Constant nodes that are an HTTP status code in a response.
+
+    Two shapes, which are the only two the generators emit:
+      * ``create_response(4xx, {...})`` / ``..., status_code=4xx)`` — any callee
+        whose name ends in ``response`` (create_response, _response, make_response)
+      * a dict literal carrying ``"statusCode": 4xx`` (returned to API Gateway)
+
+    Returns a list of (const_node, body_node_or_None) so the caller can also
+    inspect the body that ships with the code.
+    """
+    import ast
+
+    found: list = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fname = ""
+            if isinstance(node.func, ast.Name):
+                fname = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                fname = node.func.attr
+            if not fname.lower().endswith("response"):
+                continue
+            body = node.args[1] if len(node.args) > 1 else None
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, int):
+                found.append((node.args[0], body))
+            for kw in node.keywords:
+                if kw.arg in ("status_code", "statusCode", "code") and \
+                        isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+                    found.append((kw.value, body))
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if not (isinstance(key, ast.Constant) and key.value == "statusCode"):
+                    continue
+                if isinstance(value, ast.Constant) and isinstance(value.value, int):
+                    found.append((value, node))
+    return found
+
+
+def _body_has_discriminator(body_node) -> bool:
+    """True if the response body carries a field the model can branch on.
+
+    Only inspects literal dict keys — a body built by a helper call is given the
+    benefit of the doubt (we cannot see into it, and a false warning is worse
+    than a missing one).
+    """
+    import ast
+
+    if body_node is None:
+        return True
+    if not isinstance(body_node, ast.Dict):
+        return True
+    keys = {
+        k.value.lower()
+        for k in body_node.keys
+        if isinstance(k, ast.Constant) and isinstance(k.value, str)
+    }
+    if not keys:
+        return True
+    return bool(keys & _DISCRIMINATOR_KEYS)
+
+
+def lint_lambda_status_codes(code: str) -> dict:
+    """Rewrite 4xx business-outcome responses to 200 (BUSINESS_OUTCOME_200_RULE).
+
+    This is the deterministic safety net for the failure the prompts also warn
+    about: a Lambda that answers "authentication failed" with 403 makes the
+    Connect AI agent report a broken tool instead of telling the customer what
+    happened. Observed on a real build where an SSN/accountId verification tool
+    returned 400/403/409 and every negative path had to be corrected by hand.
+
+    Rewrites are position-exact (AST offsets), so only the integer literal
+    changes — comments, strings and formatting are untouched. 5xx is preserved.
+    Never raises; returns the input unchanged if anything goes wrong.
+
+    Returns {ok, fixed_code, fixes_applied, warnings}.
+    """
+    out = {"ok": True, "fixed_code": code, "fixes_applied": [], "warnings": []}
+    try:
+        import ast
+
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Syntax is reported by lint_python_source; nothing safe to do here.
+        return out
+    except Exception as e:
+        logger.warning(f"[LINT_LAMBDA] status-code scan skipped: {e}")
+        return out
+
+    try:
+        edits = []
+        for const, body in _status_code_nodes(tree):
+            if const.value not in _BUSINESS_OUTCOME_4XX:
+                continue
+            if const.end_lineno is None or const.end_col_offset is None:
+                continue
+            edits.append((const.lineno, const.col_offset, const.end_col_offset, const.value, body))
+
+        if not edits:
+            return out
+
+        lines = code.splitlines(keepends=True)
+        # Apply bottom-up / right-to-left so earlier offsets stay valid.
+        for lineno, col, end_col, old_value, body in sorted(edits, reverse=True):
+            idx = lineno - 1
+            if idx >= len(lines):
+                continue
+            line = lines[idx]
+            if line[col:end_col] != str(old_value):
+                # Offsets didn't line up (unexpected encoding/continuation) —
+                # skip rather than corrupt the file.
+                continue
+            lines[idx] = line[:col] + "200" + line[end_col:]
+            out["fixes_applied"].append(
+                f"line {lineno}: HTTP {old_value} → 200 "
+                "(business outcome must be 200 or the Connect AI agent reads it as a tool failure)"
+            )
+            if not _body_has_discriminator(body):
+                out["warnings"].append(
+                    f"line {lineno}: response body has no outcome discriminator "
+                    f"(one of {', '.join(sorted(list(_DISCRIMINATOR_KEYS)[:6]))}...) — "
+                    "the AI agent cannot tell this apart from success; add e.g. "
+                    '"success": false with a customer-readable "message"'
+                )
+
+        candidate = "".join(lines)
+        # Re-parse: a rewrite that breaks the file must never be shipped.
+        ast.parse(candidate)
+        out["fixed_code"] = candidate
+        out["fixes_applied"].reverse()
+        return out
+    except Exception as e:
+        logger.warning(f"[LINT_LAMBDA] status-code autofix aborted, passing through: {e}")
+        return {"ok": True, "fixed_code": code, "fixes_applied": [], "warnings": []}
+
+
 @tool
 def lint_lambda(session_id: str = "", operation_id: str = "", file_name: str = "index.py") -> dict:
     """Syntax-check a generated Lambda handler (Python) for a session.
@@ -748,6 +900,40 @@ _VALID_JSONPATH_ROOTS = (
 )
 
 
+# Languages for which Contact Lens real-time redaction can be requested inside
+# UpdateContactRecordingAndAnalyticsBehavior. Asking for redaction with any other
+# AnalyticsLanguage makes CreateContactFlow reject the flow, and the error names
+# AnalyticsLanguage rather than the redaction block — see the fix-up below.
+# Verified against CreateContactFlow (ap-northeast-2, 2026-08-06): en-US passes
+# with redaction enabled, ko-KR does not.
+REDACTION_SUPPORTED_LANGUAGES = {
+    "en-US", "en-GB", "en-AU", "en-IN", "es-US", "fr-CA", "fr-FR",
+    "de-DE", "it-IT", "pt-BR",
+}
+
+# Fallback when analytics is enabled but AnalyticsLanguage is missing (the API
+# requires it). Matches the default the rest of the pipeline assumes.
+_DEFAULT_ANALYTICS_LANGUAGE = "ko-KR"
+
+
+def _flow_analytics_language(actions: list) -> str:
+    """Best-guess AnalyticsLanguage for a flow, from its own voice settings."""
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        p = a.get("Parameters") or a.get("parameters") or {}
+        if not isinstance(p, dict):
+            continue
+        for key in ("LanguageCode", "AnalyticsLanguage"):
+            val = p.get(key)
+            if isinstance(val, str) and "-" in val:
+                return val
+        tts = p.get("TextToSpeechVoice")
+        if isinstance(tts, dict) and isinstance(tts.get("languageCode"), str):
+            return tts["languageCode"]
+    return _DEFAULT_ANALYTICS_LANGUAGE
+
+
 def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: list) -> None:
     """Rewrite block Parameters/Transitions to the shapes Amazon Connect's
     CreateContactFlow API actually accepts. Mutates `actions` in place and
@@ -801,6 +987,40 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
                 if et not in have and nxt:
                     errs.append({"ErrorType": et, "NextAction": nxt})
                     fixes.append(f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: added required {et} error branch")
+
+            # Contact Lens real-time redaction is only supported for a subset of
+            # languages. Asking for it with an unsupported AnalyticsLanguage is
+            # rejected as "Invalid Action property value ... AnalyticsLanguage",
+            # which is misleading — the language is fine, the REDACTION is not.
+            # CreateContactFlow-verified (2026-08-06, ap-northeast-2):
+            #   ko-KR + redaction Enabled=True  -> Invalid ... AnalyticsLanguage
+            #   en-US + redaction Enabled=True  -> OK
+            #   ko-KR + redaction absent/False  -> OK
+            #   AnalyticsLanguage omitted       -> "missing required property"
+            # So: keep AnalyticsLanguage (it is REQUIRED) and drop the redaction
+            # request instead. Recording/analytics still work; only redaction is
+            # unavailable for that language.
+            vb = p.get("VoiceBehavior") if isinstance(p, dict) else None
+            vab = vb.get("VoiceAnalyticsBehavior") if isinstance(vb, dict) else None
+            if isinstance(vab, dict):
+                lang = str(vab.get("AnalyticsLanguage") or "")
+                red = vab.get("ConversationalAnalyticsRedactionConfiguration")
+                red_on = isinstance(red, dict) and str(red.get("Enabled", "")).lower() == "true"
+                if red_on and lang not in REDACTION_SUPPORTED_LANGUAGES:
+                    vab["ConversationalAnalyticsRedactionConfiguration"] = {"Enabled": "False"}
+                    fixes.append(
+                        f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: disabled "
+                        f"ConversationalAnalyticsRedactionConfiguration — redaction is not "
+                        f"supported for AnalyticsLanguage={lang or '(unset)'} and the API "
+                        f"rejects the flow with a misleading AnalyticsLanguage error"
+                    )
+                # AnalyticsLanguage is REQUIRED whenever analytics is enabled.
+                elif not lang and str(vab.get("Enabled", "")).lower() == "true":
+                    vab["AnalyticsLanguage"] = _flow_analytics_language(actions)
+                    fixes.append(
+                        f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: added required "
+                        f"AnalyticsLanguage={vab['AnalyticsLanguage']}"
+                    )
 
         # --- UpdateContactRecordingBehavior: {Agent, Customer} → RecordingBehavior
         if t == "UpdateContactRecordingBehavior":
