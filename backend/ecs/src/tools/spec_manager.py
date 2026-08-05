@@ -1272,8 +1272,8 @@ def save_operation_spec(
         if sid:
             _nfs_persist_spec(sid, operation_id, spec.model_dump())
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 ws.save_spec(operation_id, spec.model_dump())
         except Exception as e:
@@ -1361,8 +1361,8 @@ def get_operation_spec(operation_id: str) -> dict:
 
         # S3 fallback (A2)
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 spec_dict = ws.load_spec(operation_id)
                 if spec_dict:
@@ -1432,8 +1432,8 @@ def get_all_specs() -> dict[str, OperationSpec]:
         # S3 fallback if still empty
         if not _specs_bucket():
             try:
-                from tools.project_workspace import get_workspace
-                ws = get_workspace()
+                from tools.project_workspace import ensure_workspace
+                ws = ensure_workspace()
                 if ws:
                     all_dicts = ws.load_all_specs()
                     for op_id, spec_dict in all_dicts.items():
@@ -1586,8 +1586,8 @@ def restore_specs_from_workspace():
 
     # S3 fallback for any missing specs
     try:
-        from tools.project_workspace import get_workspace
-        ws = get_workspace()
+        from tools.project_workspace import ensure_workspace
+        ws = ensure_workspace()
         if ws:
             all_dicts = ws.load_all_specs()
             s3_restored = 0
@@ -1630,8 +1630,8 @@ def update_operation_spec(
     # Load existing spec (memory first, then S3 fallback)
     if operation_id not in _specs_bucket():
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 spec_dict = ws.load_spec(operation_id)
                 if spec_dict:
@@ -1690,8 +1690,8 @@ def update_operation_spec(
         if sid:
             _nfs_persist_spec(sid, operation_id, updated_spec.model_dump())
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 ws.save_spec(operation_id, updated_spec.model_dump())
         except Exception as e:
@@ -1734,8 +1734,8 @@ def format_operation_summary() -> dict:
     # Ensure specs are loaded from S3 if memory is empty
     if not _specs_bucket():
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 all_dicts = ws.load_all_specs()
                 for op_id, spec_dict in all_dicts.items():
@@ -1906,8 +1906,8 @@ def get_session_flow_config() -> Optional[SessionFlowConfig]:
         # S3 fallback
         if cfg is None:
             try:
-                from tools.project_workspace import get_workspace
-                ws = get_workspace()
+                from tools.project_workspace import ensure_workspace
+                ws = ensure_workspace()
                 if ws:
                     data = ws.load_flow_config()
                     if data:
@@ -1991,8 +1991,8 @@ def save_session_flow_config(
                 except Exception as e:
                     logger.warning(f"[SpecManager] NFS persist failed for flow config: {e}")
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 ws.save_flow_config(config.model_dump())
         except Exception as e:
@@ -2057,8 +2057,8 @@ def get_contact_flow_spec() -> Optional[ContactFlowSpec]:
         logger.warning(f"[SpecManager] NFS contact_flow_spec restore failed: {e}")
     # S3 fallback
     try:
-        from tools.project_workspace import get_workspace
-        ws = get_workspace()
+        from tools.project_workspace import ensure_workspace
+        ws = ensure_workspace()
         if ws and hasattr(ws, "_load_json"):
             data = ws._load_json(["contact_flow_spec.json"])
             if data:
@@ -2134,8 +2134,8 @@ def save_contact_flow_spec(
                 except Exception as e:
                     logger.warning(f"[SpecManager] NFS persist failed for contact_flow_spec: {e}")
             try:
-                from tools.project_workspace import get_workspace
-                ws = get_workspace()
+                from tools.project_workspace import ensure_workspace
+                ws = ensure_workspace()
                 if ws and hasattr(ws, "_save_json"):
                     ws._save_json(["contact_flow_spec.json"], spec.model_dump())
             except Exception as e:
@@ -2271,8 +2271,8 @@ def save_infrastructure_spec(
 
         # Persist to S3
         try:
-            from tools.project_workspace import get_workspace
-            ws = get_workspace()
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
             if ws:
                 ws.save_infrastructure_spec(spec_dict)
         except Exception as e:
@@ -2325,8 +2325,8 @@ def get_infrastructure_spec() -> Optional[InfrastructureSpec]:
         # S3 fallback
         if spec is None:
             try:
-                from tools.project_workspace import get_workspace
-                ws = get_workspace()
+                from tools.project_workspace import ensure_workspace
+                ws = ensure_workspace()
                 if ws:
                     data = ws.load_infrastructure_spec()
                     if data:
@@ -2429,8 +2429,8 @@ def restore_flow_config_from_workspace():
 
     # S3 fallback
     try:
-        from tools.project_workspace import get_workspace
-        ws = get_workspace()
+        from tools.project_workspace import ensure_workspace
+        ws = ensure_workspace()
         if ws:
             data = ws.load_flow_config()
             if data:

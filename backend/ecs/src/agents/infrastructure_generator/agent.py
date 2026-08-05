@@ -65,8 +65,8 @@ def get_infrastructure_schema(project_name: str = "") -> str:
         return result
     # S3 fallback (A4)
     try:
-        from tools.project_workspace import get_workspace
-        ws = get_workspace()
+        from tools.project_workspace import ensure_workspace
+        ws = ensure_workspace()
         if ws:
             schema_dict = ws.load_schema()
             if schema_dict:
@@ -690,8 +690,8 @@ Only change what the modification request asks for.
                     result["summary"] += " with schema"
                     # Persist schema to S3 workspace (A4)
                     try:
-                        from tools.project_workspace import get_workspace
-                        ws = get_workspace()
+                        from tools.project_workspace import ensure_workspace
+                        ws = ensure_workspace()
                         if ws:
                             ws.save_schema(json.loads(schema_json))
                     except Exception as _e:

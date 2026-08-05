@@ -61,6 +61,31 @@ def get_workspace() -> Optional["ProjectWorkspace"]:
     return get_workspace_for(current_session_id.get())
 
 
+def ensure_workspace() -> Optional["ProjectWorkspace"]:
+    """Like :func:`get_workspace`, but rebuild the workspace if it went missing.
+
+    A ProjectWorkspace holds no unrecoverable state — just the session_id plus
+    read-through caches — so recreating one for a session that still has a bound
+    ``current_session_id`` is always safe and strictly better than failing the
+    caller's write.
+
+    This exists because the workspace CAN disappear mid-turn: a reconnect that
+    fires ``createNewSession`` runs cleanup_session() and drops the dict entry
+    while the agent is still streaming. app.py now refuses to reset a session with
+    a live agent task, but that guard only covers the paths it knows about — a
+    write that lands here must not be lost to a bookkeeping race.
+    """
+    sid = current_session_id.get()
+    if not sid:
+        return None
+    ws = get_workspace_for(sid)
+    if ws is None:
+        ws = ProjectWorkspace(sid)
+        set_workspace_for(sid, ws)
+        logger.warning(f"[Workspace] Re-initialised mid-turn for session {sid}")
+    return ws
+
+
 # ---------------------------------------------------------------------------
 # ProjectWorkspace
 # ---------------------------------------------------------------------------
@@ -436,7 +461,7 @@ def save_requirement_document(
     Returns:
         Confirmation with S3 key and a character count
     """
-    ws = get_workspace()
+    ws = ensure_workspace()
     if not ws:
         return {"success": False, "error": "Workspace not initialised (no session)"}
     ok = ws.save_requirement(doc_type, content, operation_id)
@@ -487,7 +512,7 @@ def load_requirement_document(
     Returns:
         The document content or an error if not found
     """
-    ws = get_workspace()
+    ws = ensure_workspace()
     if not ws:
         return {"success": False, "error": "Workspace not initialised (no session)"}
     text = ws.load_requirement(doc_type, operation_id)

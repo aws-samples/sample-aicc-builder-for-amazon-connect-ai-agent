@@ -3105,8 +3105,40 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
     partial run) and ``model`` (one of the allowlisted Bedrock ids) chosen on the
     start screen. Both are persisted to NFS so detect_phase / the phase prompt /
     every BedrockModel construction reason about the right values from turn one.
+
+    NEVER purge state while an agent task is running for this session. The
+    frontend fires createNewSession on reconnect-with-no-history (useWebSocket.ts),
+    and on a WS flap right after the kickoff message that arrives mid-turn: the
+    agent is already streaming, and clear_all_specs()/cleanup_session() would drop
+    its ProjectWorkspace out from under it. Every later workspace-mediated write in
+    that turn then fails — save_requirement_document returns
+    "Workspace not initialised (no session)" and the S3 backup of specs/state is
+    silently skipped (observed on prod 2026-08-05: the NFS fast-path still wrote,
+    so nothing looked broken until the analysis document failed to save).
     """
     data = data or {}
+
+    # A running agent owns this session's state — reset would yank it mid-turn.
+    async with _background_tasks_lock:
+        _bg = _background_tasks.get(session_id)
+        _bg_running = bool(_bg and not _bg["task"].done())
+    if _bg_running:
+        logger.warning(
+            f"[createNewSession] ignored for {session_id}: an agent task is still "
+            "running; keeping the live workspace/specs instead of resetting."
+        )
+        _eff_live = session_store.get(session_id, {}).get("session_data", {}).get("original_session_id", session_id) \
+            if isinstance(session_store.get(session_id), dict) else session_id
+        _live_scope = _get_generation_scope(_eff_live)
+        await safe_send_json(websocket, {
+            "type": "session_created",
+            "sessionId": session_id,
+            "phase": _detect_phase(session_id),
+            "scope": [] if set(_live_scope) >= set(_FULL_ASSET_SET) else _live_scope,
+            "selectedModel": _get_selected_model(_eff_live) or resolve_model_id(),
+        })
+        return
+
     if session_id in session_store:
         # Flush before clearing
         try:
