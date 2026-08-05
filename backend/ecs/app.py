@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from strands import Agent
 from strands.models import BedrockModel
+from strands.types.exceptions import MaxTokensReachedException
 from botocore.config import Config as BotocoreConfig
 
 # Import shared modules from src/
@@ -485,6 +486,31 @@ async def validate_cognito_token(token: str) -> Optional[Dict]:
 # ========================================
 # Model Configuration (same as AgentCore)
 # ========================================
+# Output token budget for the ORCHESTRATOR.
+#
+# ⚠️ This MUST be set explicitly. Strands omits `maxTokens` from
+# `inferenceConfig` when `max_tokens` is None, and Bedrock's default in that
+# case is only **4096** output tokens (verified live against
+# global.anthropic.claude-opus-4-8 in ap-northeast-2: omitting maxTokens with a
+# long-output prompt returns stopReason=max_tokens at outputTokens=4096).
+#
+# 4096 is far too small for the orchestrator: a single `save_operation_spec`
+# toolUse payload can exceed it, and an interview turn that saves several specs
+# is truncated mid-toolUse. Strands then replaces EVERY toolUse in that turn
+# with "tool use was incomplete due to maximum token limits being reached",
+# so the saves never register in history and the agent asks to save again —
+# the repeated-spec-saving loop.
+#
+# 128000 is the hard model ceiling (Bedrock rejects 128001 with "exceeds the
+# model limit of 128000") for Opus 4.6/4.7/4.8/5. Sub-agents in
+# `agents/agent_pool.py` already use 128000; the orchestrator emits chat text
+# plus tool inputs rather than whole files, so 64000 gives ~16x headroom over
+# the old effective budget while keeping a sane cutoff.
+ORCHESTRATOR_MAX_TOKENS = min(
+    int(os.environ.get("ORCHESTRATOR_MAX_TOKENS", "64000")), 128000
+)
+
+
 def get_model_config(model_id: Optional[str] = None):
     # Orchestrator model follows the per-request/persisted selection.
     # No temperature is passed (orchestrator never set one), so the
@@ -494,6 +520,7 @@ def get_model_config(model_id: Optional[str] = None):
     kwargs = build_model_kwargs(
         model_id,
         region_name=AWS_REGION,
+        max_tokens=ORCHESTRATOR_MAX_TOKENS,
         boto_client_config=BotocoreConfig(
             read_timeout=300,
             retries={"max_attempts": 3, "mode": "adaptive"},
@@ -2445,6 +2472,57 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                 "message": "생성이 취소됐어요.",
             })
             raise
+        except MaxTokensReachedException as e:
+            # The turn was cut off mid-toolUse because the model hit its output
+            # cap. Strands has already replaced every toolUse block in that
+            # assistant message with "tool use was incomplete…" text, so those
+            # tool calls did NOT execute — nothing was saved.
+            #
+            # Surface this as an actionable notice instead of a raw stack-trace
+            # error, and tell the agent (via the persisted history) exactly what
+            # happened so the next turn splits the work instead of retrying the
+            # same oversized batch. Without this the agent re-asks "should I save
+            # the specs?" and re-saves in a loop.
+            logger.warning(
+                f"[BG] max_tokens reached for {session_id} "
+                f"(cap={ORCHESTRATOR_MAX_TOKENS}): {e}"
+            )
+            await safe_send_or_log({
+                "type": "max_tokens_truncated",
+                "content": (
+                    "응답이 출력 토큰 한도에 도달해서 중간에 끊겼어요. "
+                    "직전 도구 호출은 실행되지 않았습니다 — 저장된 내용은 없어요. "
+                    "이어서 진행하려면 '계속'이라고 말씀해 주세요 (한 번에 하나씩 나눠서 처리합니다)."
+                ),
+            })
+            try:
+                partial = _extract_new_messages(streaming_agent.messages, pre_stream_message_count)
+                if partial:
+                    try:
+                        _update_generation_progress(effective_session_id, partial)
+                    except Exception:
+                        pass
+                    # Leave an explicit breadcrumb so the next turn's context
+                    # states that the truncated tool calls never ran.
+                    partial.append({
+                        "role": "user",
+                        "content": [{"text": (
+                            "[System] The previous assistant turn was truncated at the output "
+                            "token limit. Any tool calls in that turn did NOT execute — nothing "
+                            "was saved by them. Do NOT assume they succeeded, and do NOT ask the "
+                            "user to re-confirm work that was already saved in EARLIER turns. "
+                            "Verify current state with list_operations() / get_all_tool_ids() "
+                            "first, then emit ONE tool call per turn to finish the remaining work."
+                        )}],
+                    })
+                    session["conversation_history"].extend(partial)
+                    session["conversation_history"] = _prune_conversation_history(
+                        session["conversation_history"], max_messages=MAX_HISTORY_MESSAGES
+                    )
+                    _context_store.save_conversation_history(session_id, session["conversation_history"])
+            except Exception as save_err:
+                logger.error(f"[BG] Failed to save history after max_tokens for {session_id}: {save_err}")
+            await safe_send_or_log({"type": "stream_end"})
         except Exception as e:
             logger.error(f"[BG] Streaming error for {session_id}: {e}\n{traceback.format_exc()}")
             await safe_send_or_log({"type": "error", "content": str(e)})
