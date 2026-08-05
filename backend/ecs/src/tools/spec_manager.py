@@ -201,13 +201,43 @@ class BusinessRule(FlexibleBaseModel):
 
 
 class ErrorResponse(FlexibleBaseModel):
-    """Specification for an error response."""
+    """Specification for an error response.
+
+    NOTE on ``status_code``: an Amazon Connect AI agent treats any non-2xx tool
+    response as an execution failure — it never reads the body, so it cannot relay
+    the outcome and simply reports that the tool is broken. Business outcomes are
+    therefore coerced to 200 here (BUSINESS_OUTCOME_200_RULE); only 5xx, a genuine
+    fault Connect should retry, is preserved.
+    """
 
     status_code: Optional[int] = Field(
         default=None,
-        description="HTTP status code",
+        description="HTTP status code (business outcomes are always 200; only 5xx faults differ)",
         validation_alias=AliasChoices("status_code", "statusCode", "status", "code")
     )
+
+    @field_validator("status_code", mode="before")
+    @classmethod
+    def _coerce_business_outcome_to_200(cls, v):
+        """Rewrite a 4xx business outcome to 200.
+
+        The orchestrator prompt already says to record 200, but the spec is what
+        every downstream generator reads, so the invariant is enforced here rather
+        than trusted. Non-int values are passed through untouched for Pydantic's
+        own error reporting.
+        """
+        try:
+            code = int(v)
+        except (TypeError, ValueError):
+            return v
+        if 400 <= code < 500:
+            logger.warning(
+                f"[SPEC] error_responses.status_code {code} → 200: a business outcome "
+                "must be 2xx or the Connect AI agent reads it as a tool failure "
+                "(BUSINESS_OUTCOME_200_RULE)"
+            )
+            return 200
+        return code
     error_code: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("error_code", "errorCode")

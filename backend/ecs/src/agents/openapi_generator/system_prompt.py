@@ -424,17 +424,56 @@ components:
             searchedId: "R-123456"
 ```
 
-### Common Error Codes and AI Guidance
+### 🚨 Common Outcome Codes and AI Guidance (BUSINESS_OUTCOME_200_RULE)
 
-| Code | HTTP Status | AI Response Guidance |
+An Amazon Connect AI agent treats **any non-2xx response as a tool failure** — it
+never reads the body, and tells the customer the tool is broken. So every outcome
+the agent must speak about is declared under **`200`**, with the outcome carried in
+the response body. These are business outcomes, not HTTP errors:
+
+| Outcome code (in body) | HTTP Status | AI Response Guidance |
 |------|-------------|---------------------|
-| `NOT_FOUND` | 404 | Ask customer to verify identifier |
-| `VALIDATION_ERROR` | 400 | Explain which field is invalid |
-| `CONFLICT` | 409 | Resource already exists or state conflict |
-| `DATE_UNAVAILABLE` | 409 | Suggest alternative dates |
-| `UNAUTHORIZED` | 401 | Verify customer identity |
-| `RATE_LIMITED` | 429 | Ask customer to wait and try again |
-| `INTERNAL_ERROR` | 500 | Apologize and offer to transfer to agent |
+| `NOT_FOUND` | **200** | Ask customer to verify identifier |
+| `VALIDATION_ERROR` | **200** | Explain which field is invalid |
+| `CONFLICT` | **200** | Resource already exists or state conflict |
+| `DATE_UNAVAILABLE` | **200** | Suggest alternative dates |
+| `UNAUTHORIZED` / auth mismatch | **200** | Verify customer identity, offer retry |
+| `RATE_LIMITED` / lockout | **200** | Explain lockout, offer transfer |
+| `INTERNAL_ERROR` | 500 | Genuine fault — Connect retries; apologize and transfer |
+
+`500` is the only status that stays non-2xx.
+
+Therefore the `200` response schema MUST be able to express both outcomes: include
+the discriminator field (`verified`, `found`, `available`, `success`, `status`) and
+mark the outcome-specific fields as optional rather than splitting them across
+status codes. Say so in the `description` and in
+`x-amazon-connect-tool-description`, so the model knows a negative outcome is a
+normal, expected `200` it should read and act on.
+
+```yaml
+responses:
+  '200':
+    description: |
+      Verification result. ALWAYS 200, including when verification fails —
+      read `verified` to determine the outcome:
+        - verified=true  → caller authenticated
+        - verified=false + lockout=false → digits did not match, retries remain
+        - verified=false + lockout=true  → too many attempts, transfer to an agent
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/VerifyCallerResponse'
+  '500':
+    description: "Internal error — retryable fault"
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/ErrorResponse'
+```
+
+Do NOT emit `'400'`, `'401'`, `'403'`, `'404'`, `'409'` or `'429'` response
+entries for business outcomes — a declared 4xx teaches the model to expect a
+failure it cannot handle, and the Lambda must not return one either.
 
 ---
 
@@ -504,13 +543,16 @@ paths:
           description: "Unique {item} identifier"
       responses:
         '200':
-          description: "{Item} found"
+          description: |
+            Lookup result — ALWAYS 200, including "not found".
+            Read `found`: true → item returned; false → no such {item},
+            ask the customer to verify the identifier.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ItemResponse'
-        '404':
-          description: "{Item} not found"
+        '500':
+          description: "Internal error — retryable fault"
           content:
             application/json:
               schema:
@@ -599,20 +641,20 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateRequest'
       responses:
-        '201':
-          description: "{Item} created"
+        '200':
+          description: |
+            Creation result — ALWAYS 200. Read `success`:
+              - success=true  → created, return the new id
+              - success=false + status=VALIDATION_ERROR → tell the customer which field
+              - success=false + status=DATE_UNAVAILABLE  → suggest alternatives
+            Do NOT declare 400/409 here: the AI agent reads a non-2xx as a
+            broken tool and cannot relay the outcome.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/CreateResponse'
-        '400':
-          description: "Invalid input"
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '409':
-          description: "Conflict (dates unavailable, etc.)"
+        '500':
+          description: "Internal error — retryable fault"
           content:
             application/json:
               schema:
@@ -662,19 +704,17 @@ paths:
               $ref: '#/components/schemas/UpdateRequest'
       responses:
         '200':
-          description: "{Item} updated"
+          description: |
+            Update result — ALWAYS 200. Read `success`:
+              - success=true  → updated
+              - success=false + status=NOT_FOUND → ask to verify the identifier
+              - success=false + status=CONFLICT  → explain the policy restriction
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ItemResponse'
-        '404':
-          description: "{Item} not found"
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '409':
-          description: "Cannot modify (policy restriction)"
+        '500':
+          description: "Internal error — retryable fault"
           content:
             application/json:
               schema:
@@ -723,19 +763,17 @@ paths:
               $ref: '#/components/schemas/CancelRequest'
       responses:
         '200':
-          description: "{Item} cancelled"
+          description: |
+            Cancellation result — ALWAYS 200. Read `success`:
+              - success=true  → cancelled
+              - success=false + status=NOT_FOUND → ask to verify the identifier
+              - success=false + status=CONFLICT  → explain why it cannot be cancelled
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/CancelResponse'
-        '404':
-          description: "{Item} not found"
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '409':
-          description: "Cannot cancel"
+        '500':
+          description: "Internal error — retryable fault"
           content:
             application/json:
               schema:
@@ -1403,13 +1441,15 @@ No explanation before or after.
               $ref: '#/components/schemas/OperationNameRequest'
       responses:
         '200':
-          description: "..."
+          description: |
+            ... — ALWAYS 200, including negative outcomes; state which body
+            field the agent should read to tell them apart.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/OperationNameResponse'
-        '400':
-          description: "..."
+        '500':
+          description: "Internal error — retryable fault"
           content:
             application/json:
               schema:

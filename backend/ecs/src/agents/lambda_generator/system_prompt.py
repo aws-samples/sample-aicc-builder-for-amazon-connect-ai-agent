@@ -44,7 +44,9 @@ return {
 
 If a spec field has `enum_values`, any validation you add MUST compare against the
 EXACT set (case/underscores preserved). Do NOT paraphrase or normalize.
-Example: `if payload["state"] not in {"RUNNING", "FINISH", "IDLE"}: return 400`.
+Example: `if payload["state"] not in {"RUNNING", "FINISH", "IDLE"}: ...` — and
+return that rejection as **200** with `success=False`, per
+BUSINESS_OUTCOME_200_RULE, never as a 400.
 
 NEVER emit flattened output like `{"machineType": ..., "state": ..., "remainingSeconds": ...}`
 at the top level when the spec says `machineStatus` is an array of those objects.
@@ -289,6 +291,70 @@ When Lambda is called via API Gateway:
 
 ---
 
+## 🚨 STATUS CODES: BUSINESS OUTCOMES ARE ALWAYS 200 (BUSINESS_OUTCOME_200_RULE)
+
+An Amazon Connect AI agent treats **any non-2xx response as a tool failure**. It
+does not read the body — it tells the customer the tool is broken. So every
+outcome the AI agent must SPEAK ABOUT has to be `200`, with the outcome carried
+in the body.
+
+This includes the negative outcomes, which is the part that is easy to get wrong:
+
+| Scenario | ❌ Never | ✅ Always | Body discriminator |
+|---|---|---|---|
+| Auth digits/PIN/SSN don't match | 401 / 403 | **200** | `"verified": false` |
+| Record / reservation not found | 404 | **200** | `"found": false` |
+| Too many attempts, locked out | 403 / 429 | **200** | `"lockout": true` |
+| Date unavailable, seat taken | 409 | **200** | `"available": false` |
+| Missing/invalid input the customer can supply | 400 | **200** | `"success": false` + which field |
+| Unhandled exception, DB down | — | **500** | `"error"` (Connect retries 5xx — correct for faults) |
+
+`5xx` is the ONLY correct non-2xx: a real fault the agent cannot act on.
+
+```python
+# ❌ WRONG — agent reports "there is an issue with the tool", customer is stuck
+if last_four_digits != stored_last_four:
+    return create_response(403, {"verified": False, "lockout": True})
+if not item:
+    return create_response(404, {"found": False})
+if not account_number:
+    return create_response(400, {"error": "accountNumber is required"})
+
+# ✅ RIGHT — agent reads the body and says the right thing to the customer
+if last_four_digits != stored_last_four:
+    return create_response(200, {
+        "verified": False,
+        "remainingAttempts": remaining,
+        "lockout": False,
+        "message": "The digits provided do not match our records.",
+    })
+if not item:
+    return create_response(200, {
+        "verified": False, "found": False, "lockout": False,
+        "message": "No account was found with that number.",
+    })
+if not account_number:
+    return create_response(200, {
+        "verified": False, "found": False, "lockout": False,
+        "message": "accountNumber is required to verify the caller.",
+    })
+
+# ✅ 5xx stays 5xx — a genuine fault, and Connect's retry is what we want
+except Exception as e:
+    logger.error(f"Error: {e}", exc_info=True)
+    return create_response(500, {"error": "Internal server error"})
+```
+
+**Always include an explicit boolean/enum discriminator** (`verified`, `found`,
+`available`, `success`, `status`) so the model can tell outcomes apart without
+the status code, plus a human-readable `message` it can paraphrase. A bare
+`200 {}` is as useless to the agent as a 403.
+
+Never emit a validation helper that raises straight into a `400`. Convert the
+validation failure into a `200` body that names the missing field.
+
+---
+
 ## RESPONSE FORMATS
 
 ### 1. STRING_MAP Format (Contact Flow Direct - RECOMMENDED)
@@ -364,6 +430,7 @@ def handler(event, context):
             return create_response(200, {"success": True, "data": result})
 
     except Exception as e:
+        # 500 only for genuine faults — never for a business outcome.
         logger.error(f"Error: {e}")
         if is_connect_direct:
             return {"status": "ERROR", "errorMessage": str(e)}
@@ -676,11 +743,18 @@ def handler(event, context):
             return create_response(200, {"success": True, "data": result})
 
     except KeyError as e:
+        # A missing field is a BUSINESS OUTCOME the AI agent must talk about
+        # (it needs to ask the customer for the value), so it returns 200 with
+        # success=False — NOT 400, which the agent would read as a tool failure.
         logger.warning(f"Missing required field: {e}")
         error_result = {"status": "VALIDATION_ERROR", "errorMessage": f"Missing required field: {e}"}
         if is_connect_direct:
             return error_result
-        return create_response(400, {"success": False, "error": str(e)})
+        return create_response(200, {
+            "success": False,
+            "status": "VALIDATION_ERROR",
+            "message": f"Missing required field: {e}",
+        })
 
     except Exception as e:
         logger.error(f"Error processing request: {e}", exc_info=True)

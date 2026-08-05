@@ -487,6 +487,29 @@ Database: {db_type}{schema_section}{infra_spec_section}{modification_section}
             if not code:
                 code, parse_method = _parse_code_block(full_response)
 
+        # Deterministic status-code repair, BEFORE the asset is streamed or
+        # written. An Amazon Connect AI agent treats any non-2xx tool response as
+        # an execution failure — it never reads the body, so a Lambda that answers
+        # "SSN digits didn't match" with 403 makes the agent tell the customer the
+        # tool is broken. Business outcomes must be 200 with a discriminator in the
+        # body (BUSINESS_OUTCOME_200_RULE). 5xx is left alone: a real fault, where
+        # Connect's retry is the behaviour we want. Fault-tolerant.
+        status_fix = {"fixes_applied": [], "warnings": []}
+        if code and isinstance(code, str) and parse_method != "workspace_tools":
+            try:
+                from tools.asset_linters import lint_lambda_status_codes
+                status_fix = lint_lambda_status_codes(code)
+                if status_fix["fixes_applied"]:
+                    code = status_fix["fixed_code"]
+                    logger.info(
+                        f"[LAMBDA] {operation_id}: rewrote {len(status_fix['fixes_applied'])} "
+                        f"business-outcome 4xx → 200: {status_fix['fixes_applied'][:3]}"
+                    )
+                if status_fix["warnings"]:
+                    logger.warning(f"[LAMBDA] {operation_id}: {status_fix['warnings'][:3]}")
+            except Exception as e:
+                logger.warning(f"[LAMBDA] status-code lint skipped: {e}")
+
         if code:
             if parse_method != "workspace_tools":
                 logger.info(f"Code parsed successfully for {operation_id} using method: {parse_method}")
@@ -507,6 +530,22 @@ Database: {db_type}{schema_section}{infra_spec_section}{modification_section}
                 # Normal generation: stream asset as before
                 elif not streamer.found_code_block:
                     _stream_asset("lambda", "index.py", code, operation_id)
+                elif status_fix["fixes_applied"]:
+                    # The incremental streamer already pushed the UNFIXED source
+                    # into the frontend's preview cache. Force a full, non-delta
+                    # re-stream so the repaired code is what the user sees and
+                    # downloads — matching what we persist. Same reason the
+                    # contact-flow linter re-streams after an autofix.
+                    try:
+                        from tools.streaming_callback import stream_asset as _stream_full
+                        _stream_full("lambda", "index.py", code, operation_id=operation_id,
+                                     is_complete=True, force_full=True)
+                    except Exception as e:
+                        logger.warning(f"[LAMBDA] re-stream after status-code autofix failed: {e}")
+                        try:
+                            _stream_asset("lambda", "index.py", code, operation_id)
+                        except Exception:
+                            pass
 
             yield {
                 "type": "progress",
@@ -539,9 +578,16 @@ Database: {db_type}{schema_section}{infra_spec_section}{modification_section}
                 "parse_method": parse_method,
                 "syntax_ok": py_lint["ok"],
                 "syntax_errors": py_lint["errors"][:5],
+                "status_code_fixes": status_fix["fixes_applied"][:10],
+                "status_code_warnings": status_fix["warnings"][:5],
                 "summary": (
                     f"Generated index.py for {operation_id}"
                     + ("" if py_lint["ok"] else f" — ⚠️ SYNTAX ERROR (patch before deploy): {py_lint['errors'][0]['message']}")
+                    + (
+                        f" — rewrote {len(status_fix['fixes_applied'])} business-outcome 4xx → 200 "
+                        "(Connect AI agents read non-2xx as a tool failure)"
+                        if status_fix["fixes_applied"] else ""
+                    )
                 ),
                 "_completion_marker": "SUBAGENT_COMPLETE"  # Explicit completion signal
             }
