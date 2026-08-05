@@ -289,6 +289,11 @@ export function useWebSocket() {
   // it once the fresh session's socket reports ready (session_created handler).
   const pendingImportRef = useRef<{ assetType: string; content: string; name: string; imageFormat?: string } | null>(null);
   const streamingMessageIdRef = useRef<string | null>(null);
+  // Race fix: the store id of the assistant bubble currently being streamed into.
+  // Stream chunks are appended to THIS message by id, so a tool_start /
+  // subagent / asset message arriving mid-stream can no longer swallow the rest
+  // of the text (which made the assistant message look cut off).
+  const streamTargetMsgIdRef = useRef<string | null>(null);
   const streamTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastStreamContentRef = useRef<string>(""); // Track last content to detect duplicates
 
@@ -309,7 +314,9 @@ export function useWebSocket() {
     setConnecting,
     setConnectionError,
     addMessage,
+    addMessageWithId,
     updateLastMessage,
+    appendToMessageById,
     setTyping,
     updateSession,
     updateProgress,
@@ -340,30 +347,38 @@ export function useWebSocket() {
     }
   }, []);
 
+  // Race-safe flush: append buffered text to the message we started streaming
+  // into, addressed by id. Falls back to updateLastMessage only when there is no
+  // known target (e.g. content arriving outside a tracked stream).
+  const flushPendingStreamContent = useCallback(() => {
+    if (!pendingStreamContentRef.current) return;
+    const content = pendingStreamContentRef.current;
+    pendingStreamContentRef.current = "";
+    const targetId = streamTargetMsgIdRef.current;
+    if (targetId && appendToMessageById(targetId, content)) return;
+    updateLastMessage(content);
+  }, [appendToMessageById, updateLastMessage]);
+
   // Helper function to set stream timeout with auto-complete fallback
   const setStreamTimeout = useCallback(() => {
     clearStreamTimeout();
     streamTimeoutRef.current = setTimeout(() => {
       console.log("[useWebSocket] Stream timeout - auto-completing");
       setTyping(false);
+      // Flush any pending stream content BEFORE dropping the target id,
+      // otherwise the tail of the message is lost.
+      flushPendingStreamContent();
       streamingMessageIdRef.current = null;
+      streamTargetMsgIdRef.current = null;
       lastStreamContentRef.current = "";
-      // Flush any pending stream content
-      if (pendingStreamContentRef.current) {
-        updateLastMessage(pendingStreamContentRef.current);
-        pendingStreamContentRef.current = "";
-      }
     }, STREAM_IDLE_TIMEOUT_MS);
-  }, [clearStreamTimeout, setTyping, updateLastMessage]);
+  }, [clearStreamTimeout, setTyping, flushPendingStreamContent]);
 
   // Performance: Batched stream update - accumulates content and flushes at 60fps
   const flushStreamBatch = useCallback(() => {
-    if (pendingStreamContentRef.current) {
-      updateLastMessage(pendingStreamContentRef.current);
-      pendingStreamContentRef.current = "";
-    }
+    flushPendingStreamContent();
     streamBatchRafRef.current = null;
-  }, [updateLastMessage]);
+  }, [flushPendingStreamContent]);
 
   const queueStreamUpdate = useCallback((content: string) => {
     pendingStreamContentRef.current += content;
@@ -371,6 +386,19 @@ export function useWebSocket() {
       streamBatchRafRef.current = requestAnimationFrame(flushStreamBatch);
     }
   }, [flushStreamBatch]);
+
+  // Race fix: any handler that inserts a NON-assistant message (tool, subagent,
+  // asset, system) while text is mid-stream must first flush the buffered text
+  // into the streaming bubble. Otherwise the buffer flushes after the insert and
+  // `updateLastMessage` would append the tail into the newly inserted card,
+  // leaving the assistant message visibly truncated.
+  const flushBeforeInsert = useCallback(() => {
+    if (streamBatchRafRef.current) {
+      cancelAnimationFrame(streamBatchRafRef.current);
+      streamBatchRafRef.current = null;
+    }
+    flushPendingStreamContent();
+  }, [flushPendingStreamContent]);
 
   // Performance: Register tool message index for O(1) lookup
   const registerToolMessage = useCallback((toolUseId: string, messageIndex: number) => {
@@ -554,6 +582,9 @@ export function useWebSocket() {
       timestamp: new Date(),
     };
 
+    // Race fix: a sub-agent card can appear while assistant text is still
+    // streaming. Flush the buffered text into the assistant bubble first.
+    flushBeforeInsert();
     addMessage({
       role: 'subagent',
       content: content || `${getSubagentDisplayName(subagent)} ${initialStatus}`,
@@ -563,7 +594,7 @@ export function useWebSocket() {
     const newIdx = useBuilderStore.getState().messages.length - 1;
     activeSubagentIndexRef.current.set(subagent, newIdx);
     return newIdx;
-  }, [addMessage, getSubagentDisplayName]);
+  }, [addMessage, getSubagentDisplayName, flushBeforeInsert]);
 
   // Update existing subagent message
   const updateSubagentMessage = useCallback((subagent: string, update: Partial<SubagentActivity>) => {
@@ -721,11 +752,14 @@ export function useWebSocket() {
         case "typing":
           setTyping(true);
           clearStreamTimeout();
+          // Flush anything still buffered for the PREVIOUS bubble before opening
+          // a new one, so its tail isn't appended to the new empty message.
+          flushBeforeInsert();
           lastStreamContentRef.current = "";
           streamingMessageIdRef.current = `msg-${Date.now()}-${Math.random()
             .toString(36)
             .slice(2, 9)}`;
-          addMessage({
+          streamTargetMsgIdRef.current = addMessageWithId({
             role: "assistant",
             content: "",
           });
@@ -752,22 +786,28 @@ export function useWebSocket() {
             // Use message_id from backend if available for precise message targeting
             const messageId = data.message_id as string | undefined;
             const messages = useBuilderStore.getState().messages;
-            const lastMessage = messages[messages.length - 1];
+            // Race fix: the streaming target is identified by id, not by "is it
+            // last?". A tool/subagent/asset message inserted mid-stream no longer
+            // forces a new bubble — text keeps flowing into the original one.
+            const targetId = streamTargetMsgIdRef.current;
+            const targetStillValid =
+              !!targetId && messages.some((m) => m.id === targetId && m.role === "assistant");
 
-            // Check if we need to create a new message
-            if (!lastMessage || lastMessage.role !== "assistant") {
-              // No assistant message exists, create one first
+            if (!targetStillValid) {
+              // No live assistant bubble to stream into — open one.
               streamingMessageIdRef.current = messageId || `msg-${Date.now()}-${Math.random()
                 .toString(36)
                 .slice(2, 9)}`;
-              addMessage({
+              streamTargetMsgIdRef.current = addMessageWithId({
                 role: "assistant",
                 content: "",
               });
             } else if (messageId && streamingMessageIdRef.current !== messageId) {
-              // Different message ID - this is a new stream, create new message
+              // Different backend message ID — genuinely a new stream. Flush the
+              // old bubble's buffer first, then open a new one.
+              flushBeforeInsert();
               streamingMessageIdRef.current = messageId;
-              addMessage({
+              streamTargetMsgIdRef.current = addMessageWithId({
                 role: "assistant",
                 content: "",
               });
@@ -781,15 +821,9 @@ export function useWebSocket() {
           clearStreamTimeout();
           setTyping(false);
           lastStreamContentRef.current = "";
-          // Performance: Flush any pending batched stream content
-          if (pendingStreamContentRef.current) {
-            updateLastMessage(pendingStreamContentRef.current);
-            pendingStreamContentRef.current = "";
-          }
-          if (streamBatchRafRef.current) {
-            cancelAnimationFrame(streamBatchRafRef.current);
-            streamBatchRafRef.current = null;
-          }
+          // Performance: Flush any pending batched stream content.
+          // Targeted by id so a mid-stream insert can't misplace the tail.
+          flushBeforeInsert();
           if (data.content && !streamingMessageIdRef.current) {
             addMessage({
               role: "assistant",
@@ -797,6 +831,7 @@ export function useWebSocket() {
             });
           }
           streamingMessageIdRef.current = null;
+          streamTargetMsgIdRef.current = null;
           break;
 
         case "message":
@@ -813,25 +848,48 @@ export function useWebSocket() {
         case "generation_cancel_noop":
           // User cancelled the in-flight generation. Stop the typing/streaming
           // indicators and surface a short notice.
+          // Flush by id (not updateLastMessage) so the tail lands in the
+          // assistant bubble that was streaming, even if a tool card was
+          // inserted after it.
+          flushBeforeInsert();
           clearStreamTimeout();
           setTyping(false);
           lastStreamContentRef.current = "";
-          if (pendingStreamContentRef.current) {
-            updateLastMessage(pendingStreamContentRef.current);
-            pendingStreamContentRef.current = "";
-          }
           streamingMessageIdRef.current = null;
+          streamTargetMsgIdRef.current = null;
           useBuilderStore.getState().setLoadingSession(false);
           if (data.message && data.type === "generation_cancelled") {
             addMessage({ role: "assistant", content: data.message as string });
           }
           break;
 
-        case "error":
+        case "max_tokens_truncated":
+          // The turn was cut off at the model's output-token cap (app.py's
+          // MaxTokensReachedException handler). Any tool calls in that turn did
+          // NOT execute. Keep the partial text and add the notice as a separate
+          // system card so the user knows nothing was saved.
+          flushBeforeInsert();
           clearStreamTimeout();
           setTyping(false);
           lastStreamContentRef.current = "";
           streamingMessageIdRef.current = null;
+          streamTargetMsgIdRef.current = null;
+          useBuilderStore.getState().setLoadingSession(false);
+          if (data.content) {
+            addMessage({ role: "system", content: `⚠️ ${data.content}` });
+          }
+          break;
+
+        case "error":
+          // Flush whatever text has streamed so far into the assistant bubble
+          // before the error card is inserted, so a partial answer isn't lost
+          // and its tail doesn't land inside the error message.
+          flushBeforeInsert();
+          clearStreamTimeout();
+          setTyping(false);
+          lastStreamContentRef.current = "";
+          streamingMessageIdRef.current = null;
+          streamTargetMsgIdRef.current = null;
           // Detect backend "Agent is still processing" guard (app.py:1652).
           // Ensure the chat input is re-enabled immediately and bump a counter
           // so the UI can offer a Reset Session affordance after repeated hits.
@@ -961,6 +1019,8 @@ export function useWebSocket() {
                 (m) => m.role === "tool" && m.toolCall?.tool === data.tool && m.toolCall?.status === "running"
               );
               if (!hasRunningToolMsg) {
+                // Race fix: flush streaming text before inserting a tool card.
+                flushBeforeInsert();
                 addMessage({
                   role: "tool",
                   content: "",
@@ -991,6 +1051,10 @@ export function useWebSocket() {
           // Add tool call message to chat - use toolUseId for deduplication (unique per invocation)
           // This allows same tool (e.g., save_operation_spec) to be called multiple times
           if (data.tool) {
+            // Race fix: a tool_start can arrive while assistant text is still
+            // streaming. Flush the buffered text into the assistant bubble FIRST
+            // so the message isn't left cut off mid-sentence.
+            flushBeforeInsert();
             const messages = useBuilderStore.getState().messages;
             // Performance: Check map first for O(1), fallback to array check
             const toolUseIdKey = data.toolUseId as string;
@@ -1116,6 +1180,8 @@ export function useWebSocket() {
               }
             } else {
               // Fallback: if tool message not found, add a completed tool message directly
+              // Race fix: flush streaming text before inserting a tool card.
+              flushBeforeInsert();
               addMessage({
                 role: "tool",
                 content: "",
@@ -1180,10 +1246,12 @@ export function useWebSocket() {
             const currentMsgs = useBuilderStore.getState().messages;
             const lastMsg = currentMsgs[currentMsgs.length - 1];
             if (lastMsg && lastMsg.role === "thinking") {
-              // Append to existing thinking message
-              updateLastMessage(data.content);
+              // Append to the existing thinking message by id — `updateLastMessage`
+              // would target whatever is last, which may no longer be this message.
+              appendToMessageById(lastMsg.id, data.content);
             } else {
-              // Create new thinking message
+              // Race fix: flush streaming text before inserting a thinking card.
+              flushBeforeInsert();
               addMessage({
                 role: "thinking",
                 content: data.content,
@@ -1469,6 +1537,7 @@ export function useWebSocket() {
                 ? `${label} 가져오기 및 검증 완료 (자동 수정 ${fixes}건)`
                 : `Imported & validated ${label} (${fixes} fix${fixes === 1 ? '' : 'es'} applied)`;
             }
+            flushBeforeInsert();
             addMessage({ role: 'system', content: summary });
           }
           break;
@@ -1675,6 +1744,7 @@ export function useWebSocket() {
             // Insert a phase divider into the chat
             const lang = useBuilderStore.getState().language;
             const label = PHASE_LABELS[data.phase as BuilderPhase]?.[lang] || data.phase;
+            flushBeforeInsert();
             addMessage({
               role: 'system',
               content: `phase_divider:${data.phase}`,
@@ -1711,6 +1781,8 @@ export function useWebSocket() {
     [
       setTyping,
       addMessage,
+      addMessageWithId,
+      appendToMessageById,
       updateLastMessage,
       updateSession,
       updateProgress,
@@ -1722,6 +1794,7 @@ export function useWebSocket() {
       setShowDownloadModal,
       clearStreamTimeout,
       setStreamTimeout,
+      flushBeforeInsert,
       // Performance optimization functions
       queueStreamUpdate,
       registerToolMessage,
@@ -2248,6 +2321,9 @@ export function useWebSocket() {
         })();
       }
 
+      // Race fix: if the previous turn's text is still buffered, flush it into
+      // its own bubble before the new user message lands after it.
+      flushBeforeInsert();
       addMessage({
         role: "user",
         content: message,
@@ -2265,7 +2341,7 @@ export function useWebSocket() {
 
       return true;
     },
-    [addMessage]
+    [addMessage, flushBeforeInsert]
   );
 
   /**
@@ -2319,6 +2395,8 @@ export function useWebSocket() {
       }
 
       // Add user message to UI immediately (with attachment metadata)
+      // Race fix: flush any buffered stream text into its own bubble first.
+      flushBeforeInsert();
       addMessage({
         role: "user",
         content: message,
@@ -2472,7 +2550,7 @@ export function useWebSocket() {
         return false;
       }
     },
-    [addMessage]
+    [addMessage, flushBeforeInsert]
   );
 
   /**

@@ -167,7 +167,19 @@ interface BuilderState {
   setSessionReady: (ready: boolean) => void;
   setLoadingSession: (loading: boolean) => void;
   addMessage: (message: Omit<Message, 'id' | 'timestamp'>) => void;
+  /** Add a message and return the id it was assigned (for targeted appends). */
+  addMessageWithId: (message: Omit<Message, 'id' | 'timestamp'>) => string;
   updateLastMessage: (contentToAppend: string) => void;
+  /**
+   * Append to a specific message by id — race-safe.
+   *
+   * `updateLastMessage` appends to whichever message happens to be last, so if a
+   * tool / subagent / asset message gets inserted while text is still streaming,
+   * the remaining text lands in that card instead and the assistant bubble looks
+   * cut off. Targeting by id makes insertion order irrelevant.
+   * Returns true if the message was found and updated.
+   */
+  appendToMessageById: (id: string, contentToAppend: string) => boolean;
   setTyping: (typing: boolean) => void;
   updateSession: (session: Partial<SessionState>) => void;
   updateProgress: (itemId: string, status: ProgressItem['status'], progress?: number) => void;
@@ -426,6 +438,19 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       return { messages: limitedMessages };
     }),
 
+  addMessageWithId: (message) => {
+    const id = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    set((state) => {
+      const newMessage = { ...message, id, timestamp: new Date() };
+      const allMessages = [...state.messages, newMessage];
+      const limitedMessages = allMessages.length > MAX_MESSAGES
+        ? allMessages.slice(-MAX_MESSAGES)
+        : allMessages;
+      return { messages: limitedMessages };
+    });
+    return id;
+  },
+
   updateLastMessage: (contentToAppend) =>
     set((state) => {
       const len = state.messages.length;
@@ -441,6 +466,26 @@ export const useBuilderStore = create<BuilderState>((set) => ({
           : [...state.messages.slice(0, lastIndex), updatedMessage]
       };
     }),
+
+  appendToMessageById: (id, contentToAppend) => {
+    let found = false;
+    set((state) => {
+      // Search from the end — the streaming target is almost always recent.
+      for (let i = state.messages.length - 1; i >= 0; i--) {
+        if (state.messages[i].id !== id) continue;
+        found = true;
+        const updated = {
+          ...state.messages[i],
+          content: state.messages[i].content + contentToAppend,
+        };
+        const newMessages = state.messages.slice();
+        newMessages[i] = updated;
+        return { messages: newMessages };
+      }
+      return state;
+    });
+    return found;
+  },
 
   setTyping: (typing) => set({ isTyping: typing }),
 
