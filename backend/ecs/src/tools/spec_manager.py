@@ -29,6 +29,36 @@ from tools.session_context import (
 logger = logging.getLogger(__name__)
 
 
+def _gsi_name_list(gsi) -> list[str]:
+    """GSI index names, whatever shape gsi_indexes happens to be in.
+
+    DataSourceSpec normalizes this on the way in, but specs already persisted to
+    NFS can hold the raw shape, so every reader goes through here.
+
+    The trap: ``for g in gsi_indexes`` over a bare string iterates CHARACTERS, so
+    "phone-index" renders as "p, h, o, n, e, -, i, n, d, e, x" (seen on prod
+    2026-08-05). A string is therefore treated as one name — or as a
+    comma-separated list of names — never as a sequence of characters.
+    """
+    if not gsi:
+        return []
+    if isinstance(gsi, str):
+        return [p.strip() for p in gsi.split(",") if p.strip()]
+    if isinstance(gsi, dict):
+        gsi = [gsi]
+    names: list[str] = []
+    for g in gsi:
+        if isinstance(g, dict):
+            names.append(str(g.get("name") or g.get("index_name") or "?"))
+        elif isinstance(g, str):
+            names.append(g)
+        elif hasattr(g, "name"):
+            names.append(str(getattr(g, "name", "?")))
+        else:
+            names.append(str(g))
+    return names
+
+
 class FlexibleBaseModel(BaseModel):
     """
     Base model with flexible configuration for LLM compatibility.
@@ -268,6 +298,35 @@ class DataSourceSpec(FlexibleBaseModel):
     )
     connection_secret_arn: Optional[str] = Field(default=None)
     region: Optional[str] = Field(default=None)
+
+    @field_validator("gsi_indexes", mode="before")
+    @classmethod
+    def _coerce_gsi_indexes(cls, v):
+        """Accept a bare string / dict for gsi_indexes and wrap it in a list.
+
+        Found on prod 2026-08-05: the model sometimes passes a single index as a
+        plain string ("phone-index") rather than a list. `Optional[list]` allows a
+        str through (a str IS iterable), and every reader does
+        ``for g in gsi_indexes`` — which iterates a string CHARACTER BY CHARACTER
+        and renders "p, h, o, n, e, -, i, n, d, e, x". The agent noticed this in
+        its own summary and "corrected" a spec that was never actually wrong.
+
+        Normalizing here fixes all readers at once instead of hardening each
+        loop, and keeps what's stored on disk in one predictable shape.
+        """
+        if v is None or isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            # "phone-index, reservation-index" → two entries.
+            return [{"name": part.strip()} for part in s.split(",") if part.strip()]
+        if isinstance(v, dict):
+            return [v]
+        if isinstance(v, tuple):
+            return list(v)
+        return v
 
 
 class ToolSpec(FlexibleBaseModel):
@@ -882,10 +941,9 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
         table = getattr(ds, 'table_name', None) or '?'
         pk = getattr(ds, 'partition_key', None) or '?'
         lines += ["", "### Data Source", f"- Table: `{table}` (PK: `{pk}`)"]
-        gsi = getattr(ds, 'gsi_indexes', None) or []
+        gsi = _gsi_name_list(getattr(ds, 'gsi_indexes', None))
         if gsi:
-            gsi_names = [g.get('name', '?') if isinstance(g, dict) else str(g) for g in gsi]
-            lines.append(f"- GSI: {', '.join(gsi_names)}")
+            lines.append(f"- GSI: {', '.join(gsi)}")
 
     # Business rules
     if spec.business_rules:
@@ -1710,15 +1768,7 @@ def format_operation_summary() -> dict:
         if ds:
             table = getattr(ds, "table_name", None) or "?"
             pk = getattr(ds, "partition_key", None) or "?"
-            gsi_list = getattr(ds, "gsi_indexes", None) or []
-            gsi_names = []
-            for g in gsi_list:
-                if isinstance(g, dict):
-                    gsi_names.append(g.get("name", "?"))
-                elif hasattr(g, "name"):
-                    gsi_names.append(getattr(g, "name", "?"))
-                else:
-                    gsi_names.append(str(g))
+            gsi_names = _gsi_name_list(getattr(ds, "gsi_indexes", None))
             gsi_str = ", ".join(gsi_names) if gsi_names else "none"
             ds_info = f"{table} (PK: {pk}, GSI: {gsi_str})"
 
