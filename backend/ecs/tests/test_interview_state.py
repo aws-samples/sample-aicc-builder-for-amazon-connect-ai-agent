@@ -182,6 +182,7 @@ def test_unsafe_session_ids_are_rejected(app_mod, tmp_path, hostile_id):
     victim = _session_dir(tmp_path, "victim")
     (victim / "assets" / "specs" / "secret_op.json").write_text("{}", encoding="utf-8")
 
+    assert app_mod._is_safe_session_id(hostile_id) is False
     assert app_mod._session_base_dir(hostile_id) is None
     assert app_mod._read_interview_state(hostile_id) is None
 
@@ -198,20 +199,34 @@ def test_unsafe_session_ids_are_rejected(app_mod, tmp_path, hostile_id):
 def test_legitimate_session_ids_are_accepted(app_mod, tmp_path, good_id):
     """The allowlist must not be so tight that real sessions break — that would
     silently disable the whole <interview_state> fix."""
+    assert app_mod._is_safe_session_id(good_id) is True
+    _session_dir(tmp_path, good_id)  # the directory must exist to be resolved
     base = app_mod._session_base_dir(good_id)
     assert base is not None
     assert base.name == good_id
     assert base.parent.name == "sessions"
 
 
-def test_resolved_path_stays_inside_the_sessions_root(app_mod, tmp_path):
-    """Second, independent guarantee: whatever the allowlist admits must still
-    resolve inside <mount>/sessions. This is the backstop that keeps traversal
-    impossible even if the pattern is later loosened."""
+def test_resolved_dir_comes_from_the_sessions_listing(app_mod, tmp_path):
+    """The returned Path must be a real child of <mount>/sessions, taken from
+    the directory listing rather than built from the caller's string — that is
+    what makes traversal impossible by construction."""
     sessions_root = (tmp_path / "sessions").resolve()
+    _session_dir(tmp_path, "session-abc")
     base = app_mod._session_base_dir("session-abc")
     assert base is not None
-    assert sessions_root in base.parents
+    assert sessions_root in base.resolve().parents
+
+
+def test_valid_id_with_no_directory_yet_still_gets_the_pending_block(app_mod, tmp_path):
+    """On the FIRST interview turn the session dir may not exist yet. The block
+    must still be emitted — its ⏳ lines and the "one save per turn" rules are
+    exactly what's needed while the first specs are being written. Returning
+    None here would silently drop the fix at the moment it matters most."""
+    out = app_mod._read_interview_state("session-not-created-yet")
+    assert out is not None
+    assert "⏳ Operation specs: none saved yet" in out
+    assert "✅" not in out
 
 
 def test_interview_state_is_injected_only_during_the_interview(app_mod):

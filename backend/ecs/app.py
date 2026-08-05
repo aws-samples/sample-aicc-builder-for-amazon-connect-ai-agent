@@ -1195,24 +1195,36 @@ def _sanitize_messages_for_agent(messages: list) -> list:
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
-def _session_base_dir(session_id: str) -> Optional[Path]:
-    """Resolve the on-NFS directory for a session, or None if the id is unsafe.
+def _is_safe_session_id(session_id: str) -> bool:
+    """True only for ids that look like a real session id."""
+    return bool(session_id) and bool(_SAFE_SESSION_ID.match(session_id))
 
-    Two independent checks, because either alone can be argued with:
-      1. the id must match the allowlist (no separators, no dots, bounded), and
-      2. the resolved path must still sit inside <mount>/sessions.
-    (2) is the backstop that makes traversal impossible even if (1) is ever
-    loosened — and it's what makes the safety local and checkable here.
+
+def _session_base_dir(session_id: str) -> Optional[Path]:
+    """The on-NFS directory for a session, or None if it isn't there (yet).
+
+    The path is never built by concatenating the caller's string. The id is
+    matched against the allowlist and then looked up among the directory entries
+    that ACTUALLY exist under <mount>/sessions, and the returned Path comes from
+    that listing. So the only reachable values are real children of the sessions
+    root — traversal is impossible by construction rather than by
+    after-the-fact validation, which also means no user-controlled string ever
+    flows into a filesystem path (CodeQL py/path-injection).
+
+    Returns None both for an unsafe id and for a session whose directory doesn't
+    exist yet (the first interview turn) — callers treat both as "nothing saved".
     """
-    if not session_id or not _SAFE_SESSION_ID.match(session_id):
-        logger.warning(f"[interview_state] rejected unsafe session id: {session_id!r}")
+    if not _is_safe_session_id(session_id):
+        logger.warning("[interview_state] rejected unsafe session id: %r", session_id)
         return None
-    sessions_root = (Path(S3FILES_MOUNT) / "sessions").resolve()
-    candidate = (sessions_root / session_id).resolve()
-    if candidate != sessions_root and sessions_root not in candidate.parents:
-        logger.warning(f"[interview_state] path escaped sessions root: {session_id!r}")
-        return None
-    return candidate
+    sessions_root = Path(S3FILES_MOUNT) / "sessions"
+    try:
+        for entry in sessions_root.iterdir():
+            if entry.name == session_id and entry.is_dir():
+                return entry
+    except OSError as e:
+        logger.warning("[interview_state] cannot list sessions root: %s", e)
+    return None
 
 
 def _read_interview_state(session_id: str) -> Optional[str]:
@@ -1230,18 +1242,22 @@ def _read_interview_state(session_id: str) -> Optional[str]:
     result each turn. Mirrors the `<generation_state>` block that already does
     this for the generation phase.
     """
-    base = _session_base_dir(session_id)
-    if base is None:
+    # An unsafe id gets nothing at all. A safe id whose directory doesn't exist
+    # yet (first turn) still gets the block: the ⏳ lines and the accompanying
+    # rules are exactly what's needed while the first specs are being saved.
+    if not _is_safe_session_id(session_id):
+        logger.warning("[interview_state] rejected unsafe session id: %r", session_id)
         return None
+    base = _session_base_dir(session_id)
     lines: list[str] = []
 
     # Operation specs → assets/specs/{op_id}.json
     try:
-        specs_dir = base / "assets" / "specs"
+        specs_dir = (base / "assets" / "specs") if base is not None else None
         spec_ids = sorted(
             p.stem for p in specs_dir.iterdir()
             if p.is_file() and p.suffix == ".json" and p.stem != "infrastructure_spec"
-        ) if specs_dir.is_dir() else []
+        ) if specs_dir is not None and specs_dir.is_dir() else []
     except Exception:
         spec_ids = []
     if spec_ids:
@@ -1250,21 +1266,23 @@ def _read_interview_state(session_id: str) -> Optional[str]:
         lines.append("⏳ Operation specs: none saved yet")
 
     # Session-level artifacts → state/*.json
-    state_dir = base / "state"
+    state_dir = (base / "state") if base is not None else None
     for filename, label in (
         ("infrastructure_spec.json", "Infrastructure spec"),
         ("flow_config.json", "Session flow config"),
     ):
         try:
-            exists = (state_dir / filename).is_file()
+            exists = state_dir is not None and (state_dir / filename).is_file()
         except Exception:
             exists = False
         lines.append(f"{'✅' if exists else '⏳'} {label}: {'SAVED' if exists else 'not saved yet'}")
 
     # Requirement documents → state/requirements/{doc_type}.txt
     try:
-        req_dir = state_dir / "requirements"
-        docs = sorted(p.stem for p in req_dir.iterdir() if p.is_file()) if req_dir.is_dir() else []
+        req_dir = (state_dir / "requirements") if state_dir is not None else None
+        docs = sorted(
+            p.stem for p in req_dir.iterdir() if p.is_file()
+        ) if req_dir is not None and req_dir.is_dir() else []
     except Exception:
         docs = []
     if docs:
