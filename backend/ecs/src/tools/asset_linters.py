@@ -900,6 +900,40 @@ _VALID_JSONPATH_ROOTS = (
 )
 
 
+# Languages for which Contact Lens real-time redaction can be requested inside
+# UpdateContactRecordingAndAnalyticsBehavior. Asking for redaction with any other
+# AnalyticsLanguage makes CreateContactFlow reject the flow, and the error names
+# AnalyticsLanguage rather than the redaction block — see the fix-up below.
+# Verified against CreateContactFlow (ap-northeast-2, 2026-08-06): en-US passes
+# with redaction enabled, ko-KR does not.
+REDACTION_SUPPORTED_LANGUAGES = {
+    "en-US", "en-GB", "en-AU", "en-IN", "es-US", "fr-CA", "fr-FR",
+    "de-DE", "it-IT", "pt-BR",
+}
+
+# Fallback when analytics is enabled but AnalyticsLanguage is missing (the API
+# requires it). Matches the default the rest of the pipeline assumes.
+_DEFAULT_ANALYTICS_LANGUAGE = "ko-KR"
+
+
+def _flow_analytics_language(actions: list) -> str:
+    """Best-guess AnalyticsLanguage for a flow, from its own voice settings."""
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        p = a.get("Parameters") or a.get("parameters") or {}
+        if not isinstance(p, dict):
+            continue
+        for key in ("LanguageCode", "AnalyticsLanguage"):
+            val = p.get(key)
+            if isinstance(val, str) and "-" in val:
+                return val
+        tts = p.get("TextToSpeechVoice")
+        if isinstance(tts, dict) and isinstance(tts.get("languageCode"), str):
+            return tts["languageCode"]
+    return _DEFAULT_ANALYTICS_LANGUAGE
+
+
 def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: list) -> None:
     """Rewrite block Parameters/Transitions to the shapes Amazon Connect's
     CreateContactFlow API actually accepts. Mutates `actions` in place and
@@ -953,6 +987,40 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
                 if et not in have and nxt:
                     errs.append({"ErrorType": et, "NextAction": nxt})
                     fixes.append(f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: added required {et} error branch")
+
+            # Contact Lens real-time redaction is only supported for a subset of
+            # languages. Asking for it with an unsupported AnalyticsLanguage is
+            # rejected as "Invalid Action property value ... AnalyticsLanguage",
+            # which is misleading — the language is fine, the REDACTION is not.
+            # CreateContactFlow-verified (2026-08-06, ap-northeast-2):
+            #   ko-KR + redaction Enabled=True  -> Invalid ... AnalyticsLanguage
+            #   en-US + redaction Enabled=True  -> OK
+            #   ko-KR + redaction absent/False  -> OK
+            #   AnalyticsLanguage omitted       -> "missing required property"
+            # So: keep AnalyticsLanguage (it is REQUIRED) and drop the redaction
+            # request instead. Recording/analytics still work; only redaction is
+            # unavailable for that language.
+            vb = p.get("VoiceBehavior") if isinstance(p, dict) else None
+            vab = vb.get("VoiceAnalyticsBehavior") if isinstance(vb, dict) else None
+            if isinstance(vab, dict):
+                lang = str(vab.get("AnalyticsLanguage") or "")
+                red = vab.get("ConversationalAnalyticsRedactionConfiguration")
+                red_on = isinstance(red, dict) and str(red.get("Enabled", "")).lower() == "true"
+                if red_on and lang not in REDACTION_SUPPORTED_LANGUAGES:
+                    vab["ConversationalAnalyticsRedactionConfiguration"] = {"Enabled": "False"}
+                    fixes.append(
+                        f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: disabled "
+                        f"ConversationalAnalyticsRedactionConfiguration — redaction is not "
+                        f"supported for AnalyticsLanguage={lang or '(unset)'} and the API "
+                        f"rejects the flow with a misleading AnalyticsLanguage error"
+                    )
+                # AnalyticsLanguage is REQUIRED whenever analytics is enabled.
+                elif not lang and str(vab.get("Enabled", "")).lower() == "true":
+                    vab["AnalyticsLanguage"] = _flow_analytics_language(actions)
+                    fixes.append(
+                        f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: added required "
+                        f"AnalyticsLanguage={vab['AnalyticsLanguage']}"
+                    )
 
         # --- UpdateContactRecordingBehavior: {Agent, Customer} → RecordingBehavior
         if t == "UpdateContactRecordingBehavior":
