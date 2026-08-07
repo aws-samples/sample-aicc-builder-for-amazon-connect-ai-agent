@@ -170,8 +170,27 @@ export class EcsStack extends cdk.Stack {
           "dynamodb:DeleteItem",
           "dynamodb:Query",
           "dynamodb:Scan",
+          "dynamodb:DescribeTable",
         ],
         resources: ["arn:aws:dynamodb:*:*:table/aiccbuilder*"],
+      })
+    );
+
+    // DynamoDB read-only introspection of the customer's EXISTING tables
+    // (introspect_database tool). Read-only on purpose: the tool only needs to
+    // describe the schema and sample a few items — it must never mutate
+    // customer data.
+    taskRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "DynamoDbIntrospectionReadOnly",
+        actions: [
+          "dynamodb:DescribeTable",
+          "dynamodb:ListTables",
+          "dynamodb:Scan",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+        ],
+        resources: ["*"],
       })
     );
 

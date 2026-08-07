@@ -473,11 +473,17 @@ moves over time). Before emitting RDS-mode infrastructure:
 
 Instead:
 - **Skip**: DynamoDB Table, Sample Data Seeder Custom Resource
-- **Add**: Lambda environment variables for RDS connection:
-  - `RDS_CLUSTER_ARN`: from data_source.cluster_arn
-  - `RDS_SECRET_ARN`: from data_source.secret_arn
-  - `RDS_DATABASE_NAME`: from data_source.database_name
-- **Add**: IAM permissions for RDS Data API + Secrets Manager:
+- **Add**: Lambda environment variables for RDS connection.
+  ⚠️ These EXACT names are the cross-asset contract — the generated Lambda code
+  reads `os.environ["DB_CLUSTER_ARN"]`, `os.environ["DB_SECRET_ARN"]` and
+  `os.environ["DB_NAME"]`. Emitting any other name (e.g. `RDS_CLUSTER_ARN`)
+  makes every Lambda fail with KeyError at import time.
+  - `DB_CLUSTER_ARN`: from data_source.cluster_arn
+  - `DB_SECRET_ARN`: from data_source.secret_arn
+  - `DB_NAME`: from data_source.database_name
+- **Add**: IAM permissions for RDS Data API + Secrets Manager, scoped to the
+  actual cluster and secret from data_source (do not leave `:cluster:*`
+  wildcards when the ARNs are known):
   ```yaml
   - PolicyName: RDSDataAPIAccess
     PolicyDocument:
@@ -490,11 +496,11 @@ Instead:
             - rds-data:BeginTransaction
             - rds-data:CommitTransaction
             - rds-data:RollbackTransaction
-          Resource: !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:*'
+          Resource: '<data_source.cluster_arn>'
         - Effect: Allow
           Action:
             - secretsmanager:GetSecretValue
-          Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
+          Resource: '<data_source.secret_arn>'
   ```
 - **Keep**: API Gateway, Lambda functions (placeholder), S3 bucket, API Key
 
@@ -508,9 +514,9 @@ Instead:
   "database_name": "production",
   "tables": [{"table_name": "reservations", "description": "from existing RDS"}],
   "environment_variables": {
-    "RDS_CLUSTER_ARN": "arn:aws:rds:...",
-    "RDS_SECRET_ARN": "arn:aws:secretsmanager:...",
-    "RDS_DATABASE_NAME": "production"
+    "DB_CLUSTER_ARN": "arn:aws:rds:...",
+    "DB_SECRET_ARN": "arn:aws:secretsmanager:...",
+    "DB_NAME": "production"
   }
 }
 ```

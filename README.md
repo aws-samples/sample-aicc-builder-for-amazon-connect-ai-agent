@@ -27,6 +27,60 @@ https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
 
 ---
 
+## What's New in v2.4
+
+**Build on the database you already have.** Point AICC Builder at an existing
+Aurora or DynamoDB database — or just hand it your schema document — and it
+generates Lambdas, infrastructure, and prompts against your real tables,
+columns, and business rules instead of inventing new ones.
+
+- **Existing-database scan, end to end.** `introspect_database` now reads a full
+  relational schema over the RDS Data API — tables, exact column names and SQL
+  types, single **and composite** primary keys, secondary indexes, **foreign keys
+  (plus reverse relationships)**, enum/allowed values, check constraints,
+  generated columns, table/column comments, real row counts, and sample rows —
+  for both **Aurora PostgreSQL and Aurora MySQL**. DynamoDB introspection gained
+  **local secondary indexes**, projection details, nested map/list/set typing,
+  and non-key attribute discovery. Several tables can be scanned in one call.
+- **Column comments become business rules.** A comment like *"Auto-approve under
+  500,000 KRW; above needs manager approval"* is carried into the OperationSpec,
+  so the generated Lambda enforces the threshold your DBA already documented.
+- **Sampled values become data conventions.** A phone stored as `821012345678`
+  stays in that format all the way through to the Contact Flow, instead of being
+  "helpfully" rewritten to `+8210...`.
+- **No database to connect to? Paste or upload the schema.** A new
+  *schema-as-document* path accepts a DDL dump, ERD, or data dictionary, parses
+  it into the same contract, echoes back every table and column it read for your
+  confirmation, and never invents an identifier the document did not state.
+- **Generated Lambdas read columns by name.** The RDS Data API pattern now sends
+  `includeResultMetadata=True` and maps rows to dicts, replacing positional
+  access that silently returned the wrong column whenever the schema changed.
+  Parameterized queries, typed parameter binding, `DECIMAL`-as-string casting,
+  and scoped `rds-data` / Secrets Manager IAM are part of the pattern.
+- **Four new deterministic gates** catch the mistakes an LLM makes even with a
+  correct schema in context, before anything is deployed:
+  - **SQL identifier check** — a column written onto the wrong table
+    (`order_items.product_name` when `product_name` lives on `products`).
+  - **SQL type-cast check** — a cast to a type that does not exist
+    (`::approval_status` on a plain `VARCHAR`).
+  - **Required-column check** — an `INSERT` omitting a `NOT NULL` column that
+    has no default.
+  - **RDS Data API contract check** — env var drift, a missing
+    `includeResultMetadata`, positional row access, or SQL built by string
+    interpolation.
+- **Merge-time normalization** keeps the cross-asset contract intact when
+  fragments disagree: RDS environment variables are unified on
+  `DB_CLUSTER_ARN` / `DB_SECRET_ARN` / `DB_NAME` (the names the handlers
+  actually read), and an inline Lambda whose `Handler` names a function its code
+  does not define gets the alias it needs.
+- **Actionable failures instead of empty results.** A scan that finds nothing now
+  returns an error naming the tables that *do* exist, and distinguishes
+  "Data API not enabled", "access denied", and "database not found" — with the
+  exact remediation for each. The ECS task role gained the read-only
+  `dynamodb:DescribeTable` / `Scan` permissions introspection actually needs.
+
+---
+
 ## What's New in v2.3
 
 A fully-automated workshop deploy script, live-QA permission hardening, a new

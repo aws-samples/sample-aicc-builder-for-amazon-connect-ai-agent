@@ -679,10 +679,14 @@ moves over time). Before emitting RDS-mode infrastructure:
 
 Instead:
 - **Skip**: DynamoDB Table, Sample Data Seeder Custom Resource
-- **Add**: Lambda environment variables for RDS connection:
-  - `RDS_CLUSTER_ARN`: from data_source.cluster_arn
-  - `RDS_SECRET_ARN`: from data_source.secret_arn
-  - `RDS_DATABASE_NAME`: from data_source.database_name
+- **Add**: Lambda environment variables for RDS connection.
+  ⚠️ These EXACT names are the cross-asset contract — the generated Lambda code
+  reads `os.environ["DB_CLUSTER_ARN"]`, `os.environ["DB_SECRET_ARN"]` and
+  `os.environ["DB_NAME"]`. Emitting any other name (e.g. `RDS_CLUSTER_ARN`)
+  makes every Lambda fail with KeyError at import time.
+  - `DB_CLUSTER_ARN`: from data_source.cluster_arn
+  - `DB_SECRET_ARN`: from data_source.secret_arn
+  - `DB_NAME`: from data_source.database_name
 - **Add**: IAM permissions for RDS Data API + Secrets Manager:
   ```yaml
   - PolicyName: RDSDataAPIAccess
@@ -714,9 +718,9 @@ Instead:
   "database_name": "production",
   "tables": [{"table_name": "reservations", "description": "from existing RDS"}],
   "environment_variables": {
-    "RDS_CLUSTER_ARN": "arn:aws:rds:...",
-    "RDS_SECRET_ARN": "arn:aws:secretsmanager:...",
-    "RDS_DATABASE_NAME": "production"
+    "DB_CLUSTER_ARN": "arn:aws:rds:...",
+    "DB_SECRET_ARN": "arn:aws:secretsmanager:...",
+    "DB_NAME": "production"
   }
 }
 ```

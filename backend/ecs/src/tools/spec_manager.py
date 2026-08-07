@@ -329,6 +329,45 @@ class DataSourceSpec(FlexibleBaseModel):
     connection_secret_arn: Optional[str] = Field(default=None)
     region: Optional[str] = Field(default=None)
 
+    # --- RDS / Aurora specific (ignored for DynamoDB) ---------------------
+    database_name: Optional[str] = Field(
+        default=None,
+        description="RDS/Aurora database (schema) name the operation queries",
+        validation_alias=AliasChoices("database_name", "databaseName", "db_name"),
+    )
+    cluster_arn: Optional[str] = Field(
+        default=None,
+        description="Aurora cluster ARN used via the RDS Data API",
+        validation_alias=AliasChoices("cluster_arn", "clusterArn"),
+    )
+    lookup_column: Optional[str] = Field(
+        default=None,
+        description="SQL column used to identify the caller/record "
+                    "(e.g. customers.phone_number)",
+        validation_alias=AliasChoices("lookup_column", "lookupColumn", "lookup_key"),
+    )
+    related_tables: Optional[list] = Field(
+        default=None,
+        description="Other tables this operation joins/reads, in query order "
+                    "(e.g. ['customers', 'orders', 'order_items'])",
+        validation_alias=AliasChoices("related_tables", "relatedTables", "join_tables", "tables"),
+    )
+
+    @field_validator("related_tables", mode="before")
+    @classmethod
+    def _coerce_related_tables(cls, v):
+        """Accept a comma-separated string or a single dict/table name."""
+        if v is None or isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            return [p.strip() for p in s.split(",") if p.strip()] or None
+        if isinstance(v, dict):
+            return [v.get("name") or v.get("table_name") or str(v)]
+        if isinstance(v, tuple):
+            return list(v)
+        return v
+
     @field_validator("gsi_indexes", mode="before")
     @classmethod
     def _coerce_gsi_indexes(cls, v):
@@ -968,12 +1007,34 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
     # Data source
     ds = spec.data_source
     if ds:
-        table = getattr(ds, 'table_name', None) or '?'
-        pk = getattr(ds, 'partition_key', None) or '?'
-        lines += ["", "### Data Source", f"- Table: `{table}` (PK: `{pk}`)"]
-        gsi = _gsi_name_list(getattr(ds, 'gsi_indexes', None))
-        if gsi:
-            lines.append(f"- GSI: {', '.join(gsi)}")
+        db_type = (getattr(ds, "db_type", None) or "").lower()
+        table = getattr(ds, "table_name", None) or "?"
+        lines += ["", "### Data Source"]
+        if db_type.startswith("rds"):
+            engine = "PostgreSQL" if "postgres" in db_type else (
+                "MySQL" if "mysql" in db_type else "RDS")
+            pk = getattr(ds, "partition_key", None)
+            detail = f"- {engine} table: `{table}`"
+            if pk:
+                detail += f" (PK: `{pk}`)"
+            lines.append(detail)
+            db_name = getattr(ds, "database_name", None)
+            if db_name:
+                lines.append(f"- Database: `{db_name}`")
+            lookup = getattr(ds, "lookup_column", None)
+            if lookup:
+                lines.append(f"- Lookup column: `{lookup}`")
+            related = getattr(ds, "related_tables", None)
+            if related:
+                names = [r if isinstance(r, str) else (r.get("name") or str(r)) for r in related]
+                lines.append(f"- Also reads: {', '.join(f'`{n}`' for n in names)}")
+            lines.append("- Access: RDS Data API (`rds-data:ExecuteStatement`)")
+        else:
+            pk = getattr(ds, "partition_key", None) or "?"
+            lines.append(f"- Table: `{table}` (PK: `{pk}`)")
+            gsi = _gsi_name_list(getattr(ds, "gsi_indexes", None))
+            if gsi:
+                lines.append(f"- GSI: {', '.join(gsi)}")
 
     # Business rules
     if spec.business_rules:

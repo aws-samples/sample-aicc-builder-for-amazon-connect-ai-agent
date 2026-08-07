@@ -980,42 +980,97 @@ def handler(event, context):
 
 ## RDS DATA API PATTERN
 
-When `db_type` is "rds-postgresql" or "rds-mysql", generate Lambda code using RDS Data API instead of DynamoDB.
-Use `boto3` `rds-data` client with Secrets Manager for credentials.
+When `db_type` is "rds_postgresql"/"rds-postgresql" or "rds_mysql"/"rds-mysql",
+generate Lambda code using the RDS Data API instead of DynamoDB.
+Use the `boto3` `rds-data` client with Secrets Manager for credentials.
 
 ```python
 import boto3, os, json, logging
+from decimal import Decimal
 
 logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 rds_client = boto3.client("rds-data")
 
 CLUSTER_ARN = os.environ["DB_CLUSTER_ARN"]
 SECRET_ARN = os.environ["DB_SECRET_ARN"]
 DATABASE = os.environ["DB_NAME"]
 
+
 def execute_sql(sql, parameters=None):
+    '''Run a parameterized statement and return rows as dicts.'''
     params = {
         "resourceArn": CLUSTER_ARN,
         "secretArn": SECRET_ARN,
         "database": DATABASE,
         "sql": sql,
+        # REQUIRED: without this the response has no columnMetadata and rows
+        # can only be read by position, which silently breaks on schema change.
+        "includeResultMetadata": True,
     }
     if parameters:
         params["parameters"] = parameters
-    return rds_client.execute_statement(**params)
+    response = rds_client.execute_statement(**params)
+    return _rows_to_dicts(response)
 
-# Usage:
-# result = execute_sql(
-#     "SELECT * FROM customers WHERE mobile1 = :phone",
-#     parameters=[{"name": "phone", "value": {"stringValue": phone_number}}]
+
+def _rows_to_dicts(response):
+    '''Convert a Data API response into a list of {column_name: value} dicts.'''
+    columns = [c.get("label") or c.get("name") for c in response.get("columnMetadata", [])]
+    rows = []
+    for record in response.get("records", []):
+        row = {}
+        for i, field in enumerate(record):
+            name = columns[i] if i < len(columns) else f"col_{i}"
+            row[name] = _field_value(field)
+        rows.append(row)
+    return rows
+
+
+def _field_value(field):
+    if field.get("isNull"):
+        return None
+    for key in ("stringValue", "longValue", "doubleValue", "booleanValue"):
+        if key in field:
+            return field[key]
+    if "arrayValue" in field:
+        av = field["arrayValue"]
+        for key in ("stringValues", "longValues", "doubleValues", "booleanValues"):
+            if key in av:
+                return av[key]
+    return None
+
+
+# Usage — always reference columns by NAME, never by index:
+# rows = execute_sql(
+#     "SELECT order_number, status, total_amount FROM orders WHERE order_number = :order_number",
+#     parameters=[{"name": "order_number", "value": {"stringValue": order_number}}]
 # )
-# rows = result.get("records", [])
+# if not rows:
+#     return not_found_response()
+# order = rows[0]
+# status = order["status"]
 ```
 
 Rules for RDS mode:
 - Use parameterized queries (`:param_name`) — NEVER string concatenation
+  (SQL injection). Table/column names cannot be parameterized, so they must
+  come from the scanned schema, never from user input.
 - Environment variables: `DB_CLUSTER_ARN`, `DB_SECRET_ARN`, `DB_NAME`
-- Parse `records` array from response (each row is a list of typed values)
+- ALWAYS pass `includeResultMetadata=True` and read columns by name via the
+  `_rows_to_dicts` helper above. Never index `record[0]`, `record[1]`, …
+- Use the EXACT table and column names from the introspected/provided schema,
+  including case. PostgreSQL folds unquoted identifiers to lower case; MySQL
+  keeps them as declared.
+- Respect `allowed_values` from the schema when writing enum comparisons and
+  when validating input — an invalid enum value is a DB error, not a 404.
+- Numeric/DECIMAL columns come back as strings in `stringValue`; cast with
+  `Decimal(...)`/`int(...)` before arithmetic or comparison.
+- For paging/limits use `LIMIT`; never `SELECT *` on a large table in a
+  contact-center path — select the columns you need.
+- Required IAM on the Lambda role: `rds-data:ExecuteStatement`,
+  `rds-data:BatchExecuteStatement`, and `secretsmanager:GetSecretValue` on the
+  credentials secret.
 - Keep the same dual-mode handler (Contact Flow + API Gateway) structure
 
 ## EXTERNAL API INTEGRATION PATTERNS

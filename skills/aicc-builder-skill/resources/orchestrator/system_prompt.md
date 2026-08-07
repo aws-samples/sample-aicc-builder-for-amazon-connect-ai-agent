@@ -335,10 +335,26 @@ into the conversation.
   🟡 Placeholder: TODO comment + skeleton code only (real API wired later).
 
 #### Database type (only if they have an existing DB)
-- DynamoDB (new) or RDS MySQL/PostgreSQL (existing)?
-- For RDS: Aurora Serverless v2 + Data API. You need the Secrets Manager
-  ARN, cluster ARN, and database name.
-- Given the existing table names + region, we'll auto-introspect the schema.
+- DynamoDB (new) or an existing DynamoDB / RDS-Aurora MySQL / RDS-Aurora PostgreSQL?
+- Record `db_type` as one of: `dynamodb`, `rds_mysql`, `rds_postgresql`.
+- Always capture `region` (the DB's region, which may differ from this app's).
+- **DynamoDB**: capture `table_name` — several tables may be given as one
+  comma-separated string; the scan handles them in a single call.
+- **RDS/Aurora**: introspection goes through the RDS Data API, so you MUST
+  collect all three and store them under exactly these keys:
+  `rds_cluster_arn`, `rds_secret_arn`, `rds_database_name`.
+  Tell the user where to find them if they ask: cluster ARN from the RDS
+  console/`describe-db-clusters`, secret ARN from Secrets Manager (the
+  cluster's master-user secret), database name = the schema they query.
+  The Data API exists only on Aurora Serverless v2/provisioned clusters with
+  the HTTP endpoint enabled — if they are on a plain RDS instance, say so and
+  offer the document path below instead.
+- **No reachable DB?** They can instead paste or upload the schema (DDL dump,
+  ERD image, data dictionary, sample JSON). Accept it and follow
+  "Phase 0-ALT: Schema supplied as a DOCUMENT" — do not ask for ARNs just to
+  read a schema, only ask for them if generated Lambdas must actually connect.
+- Given the above, we auto-introspect the schema — never ask the user to retype
+  column names that a scan can discover.
 
 #### Passing discovered info to sub-agents
 - `call_direction` → contact_flow_generator (via `contact_flow_requirements`)
@@ -839,25 +855,89 @@ When collected_data includes `existing_table == true`:
 
 **Phase 0: Schema Introspection (scan the existing DB)**
 ```
-1. Call introspect_database:
+1. Call introspect_database — pass EVERY parameter the engine needs:
+
+   # DynamoDB (table_name may be a comma-separated list to scan several at once)
    introspect_database(
-       db_type=collected_data["db_type"],
-       table_name=collected_data["table_name"],
+       db_type="dynamodb",
+       dynamodb_table_name=collected_data["table_name"],
        region=collected_data["region"]
    )
-2. Convert via convert_to_infrastructure_schema():
-   - key_schema → primary_key
-   - global_secondary_indexes → gsi_indexes
-   - attributes → field list
-   - unify env var on TABLE_NAME (use the real table name since it already exists)
-3. Report scan result to the user (user-facing copy in their language), e.g.:
-   "✅ 테이블 스키마를 스캔했어요!
-   - 테이블: {table_name}
-   - PK: {primary_key}
-   - GSI: {gsi_list}
-   - 속성: {attribute_count}개
 
+   # RDS / Aurora — the three connection values are MANDATORY.
+   # Omitting them returns MISSING_PARAMETERS; there is no default.
+   introspect_database(
+       db_type=collected_data["db_type"],          # "rds_postgresql" | "rds_mysql"
+       region=collected_data["region"],
+       rds_cluster_arn=collected_data["rds_cluster_arn"],
+       rds_secret_arn=collected_data["rds_secret_arn"],
+       rds_database_name=collected_data["rds_database_name"],
+       table_name=collected_data.get("table_name")  # omit to scan the whole schema
+   )
+
+2. CHECK THE RESULT BEFORE CONTINUING. If `success == false`, do NOT proceed to
+   Phase 1 — relay `error` to the user verbatim and ask them to confirm the
+   connection details. Common `error_code` values and what to tell the user:
+   - MISSING_PARAMETERS    → ask for the cluster ARN / secret ARN / database name
+   - DATA_API_NOT_ENABLED  → the Data API must be enabled; it only exists on
+                             Aurora clusters, not on plain RDS instances
+   - ACCESS_DENIED         → the runtime role lacks rds-data / secretsmanager /
+                             dynamodb:DescribeTable permission
+   - NO_TABLES_FOUND       → the error lists the tables that DO exist; ask which
+                             ones they meant
+
+3. Convert via convert_to_infrastructure_schema(). It handles DynamoDB
+   (single or multiple tables) AND RDS/Aurora, and returns:
+   - DynamoDB: tables[].primary_key / sort_key / gsi_indexes / lsi_indexes,
+     environment_variables{<ENTITY>_TABLE_NAME}
+   - RDS:      tables[].primary_key / columns[] (exact names, sql_type,
+     allowed_values, description) / indexes / foreign_keys / referenced_by,
+     relationships[], enum_types{}, connection{cluster_arn, secret_arn,
+     database_name}, environment_variables{DB_CLUSTER_ARN, DB_SECRET_ARN,
+     DB_NAME}, iam_requirements[]
+   - both:     data_conventions{} with REAL sampled examples, access_notes[]
+
+4. ⚠️ The scanned schema is now the CONTRACT. Never rename, re-case, or invent
+   columns/attributes. Use the exact identifiers returned by the scan, honour
+   `allowed_values` for enum-like fields, and preserve `data_conventions`
+   examples (e.g. a phone stored as `821012345678` must not become `+8210...`).
+   Column/table `description` values often carry business rules
+   (e.g. "Auto-approve under 500,000 KRW") — feed those into the OperationSpec.
+
+5. Report the scan result to the user (in their language), e.g.:
+   "✅ 스키마를 스캔했어요!
+   - 테이블: {table_count}개 ({table_names})
+   - 주요 키: {primary_keys}
+   - 인덱스/GSI: {index_list}
+   - 관계: {relationship_count}개
    이 스키마를 기반으로 에셋을 생성할게요."
+```
+
+**Phase 0-ALT: Schema supplied as a DOCUMENT (no live DB to scan)**
+```
+When the customer PASTES or UPLOADS the schema instead (DDL/CREATE TABLE dump,
+ERD image, Excel/CSV data dictionary, JSON sample payloads) and there is no
+reachable DB — do NOT call introspect_database. Instead:
+
+1. Read the attachment/pasted text and extract, per table:
+   exact table name, exact column names, SQL types, PK (incl. composite),
+   FKs/relationships, indexes, enum/allowed values, NOT NULL, defaults,
+   generated columns, and any comments carrying business rules.
+2. Build the SAME infrastructure_schema shape convert_to_infrastructure_schema()
+   produces (see Phase 0 step 3), setting `existing: true` on every table.
+   For RDS add connection{} + environment_variables{DB_CLUSTER_ARN,
+   DB_SECRET_ARN, DB_NAME} — ask the customer for the ARNs if the document
+   doesn't contain them, and use explicit `<REPLACE_ME>` placeholders if they
+   are not available yet, never invented values.
+3. Persist it with save_operation_spec so later phases read the same contract.
+4. ECHO BACK what you parsed as a table (table → columns → PK → FKs) and ask
+   the user to confirm BEFORE generating. Anything the document did not state
+   must be asked, not guessed — especially the lookup key used for caller
+   identification and enum value spellings.
+5. Then continue with Phase 1 exactly as in the scanned path.
+
+⚠️ Fidelity rule is identical: the document is the contract. Preserve the
+customer's spelling and casing of every identifier, character for character.
 ```
 
 **Phase 1: Infrastructure (API GW + Lambda ONLY)**
