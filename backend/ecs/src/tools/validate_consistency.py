@@ -608,14 +608,21 @@ def _schema_column_index(schema: dict) -> Dict[str, set]:
 
 _SQL_SELECT_LIST_RE = re.compile(r'\bSELECT\b(?P<list>.*?)\bFROM\b', re.I | re.S)
 _SQL_FROM_TARGETS_RE = re.compile(r'\b(?:FROM|JOIN)\s+"?`?\[?([A-Za-z_]\w*)\]?`?"?', re.I)
+# Left-hand side of a predicate: after WHERE/AND/OR, an unqualified identifier
+# followed by a comparison operator. The negative lookahead on '(' keeps
+# function calls out; requiring the operator keeps bare keywords out.
+_SQL_PREDICATE_LHS_RE = re.compile(
+    r'\b(?:WHERE|AND|OR)\s+"?`?\[?([A-Za-z_]\w*)\]?`?"?\s*'
+    r'(?:=|<>|!=|>=|<=|>|<|\bIS\b|\bIN\b|\bLIKE\b|\bBETWEEN\b)(?!\s*\()',
+    re.I)
 
 
 def _unqualified_columns(sql: str) -> list:
     """Column identifiers used without a table qualifier.
 
-    Only the SELECT list and the INSERT column list are read — not the whole
-    statement — so SQL keywords, function names and literals are not mistaken
-    for columns.
+    Read from the SELECT list, the INSERT column list, and the left-hand side of
+    WHERE/AND/OR comparisons — never the whole statement, so SQL keywords,
+    function names and literals are not mistaken for columns.
     """
     names = []
     m = _SQL_SELECT_LIST_RE.search(sql)
@@ -632,11 +639,18 @@ def _unqualified_columns(sql: str) -> list:
             ident = c.strip().strip('"`[]')
             if re.fullmatch(r'[A-Za-z_]\w*', ident) and ident.lower() not in _SQL_RESERVED:
                 names.append(ident)
+    # A predicate's left-hand side: `WHERE order_number = :x`, `AND status <> 'X'`.
+    # Requires a comparison operator so bare keywords cannot slip through, and
+    # skips anything qualified or followed by '(' (a function call).
+    for ident in _SQL_PREDICATE_LHS_RE.findall(sql):
+        ident = ident.strip('"`[]')
+        if re.fullmatch(r'[A-Za-z_]\w*', ident) and ident.lower() not in _SQL_RESERVED:
+            names.append(ident)
     return names
 
 
 def _check_sql_identifiers(op_id: str, code: str, col_index: Dict[str, set]) -> list:
-    """Report SQL columns that belong to a different table than the one used.
+    """Report SQL columns that the table they are used against does not have.
 
     Covers both `alias.column` references and unqualified columns — the latter
     only when the statement touches exactly one known table, which makes the
@@ -644,6 +658,12 @@ def _check_sql_identifiers(op_id: str, code: str, col_index: Dict[str, set]) -> 
     `product_name` straight out of `order_items` (it lives on `products`) and
     inserted `created_at` into `returns` (that column is `requested_at`); with
     no alias in the SQL, a qualified-only check saw neither.
+
+    Once the table is resolved, a column missing from that table's column list
+    is wrong whether or not it exists elsewhere: the scan returns the complete
+    column list for every table it read, so `shipments` having no `created_at`
+    is a fact, not a guess. Naming the table that does own the column is extra
+    help when there is one, not a precondition for reporting.
     """
     issues = []
     if not col_index:
@@ -656,18 +676,22 @@ def _check_sql_identifiers(op_id: str, code: str, col_index: Dict[str, set]) -> 
     def report(qualifier, column, table):
         if column in col_index.get(table, set()):
             return
-        real_owners = owner.get(column, set()) - {table}
-        if not real_owners:
-            return          # column not described anywhere — don't guess
         shown = f"{qualifier}.{column}" if qualifier else column
+        real_owners = sorted(owner.get(column, set()) - {table})
+        if real_owners:
+            where = (f"but `{column}` belongs to {real_owners} — not to `{table}`. "
+                     f"Join through to {real_owners[0]} or use the correct column "
+                     f"from `{table}`.")
+        else:
+            where = (f"but `{table}` has no column `{column}`, and no scanned table "
+                     f"does. Use one of the columns the scan reported for "
+                     f"`{table}`: {sorted(col_index.get(table, set()))}.")
         issues.append({
             "operation_id": op_id, "field": shown,
             "asset_type": "sql_schema_mismatch",
             "issue": f"Lambda '{op_id}' SQL references `{shown}` against `{table}`, "
-                     f"but `{column}` belongs to {sorted(real_owners)} — not to "
-                     f"`{table}`. This fails at runtime with 'column does not exist' "
-                     f"(SQLState 42703). Join through to {sorted(real_owners)[0]} or "
-                     f"use the correct column from `{table}`.",
+                     f"{where} This fails at runtime with 'column does not exist' "
+                     f"(SQLState 42703).",
         })
 
     for sql in _extract_sql_statements(code):
