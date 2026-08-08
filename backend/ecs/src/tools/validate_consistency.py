@@ -606,8 +606,45 @@ def _schema_column_index(schema: dict) -> Dict[str, set]:
     return index
 
 
+_SQL_SELECT_LIST_RE = re.compile(r'\bSELECT\b(?P<list>.*?)\bFROM\b', re.I | re.S)
+_SQL_FROM_TARGETS_RE = re.compile(r'\b(?:FROM|JOIN)\s+"?`?\[?([A-Za-z_]\w*)\]?`?"?', re.I)
+
+
+def _unqualified_columns(sql: str) -> list:
+    """Column identifiers used without a table qualifier.
+
+    Only the SELECT list and the INSERT column list are read — not the whole
+    statement — so SQL keywords, function names and literals are not mistaken
+    for columns.
+    """
+    names = []
+    m = _SQL_SELECT_LIST_RE.search(sql)
+    if m:
+        for item in m.group("list").split(","):
+            item = re.split(r'\s+AS\s+|\s+', item.strip(), flags=re.I)[0].strip()
+            if "." in item or "(" in item or "*" in item:
+                continue          # qualified, a function call, or SELECT *
+            ident = item.strip('"`[]')
+            if re.fullmatch(r'[A-Za-z_]\w*', ident) and ident.lower() not in _SQL_RESERVED:
+                names.append(ident)
+    for _, col_list, _ in _PARAM_INSERT_RE.findall(sql):
+        for c in col_list.split(","):
+            ident = c.strip().strip('"`[]')
+            if re.fullmatch(r'[A-Za-z_]\w*', ident) and ident.lower() not in _SQL_RESERVED:
+                names.append(ident)
+    return names
+
+
 def _check_sql_identifiers(op_id: str, code: str, col_index: Dict[str, set]) -> list:
-    """Report qualified SQL columns that belong to a different table."""
+    """Report SQL columns that belong to a different table than the one used.
+
+    Covers both `alias.column` references and unqualified columns — the latter
+    only when the statement touches exactly one known table, which makes the
+    owning table unambiguous. Observed live: a handler selected
+    `product_name` straight out of `order_items` (it lives on `products`) and
+    inserted `created_at` into `returns` (that column is `requested_at`); with
+    no alias in the SQL, a qualified-only check saw neither.
+    """
     issues = []
     if not col_index:
         return issues
@@ -615,6 +652,23 @@ def _check_sql_identifiers(op_id: str, code: str, col_index: Dict[str, set]) -> 
     for tbl, cols in col_index.items():
         for c in cols:
             owner.setdefault(c, set()).add(tbl)
+
+    def report(qualifier, column, table):
+        if column in col_index.get(table, set()):
+            return
+        real_owners = owner.get(column, set()) - {table}
+        if not real_owners:
+            return          # column not described anywhere — don't guess
+        shown = f"{qualifier}.{column}" if qualifier else column
+        issues.append({
+            "operation_id": op_id, "field": shown,
+            "asset_type": "sql_schema_mismatch",
+            "issue": f"Lambda '{op_id}' SQL references `{shown}` against `{table}`, "
+                     f"but `{column}` belongs to {sorted(real_owners)} — not to "
+                     f"`{table}`. This fails at runtime with 'column does not exist' "
+                     f"(SQLState 42703). Join through to {sorted(real_owners)[0]} or "
+                     f"use the correct column from `{table}`.",
+        })
 
     for sql in _extract_sql_statements(code):
         aliases = {}
@@ -624,28 +678,19 @@ def _check_sql_identifiers(op_id: str, code: str, col_index: Dict[str, set]) -> 
             if tbl in col_index:
                 aliases[alias] = tbl
                 aliases[tbl] = tbl
-        if not aliases:
-            continue
+
         for qualifier, column in _SQL_QUALIFIED_RE.findall(sql):
             table = aliases.get(qualifier)
-            if not table or column.lower() in _SQL_RESERVED:
-                continue
-            known = col_index.get(table, set())
-            if column in known:
-                continue
-            real_owners = owner.get(column, set()) - {table}
-            if not real_owners:
-                continue  # column simply not listed for this table — don't guess
-            issues.append({
-                "operation_id": op_id, "field": f"{qualifier}.{column}",
-                "asset_type": "sql_schema_mismatch",
-                "issue": f"Lambda '{op_id}' SQL references `{qualifier}.{column}` "
-                         f"(alias of `{table}`), but `{column}` belongs to "
-                         f"{sorted(real_owners)} — not to `{table}`. This fails at "
-                         f"runtime with 'column does not exist' (SQLState 42703). "
-                         f"Join through to {sorted(real_owners)[0]} or use the "
-                         f"correct column from `{table}`.",
-            })
+            if table and column.lower() not in _SQL_RESERVED:
+                report(qualifier, column, table)
+
+        targets = {t for t in _SQL_FROM_TARGETS_RE.findall(sql) if t in col_index}
+        targets |= {t for t, _, _ in _PARAM_INSERT_RE.findall(sql) if t in col_index}
+        if len(targets) == 1:
+            only = next(iter(targets))
+            for column in _unqualified_columns(sql):
+                report(None, column, only)
+
     return issues
 
 
