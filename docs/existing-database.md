@@ -99,10 +99,9 @@ DynamoDB takes the same comma-separated form via `dynamodb_table_name`.
 
 ### Requirements
 
-The runtime role needs `rds:DescribeDBInstances` / `DescribeDBClusters` for
-discovery, `secretsmanager:GetSecretValue` for credentials, plus
-`rds-data:ExecuteStatement` on the Data API path, and
-`dynamodb:DescribeTable` + `dynamodb:Scan` for DynamoDB.
+Two different principals touch your database, at two different times. They need
+different permissions and it is worth keeping them separate when a security team
+reviews this — see [§4 Access and permissions](#4-access-and-permissions).
 
 A scan that finds nothing returns an error listing the tables that *do* exist
 and the schema/owner it searched. Failures are distinguished so they are
@@ -148,7 +147,201 @@ values actually present. Without that the generator guesses: in testing it wrote
 
 ---
 
-## 4. Deploying against a driver-based engine
+## 4. Access and permissions
+
+Two principals touch the database, at two different times. Keeping them apart is
+what makes a least-privilege review tractable.
+
+| | Who | When | What it does |
+|---|---|---|---|
+| **A. Scan** | the AICC Builder ECS task role | during the interview | reads schema metadata + samples a few rows |
+| **B. Runtime** | each generated Lambda's own role | on every call | runs the operation's queries |
+
+The builder itself never touches your database at runtime, and the generated
+Lambdas never call the discovery APIs. Neither principal needs the other's
+permissions.
+
+### A. Scan-time — the AICC Builder task role
+
+**This is read-only by construction.** The scan issues catalog `SELECT`s
+(`information_schema`, `pg_catalog`, `sys.*`, `user_tab_cols`, `SYSCAT.*`), a
+`SELECT COUNT(*)`, a `SELECT * ... LIMIT 5` per table, and `SELECT DISTINCT` on
+enum-like columns. It issues no `INSERT`, `UPDATE`, `DELETE` or DDL of any kind.
+For DynamoDB it calls `DescribeTable` and a 25-item `Scan`.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ResolveTheTarget",
+      "Effect": "Allow",
+      "Action": [
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBClusters"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadCredentials",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:rds!cluster-EXAMPLE-*"
+    },
+    {
+      "Sid": "QueryOverDataApi",
+      "Effect": "Allow",
+      "Action": "rds-data:ExecuteStatement",
+      "Resource": "arn:aws:rds:REGION:ACCOUNT:cluster:YOUR-CLUSTER"
+    },
+    {
+      "Sid": "IntrospectDynamoDb",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:DescribeTable",
+        "dynamodb:Scan"
+      ],
+      "Resource": "arn:aws:dynamodb:REGION:ACCOUNT:table/YOUR-TABLE"
+    }
+  ]
+}
+```
+
+`rds:Describe*` cannot be resource-scoped by AWS, which is why it is `"*"`.
+Everything else should be pinned to the specific cluster, secret and tables you
+are willing to expose. Drop the statements you do not need — the DynamoDB block
+is unnecessary for an RDS-only engagement and vice versa.
+
+On the driver path there is no `rds-data` call at all; the task instead needs
+TCP reachability to the endpoint (security group + subnet route), which is a
+network permission rather than an IAM one.
+
+**If you cannot grant even read access**, use the schema-as-document path in §2.
+Nothing connects to the database and no IAM change is required.
+
+### B. Runtime — the generated Lambda's role
+
+The generated CloudFormation creates one role per function. What it grants
+depends on which connection method the schema was read with.
+
+Data API path (Aurora with the HTTP endpoint enabled):
+
+```yaml
+- Effect: Allow
+  Action:
+    - rds-data:ExecuteStatement
+    - rds-data:BatchExecuteStatement
+  Resource: <the cluster ARN from the scan>
+- Effect: Allow
+  Action: secretsmanager:GetSecretValue
+  Resource: <the credentials secret ARN>
+```
+
+Driver path (plain RDS, or Aurora without the HTTP endpoint):
+
+```yaml
+- Effect: Allow
+  Action: secretsmanager:GetSecretValue
+  Resource: <the credentials secret ARN>
+# plus the managed AWSLambdaVPCAccessExecutionRole for ENI management
+```
+
+No `rds-data` permission is needed on the driver path. Both are scoped to the
+one cluster and the one secret the scan resolved — not `"*"`.
+
+### Data handling — what the scan reads out of your tables
+
+Worth flagging explicitly, because it is easy to miss: the scan does not only
+read metadata. To get value formats right it samples **up to 5 rows per table**
+and the **distinct values of enum-like columns**, and those sampled values are
+carried into the generated assets — the OperationSpec's data conventions, the AI
+prompt's examples, and sometimes a comment in the Lambda.
+
+That is deliberate (it is how a phone stored as `821012345678` survives instead
+of being rewritten to `+8210...`), but it means:
+
+- Run the scan against a **non-production copy** when the tables contain real
+  personal data, or point it at a schema-only replica.
+- Set `include_sample_rows=False` to skip row sampling entirely. You still get
+  every table, column, key, index, foreign key and comment — only the example
+  values and the observed enum values are lost.
+- Review the generated AI prompt and OperationSpec before deploying, the same as
+  any other generated asset.
+
+---
+
+## 5. How the generated assets query the database
+
+The scan decides which of two runtime patterns gets generated, and says so in
+`access_method`.
+
+### Data API pattern — `access_method: "rds-data-api"`
+
+No VPC, no driver, no connection pooling. The handler calls `rds-data` over
+HTTPS with the cluster ARN and secret ARN it was given as environment variables.
+
+```python
+CLUSTER_ARN = os.environ["DB_CLUSTER_ARN"]
+SECRET_ARN  = os.environ["DB_SECRET_ARN"]
+DATABASE    = os.environ["DB_NAME"]
+
+response = rds_client.execute_statement(
+    resourceArn=CLUSTER_ARN, secretArn=SECRET_ARN, database=DATABASE,
+    sql="SELECT order_number, status FROM orders WHERE order_number = :orderNumber",
+    parameters=[{"name": "orderNumber", "value": {"stringValue": order_number}}],
+    includeResultMetadata=True,          # required — see below
+)
+```
+
+`includeResultMetadata=True` is not optional. Without it the response carries no
+`columnMetadata`, rows can only be read by position, and the handler silently
+returns the wrong column the moment someone adds a column to the table. With it,
+rows are mapped to dicts and read by name. A deterministic gate rejects any
+generated handler that omits it.
+
+Those three environment variable names are a hard contract: the handler reads
+exactly `DB_CLUSTER_ARN` / `DB_SECRET_ARN` / `DB_NAME`, and the merge step
+renames any fragment that drifted (e.g. `RDS_CLUSTER_ARN`) so a function cannot
+ship with a `KeyError` on cold start.
+
+### Driver pattern — `access_method: "<engine>-driver"`
+
+For every other engine the handler opens a real connection.
+
+```python
+secret = json.loads(sm.get_secret_value(SecretId=os.environ["DB_SECRET_ARN"])["SecretString"])
+conn = pytds.connect(server=os.environ["DB_HOST"], port=int(os.environ["DB_PORT"]),
+                     user=secret["username"], password=secret["password"],
+                     database=os.environ["DB_NAME"])
+```
+
+- Credentials come from Secrets Manager at cold start and are cached in a
+  module-level variable — never passed as plaintext environment variables.
+- Environment variables are `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN`
+  (no `DB_CLUSTER_ARN` — that is Data-API-only).
+- Columns are read from `cursor.description`, the same by-name discipline as the
+  Data API path.
+- The connection is module-level so it is reused across invocations.
+- Deployment needs `VpcConfig`, a security-group ingress on the engine's port,
+  and a Secrets Manager VPC endpoint — see §6.
+
+### Query discipline, both paths
+
+Applies regardless of engine, and each item is enforced by a gate rather than
+left to the model:
+
+| Rule | Why |
+|---|---|
+| Parameterized queries only (`:name`, `%(name)s`, `?`) | SQL injection. Table and column names come from the scanned schema, never from caller input |
+| Parameters bound with the column's own type | PostgreSQL rejects `bigint = text` outright; MySQL coerces silently and stops using the index |
+| Columns read by name | a positional read returns the wrong value after any schema change |
+| Exact identifiers from the scan | a column written onto the wrong table fails with SQLState 42703 |
+| `allowed_values` honoured verbatim | an invalid enum value is a database error, not a 404 |
+| `DECIMAL` cast before arithmetic | the Data API returns numerics as strings |
+
+---
+
+## 6. Deploying against a driver-based engine
 
 On the Data API path the generated Lambdas need no networking. On the driver
 path (plain RDS, or Aurora with the HTTP endpoint off) they need three things,
@@ -169,7 +362,7 @@ its timeout before running a single query. In testing every invocation returned
 
 ---
 
-## 5. Validation gates
+## 7. Validation gates
 
 A correct schema in context is not sufficient — a language model will still
 write a column onto the wrong table. These checks run deterministically in
@@ -197,7 +390,7 @@ they arise from independently generated fragments disagreeing:
 
 ---
 
-## 6. Verifying the gates
+## 8. Verifying the gates
 
 `scripts/verify_param_type_gate.py` exercises the parameter type-binding gate
 against a synthetic matrix, against real generated handlers, and — with
@@ -289,7 +482,7 @@ are plain `VARCHAR` columns rather than enum types, `returns.quantity` is
 
 ---
 
-## 7. Engine coverage
+## 9. Engine coverage
 
 `introspect_database` is exercised against a live instance of every engine the
 account can host, over both connection methods, plus the table-selection modes
