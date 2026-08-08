@@ -485,6 +485,21 @@ _MYSQL_QUERIES = {
         WHERE TABLE_SCHEMA = :database AND REFERENCED_TABLE_NAME IS NOT NULL
         ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION
     """,
+    # CHECK constraints. MySQL exposes these from 8.0.16 and MariaDB from 10.2;
+    # the join onto TABLE_CONSTRAINTS is what supplies the table name, which
+    # CHECK_CONSTRAINTS itself does not carry. Older servers have no such view,
+    # so the caller tolerates this query failing.
+    "checks": """
+        SELECT tc.TABLE_NAME AS table_name,
+               cc.CONSTRAINT_NAME AS constraint_name,
+               cc.CHECK_CLAUSE AS definition
+        FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS cc
+        JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+          ON tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+         AND tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA
+        WHERE cc.CONSTRAINT_SCHEMA = :database
+        ORDER BY tc.TABLE_NAME, cc.CONSTRAINT_NAME
+    """,
 }
 
 _POSTGRES_QUERIES = {
@@ -1395,7 +1410,6 @@ def _introspect_sql(
         foreign_keys = run(queries["foreign_keys"])
         primary_keys = [] if family == "mysql" else run(queries["primary_keys"])
         enums = _group_enums(run(queries["enums"])) if family == "postgresql" else {}
-        checks = run(queries["checks"]) if "checks" in queries else []
     except ClientError as e:
         close()
         return {"success": False, **_explain_rds_error(e, db_type, target.get("cluster_arn"), region)}
@@ -1407,6 +1421,16 @@ def _introspect_sql(
             "error_code": "QUERY_FAILED",
             "db_type": db_type,
         }
+
+    # CHECK constraints are best-effort: MySQL only exposes them from 8.0.16 and
+    # MariaDB from 10.2, so on an older server the view simply does not exist.
+    # A missing view must not fail the whole scan.
+    checks = []
+    if "checks" in queries:
+        try:
+            checks = run(queries["checks"])
+        except Exception:
+            checks = []
 
     is_mysql = family == "mysql"
     selected_set = set(selected)
@@ -1557,7 +1581,7 @@ def _introspect_sql(
                 "referenced_columns": fk["referenced_columns"],
             })
 
-    # ---- check constraints (PostgreSQL)
+    # ---- check constraints (PostgreSQL, MySQL 8.0.16+/MariaDB 10.2+)
     for row in checks:
         tname = row.get("TABLE_NAME")
         if tname in table_schemas:
