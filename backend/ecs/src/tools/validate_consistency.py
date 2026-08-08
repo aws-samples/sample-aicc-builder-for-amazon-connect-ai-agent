@@ -7,6 +7,8 @@ match the operation spec's input_fields/output_fields exactly.
 Called by Orchestrator after Phase 3b (Prompt) and by Reviewer Agent.
 """
 
+import ast
+import json
 import re
 import logging
 from typing import List, Dict, Any, Optional
@@ -272,6 +274,521 @@ def _extract_openapi_fields(yaml_content: str) -> Dict[str, Dict[str, set]]:
                             output_fields.update(_get_schema_props(spec, sw["schema"]))
             result[op_id] = {"input": input_fields, "output": output_fields}
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SQL identifier check (D4)
+#
+# Root cause this guards against (found in live E2E against a scanned Aurora
+# PostgreSQL schema): even with a correct introspection result in context, the
+# generator writes a column onto the WRONG table — e.g. `oi.product_name` when
+# product_name lives on `products`, or `pv.serial_number` when serial_number
+# lives on `warranty_claims`. The Lambda then fails at runtime with
+# "column ... does not exist" (SQLState 42703) on the very first call.
+#
+# The check is deliberately conservative: it only reports a column when the
+# schema knows that column on a DIFFERENT table. Columns the schema summary
+# simply omitted are ignored, so it cannot false-positive on an incomplete
+# column list.
+# ─────────────────────────────────────────────────────────────────────────────
+_SQL_KEYWORD_RE = re.compile(r'^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b', re.I)
+# alias declarations:  FROM orders o  /  JOIN order_items AS oi
+_SQL_ALIAS_RE = re.compile(
+    r'\b(?:FROM|JOIN)\s+([A-Za-z_][\w]*)\s+(?:AS\s+)?([A-Za-z_][\w]*)\b', re.I)
+_SQL_QUALIFIED_RE = re.compile(r'\b([A-Za-z_][\w]*)\.([A-Za-z_][\w]*)\b')
+_SQL_RESERVED = {
+    "select", "insert", "update", "delete", "with", "from", "join", "inner",
+    "left", "right", "outer", "on", "where", "and", "or", "not", "null", "as",
+    "order", "by", "group", "having", "limit", "offset", "into", "values", "set",
+    "asc", "desc", "distinct", "case", "when", "then", "else", "end", "returning",
+    "union", "all", "exists", "in", "is", "like", "ilike", "between", "interval",
+    "coalesce", "count", "sum", "max", "min", "avg", "now", "cast",
+}
+
+
+def _extract_sql_statements(code: str) -> list:
+    """Pull SQL statements out of a generated Python handler.
+
+    Uses the AST rather than a regex so that implicit string concatenation
+    (``"SELECT a " "FROM t " "WHERE ..."`` split across lines — which is what
+    the generators actually emit) is seen as ONE statement. A regex sees each
+    fragment separately and never observes the FROM clause, so alias resolution
+    silently finds nothing.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    consts: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    consts[target.id] = node.value.value
+
+    def as_text(node) -> Optional[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):   # f-string
+            parts = []
+            for value in node.values:
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    parts.append(value.value)
+                elif isinstance(value, ast.FormattedValue) and \
+                        isinstance(value.value, ast.Name) and value.value.id in consts:
+                    parts.append(consts[value.value.id])
+                else:
+                    parts.append(" ")
+            return "".join(parts)
+        if isinstance(node, ast.Name):
+            return consts.get(node.id)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = as_text(node.left), as_text(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for arg in list(node.args) + [k.value for k in node.keywords if k.arg == "sql"]:
+                text = as_text(arg)
+                if text and _SQL_KEYWORD_RE.match(text):
+                    found.append(text)
+    for text in consts.values():
+        if _SQL_KEYWORD_RE.match(text) and text not in found:
+            found.append(text)
+    return found
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data API parameter type-binding check (D5)
+#
+# Root cause this guards against (found in live E2E): the handler bound a
+# BIGINT key as a string —
+#     parameters=[{"name": "orderId", "value": {"stringValue": str(order_id)}}]
+# — and PostgreSQL rejected the query with
+#     operator does not exist: bigint = text  (SQLState 42883)
+# on the first invocation. MySQL silently coerces instead, which hides the bug
+# but throws away index usage on the compared column.
+#
+# Only unambiguous mismatches are reported. A string bound to a date/timestamp/
+# uuid/json/enum/numeric column is legitimate for the Data API and is ignored.
+# ─────────────────────────────────────────────────────────────────────────────
+_INT_TYPE_RE = re.compile(
+    r'^(small|big|tiny|medium)?(int|integer|serial)\d*(\s+unsigned)?$', re.I)
+_BOOL_TYPE_RE = re.compile(r'^(bool|boolean|bit|tinyint\(1\))$', re.I)
+_TEXT_TYPE_RE = re.compile(
+    r'^n?(var)?char(acter)?(\s+varying)?(\(\s*(\d+|max)\s*\))?$|'
+    r'^n?(tiny|medium|long)?text$', re.I)
+# columns where a stringValue binding is the correct Data API representation
+_STRING_OK_TYPE_RE = re.compile(
+    r'date|time|timestamp|uuid|json|xml|enum|set\(|numeric|decimal|money|'
+    r'interval|inet|cidr|bytea|blob|user-defined', re.I)
+
+_PARAM_COMPARISON_RE = re.compile(
+    r'\b(?:([A-Za-z_]\w*)\.)?([A-Za-z_]\w*)\s*(?:=|<>|!=|>=|<=|>|<)\s*:(\w+)')
+_PARAM_INSERT_RE = re.compile(
+    r'INSERT\s+INTO\s+"?`?([A-Za-z_]\w*)`?"?\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)',
+    re.I | re.S)
+_VALUE_KEYS = ("stringValue", "longValue", "doubleValue", "booleanValue",
+               "blobValue", "isNull", "arrayValue")
+
+
+def _extract_sql_with_bindings(code: str) -> list:
+    """Return [(sql_text, {param_name: dataApiValueKey})] per SQL call site."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    consts: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    consts[target.id] = node.value.value
+
+    def as_text(node) -> Optional[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            parts = []
+            for value in node.values:
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    parts.append(value.value)
+                elif isinstance(value, ast.FormattedValue) and \
+                        isinstance(value.value, ast.Name) and value.value.id in consts:
+                    parts.append(consts[value.value.id])
+                else:
+                    parts.append(" ")
+            return "".join(parts)
+        if isinstance(node, ast.Name):
+            return consts.get(node.id)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = as_text(node.left), as_text(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    def bindings(node) -> Dict[str, str]:
+        """Parse a parameters=[{"name": ..., "value": {"longValue": ...}}] list."""
+        out: Dict[str, str] = {}
+        if not isinstance(node, (ast.List, ast.Tuple)):
+            return out
+        for element in node.elts:
+            if not isinstance(element, ast.Dict):
+                continue
+            name = None
+            value_key = None
+            for k, v in zip(element.keys, element.values):
+                key = k.value if isinstance(k, ast.Constant) else None
+                if key == "name" and isinstance(v, ast.Constant):
+                    name = v.value
+                elif key == "value" and isinstance(v, ast.Dict):
+                    for vk in v.keys:
+                        if isinstance(vk, ast.Constant) and vk.value in _VALUE_KEYS:
+                            value_key = vk.value
+                            break
+            if name and value_key:
+                out[name] = value_key
+        return out
+
+    pairs = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        sql = None
+        for arg in list(node.args) + [k.value for k in node.keywords if k.arg == "sql"]:
+            text = as_text(arg)
+            if text and _SQL_KEYWORD_RE.match(text):
+                sql = text
+                break
+        if not sql:
+            continue
+        binds: Dict[str, str] = {}
+        for kw in node.keywords:
+            if kw.arg in ("parameters", "params"):
+                binds = bindings(kw.value)
+        if not binds:
+            for arg in node.args:
+                if isinstance(arg, (ast.List, ast.Tuple)):
+                    binds = bindings(arg)
+                    if binds:
+                        break
+        pairs.append((sql, binds))
+    return pairs
+
+
+def _column_type_index(schema: dict) -> Dict[tuple, str]:
+    """(table, column) -> declared sql type, plus (None, column) when unambiguous."""
+    per_table: Dict[tuple, str] = {}
+    by_column: Dict[str, set] = {}
+    tables = schema.get("tables", []) if isinstance(schema, dict) else []
+    if isinstance(tables, dict):
+        tables = list(tables.values())
+    for t in tables or []:
+        if not isinstance(t, dict):
+            continue
+        table = t.get("name") or t.get("table_name")
+        for c in t.get("columns", []) or []:
+            if not isinstance(c, dict):
+                continue
+            col = c.get("name") or c.get("column_name")
+            sql_type = c.get("sql_type") or c.get("full_type") or c.get("type")
+            if not col or not sql_type:
+                continue
+            per_table[(table, col)] = str(sql_type)
+            by_column.setdefault(col, set()).add(str(sql_type))
+    for col, types in by_column.items():
+        if len(types) == 1:
+            per_table[(None, col)] = next(iter(types))
+    return per_table
+
+
+def _expected_value_key(sql_type: str) -> Optional[str]:
+    """The Data API value key a column of this type must be bound with."""
+    t = str(sql_type).strip()
+    if _STRING_OK_TYPE_RE.search(t):
+        return None          # a stringValue binding is legitimate here
+    if _BOOL_TYPE_RE.match(t):
+        return "booleanValue"
+    if _INT_TYPE_RE.match(t):
+        return "longValue"
+    if _TEXT_TYPE_RE.match(t):
+        return "stringValue"
+    return None
+
+
+def _check_sql_param_types(op_id: str, code: str, type_index: Dict[tuple, str]) -> list:
+    """Report Data API parameters bound with a type the column cannot accept."""
+    issues = []
+    if not type_index:
+        return issues
+
+    for sql, binds in _extract_sql_with_bindings(code):
+        if not binds:
+            continue
+        aliases = {}
+        for table, alias in _SQL_ALIAS_RE.findall(sql):
+            if alias.lower() not in _SQL_RESERVED:
+                aliases[alias] = table
+                aliases[table] = table
+
+        mapping = {}   # param -> (table, column)
+        for qualifier, column, param in _PARAM_COMPARISON_RE.findall(sql):
+            table = aliases.get(qualifier) if qualifier else None
+            mapping[param] = (table, column)
+        for table, col_list, val_list in _PARAM_INSERT_RE.findall(sql):
+            cols = [c.strip().strip('"`') for c in col_list.split(",") if c.strip()]
+            vals = [v.strip() for v in val_list.split(",")]
+            for col, val in zip(cols, vals):
+                m = re.match(r'^:(\w+)', val)
+                if m:
+                    mapping.setdefault(m.group(1), (table, col))
+
+        for param, (table, column) in mapping.items():
+            bound = binds.get(param)
+            if not bound or bound in ("isNull", "arrayValue", "blobValue"):
+                continue
+            sql_type = type_index.get((table, column)) or type_index.get((None, column))
+            if not sql_type:
+                continue
+            expected = _expected_value_key(sql_type)
+            if not expected or expected == bound:
+                continue
+            issues.append({
+                "operation_id": op_id, "field": f":{param}",
+                "asset_type": "sql_param_type_mismatch",
+                "issue": f"Lambda '{op_id}' binds `:{param}` as `{bound}` but "
+                         f"`{(table + '.') if table else ''}{column}` is "
+                         f"`{sql_type}`, which needs `{expected}`. PostgreSQL "
+                         f"rejects this outright (e.g. 'operator does not exist: "
+                         f"bigint = text', SQLState 42883); MySQL silently coerces "
+                         f"and stops using the index. Bind it as {expected}.",
+            })
+    return issues
+
+
+def _schema_column_index(schema: dict) -> Dict[str, set]:
+    """table_name -> set(column names) from the infrastructure schema."""
+    index: Dict[str, set] = {}
+    tables = schema.get("tables", []) if isinstance(schema, dict) else []
+    if isinstance(tables, dict):
+        tables = list(tables.values())
+    for t in tables or []:
+        if not isinstance(t, dict):
+            continue
+        name = t.get("name") or t.get("table_name") or t.get("tableName")
+        if not name:
+            continue
+        cols = set()
+        for c in t.get("columns", []) or []:
+            if isinstance(c, str):
+                cols.add(c)
+            elif isinstance(c, dict):
+                cn = c.get("name") or c.get("column_name")
+                if cn:
+                    cols.add(cn)
+        pk = t.get("primary_key")
+        if isinstance(pk, str):
+            for part in re.split(r'[+,]', pk):
+                part = part.strip()
+                if part:
+                    cols.add(part)
+        elif isinstance(pk, list):
+            cols.update(str(p) for p in pk)
+        if cols:
+            index[name] = cols
+    return index
+
+
+def _check_sql_identifiers(op_id: str, code: str, col_index: Dict[str, set]) -> list:
+    """Report qualified SQL columns that belong to a different table."""
+    issues = []
+    if not col_index:
+        return issues
+    owner: Dict[str, set] = {}
+    for tbl, cols in col_index.items():
+        for c in cols:
+            owner.setdefault(c, set()).add(tbl)
+
+    for sql in _extract_sql_statements(code):
+        aliases = {}
+        for tbl, alias in _SQL_ALIAS_RE.findall(sql):
+            if alias.lower() in _SQL_RESERVED:
+                continue
+            if tbl in col_index:
+                aliases[alias] = tbl
+                aliases[tbl] = tbl
+        if not aliases:
+            continue
+        for qualifier, column in _SQL_QUALIFIED_RE.findall(sql):
+            table = aliases.get(qualifier)
+            if not table or column.lower() in _SQL_RESERVED:
+                continue
+            known = col_index.get(table, set())
+            if column in known:
+                continue
+            real_owners = owner.get(column, set()) - {table}
+            if not real_owners:
+                continue  # column simply not listed for this table — don't guess
+            issues.append({
+                "operation_id": op_id, "field": f"{qualifier}.{column}",
+                "asset_type": "sql_schema_mismatch",
+                "issue": f"Lambda '{op_id}' SQL references `{qualifier}.{column}` "
+                         f"(alias of `{table}`), but `{column}` belongs to "
+                         f"{sorted(real_owners)} — not to `{table}`. This fails at "
+                         f"runtime with 'column does not exist' (SQLState 42703). "
+                         f"Join through to {sorted(real_owners)[0]} or use the "
+                         f"correct column from `{table}`.",
+            })
+    return issues
+
+
+_PG_BUILTIN_TYPES = {
+    "text", "varchar", "char", "bpchar", "citext", "name",
+    "int", "int2", "int4", "int8", "smallint", "integer", "bigint",
+    "numeric", "decimal", "real", "float4", "float8", "double precision", "money",
+    "bool", "boolean", "bytea", "uuid", "json", "jsonb", "xml",
+    "date", "time", "timetz", "timestamp", "timestamptz", "interval",
+    "inet", "cidr", "macaddr", "tsvector", "tsquery", "oid", "regclass",
+    "array", "character", "user-defined", "record", "void", "anyelement",
+}
+_SQL_CAST_RE = re.compile(r'::\s*"?([A-Za-z_][\w ]*?)"?\s*(?=[\s,)\]]|$)')
+
+
+def _check_sql_casts(op_id: str, code: str, enum_types: set) -> list:
+    """Report ``::type`` casts to a type the schema does not define.
+
+    Observed live: the generator correctly cast a real PostgreSQL enum
+    (``:reason::return_reason``) and then invented the same pattern for two
+    plain VARCHAR columns (``:approvalStatus::approval_status``,
+    ``:claimStatus::claim_status``). Postgres rejects those with
+    ``type "approval_status" does not exist`` on the first write.
+    """
+    issues = []
+    for sql in _extract_sql_statements(code):
+        for raw in _SQL_CAST_RE.findall(sql):
+            type_name = raw.strip().lower().rstrip("[]")
+            base = type_name.replace("[]", "").strip()
+            if not base or base in _PG_BUILTIN_TYPES or base in enum_types:
+                continue
+            if re.match(r'^(varchar|char|numeric|decimal|timestamp|time)\s*\(', base):
+                continue
+            issues.append({
+                "operation_id": op_id, "field": f"::{raw.strip()}",
+                "asset_type": "sql_type_mismatch",
+                "issue": f"Lambda '{op_id}' SQL casts to type `{raw.strip()}`, which is "
+                         f"neither a built-in type nor one of the schema's enum types "
+                         f"({sorted(enum_types) if enum_types else 'none'}). Postgres "
+                         f"fails with 'type \"{raw.strip()}\" does not exist' on the first "
+                         f"call. If that column is a plain VARCHAR, drop the cast.",
+            })
+    return issues
+
+
+def _schema_enum_types(schema: dict) -> set:
+    """Collect enum type names the schema declares."""
+    names = set()
+    if not isinstance(schema, dict):
+        return names
+    enum_types = schema.get("enum_types") or {}
+    if isinstance(enum_types, dict):
+        names.update(k.lower() for k in enum_types)
+    elif isinstance(enum_types, list):
+        for e in enum_types:
+            if isinstance(e, str):
+                names.add(e.lower())
+            elif isinstance(e, dict) and e.get("name"):
+                names.add(str(e["name"]).lower())
+    tables = schema.get("tables", [])
+    if isinstance(tables, dict):
+        tables = list(tables.values())
+    for t in tables or []:
+        if not isinstance(t, dict):
+            continue
+        enums = t.get("enums")
+        if isinstance(enums, dict):
+            # {"status": [...]} — the column name is not the type name, but the
+            # generator commonly casts to it, so accept it rather than false-flag.
+            names.update(k.lower() for k in enums)
+        for c in t.get("columns", []) or []:
+            if isinstance(c, dict):
+                st = (c.get("sql_type") or c.get("full_type") or "")
+                m = re.match(r'^([a-z_][\w]*)$', str(st).strip().lower())
+                if m and m.group(1) not in _PG_BUILTIN_TYPES:
+                    names.add(m.group(1))
+    return names
+
+
+_SQL_INSERT_RE = re.compile(
+    r'INSERT\s+INTO\s+"?([A-Za-z_][\w]*)"?\s*\(([^)]*)\)', re.I | re.S)
+
+
+def _check_sql_insert_required_columns(op_id: str, code: str, schema: dict) -> list:
+    """Report INSERTs that omit a NOT NULL column having no default.
+
+    Observed live: the generated `create_return` INSERT listed
+    (return_number, order_id, line_number, reason, refund_amount,
+     requires_manager_approval, approval_status) but `returns.quantity` is
+    NOT NULL with no default, so the first write fails with
+    'null value in column "quantity" violates not-null constraint'.
+    """
+    issues = []
+    required: Dict[str, set] = {}
+    tables = schema.get("tables", []) if isinstance(schema, dict) else []
+    if isinstance(tables, dict):
+        tables = list(tables.values())
+    for t in tables or []:
+        if not isinstance(t, dict):
+            continue
+        name = t.get("name") or t.get("table_name")
+        cols = t.get("columns") or []
+        if not name or not cols or not isinstance(cols[0], dict):
+            continue  # need per-column metadata to judge
+        needed = set()
+        for c in cols:
+            nullable = c.get("nullable")
+            if nullable in (True, "YES", "yes"):
+                continue
+            if nullable is None:
+                continue  # unknown → don't guess
+            if c.get("default") not in (None, "", "None"):
+                continue
+            if c.get("generated") or c.get("auto_increment"):
+                continue
+            cname = c.get("name") or c.get("column_name")
+            if cname:
+                needed.add(cname)
+        if needed:
+            required[name] = needed
+
+    if not required:
+        return issues
+
+    for sql in _extract_sql_statements(code):
+        for table, col_list in _SQL_INSERT_RE.findall(sql):
+            if table not in required:
+                continue
+            provided = {c.strip().strip('"') for c in col_list.split(",") if c.strip()}
+            missing = sorted(required[table] - provided)
+            # a single-column PK that looks generated is usually a serial
+            missing = [m for m in missing if not m.endswith("_id") or m in provided]
+            if missing:
+                issues.append({
+                    "operation_id": op_id, "field": ", ".join(missing),
+                    "asset_type": "sql_missing_required_column",
+                    "issue": f"Lambda '{op_id}' INSERTs into `{table}` without the NOT NULL "
+                             f"column(s) {missing}, which have no default. The write fails "
+                             f"with 'null value in column ... violates not-null "
+                             f"constraint'. Add them to the INSERT column list and "
+                             f"parameters.",
+                })
+    return issues
 
 
 @tool
@@ -594,6 +1111,116 @@ def validate_parameter_consistency(session_id: str) -> dict:
                              f"fails with AccessDeniedException at runtime. Add an inline "
                              f"policy with these actions to the function's role.",
                 })
+
+    # D3: RDS Data API contract (only when the Lambdas actually use rds-data)
+    #     Catches, deterministically:
+    #       a) env var name drift — Lambda reads DB_CLUSTER_ARN while the
+    #          CloudFormation template exports RDS_CLUSTER_ARN → KeyError at
+    #          import time on every invocation
+    #       b) execute_statement without includeResultMetadata=True → the
+    #          response carries no columnMetadata, so rows can only be read
+    #          positionally and any schema change silently corrupts results
+    #       c) positional row access (record[0]) instead of by column name
+    #       d) SQL built by string concatenation/f-string → SQL injection
+    _RDS_ENV_CANON = ("DB_CLUSTER_ARN", "DB_SECRET_ARN", "DB_NAME")
+    _RDS_ENV_WRONG = {
+        "RDS_CLUSTER_ARN": "DB_CLUSTER_ARN",
+        "RDS_SECRET_ARN": "DB_SECRET_ARN",
+        "RDS_DATABASE_NAME": "DB_NAME",
+        "RDS_DB_NAME": "DB_NAME",
+        "CLUSTER_ARN": "DB_CLUSTER_ARN",
+        "SECRET_ARN": "DB_SECRET_ARN",
+    }
+    for op_id, code in lambda_all_code.items():
+        if "rds-data" not in code and "rds_data" not in code:
+            continue
+
+        env_reads = set(re.findall(r'os\.environ(?:\.get)?[\[\(]\s*["\']([A-Z0-9_]+)["\']', code))
+
+        for wrong, right in _RDS_ENV_WRONG.items():
+            if wrong in env_reads and right not in env_reads:
+                mismatches.append({
+                    "operation_id": op_id, "field": wrong,
+                    "asset_type": "rds_env_contract",
+                    "issue": f"Lambda '{op_id}' reads os.environ['{wrong}'] but the RDS "
+                             f"env var contract is '{right}'. Rename it in the handler and "
+                             f"make sure infrastructure.yaml sets the same name, otherwise "
+                             f"the function raises KeyError on cold start.",
+                })
+
+        if infra_yaml:
+            for env_name in sorted(env_reads & set(_RDS_ENV_CANON)):
+                if env_name not in infra_yaml:
+                    mismatches.append({
+                        "operation_id": op_id, "field": env_name,
+                        "asset_type": "rds_env_contract",
+                        "issue": f"Lambda '{op_id}' reads os.environ['{env_name}'] but "
+                                 f"infrastructure.yaml never defines it — the function "
+                                 f"fails with KeyError at runtime. Add it to the function's "
+                                 f"Environment.Variables.",
+                    })
+
+        if "execute_statement" in code and "includeResultMetadata" not in code:
+            mismatches.append({
+                "operation_id": op_id, "field": "includeResultMetadata",
+                "asset_type": "rds_data_api",
+                "issue": f"Lambda '{op_id}' calls rds-data execute_statement without "
+                         f"includeResultMetadata=True. The response then has no "
+                         f"columnMetadata, so columns can only be read by position and "
+                         f"results break on any schema change. Pass "
+                         f"includeResultMetadata=True and map rows to dicts by column name.",
+            })
+
+        positional = (
+            re.search(r'\[\s*["\']records["\']\s*\]\s*\[\s*\d+\s*\]', code)
+            or re.search(r'\brecords\s*\[\s*\d+\s*\]\s*\[\s*\d+\s*\]', code)
+            or re.search(r'\brecord\s*\[\s*\d+\s*\]', code)
+            or re.search(r'\.get\(\s*["\']records["\']\s*[^)]*\)\s*\[\s*\d+\s*\]\s*\[\s*\d+\s*\]', code)
+        )
+        if positional:
+            mismatches.append({
+                "operation_id": op_id, "field": "",
+                "asset_type": "rds_data_api",
+                "issue": f"Lambda '{op_id}' reads Data API rows by position "
+                         f"(record[0], records[0][1], …). Read columns by name using "
+                         f"columnMetadata instead — positional access silently returns the "
+                         f"wrong column when the table changes.",
+            })
+
+        # SQL text built with an f-string / concatenation / % / .format() instead
+        # of Data API named parameters
+        injection = (
+            re.search(r'\bsql\s*=\s*f["\']', code)
+            or re.search(r'\bsql\s*=\s*["\'][^"\']*["\']\s*(?:\+|%|\.format\()', code)
+            or re.search(r'(?:execute_sql|execute_statement)\s*\(\s*f["\']', code)
+            or re.search(r'(?:execute_sql|execute_statement)\s*\(\s*["\'][^"\']*["\']\s*(?:\+|%|\.format\()', code)
+        )
+        if injection:
+            mismatches.append({
+                "operation_id": op_id, "field": "",
+                "asset_type": "rds_data_api",
+                "issue": f"Lambda '{op_id}' builds SQL by string interpolation/concatenation "
+                         f"— SQL injection risk. Use Data API named parameters "
+                         f"(:param) with the parameters=[...] argument.",
+            })
+
+    # D4: SQL identifiers in generated handlers vs the scanned/provided schema
+    if infra_schema and lambda_all_code:
+        try:
+            _schema = json.loads(infra_schema) if isinstance(infra_schema, str) else infra_schema
+        except Exception:
+            _schema = None
+        if isinstance(_schema, dict):
+            _col_index = _schema_column_index(_schema)
+            _enum_types = _schema_enum_types(_schema)
+            _type_index = _column_type_index(_schema)
+            for op_id, code in lambda_all_code.items():
+                mismatches.extend(_check_sql_identifiers(op_id, code, _col_index))
+                mismatches.extend(_check_sql_casts(op_id, code, _enum_types))
+                mismatches.extend(
+                    _check_sql_insert_required_columns(op_id, code, _schema))
+                mismatches.extend(
+                    _check_sql_param_types(op_id, code, _type_index))
 
     summary = f"Found {len(mismatches)} mismatches across {len(expected)} operations"
     if mismatches:

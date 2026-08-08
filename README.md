@@ -27,6 +27,82 @@ https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
 
 ---
 
+## What's New in v2.4
+
+**Build on the database you already have.** Point AICC Builder at an existing
+database — **any RDS or Aurora engine**, or DynamoDB — or just hand it your
+schema document, and it generates Lambdas, infrastructure and prompts against
+your real tables, columns and business rules instead of inventing new ones.
+
+- **Every RDS and Aurora engine.** PostgreSQL, MySQL, MariaDB, SQL Server,
+  Oracle and Db2 — on Aurora or on plain RDS. The connection method is chosen
+  for you: Aurora with the Data API (HTTP endpoint) goes over the Data API with
+  no network path needed, everything else connects with a bundled driver
+  (`psycopg2`, `pymysql`, `pytds`, `oracledb`).
+- **One argument is enough.** Give it a DB instance or Aurora cluster
+  identifier and the engine, endpoint, port, master-user secret and connection
+  method are all resolved from RDS. Name the wrong engine and RDS is trusted
+  over the guess.
+- **Full relational detail.** Tables, exact column names and SQL types, single
+  **and composite** primary keys, secondary indexes, **foreign keys (plus reverse
+  relationships)**, enum/allowed values, check constraints, generated columns,
+  table/column comments, real row counts and sample rows. DynamoDB introspection
+  gained **local secondary indexes**, projection details, nested map/list/set
+  typing and non-key attribute discovery.
+- **Scan a whole schema, a few tables, or one.** `tables_only=True` returns a
+  cheap inventory (names, row counts, comments) of an unfamiliar database so you
+  can pick what matters; then pass `table_name="a,b,c"` for full detail on just
+  those. Names match case-insensitively, so `orders` finds Oracle's `ORDERS`.
+- **Column comments become business rules.** A comment like *"Auto-approve under
+  500,000 KRW; above needs manager approval"* is carried into the OperationSpec,
+  so the generated Lambda enforces the threshold your DBA already documented.
+- **Sampled values become data conventions.** A phone stored as `821012345678`
+  stays in that format all the way through to the Contact Flow, instead of being
+  "helpfully" rewritten to `+8210...`.
+- **Observed values instead of invented enums.** SQL Server, Oracle and Db2 have
+  no ENUM type, so the scan reports the distinct values actually present in
+  status-like columns — no more a handler validating against `LOST` when the
+  column really holds `LOSS`.
+- **No database to connect to? Paste or upload the schema.** A
+  *schema-as-document* path accepts a DDL dump, ERD, or data dictionary, parses
+  it into the same contract, echoes back every table and column it read for your
+  confirmation, and never invents an identifier the document did not state.
+- **Generated Lambdas read columns by name.** The RDS Data API pattern now sends
+  `includeResultMetadata=True` and maps rows to dicts, replacing positional
+  access that silently returned the wrong column whenever the schema changed. On
+  the driver path the generated stack emits the `VpcConfig`, security-group
+  ingress and Secrets Manager VPC endpoint the function needs to reach both the
+  database and its credentials.
+- **Five new deterministic gates** catch the mistakes an LLM makes even with a
+  correct schema in context, before anything is deployed:
+  - **SQL identifier check** — a column written onto the wrong table
+    (`order_items.product_name` when `product_name` lives on `products`).
+  - **SQL type-cast check** — a cast to a type that does not exist
+    (`::approval_status` on a plain `VARCHAR`).
+  - **Required-column check** — an `INSERT` omitting a `NOT NULL` column that
+    has no default.
+  - **Parameter type-binding check** — a `bigint` key bound as a string, which
+    PostgreSQL rejects with `operator does not exist: bigint = text`.
+  - **RDS Data API contract check** — env var drift, a missing
+    `includeResultMetadata`, positional row access, or SQL built by string
+    interpolation.
+- **Merge-time normalization** keeps the cross-asset contract intact when
+  fragments disagree: RDS environment variables are unified on
+  `DB_CLUSTER_ARN` / `DB_SECRET_ARN` / `DB_NAME` (the names the handlers
+  actually read), and an inline Lambda whose `Handler` names a function its code
+  does not define gets the alias it needs.
+- **Actionable failures instead of empty results.** A scan that finds nothing now
+  returns an error naming the tables that *do* exist and the schema it searched,
+  and distinguishes target-not-found, Data-API-off, connection-failed,
+  driver-missing, access-denied and unreadable-secret — with the remediation for
+  each. The ECS task role gained the read-only `rds:Describe*` and
+  `dynamodb:DescribeTable` / `Scan` permissions introspection actually needs.
+
+> 📖 Details, per-engine notes and the verification runs:
+> [docs/existing-database.md](./docs/existing-database.md)
+
+---
+
 ## What's New in v2.3
 
 A fully-automated workshop deploy script, live-QA permission hardening, a new
@@ -515,6 +591,7 @@ letter, and a number (no symbol required).
 | Doc | Description |
 |---|---|
 | [docs/agentic-ai.md](./docs/agentic-ai.md) | **How the multi-agent system keeps customer requirements intact end-to-end** — OperationSpec contract, deterministic validation, patch-only modification |
+| [docs/existing-database.md](./docs/existing-database.md) | **Building on a database you already have** — live scan vs schema-as-document, schema fidelity, and the deterministic SQL gates |
 | [docs/architecture.md](./docs/architecture.md) | Runtime architecture, WebSocket protocol, data flow |
 | [docs/architecture-asset-flow.md](./docs/architecture-asset-flow.md) | Asset read/write/stream paths, dual-write to NFS + S3 |
 | [docs/agents.md](./docs/agents.md) | 9 agents: roles, tools, model configs, generation sequence |

@@ -679,10 +679,14 @@ moves over time). Before emitting RDS-mode infrastructure:
 
 Instead:
 - **Skip**: DynamoDB Table, Sample Data Seeder Custom Resource
-- **Add**: Lambda environment variables for RDS connection:
-  - `RDS_CLUSTER_ARN`: from data_source.cluster_arn
-  - `RDS_SECRET_ARN`: from data_source.secret_arn
-  - `RDS_DATABASE_NAME`: from data_source.database_name
+- **Add**: Lambda environment variables for RDS connection.
+  ⚠️ These EXACT names are the cross-asset contract — the generated Lambda code
+  reads `os.environ["DB_CLUSTER_ARN"]`, `os.environ["DB_SECRET_ARN"]` and
+  `os.environ["DB_NAME"]`. Emitting any other name (e.g. `RDS_CLUSTER_ARN`)
+  makes every Lambda fail with KeyError at import time.
+  - `DB_CLUSTER_ARN`: from data_source.cluster_arn
+  - `DB_SECRET_ARN`: from data_source.secret_arn
+  - `DB_NAME`: from data_source.database_name
 - **Add**: IAM permissions for RDS Data API + Secrets Manager:
   ```yaml
   - PolicyName: RDSDataAPIAccess
@@ -702,6 +706,28 @@ Instead:
             - secretsmanager:GetSecretValue
           Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
   ```
+### When the engine has NO Data API (plain RDS, or Aurora with the endpoint off)
+
+RDS PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and Db2 are reached with a
+driver, so the Lambdas need real networking. Emit ALL of the following or the
+functions time out on their first invocation:
+
+- `VpcConfig` on every DB-touching function, with at least two subnets in the
+  DB's VPC and a dedicated Lambda security group.
+- An `AWS::EC2::SecurityGroupIngress` allowing that Lambda SG to reach the DB
+  security group on the engine's port (5432/3306/1433/1521/50000).
+- ⚠️ A Secrets Manager interface VPC endpoint
+  (`AWS::EC2::VPCEndpoint`, `com.amazonaws.${AWS::Region}.secretsmanager`,
+  `VpcEndpointType: Interface`, `PrivateDnsEnabled: true`, with a security group
+  allowing 443 from the Lambda SG) — UNLESS the subnets are private with a NAT
+  gateway. A VPC-attached Lambda has no route to public AWS endpoints, so
+  `GetSecretValue` hangs and the function dies at the 30s timeout before it ever
+  queries the database. This was observed end-to-end in testing.
+- Environment variables `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN`
+  (no `DB_CLUSTER_ARN` — that is Data-API-only).
+- IAM: `secretsmanager:GetSecretValue` on the credentials secret, plus the
+  managed `AWSLambdaVPCAccessExecutionRole` for ENI management.
+
 - **Keep**: API Gateway, Lambda functions (placeholder), S3 bucket, API Key
 
 ### Schema Summary JSON for RDS mode:
@@ -714,9 +740,9 @@ Instead:
   "database_name": "production",
   "tables": [{"table_name": "reservations", "description": "from existing RDS"}],
   "environment_variables": {
-    "RDS_CLUSTER_ARN": "arn:aws:rds:...",
-    "RDS_SECRET_ARN": "arn:aws:secretsmanager:...",
-    "RDS_DATABASE_NAME": "production"
+    "DB_CLUSTER_ARN": "arn:aws:rds:...",
+    "DB_SECRET_ARN": "arn:aws:secretsmanager:...",
+    "DB_NAME": "production"
   }
 }
 ```

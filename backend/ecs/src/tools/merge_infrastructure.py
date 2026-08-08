@@ -149,6 +149,133 @@ def _fix_qconnect_namespace(yaml_str: str) -> str:
     return new_yaml
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# RDS Data API environment-variable contract
+#
+# Generated Lambda handlers read os.environ["DB_CLUSTER_ARN"] /
+# ["DB_SECRET_ARN"] / ["DB_NAME"]. When the infrastructure generator emits a
+# different name for even one function (observed live: CreateWarrantyClaim got
+# RDS_CLUSTER_ARN, TrackShipment got CLUSTER_ARN) that function dies with
+# KeyError on cold start. Fragments are generated independently, so the naming
+# drifts per-fragment no matter what the prompt says — normalize it here.
+# ─────────────────────────────────────────────────────────────────────────────
+_RDS_ENV_ALIASES = {
+    "RDS_CLUSTER_ARN": "DB_CLUSTER_ARN",
+    "RDS_SECRET_ARN": "DB_SECRET_ARN",
+    "RDS_DATABASE_NAME": "DB_NAME",
+    "RDS_DB_NAME": "DB_NAME",
+    "RDS_DATABASE": "DB_NAME",
+    "CLUSTER_ARN": "DB_CLUSTER_ARN",
+    "SECRET_ARN": "DB_SECRET_ARN",
+    "DATABASE_NAME": "DB_NAME",
+    "DB_DATABASE_NAME": "DB_NAME",
+}
+
+
+def _fix_rds_env_var_names(yaml_str: str) -> str:
+    """Normalize RDS Data API env var keys to the DB_* contract.
+
+    Only rewrites YAML mapping KEYS (``  RDS_CLUSTER_ARN: ...``) — never values,
+    inline Python, or IAM actions — so a handler that legitimately mentions the
+    old name in a comment is left alone. Skips templates that have no RDS usage.
+    """
+    if "rds-data" not in yaml_str and "DBClusterArn" not in yaml_str:
+        return yaml_str
+
+    total = 0
+    for old, new in _RDS_ENV_ALIASES.items():
+        if old == new:
+            continue
+        pattern = re.compile(rf'^(\s+){old}(\s*:\s*)', re.MULTILINE)
+        yaml_str, n = pattern.subn(rf'\g<1>{new}\g<2>', yaml_str)
+        total += n
+        if n:
+            logger.info(f"[MERGE] Renamed {n}x env var {old} → {new} (RDS Data API contract)")
+    if total:
+        logger.info(f"[MERGE] Normalized {total} RDS env var name(s) to the DB_* contract")
+    return yaml_str
+
+
+_INLINE_FN_RE = re.compile(
+    r'^(?P<indent>\s+)(?P<logical>[A-Za-z0-9]+):\s*\n'
+    r'(?P<body>(?:.*\n)*?)'
+    r'(?=^\s{2}[A-Za-z0-9]+:\s*$|\Z)',
+    re.MULTILINE,
+)
+
+
+def _fix_inline_handler_name(yaml_str: str) -> str:
+    """Make inline ZipFile Python define the function the Handler declares.
+
+    Observed live: a placeholder Lambda declared ``Handler: index.handler`` but
+    its inline code only defined ``lambda_handler``, so the very first invoke
+    returned ``Runtime.HandlerNotFound: Handler 'handler' missing on module
+    'index'``. Rather than rewrite the code, append an alias line at the same
+    indentation, which is valid for either naming convention.
+    """
+    if "ZipFile" not in yaml_str:
+        return yaml_str
+
+    fixed = 0
+    out_lines = yaml_str.split("\n")
+    i = 0
+    while i < len(out_lines):
+        line = out_lines[i]
+        m = re.match(r'^(\s*)Handler:\s*index\.(\w+)\s*$', line)
+        if not m:
+            i += 1
+            continue
+        wanted = m.group(2)
+        # find the ZipFile block that belongs to the same resource
+        j = i
+        zip_start = None
+        while j < min(i + 60, len(out_lines)):
+            if re.match(r'^\s*ZipFile:\s*\|', out_lines[j]):
+                zip_start = j
+                break
+            if re.match(r'^\s{2}[A-Za-z0-9]+:\s*$', out_lines[j]) and j > i:
+                break
+            j += 1
+        if zip_start is None:
+            i += 1
+            continue
+        code_indent = None
+        k = zip_start + 1
+        end = k
+        while k < len(out_lines):
+            ln = out_lines[k]
+            if ln.strip() == "":
+                k += 1
+                continue
+            indent = len(ln) - len(ln.lstrip())
+            if code_indent is None:
+                code_indent = indent
+            if indent < code_indent:
+                break
+            end = k
+            k += 1
+        if code_indent is None:
+            i += 1
+            continue
+        body = "\n".join(out_lines[zip_start + 1:end + 1])
+        if re.search(rf'^\s*def\s+{re.escape(wanted)}\s*\(', body, re.MULTILINE):
+            i += 1
+            continue
+        defined = re.findall(r'^\s*def\s+(\w*handler\w*)\s*\(', body, re.MULTILINE)
+        if not defined:
+            i += 1
+            continue
+        alias = f"{' ' * code_indent}{wanted} = {defined[0]}"
+        out_lines.insert(end + 1, alias)
+        fixed += 1
+        i = end + 2
+
+    if fixed:
+        logger.info(f"[MERGE] Added {fixed}x inline Lambda handler alias "
+                    f"(Handler declared a function the inline code did not define)")
+    return "\n".join(out_lines)
+
+
 def _fix_cfnresponse_import(yaml_str: str) -> str:
     """Split comma-form imports that include cfnresponse onto their own lines.
 
@@ -489,6 +616,8 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     final_yaml = _remove_anchor_comment(merged)
     final_yaml = _fix_common_property_hallucinations(final_yaml)
     final_yaml = _fix_qconnect_namespace(final_yaml)
+    final_yaml = _fix_rds_env_var_names(final_yaml)
+    final_yaml = _fix_inline_handler_name(final_yaml)
     final_yaml = _ensure_qsession_role_permissions(final_yaml)
     final_yaml = _fix_customer_lookup_handler(final_yaml)
     final_yaml = _fix_cfnresponse_import(final_yaml)
