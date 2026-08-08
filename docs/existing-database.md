@@ -12,6 +12,41 @@ place: a schema contract that every downstream generator reads.
 Supported: **DynamoDB**, and **every RDS and Aurora engine** — PostgreSQL,
 MySQL, MariaDB, SQL Server, Oracle and Db2.
 
+```mermaid
+flowchart LR
+    subgraph IN["Two ways in"]
+        DB[("Your database<br/>RDS · Aurora · DynamoDB")]
+        DOC["Schema document<br/>DDL · ERD · data dictionary"]
+    end
+
+    DB -->|introspect_database<br/>read-only| CONTRACT
+    DOC -->|parsed + echoed back<br/>for confirmation| CONTRACT
+
+    CONTRACT["<b>Schema contract</b><br/>exact columns · keys · FKs<br/>allowed values · comments<br/>sampled value formats"]
+
+    CONTRACT --> SPEC["OperationSpec<br/>business rules from comments"]
+    SPEC --> GEN
+
+    subgraph GEN["Generated assets"]
+        L["Lambda handlers"]
+        I["CloudFormation"]
+        P["AI prompt"]
+        F["Contact Flow"]
+    end
+
+    GEN --> GATE{"Deterministic<br/>gates"}
+    GATE -->|mismatch| SPEC
+    GATE -->|clean| OUT["Deployable bundle"]
+
+    style CONTRACT fill:#e8f0fe,stroke:#4285f4,stroke-width:2px
+    style GATE fill:#fff4e5,stroke:#f59e0b,stroke-width:2px
+    style OUT fill:#e6f4ea,stroke:#34a853,stroke-width:2px
+```
+
+The contract is the single point every generator reads from. Nothing downstream
+invents an identifier that is not in it, and the gates check the generated SQL
+back against it before anything ships.
+
 ---
 
 ## 1. Live scan
@@ -37,6 +72,27 @@ introspect_database(
 ```
 
 ### Connection method (chosen automatically)
+
+```mermaid
+flowchart TD
+    ID["rds_instance_identifier"] --> DESC["rds:DescribeDBInstances<br/>rds:DescribeDBClusters"]
+    DESC --> RESOLVED["engine · endpoint · port<br/>master-user secret"]
+    RESOLVED --> Q{"Aurora, and the<br/>HTTP endpoint enabled?"}
+
+    Q -->|yes| API["<b>RDS Data API</b><br/>HTTPS · no VPC needed"]
+    Q -->|no| DRV["<b>Driver connection</b><br/>needs TCP reachability"]
+
+    API --> PG1["Aurora PostgreSQL<br/>Aurora MySQL"]
+    DRV --> PG2["psycopg2 · PostgreSQL"]
+    DRV --> MY2["pymysql · MySQL, MariaDB"]
+    DRV --> MS2["pytds · SQL Server"]
+    DRV --> OR2["oracledb · Oracle"]
+    DRV --> DB2["ibm_db · Db2"]
+
+    style API fill:#e6f4ea,stroke:#34a853,stroke-width:2px
+    style DRV fill:#fce8e6,stroke:#ea4335,stroke-width:2px
+    style Q fill:#fff4e5,stroke:#f59e0b
+```
 
 | Target | Method | Needs a network path? |
 |---|---|---|
@@ -161,6 +217,35 @@ The builder itself never touches your database at runtime, and the generated
 Lambdas never call the discovery APIs. Neither principal needs the other's
 permissions.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    actor SA as SA / customer
+    participant B as AICC Builder<br/>(ECS task role)
+    participant SM as Secrets Manager
+    participant DB as Your database
+    participant L as Generated Lambda<br/>(its own role)
+
+    rect rgba(66,133,244,0.08)
+        note over SA,DB: A. Scan — during the interview, read-only
+        SA->>B: "here's my DB identifier"
+        B->>B: rds:DescribeDB* → engine, endpoint, secret
+        B->>SM: GetSecretValue
+        B->>DB: catalog SELECTs · COUNT(*) · 5-row sample · SELECT DISTINCT
+        DB-->>B: schema + example values
+        B-->>SA: schema summary, confirm before generating
+    end
+
+    rect rgba(52,168,83,0.08)
+        note over L,DB: B. Runtime — on every call, after deployment
+        L->>SM: GetSecretValue (cached per container)
+        L->>DB: the operation's parameterized query
+        DB-->>L: rows, read by column name
+    end
+
+    note over B,L: the builder never runs at call time —<br/>the Lambda never calls the discovery APIs
+```
+
 ### A. Scan-time — the AICC Builder task role
 
 **This is read-only by construction.** The scan issues catalog `SELECT`s
@@ -274,6 +359,34 @@ of being rewritten to `+8210...`), but it means:
 
 The scan decides which of two runtime patterns gets generated, and says so in
 `access_method`.
+
+```mermaid
+flowchart LR
+    CALLER(["Caller"]) --> CF["Contact Flow"]
+    CF --> AGENT["Q in Connect<br/>AI agent"]
+    AGENT -->|tool call| LAM["Generated Lambda"]
+
+    LAM --> M{"access_method"}
+
+    M -->|rds-data-api| A1["rds-data:ExecuteStatement<br/>over HTTPS"]
+    A1 --> A2["includeResultMetadata=True<br/>rows → dicts by column name"]
+    A2 --> TARGET
+
+    M -->|engine-driver| D1["Secrets Manager<br/>credentials at cold start"]
+    D1 --> D2["driver connect over TCP<br/>inside the VPC"]
+    D2 --> D3["cursor.description<br/>rows → dicts by column name"]
+    D3 --> TARGET
+
+    TARGET[("Your existing tables")]
+
+    style A1 fill:#e6f4ea,stroke:#34a853
+    style D2 fill:#fce8e6,stroke:#ea4335
+    style M fill:#fff4e5,stroke:#f59e0b
+    style TARGET fill:#e8f0fe,stroke:#4285f4,stroke-width:2px
+```
+
+Both paths land on the same discipline: parameterized queries, columns read by
+name, and identifiers taken from the scanned schema.
 
 ### Data API pattern — `access_method: "rds-data-api"`
 
