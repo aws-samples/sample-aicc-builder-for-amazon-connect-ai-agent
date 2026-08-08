@@ -215,6 +215,22 @@ export class EcsStack extends cdk.Stack {
       })
     );
 
+    // RDS discovery for DB introspection. introspect_database resolves the
+    // engine, endpoint, port and master-user secret from a DB instance or
+    // cluster identifier, so it can pick the Data API or a driver connection
+    // without the operator supplying any of it. Read-only.
+    taskRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "RdsDiscoveryReadOnly",
+        actions: [
+          "rds:DescribeDBInstances",
+          "rds:DescribeDBClusters",
+          "rds:DescribeDBClusterEndpoints",
+        ],
+        resources: ["*"],
+      })
+    );
+
     // CloudWatch metrics (for custom metrics)
     taskRole.addToPolicy(
       new iam.PolicyStatement({

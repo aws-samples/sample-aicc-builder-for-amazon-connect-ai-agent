@@ -363,6 +363,216 @@ def _extract_sql_statements(code: str) -> list:
     return found
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Data API parameter type-binding check (D5)
+#
+# Root cause this guards against (found in live E2E): the handler bound a
+# BIGINT key as a string —
+#     parameters=[{"name": "orderId", "value": {"stringValue": str(order_id)}}]
+# — and PostgreSQL rejected the query with
+#     operator does not exist: bigint = text  (SQLState 42883)
+# on the first invocation. MySQL silently coerces instead, which hides the bug
+# but throws away index usage on the compared column.
+#
+# Only unambiguous mismatches are reported. A string bound to a date/timestamp/
+# uuid/json/enum/numeric column is legitimate for the Data API and is ignored.
+# ─────────────────────────────────────────────────────────────────────────────
+_INT_TYPE_RE = re.compile(
+    r'^(small|big|tiny|medium)?(int|integer|serial)\d*(\s+unsigned)?$', re.I)
+_BOOL_TYPE_RE = re.compile(r'^(bool|boolean|bit|tinyint\(1\))$', re.I)
+_TEXT_TYPE_RE = re.compile(
+    r'^n?(var)?char(acter)?(\s+varying)?(\(\s*(\d+|max)\s*\))?$|'
+    r'^n?(tiny|medium|long)?text$', re.I)
+# columns where a stringValue binding is the correct Data API representation
+_STRING_OK_TYPE_RE = re.compile(
+    r'date|time|timestamp|uuid|json|xml|enum|set\(|numeric|decimal|money|'
+    r'interval|inet|cidr|bytea|blob|user-defined', re.I)
+
+_PARAM_COMPARISON_RE = re.compile(
+    r'\b(?:([A-Za-z_]\w*)\.)?([A-Za-z_]\w*)\s*(?:=|<>|!=|>=|<=|>|<)\s*:(\w+)')
+_PARAM_INSERT_RE = re.compile(
+    r'INSERT\s+INTO\s+"?`?([A-Za-z_]\w*)`?"?\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)',
+    re.I | re.S)
+_VALUE_KEYS = ("stringValue", "longValue", "doubleValue", "booleanValue",
+               "blobValue", "isNull", "arrayValue")
+
+
+def _extract_sql_with_bindings(code: str) -> list:
+    """Return [(sql_text, {param_name: dataApiValueKey})] per SQL call site."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    consts: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    consts[target.id] = node.value.value
+
+    def as_text(node) -> Optional[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            parts = []
+            for value in node.values:
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    parts.append(value.value)
+                elif isinstance(value, ast.FormattedValue) and \
+                        isinstance(value.value, ast.Name) and value.value.id in consts:
+                    parts.append(consts[value.value.id])
+                else:
+                    parts.append(" ")
+            return "".join(parts)
+        if isinstance(node, ast.Name):
+            return consts.get(node.id)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = as_text(node.left), as_text(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    def bindings(node) -> Dict[str, str]:
+        """Parse a parameters=[{"name": ..., "value": {"longValue": ...}}] list."""
+        out: Dict[str, str] = {}
+        if not isinstance(node, (ast.List, ast.Tuple)):
+            return out
+        for element in node.elts:
+            if not isinstance(element, ast.Dict):
+                continue
+            name = None
+            value_key = None
+            for k, v in zip(element.keys, element.values):
+                key = k.value if isinstance(k, ast.Constant) else None
+                if key == "name" and isinstance(v, ast.Constant):
+                    name = v.value
+                elif key == "value" and isinstance(v, ast.Dict):
+                    for vk in v.keys:
+                        if isinstance(vk, ast.Constant) and vk.value in _VALUE_KEYS:
+                            value_key = vk.value
+                            break
+            if name and value_key:
+                out[name] = value_key
+        return out
+
+    pairs = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        sql = None
+        for arg in list(node.args) + [k.value for k in node.keywords if k.arg == "sql"]:
+            text = as_text(arg)
+            if text and _SQL_KEYWORD_RE.match(text):
+                sql = text
+                break
+        if not sql:
+            continue
+        binds: Dict[str, str] = {}
+        for kw in node.keywords:
+            if kw.arg in ("parameters", "params"):
+                binds = bindings(kw.value)
+        if not binds:
+            for arg in node.args:
+                if isinstance(arg, (ast.List, ast.Tuple)):
+                    binds = bindings(arg)
+                    if binds:
+                        break
+        pairs.append((sql, binds))
+    return pairs
+
+
+def _column_type_index(schema: dict) -> Dict[tuple, str]:
+    """(table, column) -> declared sql type, plus (None, column) when unambiguous."""
+    per_table: Dict[tuple, str] = {}
+    by_column: Dict[str, set] = {}
+    tables = schema.get("tables", []) if isinstance(schema, dict) else []
+    if isinstance(tables, dict):
+        tables = list(tables.values())
+    for t in tables or []:
+        if not isinstance(t, dict):
+            continue
+        table = t.get("name") or t.get("table_name")
+        for c in t.get("columns", []) or []:
+            if not isinstance(c, dict):
+                continue
+            col = c.get("name") or c.get("column_name")
+            sql_type = c.get("sql_type") or c.get("full_type") or c.get("type")
+            if not col or not sql_type:
+                continue
+            per_table[(table, col)] = str(sql_type)
+            by_column.setdefault(col, set()).add(str(sql_type))
+    for col, types in by_column.items():
+        if len(types) == 1:
+            per_table[(None, col)] = next(iter(types))
+    return per_table
+
+
+def _expected_value_key(sql_type: str) -> Optional[str]:
+    """The Data API value key a column of this type must be bound with."""
+    t = str(sql_type).strip()
+    if _STRING_OK_TYPE_RE.search(t):
+        return None          # a stringValue binding is legitimate here
+    if _BOOL_TYPE_RE.match(t):
+        return "booleanValue"
+    if _INT_TYPE_RE.match(t):
+        return "longValue"
+    if _TEXT_TYPE_RE.match(t):
+        return "stringValue"
+    return None
+
+
+def _check_sql_param_types(op_id: str, code: str, type_index: Dict[tuple, str]) -> list:
+    """Report Data API parameters bound with a type the column cannot accept."""
+    issues = []
+    if not type_index:
+        return issues
+
+    for sql, binds in _extract_sql_with_bindings(code):
+        if not binds:
+            continue
+        aliases = {}
+        for table, alias in _SQL_ALIAS_RE.findall(sql):
+            if alias.lower() not in _SQL_RESERVED:
+                aliases[alias] = table
+                aliases[table] = table
+
+        mapping = {}   # param -> (table, column)
+        for qualifier, column, param in _PARAM_COMPARISON_RE.findall(sql):
+            table = aliases.get(qualifier) if qualifier else None
+            mapping[param] = (table, column)
+        for table, col_list, val_list in _PARAM_INSERT_RE.findall(sql):
+            cols = [c.strip().strip('"`') for c in col_list.split(",") if c.strip()]
+            vals = [v.strip() for v in val_list.split(",")]
+            for col, val in zip(cols, vals):
+                m = re.match(r'^:(\w+)', val)
+                if m:
+                    mapping.setdefault(m.group(1), (table, col))
+
+        for param, (table, column) in mapping.items():
+            bound = binds.get(param)
+            if not bound or bound in ("isNull", "arrayValue", "blobValue"):
+                continue
+            sql_type = type_index.get((table, column)) or type_index.get((None, column))
+            if not sql_type:
+                continue
+            expected = _expected_value_key(sql_type)
+            if not expected or expected == bound:
+                continue
+            issues.append({
+                "operation_id": op_id, "field": f":{param}",
+                "asset_type": "sql_param_type_mismatch",
+                "issue": f"Lambda '{op_id}' binds `:{param}` as `{bound}` but "
+                         f"`{(table + '.') if table else ''}{column}` is "
+                         f"`{sql_type}`, which needs `{expected}`. PostgreSQL "
+                         f"rejects this outright (e.g. 'operator does not exist: "
+                         f"bigint = text', SQLState 42883); MySQL silently coerces "
+                         f"and stops using the index. Bind it as {expected}.",
+            })
+    return issues
+
+
 def _schema_column_index(schema: dict) -> Dict[str, set]:
     """table_name -> set(column names) from the infrastructure schema."""
     index: Dict[str, set] = {}
@@ -1003,11 +1213,14 @@ def validate_parameter_consistency(session_id: str) -> dict:
         if isinstance(_schema, dict):
             _col_index = _schema_column_index(_schema)
             _enum_types = _schema_enum_types(_schema)
+            _type_index = _column_type_index(_schema)
             for op_id, code in lambda_all_code.items():
                 mismatches.extend(_check_sql_identifiers(op_id, code, _col_index))
                 mismatches.extend(_check_sql_casts(op_id, code, _enum_types))
                 mismatches.extend(
                     _check_sql_insert_required_columns(op_id, code, _schema))
+                mismatches.extend(
+                    _check_sql_param_types(op_id, code, _type_index))
 
     summary = f"Found {len(mismatches)} mismatches across {len(expected)} operations"
     if mismatches:

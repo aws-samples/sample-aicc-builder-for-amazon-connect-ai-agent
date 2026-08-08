@@ -1197,6 +1197,14 @@ Rules for RDS mode:
   keeps them as declared.
 - Respect `allowed_values` from the schema when writing enum comparisons and
   when validating input — an invalid enum value is a DB error, not a 404.
+  ⚠️ When `allowed_values_source` is `"observed"` the engine has no declared
+  enum (SQL Server, Oracle and Db2 never do) and the list is the set of values
+  actually present in the column. Copy those spellings CHARACTER FOR CHARACTER
+  into any validation set. Found in live testing: a handler hardcoded
+  `{"DAMAGE", "LOST"}` for a column whose real values are `DAMAGE`, `LOSS`,
+  `DELAY`, `WRONG_DELIVERY` — the guessed `LOST` rejected every valid request
+  and would have written a value the business never uses. Never shorten,
+  pluralize, translate or "correct" a value, and never drop one you were given.
 - Numeric/DECIMAL columns come back as strings in `stringValue`; cast with
   `Decimal(...)`/`int(...)` before arithmetic or comparison.
 - For paging/limits use `LIMIT`; never `SELECT *` on a large table in a
@@ -1205,6 +1213,40 @@ Rules for RDS mode:
   `rds-data:BatchExecuteStatement`, and `secretsmanager:GetSecretValue` on the
   credentials secret.
 - Keep the same dual-mode handler (Contact Flow + API Gateway) structure
+
+### Engines WITHOUT the Data API (plain RDS, or Aurora with the HTTP endpoint off)
+
+The Data API only exists on Aurora. When `access_method` in the schema is
+`<engine>-driver` rather than `rds-data-api` — i.e. RDS PostgreSQL, MySQL,
+MariaDB, SQL Server, Oracle or Db2 — the Lambda must open a real connection
+instead:
+
+- Driver per engine: `psycopg2` (PostgreSQL), `pymysql` (MySQL/MariaDB),
+  `pytds` (SQL Server), `oracledb` (Oracle), `ibm_db_dbi` (Db2). None ship in
+  the Lambda runtime, so note in the header comment that a layer or bundled
+  dependency is required.
+- Read credentials from Secrets Manager at cold start, never from plain env
+  vars: `DB_SECRET_ARN` holds the username/password, `DB_HOST`, `DB_PORT` and
+  `DB_NAME` locate the database. Cache the parsed secret in a module-level
+  variable so it is fetched once per container.
+- The function needs `VpcConfig` (subnets + a security group allowed inbound on
+  the DB port) because it talks TCP to the endpoint. State that requirement in
+  the handler docstring so whoever deploys it knows.
+- ⚠️ A VPC-attached Lambda has NO route to public AWS endpoints unless one is
+  provided, so `secretsmanager:GetSecretValue` hangs until the function times
+  out. Found in live testing: every invocation returned
+  `Task timed out after 30.00 seconds` before a single DB query ran. Say plainly
+  in the docstring that the deployment needs EITHER a Secrets Manager interface
+  VPC endpoint (`com.amazonaws.<region>.secretsmanager`, reachable from the
+  Lambda security group on 443) OR private subnets with a NAT gateway.
+- Use the driver's own parameter style — `%(name)s` for psycopg2/pymysql/pytds,
+  `:name` for oracledb, `?` for ibm_db — and still NEVER interpolate values.
+- Read columns by name from `cursor.description`, exactly as the Data API path
+  reads `columnMetadata`; never index rows positionally.
+- Close the cursor in a `finally` block and keep the connection module-level so
+  it is reused across invocations.
+- Required IAM: `secretsmanager:GetSecretValue` on the credentials secret (no
+  `rds-data:*` needed on this path).
 
 ## EXTERNAL API INTEGRATION PATTERNS
 

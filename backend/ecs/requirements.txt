@@ -31,8 +31,12 @@ PyYAML>=6.0.0
 python-jose[cryptography]>=3.3.0
 
 # Database drivers (for introspect_database tool)
-PyMySQL>=1.1.0
-psycopg2-binary>=2.9.0
+# Every RDS/Aurora engine is reachable: Aurora uses the RDS Data API when its
+# HTTP endpoint is enabled, everything else connects with one of these drivers.
+PyMySQL>=1.1.0            # MySQL, MariaDB, Aurora MySQL
+psycopg2-binary>=2.9.0    # PostgreSQL, Aurora PostgreSQL
+python-tds>=1.15.0        # SQL Server (pure Python, no FreeTDS needed)
+oracledb>=2.4.0           # Oracle (thin mode, no Instant Client needed)
 
 # HTTP client
 requests>=2.31.0

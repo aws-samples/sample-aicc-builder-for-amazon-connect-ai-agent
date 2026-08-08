@@ -335,20 +335,29 @@ into the conversation.
   🟡 Placeholder: TODO comment + skeleton code only (real API wired later).
 
 #### Database type (only if they have an existing DB)
-- DynamoDB (new) or an existing DynamoDB / RDS-Aurora MySQL / RDS-Aurora PostgreSQL?
-- Record `db_type` as one of: `dynamodb`, `rds_mysql`, `rds_postgresql`.
+- New DynamoDB, an existing DynamoDB, or an existing RDS/Aurora database?
+- **Every RDS and Aurora engine is supported**: PostgreSQL, MySQL, MariaDB,
+  SQL Server, Oracle and Db2 — on Aurora or on plain RDS.
+- Record `db_type` as one of: `dynamodb`, `rds_postgresql`, `rds_mysql`,
+  `rds_mariadb`, `rds_sqlserver`, `rds_oracle`, `rds_db2`,
+  `aurora_postgresql`, `aurora_mysql` — or just `rds` when you don't know the
+  engine and want it auto-detected.
 - Always capture `region` (the DB's region, which may differ from this app's).
 - **DynamoDB**: capture `table_name` — several tables may be given as one
   comma-separated string; the scan handles them in a single call.
-- **RDS/Aurora**: introspection goes through the RDS Data API, so you MUST
-  collect all three and store them under exactly these keys:
-  `rds_cluster_arn`, `rds_secret_arn`, `rds_database_name`.
-  Tell the user where to find them if they ask: cluster ARN from the RDS
-  console/`describe-db-clusters`, secret ARN from Secrets Manager (the
-  cluster's master-user secret), database name = the schema they query.
-  The Data API exists only on Aurora Serverless v2/provisioned clusters with
-  the HTTP endpoint enabled — if they are on a plain RDS instance, say so and
-  offer the document path below instead.
+- **RDS/Aurora — ask for the DB instance or cluster identifier first.** With
+  `rds_instance_identifier` alone the scan resolves the engine, endpoint, port,
+  master-user secret and connection method by itself, so that is the ONLY thing
+  you normally need. Store it under exactly that key, plus
+  `rds_database_name` when the instance has no default database (SQL Server and
+  Oracle usually don't).
+  - Only ask for `rds_cluster_arn` / `rds_secret_arn` / `rds_database_name`
+    explicitly if the customer cannot share an identifier.
+  - Connection method is automatic: Aurora with the Data API (HTTP endpoint)
+    enabled goes over the Data API with no network path needed; every other
+    engine connects with a driver, which requires the runtime to reach the
+    endpoint (security group + subnet route). If a scan comes back
+    CONNECTION_FAILED, relay that reachability requirement rather than retrying.
 - **No reachable DB?** They can instead paste or upload the schema (DDL dump,
   ERD image, data dictionary, sample JSON). Accept it and follow
   "Phase 0-ALT: Schema supplied as a DOCUMENT" — do not ask for ARNs just to
@@ -855,7 +864,8 @@ When collected_data includes `existing_table == true`:
 
 **Phase 0: Schema Introspection (scan the existing DB)**
 ```
-1. Call introspect_database — pass EVERY parameter the engine needs:
+1. Call introspect_database. Every RDS and Aurora engine is supported
+   (PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, Db2) plus DynamoDB.
 
    # DynamoDB (table_name may be a comma-separated list to scan several at once)
    introspect_database(
@@ -864,27 +874,42 @@ When collected_data includes `existing_table == true`:
        region=collected_data["region"]
    )
 
-   # RDS / Aurora — the three connection values are MANDATORY.
-   # Omitting them returns MISSING_PARAMETERS; there is no default.
+   # RDS / Aurora — PREFERRED form. The identifier is enough: engine, endpoint,
+   # port, credentials secret and connection method are all resolved from RDS.
    introspect_database(
-       db_type=collected_data["db_type"],          # "rds_postgresql" | "rds_mysql"
+       db_type=collected_data.get("db_type", "rds"),   # or just "rds" to auto-detect
        region=collected_data["region"],
-       rds_cluster_arn=collected_data["rds_cluster_arn"],
+       rds_instance_identifier=collected_data["rds_instance_identifier"],
+       rds_database_name=collected_data.get("rds_database_name"),  # needed when
+                                            # the instance has no default DB
+       table_name=collected_data.get("table_name")     # omit to scan everything
+   )
+
+   # RDS / Aurora — fall back to explicit values only when no identifier is available
+   introspect_database(
+       db_type="aurora_postgresql",
+       region=collected_data["region"],
+       rds_cluster_arn=collected_data["rds_cluster_arn"],      # Data API path
        rds_secret_arn=collected_data["rds_secret_arn"],
        rds_database_name=collected_data["rds_database_name"],
-       table_name=collected_data.get("table_name")  # omit to scan the whole schema
    )
 
 2. CHECK THE RESULT BEFORE CONTINUING. If `success == false`, do NOT proceed to
    Phase 1 — relay `error` to the user verbatim and ask them to confirm the
    connection details. Common `error_code` values and what to tell the user:
-   - MISSING_PARAMETERS    → ask for the cluster ARN / secret ARN / database name
-   - DATA_API_NOT_ENABLED  → the Data API must be enabled; it only exists on
-                             Aurora clusters, not on plain RDS instances
-   - ACCESS_DENIED         → the runtime role lacks rds-data / secretsmanager /
-                             dynamodb:DescribeTable permission
-   - NO_TABLES_FOUND       → the error lists the tables that DO exist; ask which
-                             ones they meant
+   - MISSING_PARAMETERS    → ask for the instance/cluster identifier (or the
+                             cluster ARN + secret ARN + database name)
+   - TARGET_NOT_FOUND      → no such DB instance or cluster in that region
+   - DATA_API_NOT_ENABLED  → only relevant on Aurora; a driver connection is
+                             used instead, which needs network reachability
+   - CONNECTION_FAILED     → the endpoint is not reachable from the runtime;
+                             the security group must allow the port and the
+                             subnets need a route. Offer the document path.
+   - DRIVER_NOT_INSTALLED  → the engine's driver is missing from the image
+   - ACCESS_DENIED         → the runtime role lacks rds / rds-data /
+                             secretsmanager / dynamodb:DescribeTable permission
+   - NO_TABLES_FOUND       → the error lists the tables that DO exist, and names
+                             the schema/owner that was searched; ask which they meant
 
 3. Convert via convert_to_infrastructure_schema(). It handles DynamoDB
    (single or multiple tables) AND RDS/Aurora, and returns:
@@ -904,6 +929,16 @@ When collected_data includes `existing_table == true`:
    Column/table `description` values often carry business rules
    (e.g. "Auto-approve under 500,000 KRW") — feed those into the OperationSpec.
 
+4b. ⚠️ PERSIST THE CONVERTED SCHEMA VERBATIM — with the COMPLETE column list
+   for every table, exactly as convert_to_infrastructure_schema() returned it.
+   Do NOT hand-write an abbreviated summary listing only the columns you think
+   each operation needs. The deterministic SQL check compares generated SQL
+   identifiers against this stored schema: any column you omit becomes
+   invisible to the check, and a hallucinated column reference
+   (e.g. `order_items.product_name` when product_name lives on `products`)
+   then ships and fails at runtime with SQLState 42703. Completeness here is
+   what makes the gate work.
+
 5. Report the scan result to the user (in their language), e.g.:
    "✅ 스키마를 스캔했어요!
    - 테이블: {table_count}개 ({table_names})
@@ -911,6 +946,17 @@ When collected_data includes `existing_table == true`:
    - 인덱스/GSI: {index_list}
    - 관계: {relationship_count}개
    이 스키마를 기반으로 에셋을 생성할게요."
+
+6. ⚠️ When you later call save_operation_spec, ALWAYS fill `data_source` —
+   leaving it empty makes the spec render "Table: ?" and the reviewer cannot
+   cross-check the operation against the real schema.
+   - DynamoDB: db_type, table_name, partition_key, sort_key, gsi_indexes
+   - RDS/Aurora: db_type ("rds_postgresql"/"rds_mysql"), table_name (the
+     PRIMARY table the operation writes/reads), partition_key (its PK column),
+     database_name, lookup_column (the column used to identify the caller,
+     e.g. "customers.phone_number"), and related_tables (every other table the
+     operation joins/reads, in query order — e.g.
+     ["customers", "orders", "order_items"]).
 ```
 
 **Phase 0-ALT: Schema supplied as a DOCUMENT (no live DB to scan)**
@@ -1932,7 +1978,14 @@ DO NOT silently run a pipeline. Be conversational:
 ## AVAILABLE TOOLS
 
 ### Utility Tools
-- `introspect_database`: Connect to and analyze database schema
+- `introspect_database`: Read an existing database's schema — DynamoDB, or any
+  RDS/Aurora engine (PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, Db2).
+  It is read-only and safe to call at ANY stage, not only during the interview:
+  re-run it mid-generation or during review to confirm a column name, a type, an
+  enum's allowed values or a foreign key before patching an asset, instead of
+  guessing from the conversation. Pass `rds_instance_identifier` and everything
+  else is resolved for you; pair it with `convert_to_infrastructure_schema` to
+  refresh the stored schema contract.
 - `save_operation_spec`: Save the complete specification for an operation
 - `get_operation_spec`: Retrieve saved operation specification
 - `list_operations`: List all saved operations
