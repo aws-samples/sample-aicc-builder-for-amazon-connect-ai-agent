@@ -240,6 +240,59 @@
           ],
           "default": null,
           "title": "Region"
+        },
+        "database_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "RDS/Aurora database (schema) name the operation queries",
+          "title": "Database Name"
+        },
+        "cluster_arn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Aurora cluster ARN used via the RDS Data API",
+          "title": "Cluster Arn"
+        },
+        "lookup_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "SQL column used to identify the caller/record (e.g. customers.phone_number)",
+          "title": "Lookup Column"
+        },
+        "related_tables": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Other tables this operation joins/reads, in query order (e.g. ['customers', 'orders', 'order_items'])",
+          "title": "Related Tables"
         }
       },
       "title": "DataSourceSpec",
@@ -247,7 +300,7 @@
     },
     "ErrorResponse": {
       "additionalProperties": true,
-      "description": "Specification for an error response.",
+      "description": "Specification for an error response.\n\nNOTE on ``status_code``: an Amazon Connect AI agent treats any non-2xx tool\nresponse as an execution failure \u2014 it never reads the body, so it cannot relay\nthe outcome and simply reports that the tool is broken. Business outcomes are\ntherefore coerced to 200 here (BUSINESS_OUTCOME_200_RULE); only 5xx, a genuine\nfault Connect should retry, is preserved.",
       "properties": {
         "status_code": {
           "anyOf": [
@@ -259,7 +312,7 @@
             }
           ],
           "default": null,
-          "description": "HTTP status code",
+          "description": "HTTP status code (business outcomes are always 200; only 5xx faults differ)",
           "title": "Status Code"
         },
         "error_code": {

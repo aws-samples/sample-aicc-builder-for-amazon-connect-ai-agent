@@ -90,7 +90,8 @@ Always write to a local directory (default `./aicc-output/` — ask if unsure):
     project.json                         # company, industry, language, mode, scope
     progress.json                        # phase + 12-step checklist (your <generation_state>)
     specs/<operation_id>.json            # one OperationSpec per operation
-    infrastructure_schema.json           # tables, Lambda wiring, env vars (the Schema Summary)
+    infrastructure_schema.json           # tables, Lambda wiring, env vars (the Schema Summary);
+                                         # on the existing-DB path this is the scanned SCHEMA CONTRACT
     session_flow_config.json             # call direction, greeting, persona
     requirements/<doc_type>.md           # raw customer input (large text / uploaded docs)
     research/<topic>.md                  # cited web-research notes (optional)
@@ -150,19 +151,161 @@ png/jpeg/gif/webp; documents pdf/txt/md/docx/csv/xlsx.
 When the user provides an existing **Contact Flow JSON**, **AI Prompt YAML**, or a
 **flow-diagram image**:
 
-1. **Flow / prompt file** — `Read` it, then run the lint/repair pass:
-   - Contact Flow → enforce the verified block schemas in
-     `resources/reference/contact_flow_block_schemas.md` (and `validate_consistency.py`
-     where applicable). The repaired JSON may be **shorter** than the original — the
-     linter strips invalid `DTMFConfiguration`, duplicate SSML, etc. That is correct.
-   - AI Prompt YAML → dedup any `{{variable}}` that appears more than once inside a
-     single `{{ }}` (qconnect rejects duplicates).
+1. **Flow / prompt file** — `Read` it, seed it to its stable path, then run the
+   deterministic repair pass rather than eyeballing it:
+   ```bash
+   python3 resources/scripts/lint_assets.py <output_dir> --fix
+   python3 resources/scripts/lint_assets.py <output_dir>          # must come back clean
+   ```
+   - Contact Flow → `lint_contact_flow` applies the API-verified block schemas
+     (explained in `resources/reference/contact_flow_block_schemas.md`). The repaired
+     JSON may be **shorter** than the original — the linter strips invalid
+     `DTMFConfiguration`, duplicate SSML, etc. That is correct.
+   - AI Prompt YAML → `lint_ai_prompt` strips the braces from any `{{variable}}` used
+     more than once (qconnect rejects duplicates).
 2. **Flow image** — follow `resources/reference/vision_import.md`: confirm intent,
    `Read` the image, transcribe to flow JSON with the vision contract, then lint as above.
 3. **Seed** the repaired asset to its stable path (`imported_flow` / `imported_agent`).
 4. **Print an import summary** line: `{errors, warnings, fixesApplied}`.
 5. **Switch to patch-only modification mode** (see below). Never regenerate an
    imported asset from scratch.
+
+## PHASE 0 — existing database (run BEFORE Phase 1 whenever the data already exists)
+
+If the interview establishes that the customer already has tables (`existing_table
+== true`), the schema — not your imagination — is the contract. The webapp calls
+`introspect_database` + `convert_to_infrastructure_schema`; in a CLI you do the same
+work with `Bash` + the AWS CLI, or read the schema as a document. The full
+orchestrator text for both paths is in
+`resources/orchestrator/system_prompt.md` → "GENERATION FLOW: EXISTING DATABASE PATH".
+
+**Path A — live scan.** Confirm the target account/region with the user first, use
+**read-only credentials**, and stick to `describe`/`SELECT` calls. Which sub-path
+applies depends on how the database is reachable — **A1** (Data API, IAM only) or
+**A2** (a real driver connection, which needs a network path):
+
+```bash
+aws sts get-caller-identity                                     # confirm the account
+# DynamoDB
+aws dynamodb describe-table --table-name <T> --region <R>
+aws dynamodb scan --table-name <T> --max-items 5 --region <R>    # data conventions only
+# RDS / Aurora — resolve the identifier to a cluster/instance first
+aws rds describe-db-clusters   --region <R> --query 'DBClusters[].[DBClusterIdentifier,Engine,Endpoint]'
+aws rds describe-db-instances  --region <R> --query 'DBInstances[].[DBInstanceIdentifier,Engine,Endpoint.Address]'
+# A1 — Aurora with the Data API enabled: pure IAM, no network path needed
+aws rds-data execute-statement --resource-arn <clusterArn> --secret-arn <secretArn> \
+  --database <db> --include-result-metadata --sql "
+    SELECT c.table_name, c.column_name, c.data_type, c.udt_name, c.is_nullable,
+           c.column_default, c.is_generated, c.ordinal_position
+    FROM information_schema.columns c
+    WHERE c.table_schema = 'public'
+    ORDER BY c.table_name, c.ordinal_position"
+```
+Also pull primary keys, indexes, foreign keys and enum labels (`pg_constraint`,
+`pg_index`, `pg_enum` on PostgreSQL; `information_schema.key_column_usage` +
+`SHOW INDEX` on MySQL/MariaDB).
+
+**Path A2 — driver connection (every non-Data-API engine).** Do NOT assume this is
+impossible from a CLI. Reachability here is a **network** question, not an IAM one:
+credentials get you *authenticated*, but the packets still have to arrive. Work out
+which case you are in before falling back to Path B:
+
+```bash
+aws rds describe-db-instances --region <R> --db-instance-identifier <ID> \
+  --query 'DBInstances[0].{public:PubliclyAccessible,ep:Endpoint.Address,port:Endpoint.Port,sg:VpcSecurityGroups[].VpcSecurityGroupId,subnets:DBSubnetGroup.Subnets[].SubnetIdentifier}'
+aws ec2 describe-security-groups --group-ids <sg> \
+  --query 'SecurityGroups[0].IpPermissions'          # is your IP/CIDR allowed on the port?
+nc -zv <endpoint> <port>                              # 5s answer: reachable or not
+```
+
+| Situation | What to do |
+|---|---|
+| `PubliclyAccessible: true` and the SG allows your egress IP | Connect directly — nothing else needed |
+| You are on the customer's VPN / Direct Connect / a peered network, SG allows your CIDR | Connect directly |
+| Private-only, but you have `ssm:StartSession` and there is an SSM-managed instance in the VPC | **Port-forward** (below). No bastion key, no inbound SSH, no public DB |
+| Private-only, no tunnel available, or the customer won't grant DB access | Path B |
+
+```bash
+# Private RDS via any SSM-managed EC2 instance in its VPC (needs the Session Manager plugin).
+# The DB security group must allow the INSTANCE's security group on the port — not your laptop.
+aws ssm start-session --target <instanceId> --region <R> \
+  --document-name AWS-StartPortForwardingSessionToRemoteHost \
+  --parameters '{"host":["<db-endpoint>"],"portNumber":["5432"],"localPortNumber":["15432"]}'
+# then treat the database as localhost:15432
+```
+A CloudShell **VPC environment** placed in the DB's VPC/subnets/SG works the same way.
+
+Credentials: read the secret (`aws secretsmanager get-secret-value --secret-id <arn>
+--query SecretString`), or — PostgreSQL/MySQL/MariaDB with IAM database
+authentication enabled and the DB user mapped — mint a token instead of a password
+with `aws rds generate-db-auth-token --hostname <ep> --port <p> --username <u>`
+(SSL required). Then run the same catalog queries as A1 through a client: `psql` /
+`mysql`, or Python with `psycopg2` / `pymysql` / `pytds` / `oracledb` — the exact
+drivers the webapp's image ships; `pip install` whichever you need. Ask for a
+**read-only DB user**; every query here is a catalog `SELECT`.
+
+⚠️ Write the result with the **`<engine>-driver`** contract from the table below,
+never the Data API one. That mismatch is a shipped-and-broken Lambda, not a
+cosmetic slip.
+
+> The webapp is under the same constraint on this path and has *fewer* options: its
+> ECS task sits in the app's own VPC, so it reaches a driver database only if the
+> endpoint is publicly accessible or the VPCs are peered — it cannot open an SSM
+> tunnel or ride a VPN. It returns `CONNECTION_FAILED` with the SG/route hint. A
+> laptop with the right credentials is often *better* placed than the webapp here.
+
+**Path B — schema as a document.** DDL dump, ERD image, data dictionary, or sample
+JSON payloads. Extract exact table + column names, SQL types, PK (incl. composite),
+FKs, indexes, enum/allowed values, NOT NULL, defaults, generated columns, and any
+comments carrying business rules. Ask for anything the document doesn't state —
+especially the caller-lookup key and enum spellings — and use explicit
+`<REPLACE_ME>` placeholders for missing ARNs, never invented values.
+
+**Both paths, then:**
+
+1. Write the result to `state/infrastructure_schema.json` in the same shape the
+   webapp's converter produces, with `existing: true` on every table:
+   `tables[].{name, primary_key, sort_key, columns[{name, sql_type, nullable,
+   default, generated, allowed_values, description}], indexes, foreign_keys}`,
+   `relationships[]`, `enum_types{}`, `data_conventions{}` with REAL sampled
+   examples, plus `access_method` and **the connection contract that matches it**
+   — the two are not interchangeable, and `lambda_generator` picks its code path
+   from `access_method`:
+
+   | `access_method` | `connection` | `environment_variables` | `iam_requirements` |
+   |---|---|---|---|
+   | `rds-data-api` | `{cluster_arn, secret_arn, database_name}` | `{DB_CLUSTER_ARN, DB_SECRET_ARN, DB_NAME}` | `rds-data:ExecuteStatement`, `rds-data:BatchExecuteStatement`, `secretsmanager:GetSecretValue` |
+   | `<engine>-driver` | `{host, port, secret_arn, database_name}` | `{DB_SECRET_ARN, DB_HOST, DB_PORT, DB_NAME}` | `secretsmanager:GetSecretValue` only |
+
+   Writing the Data API shape for a driver target is the failure this table exists
+   to prevent: the handler then calls `rds-data` against a cluster that has no
+   Data API and reads a `DB_CLUSTER_ARN` that was never set. A driver target also
+   needs `VpcConfig` (subnets + an SG allowed on the DB port) **and** either a
+   Secrets Manager interface VPC endpoint or a NAT — without one,
+   `GetSecretValue` hangs until the function times out.
+2. **Persist the COMPLETE column list for every table, verbatim.** Do not hand-write
+   an abbreviated summary of "just the columns this operation needs" — the `sql_*`
+   checks in `validate_consistency.py` compare generated SQL against this file, so
+   any column you omit becomes invisible to the gate and a hallucinated reference
+   (`order_items.product_name` when it lives on `products`) ships and fails at
+   runtime with SQLState 42703. Completeness here is what makes the gate work.
+3. **Echo back what you parsed** (table → columns → PK → FKs) and get confirmation
+   BEFORE generating.
+4. Fill `data_source` on every OperationSpec — for RDS/Aurora that means `db_type`,
+   `table_name` (the primary table), `partition_key`, `database_name`,
+   `lookup_column` (the column identifying the caller, e.g. `customers.phone_number`)
+   and `related_tables` (every other table the operation joins, in query order).
+   An empty `data_source` renders "Table: ?" and blinds the reviewer.
+5. **Fidelity rule:** never rename, re-case, or invent an identifier; honour
+   `allowed_values` exactly; preserve `data_conventions` samples (a phone stored as
+   `821012345678` must not become `+8210…`). Column/table descriptions often carry
+   business rules ("auto-approve under 500,000 KRW") — feed those into the spec.
+
+Aurora Data API also has a **minimum engine version**; if the cluster is older,
+the driver path is the only option — flag it instead of emitting Data API code.
+Phase 1 then runs unchanged, passing `existing_tables[]` (with
+`table_arn: "existing table - managed outside CloudFormation"`) and
+`include_sample_data=False`.
 
 ## INTERVIEW MODE — gather requirements
 
@@ -215,7 +358,12 @@ in-scope phases below execute; mark the rest "skipped (not in scope)".
 | 4 | `prompt_generator` | all specs + flow config | `prompt/ai_agent_prompt.yaml` |
 | 5 | `contact_flow_generator` | flow config + prompt | `contact_flow/contact_flow.json` |
 | 6 | `faq_generator` (optional) | company profile / research | `faq/<category>/*.txt` |
-| 7 | **Review gate** (`reviewer_agent` + validator) | all of `assets/v1/` | `state/review_report.md` |
+| 7 | **Review gate** (`reviewer_agent` + 3 validators) | all of `assets/v1/` | `state/review_report.md` |
+
+Run `resources/scripts/lint_assets.py <output_dir>` at the end of **every** phase
+(Phase 0 excepted) before you report the result — it is cheap, deterministic, and
+catches the failures that otherwise surface only at CloudFormation deploy or flow
+import time. See **Validation** below for the full gate list.
 
 **Granularity & special Lambdas (Phase 1–2) — easy to get wrong:**
 - **One Lambda per TOOL, not per operation.** Enumerate every tool id across all
@@ -297,34 +445,84 @@ Example header:
 **Before each generation phase beyond #1**: confirm the previous phase's artifacts
 exist on disk.
 
-**After Phase 1 (infra)** — CloudFormation lint gate (mirrors the webapp's
-`merge_infrastructure_fragments` cfn-lint gate):
-```bash
-cfn-lint <output_dir>/assets/v1/infrastructure/template.yaml   # if cfn-lint is installed
-```
-Fix exactly the errors cfn-lint names (patch via `Edit`); don't paraphrase or
-over-fix. If cfn-lint isn't installed, say so and fall back to a YAML parse check.
+Three deterministic (non-LLM) gates carry the webapp's whole safety net. Run them —
+your reading of a file is not a substitute:
 
-**After Phase 3 (OpenAPI)** — OpenAPI 3.0 validation gate:
-```bash
-python -c "import yaml,sys; yaml.safe_load(open('<output_dir>/assets/v1/openapi/openapi.yaml'))"
-# or, if available: openapi-spec-validator <output_dir>/assets/v1/openapi/openapi.yaml
-```
+| Script | What it gates | When |
+|---|---|---|
+| `resources/scripts/lint_assets.py` | per-asset syntax + import-safety, with auto-fixes | after every generation phase |
+| `resources/scripts/validate_consistency.py` | 18 cross-asset consistency checks | after Phase 3 and Phase 6 |
+| `resources/scripts/shape_parity.py` | spec ↔ OpenAPI shape parity (reviewer HARD GATE) | after Phase 3, again at Phase 7 |
 
-**After Phase 3 and Phase 6** — the 9-check cross-asset consistency validator:
+All three take `<output_dir>`, accept `--json`, exit 0 on success and 1 on findings,
+and resolve assets from the newest `assets/vN/` (a flat `assets/` also works).
+
+**Asset linters — after EVERY generation phase.** `lint_assets.py` is generated from
+the webapp's `asset_linters.py`, so it enforces exactly what the webapp enforces:
 ```bash
-python resources/scripts/validate_consistency.py <output_dir>
+python3 resources/scripts/lint_assets.py <output_dir>          # report
+python3 resources/scripts/lint_assets.py <output_dir> --fix     # apply deterministic fixes
 ```
-It enforces the same 9 rules the webapp enforces:
-1. Lambda reads every `input_fields[].name`
-2. Lambda response contains every `output_fields[].name`
-3. OpenAPI `requestBody` matches spec inputs
-4. OpenAPI response schema matches spec outputs
-5. Infra table keys include `data_source.primary_key`
-6. Lambda `IndexName=` values exist as infra GSIs
-7. Lambda `os.environ["X_TABLE_NAME"]` matches infra env vars
-8. Lambda response wrapper (data vs flat) matches OpenAPI response shape
-9. Lambda & OpenAPI count each ≥ spec count
+It runs, per asset type:
+- **Lambda** — Python `compile()` syntax check, then **BUSINESS_OUTCOME_200**: rewrites
+  `create_response(4xx, …)` business outcomes to 200 (5xx is preserved) and warns when
+  the body has no outcome discriminator.
+- **CloudFormation** — cfn-lint plus deterministic autofixes (`pip install cfn-lint`;
+  without it you get autofixes but **no validation**, and it says so).
+- **OpenAPI** — openapi-spec-validator plus autofixes
+  (`pip install openapi-spec-validator`).
+- **Contact Flow** — the API-verified block tables: renames invalid `Type`s, adds
+  required error branches, strips `Transitions` from terminal blocks, normalizes the
+  `Complete`/`Escalate` tool-result values, checks JSONPath roots and redaction
+  languages.
+- **AI prompt** — the qconnect variable-once rule.
+
+`NEEDS FIX` lines mean the fix is *available but unapplied*; re-run with `--fix`, then
+re-lint. A repaired Contact Flow may be **shorter** than the draft — that is correct.
+
+**Cross-asset consistency — after Phase 3 and Phase 6:**
+```bash
+python3 resources/scripts/validate_consistency.py <output_dir>
+```
+18 checks, the same ones the webapp runs after every generation phase:
+
+*spec ↔ generated asset* — `lambda_input` (spec input never read by the handler),
+`lambda_output` (spec output absent from the response body), `lambda_tool` (ToolSpec
+input never read by its handler), `openapi_input` / `openapi_output`, `infra_pk`
+(spec primary key is not a key on the infra table), `lambda_gsi` (`IndexName=` that
+is not a GSI), `lambda_env` (`*_TABLE_NAME` the schema never defines),
+`response_structure` (`data` wrapper on one side only), `count_lambda` /
+`count_openapi` (fewer handlers/paths than specs — or than tools).
+
+*IAM (D2)* — `iam_permissions`: the handler calls an AWS API its CloudFormation role
+never grants (this is the `AccessDeniedException` you'd otherwise find at runtime).
+
+*RDS Data API contract (D3)* — `rds_env_contract`: the env-var names are exactly
+`DB_CLUSTER_ARN`, `DB_SECRET_ARN`, `DB_NAME` (not `RDS_CLUSTER_ARN`, `SECRET_ARN`, …)
+**and** the template actually defines each one, or the function `KeyError`s on cold
+start. `rds_data_api`: `includeResultMetadata=True` is passed, rows are read by column
+name rather than by position, and SQL is not built by string interpolation.
+
+*SQL vs the database schema (D4/D5)* — `sql_schema_mismatch` (a column the resolved
+table does not have → SQLState 42703), `sql_type_mismatch` (a `::cast` to a type the
+schema never defines), `sql_missing_required_column` (an INSERT that omits a NOT NULL
+column with no default), `sql_param_type_mismatch` (a `:param` bound with the wrong
+Data API value key — `longValue` for integer types, `booleanValue` for bool,
+`stringValue` for char/text; date/uuid/json/enum/numeric legitimately take
+`stringValue`). These only work if `state/infrastructure_schema.json` holds the
+complete column list (see Phase 0).
+
+**Shape parity — after Phase 3:**
+```bash
+python3 resources/scripts/shape_parity.py <output_dir>
+```
+This is the reviewer's **HARD GATE**: every spec `field_type` must map to the OpenAPI
+type, enums must match exactly, nested `items.properties` must survive, and neither
+side may declare a property the other doesn't. It enforces on the OpenAPI side what
+golden rules 13/15/16 ask the generators to do, and it covers **multi-tool** specs
+(each `tools[].input_fields` / `output_fields`), not just the operation-level fields.
+An exit code of 2 means the document uses a construct the validator refuses to guess
+at — `oneOf`/`anyOf`/`allOf` or an external `$ref` — so flatten it into a plain schema.
 
 On a mismatch: **field rename/typo** → `Edit` the offending file (don't regenerate);
 **structural mismatch** → re-run the specific sub-agent persona with a
@@ -332,18 +530,21 @@ On a mismatch: **field rename/typo** → `Edit` the offending file (don't regene
 
 ### Phase 7 — Final review gate (MANDATORY)
 
-After the last generation phase, complete all three before declaring done:
+After the last generation phase, complete all five before declaring done:
 
 1. **Artifact presence** — every in-scope output path exists and is non-empty.
-2. **Consistency validator** exits 0 (run it again).
-3. **Reviewer pass** — adopt `resources/sub-agents/reviewer_agent.md`, read all
+2. **`lint_assets.py`** exits 0 with no pending fixes.
+3. **`validate_consistency.py`** exits 0.
+4. **`shape_parity.py`** exits 0.
+5. **Reviewer pass** — adopt `resources/sub-agents/reviewer_agent.md`, read all
    `assets/v1/` artifacts, and `Write` `state/review_report.md` with sections:
    `## Summary` (one sentence per asset), `## Consistency findings`,
    `## Recommended edits` (empty = clean), `## Verdict` (`READY_TO_DEPLOY` |
    `NEEDS_EDITS`). Write the report in the user's language.
 
-If `NEEDS_EDITS`, apply edits via `Edit` (never whole-file regen) and re-run the
-validator. Surface `READY_TO_DEPLOY` only once all three pass.
+If `NEEDS_EDITS`, apply edits via `Edit` (never whole-file regen) and re-run the three
+scripts. Surface `READY_TO_DEPLOY` only once all five pass — and quote the three exit
+codes in the report so the user can see the gates actually ran.
 
 ## Patch-only modification protocol (post-generation)
 
@@ -392,20 +593,36 @@ when the user explicitly asks ("다시 검토 / review again") — otherwise rea
 ## Cross-generator golden rules (ALWAYS apply)
 
 Read the full `resources/sub-agents/_shared_rules.md` before Phase 1 — it carries all
-16 rules **and** the AI-bot↔flow tool-result contract. The essentials:
+**17** rules **and** the AI-bot↔flow tool-result contract. The essentials:
 
-1. **HTTP_METHOD_RULE** — spec verb == OpenAPI verb == CFN `HttpMethod`, exactly.
-2. **PATH_PREFIX_RULE** — OpenAPI `paths:` start with `/tools/`; the CFN `ApiEndpoint`
+1. **BUSINESS_OUTCOME_200_RULE** (rule 17, CRITICAL) — an Amazon Connect AI agent
+   treats **any non-2xx as a broken tool** and never reads the body, so it can't tell
+   "no reservation found" from "the API is down". Every *business* outcome — not found,
+   not eligible, already cancelled, validation rejected — returns **HTTP 200** with a
+   body discriminator (`success`/`found`/`eligible`/`errorCode`/…) **and** a
+   customer-readable `message`. Only genuine 5xx server faults stay non-2xx.
+   `lint_assets.py` rewrites 4xx business outcomes for you; the point is to not write
+   them in the first place.
+2. **HTTP_METHOD_RULE** — spec verb == OpenAPI verb == CFN `HttpMethod`, exactly.
+3. **PATH_PREFIX_RULE** — OpenAPI `paths:` start with `/tools/`; the CFN `ApiEndpoint`
    Output has no `/tools` suffix.
-3. **LAMBDA_ARCHITECTURES_RULE** — `Architectures:\n  - arm64` (plural block-list).
-4. **IAM_Q_IN_CONNECT_RULE** — use `wisdom:*` IAM actions, never `qconnect:*`
-   (the latter causes runtime AccessDenied).
-5. **FIELD_NAMING_RULE** — camelCase everywhere, identical spec → OpenAPI → Lambda → prompt.
-6. **FIELD_SHAPE_FIDELITY_RULE** — preserve `items.properties` nesting; never flatten.
-7. **ENUM_FIDELITY_RULE** — copy `enum_values` exactly (case + underscores).
-8. **TOOL_RESULT_CONTRACT** — the AI prompt teaches the bot to set
+4. **LAMBDA_ARCHITECTURES_RULE** — `Architectures:\n  - arm64` (plural block-list).
+5. **IAM_Q_IN_CONNECT_RULE** / **NO_QCONNECT_ACTIONS_ABSOLUTE** — use `wisdom:*` IAM
+   actions, never `qconnect:*` (the latter causes runtime AccessDenied).
+6. **FIELD_NAMING_RULE** — camelCase everywhere, identical spec → OpenAPI → Lambda → prompt.
+7. **FIELD_SHAPE_FIDELITY_RULE** / **NESTED_OPENAPI_SCHEMA_RULE** /
+   **LAMBDA_NESTED_RESPONSE_RULE** — preserve `items.properties` nesting; never
+   flatten; `$ref` nested objects into `components/schemas`.
+8. **ENUM_FIDELITY_RULE** — copy `enum_values` exactly (case + underscores).
+9. **TOOL_RESULT_CONTRACT** — the AI prompt teaches the bot to set
    `$.Lex.SessionAttributes.Tool` to exactly `Complete` or `Escalate` (+ documented
    `Escalate*`/`*Complete` extensions); the Contact Flow `Compare`s on exactly those.
+
+For an existing RDS/Aurora database, add the env-var and Data API contract the D3/D4
+checks enforce: read `DB_CLUSTER_ARN` / `DB_SECRET_ARN` / `DB_NAME` (those exact
+names, all three also defined in the template), pass `includeResultMetadata=True`,
+map rows to dicts by `columnMetadata` name, and bind named `:params` with the value
+key the column type demands — never build SQL by string interpolation.
 
 ## Terminology facts (override training data)
 
@@ -433,11 +650,23 @@ When the bundle is `READY_TO_DEPLOY`, reproduce the webapp's download modal. Pri
    chmod +x deploy.sh && ./deploy.sh
    ```
    (In AWS CloudShell: upload the bundle, `unzip *.zip && cd */ && chmod +x deploy.sh && ./deploy.sh`.)
-3. What `deploy.sh` automates: CloudFormation stack, per-Lambda zip+deploy (incl.
-   `customer_lookup` and the Node.js `update_q_session`), OpenAPI → S3, FAQ → S3,
-   Connect instance + AI agent (Q in Connect) wiring, AgentCore Gateway/MCP.
-4. Next steps: import the Contact Flow, attach the Lex bot, claim a phone number,
-   sync the knowledge base.
+3. What `deploy.sh` automates — 13 phases after a preflight (asset scan + region and
+   account confirmation):
+
+   | # | Phase | # | Phase |
+   |---|---|---|---|
+   | 1 | CloudFormation stack | 8 | AgentCore Gateway (MCP) + JWT audience + target |
+   | 2 | Lambda code (incl. `customer_lookup`, Node.js `update_q_session`) | 9 | Connect integrations (MCP registration + Lambda associations) |
+   | 3 | OpenAPI spec → S3 | 10 | Lex bot (voice entry point) |
+   | 4 | FAQ documents → S3 | 11 | Contact Flow import + placeholder substitution |
+   | 5 | Amazon Connect instance (create or select) | 12 | AI Prompt + AI Agent + security profile |
+   | 6 | Q in Connect assistant + knowledge base | 13 | Phone number claim + flow association (optional) |
+   | 7 | Lambda environment variables | | |
+
+   So the flow import, Lex bot, AI agent wiring and phone number are **automated** —
+   don't tell the user to do those by hand.
+4. Next steps after it finishes: place a test call/chat, sync the knowledge base if
+   FAQ content changed, and review the flow in the Connect console.
 
 State plainly that generated assets are **PoC starting points**, not hardened
 production code (rotate the workshop `ApiKeyRequired: false`, scope IAM, etc.).
@@ -452,7 +681,7 @@ resources/
     document_analysis.md        # raw-requirements-doc entry mode
     operation_spec_template.md  # OperationSpec authoring template (verbatim placeholders)
   sub-agents/
-    _shared_rules.md            # 16 golden rules + Complete/Escalate contract + nested-field rendering
+    _shared_rules.md            # 17 golden rules (incl. BUSINESS_OUTCOME_200_RULE) + Complete/Escalate contract + nested-field rendering
     infrastructure_generator.md  lambda_generator.md  openapi_generator.md
     prompt_generator.md          contact_flow_generator.md  faq_generator.md
     research_agent.md            reviewer_agent.md
@@ -465,7 +694,10 @@ resources/
     SessionFlowConfig / ContactFlowSpec / FlowBehavior / CustomerInfoVariable /
     NoResponsePolicy .schema.json
   scripts/
-    validate_consistency.py     # 9-check cross-asset validator (stdlib + PyYAML)
+    lint_assets.py              # per-asset linters + autofixes — AUTO-GENERATED from
+                                # backend tools/asset_linters.py; do not hand-edit
+    validate_consistency.py     # 18-check cross-asset validator (stdlib + PyYAML)
+    shape_parity.py             # spec ↔ OpenAPI shape parity HARD GATE
     check_spec_complete.py       clues_format.py
   templates/
     pre_questionnaire_template.md
@@ -483,7 +715,19 @@ After editing any prompt in `backend/ecs/src/` or a Pydantic spec model, re-run:
 skills/aicc-builder-skill/scripts/extract_prompts.sh          # regenerate resources/
 skills/aicc-builder-skill/scripts/extract_prompts.sh --check  # CI/pre-commit drift + coverage gate
 ```
-`--check` now also fails if a NEW backend prompt section or spec model isn't covered
-by the extractor — so the skill can't silently fall behind. The authored files under
-`resources/reference/` and `resources/templates/update_q_session/` are NOT extracted;
-update them by hand when the corresponding backend source changes.
+`--check` also fails if a NEW backend prompt section or spec model isn't covered by
+the extractor — so the skill can't silently fall behind.
+
+**Auto-extracted (never hand-edit):** `resources/orchestrator/*.md`,
+`resources/sub-agents/*.md`, `resources/schemas/*.json`, and
+`resources/scripts/lint_assets.py` (generated from `tools/asset_linters.py` with the
+`@tool` S3 wrappers stripped — that is how the API-verified Contact Flow tables stay
+in sync).
+
+**Authored / hand-maintained:** `resources/reference/*`, `resources/templates/*`
+(incl. `update_q_session/index.js` and `deploy_workshop.sh`), `resources/examples/*`,
+`resources/scripts/validate_consistency.py`, `resources/scripts/shape_parity.py`,
+`resources/scripts/check_spec_complete.py`, `resources/scripts/clues_format.py`, and
+these SKILL.md files. `validate_consistency.py` and `shape_parity.py` are ports of
+`backend/ecs/src/tools/{validate_consistency,shape_parity}.py` — when a check changes
+there, port it here by hand and re-run the smoke tests.

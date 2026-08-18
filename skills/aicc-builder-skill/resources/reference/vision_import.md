@@ -23,12 +23,17 @@ chart — and wants it turned into an importable Amazon Connect Contact Flow.
 4. **Lint + repair** the draft with the deterministic linter before trusting it —
    the draft is best-effort and MUST pass import-safety:
    ```bash
-   python resources/scripts/validate_consistency.py <output_dir>   # cross-asset
+   python3 resources/scripts/lint_assets.py <output_dir>          # report
+   python3 resources/scripts/lint_assets.py <output_dir> --fix     # apply fixes
    ```
-   plus the Contact-Flow block rules in
-   [`resources/reference/contact_flow_block_schemas.md`](contact_flow_block_schemas.md).
-   The repaired JSON may be **shorter** than the draft (the linter strips invalid
-   `DTMFConfiguration`, duplicate SSML, etc.) — that is expected and correct.
+   `lint_assets.py` carries the same `lint_contact_flow` the webapp runs (it is
+   generated from `backend/ecs/src/tools/asset_linters.py`), so it renames invalid
+   `Type`s, adds required error branches, and strips `Transitions` from terminal
+   blocks. See
+   [`resources/reference/contact_flow_block_schemas.md`](contact_flow_block_schemas.md)
+   for what each rule means. The repaired JSON may be **shorter** than the draft
+   (the linter strips invalid `DTMFConfiguration`, duplicate SSML, etc.) — that is
+   expected and correct.
 5. **Seed it as an imported asset** under a stable id and enter patch-only mode:
    `assets/v1/contact_flow/imported_flow/contact_flow.json`. Subsequent edits use
    `Edit` (or re-call `contact_flow_generator` with `flow_name="imported_flow"` +
@@ -50,15 +55,16 @@ chart — and wants it turned into an importable Amazon Connect Contact Flow.
 >   `AssociateContactToCustomerProfile, AuthenticateParticipant, CheckHoursOfOperation,
 >   CheckMetricData, CheckOutboundCallStatus, Compare, ConnectParticipantWithLexBot,
 >   CreateCase, CreateContact, CreatePersistentContactAssociation, CreateTask,
->   CreateWisdomSession, DisconnectParticipant, DistributeByPercentage,
->   EndFlowExecution, EvaluateDataTableValues, GetCustomerProfile,
->   GetCustomerProfileObject, GetMetricData, GetParticipantInput, InvokeFlowModule,
->   InvokeLambdaFunction, LoadContactContent, Loop, MessageParticipant,
->   MessageParticipantIteratively, RenderMessageTemplate, ResumeContact, ShowView,
->   StartOutboundEmailContact, TagContact, TransferContactToQueue,
->   TransferParticipantToThirdParty, TransferToFlow, UntagContact,
->   UpdateContactAttributes, UpdateContactCallbackNumber, UpdateContactData,
->   UpdateContactEventHooks, UpdateContactMediaStreamingBehavior,
+>   CreateWisdomSession, DequeueContactAndTransferToQueue, DisconnectParticipant,
+>   DistributeByPercentage, EndFlowExecution, EvaluateDataTableValues,
+>   GetCustomerProfile, GetCustomerProfileObject, GetMetricData, GetParticipantInput,
+>   InvokeFlowModule, InvokeLambdaFunction, LoadContactContent, Loop,
+>   MessageParticipant, MessageParticipantIteratively, RenderMessageTemplate,
+>   ResumeContact, ShowView, StartOutboundEmailContact, TagContact,
+>   TransferContactToQueue, TransferParticipantToThirdParty, TransferToFlow,
+>   UntagContact, UpdateContactAttributes, UpdateContactCallbackNumber,
+>   UpdateContactData, UpdateContactEventHooks,
+>   UpdateContactMediaStreamingBehavior,
 >   UpdateContactRecordingAndAnalyticsBehavior, UpdateContactRecordingBehavior,
 >   UpdateContactRoutingBehavior, UpdateContactRoutingCriteria,
 >   UpdateContactTargetQueue, UpdateContactTextToSpeechVoice,
@@ -75,6 +81,19 @@ chart — and wants it turned into an importable Amazon Connect Contact Flow.
 >   user refines it afterward.
 > - Use `{{PLACEHOLDER}}` tokens (e.g. `{{FRONT_DESK_QUEUE_ARN}}`, `{{LAMBDA_ARN}}`)
 >   for any ARN/id the diagram references but doesn't provide.
+
+The webapp builds that `Type` list at import time from
+`VALID_CONTACT_FLOW_ACTION_TYPES`, so the copy above can go stale. Print the
+authoritative list instead of trusting it:
+
+```bash
+python3 -c "import importlib.util as u; s=u.spec_from_file_location('la','resources/scripts/lint_assets.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print(', '.join(sorted(m.VALID_CONTACT_FLOW_ACTION_TYPES)))"
+```
+
+If the user supplied a company name or a note about the diagram, pass both as
+context alongside the image — the webapp prefixes the transcription request with
+`Company: <name>.` and `User note: <hint>.`, and they measurably improve queue/prompt
+naming.
 
 See [`contact_flow_block_schemas.md`](contact_flow_block_schemas.md) for the
 per-block required parameters and error lists the linter enforces.

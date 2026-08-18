@@ -1,13 +1,17 @@
 """
 Database Introspector Tool
 
-Connects to customer databases (DynamoDB, RDS/Aurora MySQL & PostgreSQL)
-and discovers schema information to help generate accurate Lambda functions.
+Connects to customer databases (DynamoDB, and every RDS/Aurora engine — see the
+engine registry below) and discovers schema information to help generate
+accurate Lambda functions.
 
-RDS introspection goes through the **RDS Data API**, which is only available on
-Aurora Serverless v2 / Aurora provisioned clusters with the HTTP endpoint
-enabled. Plain RDS instances are not reachable this way and produce an
-actionable error instead of a silent empty result.
+RDS introspection picks its connection method per target: the **RDS Data API**
+when the cluster is Aurora with the HTTP endpoint enabled, and a **direct engine
+driver** otherwise (plain RDS PostgreSQL/MySQL/MariaDB, SQL Server, Oracle, Db2,
+or Aurora with the endpoint off). Whichever was used is reported as
+`access_method` (`rds-data-api` or `<engine>-driver`) and carried into the
+converted infrastructure schema, because it decides which code path the
+generated Lambda must take.
 """
 
 import json
@@ -2123,6 +2127,19 @@ def _convert_dynamodb(r: dict) -> dict:
 def _convert_rds(r: dict) -> dict:
     engine = r.get("engine") or _DB_TYPE_FAMILY.get(r.get("db_type"), "postgresql")
     database_name = r.get("database_name")
+    # The scan already decided how it reached this database (data_api vs a real
+    # driver connection). Carry that decision through verbatim — hardcoding
+    # "rds-data-api" here made every driver-only engine (plain RDS PostgreSQL/MySQL,
+    # SQL Server, Oracle, Db2, or Aurora with the HTTP endpoint off) present
+    # downstream as Data API, so lambda_generator emitted rds-data calls against a
+    # cluster that has no Data API and the deployed handler failed on the first query.
+    access_method = r.get("access_method")
+    if not access_method:
+        # Hand-built payloads (document path, cached older scans) may omit it —
+        # infer from which connection coordinates are actually present.
+        access_method = ("rds-data-api" if (r.get("cluster_arn") and r.get("secret_arn"))
+                         else f"{engine}-driver")
+    uses_data_api = access_method == "rds-data-api"
 
     tables = []
     conventions = {}
@@ -2175,27 +2192,48 @@ def _convert_rds(r: dict) -> dict:
                     "example": example,
                 }
 
+    if uses_data_api:
+        connection = {
+            "cluster_arn": r.get("cluster_arn"),
+            "secret_arn": r.get("secret_arn"),
+            "database_name": database_name,
+        }
+        environment_variables = {
+            "DB_CLUSTER_ARN": r.get("cluster_arn"),
+            "DB_SECRET_ARN": r.get("secret_arn"),
+            "DB_NAME": database_name,
+        }
+        iam_requirements = [
+            "rds-data:ExecuteStatement",
+            "rds-data:BatchExecuteStatement",
+            "secretsmanager:GetSecretValue",
+        ]
+    else:
+        # Driver path: the Lambda opens a TCP connection, so it needs the endpoint
+        # instead of a cluster ARN, and only the secret read from IAM.
+        connection = {
+            "host": r.get("host"),
+            "port": r.get("port"),
+            "secret_arn": r.get("secret_arn"),
+            "database_name": database_name,
+        }
+        environment_variables = {
+            "DB_SECRET_ARN": r.get("secret_arn"),
+            "DB_HOST": r.get("host"),
+            "DB_PORT": str(r["port"]) if r.get("port") is not None else None,
+            "DB_NAME": database_name,
+        }
+        iam_requirements = ["secretsmanager:GetSecretValue"]
+
     return {
         "db_type": r["db_type"],
         "engine": engine,
         "region": r.get("region"),
         "database_name": database_name,
-        "access_method": "rds-data-api",
-        "connection": {
-            "cluster_arn": r.get("cluster_arn"),
-            "secret_arn": r.get("secret_arn"),
-            "database_name": database_name,
-        },
-        "environment_variables": {
-            "DB_CLUSTER_ARN": r.get("cluster_arn"),
-            "DB_SECRET_ARN": r.get("secret_arn"),
-            "DB_NAME": database_name,
-        },
-        "iam_requirements": [
-            "rds-data:ExecuteStatement",
-            "rds-data:BatchExecuteStatement",
-            "secretsmanager:GetSecretValue",
-        ],
+        "access_method": access_method,
+        "connection": connection,
+        "environment_variables": environment_variables,
+        "iam_requirements": iam_requirements,
         "tables": tables,
         "relationships": r.get("relationships", []),
         "enum_types": r.get("enum_types"),

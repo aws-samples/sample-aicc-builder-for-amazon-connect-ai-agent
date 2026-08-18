@@ -943,9 +943,16 @@ When collected_data includes `existing_table == true`:
      environment_variables{<ENTITY>_TABLE_NAME}
    - RDS:      tables[].primary_key / columns[] (exact names, sql_type,
      allowed_values, description) / indexes / foreign_keys / referenced_by,
-     relationships[], enum_types{}, connection{cluster_arn, secret_arn,
-     database_name}, environment_variables{DB_CLUSTER_ARN, DB_SECRET_ARN,
-     DB_NAME}, iam_requirements[]
+     relationships[], enum_types{}, plus `access_method` and the connection
+     contract that matches it:
+       · `rds-data-api`      → connection{cluster_arn, secret_arn, database_name},
+         environment_variables{DB_CLUSTER_ARN, DB_SECRET_ARN, DB_NAME},
+         iam_requirements[rds-data:*, secretsmanager:GetSecretValue]
+       · `<engine>-driver`   → connection{host, port, secret_arn, database_name},
+         environment_variables{DB_SECRET_ARN, DB_HOST, DB_PORT, DB_NAME},
+         iam_requirements[secretsmanager:GetSecretValue]
+     Pass `access_method` and the env vars through UNCHANGED — lambda_generator
+     picks the Data API vs driver code path from them.
    - both:     data_conventions{} with REAL sampled examples, access_notes[]
 
 4. ⚠️ The scanned schema is now the CONTRACT. Never rename, re-case, or invent

@@ -87,6 +87,59 @@
       ],
       "default": null,
       "title": "Region"
+    },
+    "database_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "RDS/Aurora database (schema) name the operation queries",
+      "title": "Database Name"
+    },
+    "cluster_arn": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Aurora cluster ARN used via the RDS Data API",
+      "title": "Cluster Arn"
+    },
+    "lookup_column": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "SQL column used to identify the caller/record (e.g. customers.phone_number)",
+      "title": "Lookup Column"
+    },
+    "related_tables": {
+      "anyOf": [
+        {
+          "items": {},
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Other tables this operation joins/reads, in query order (e.g. ['customers', 'orders', 'order_items'])",
+      "title": "Related Tables"
     }
   },
   "title": "DataSourceSpec",
