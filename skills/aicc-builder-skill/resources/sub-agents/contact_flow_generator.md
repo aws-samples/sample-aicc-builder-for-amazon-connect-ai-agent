@@ -83,7 +83,7 @@ silently dropping customer-specific behaviors. DO NOT do that.
 **For EVERY behavior present in the requirements, the corresponding blocks MUST
 appear in the generated flow. This is mandatory, not optional:**
 - `callback_enabled: true` → you MUST include `UpdateContactCallbackNumber` →
-  `TransferContactToQueue` (with InvalidNumber/NotDialable/NoMatchingError handlers).
+  `TransferContactToQueue` (callback errors: InvalidCallbackNumber + CallbackNumberNotDialable).
 - A named target queue / "transfer to the X queue" → you MUST include
   `UpdateContactTargetQueue` → `TransferContactToQueue` using that queue.
 - `hours_of_operation` / business-hours branching → you MUST include
@@ -172,7 +172,7 @@ If you are uncertain about ANY block type, parameter format, or syntax:
 ❌ WRONG: `{"ProfileId": "...", "ContactId": "..."}`
 ✅ CORRECT: `{"ProfileRequestData": {"ProfileId": "...", "ContactId": "..."}}`
 
-### InvokeLambdaFunction - MUST use STRING_MAP ResponseType
+### InvokeLambdaFunction - ResponseType STRING_MAP or JSON
 ```json
 {
   "Type": "InvokeLambdaFunction",
@@ -185,8 +185,9 @@ If you are uncertain about ANY block type, parameter format, or syntax:
   }
 }
 ```
-❌ WRONG: `"ResponseType": "JSON"`
-✅ CORRECT: `"ResponseType": "STRING_MAP"`
+`ResponseType` accepts `STRING_MAP` (flat key/value — prefer this) OR `JSON` (nested).
+Both import (API-verified). `ResponseValidation` is OPTIONAL and may be omitted.
+❌ WRONG: `"ResponseType": "JSON_OBJECT"` (rejected — "Invalid Action property value")
 
 ---
 
@@ -288,16 +289,16 @@ on a correct, complete, importable JSON.
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | MessageParticipant | Play TTS/text to customer | Text OR PromptId OR Media | NoMatchingError |
-| GetParticipantInput | Collect DTMF input (TWO modes — see below) | Text/SSML, StoreInput, InputTimeLimitSeconds | InputTimeLimitExceeded, NoMatchingCondition, NoMatchingError |
-| StoreUserInput | Store numeric input as attribute | AttributeName | NoMatchingError |
+| GetParticipantInput | Collect DTMF input (TWO modes — see below) | Text/SSML, StoreInput, InputTimeLimitSeconds (required) | MENU: InputTimeLimitExceeded+NoMatchingCondition+NoMatchingError / STORE: NoMatchingError only |
 | DisconnectParticipant | End the contact | (none) | (none - terminal block) |
-| Wait | Pause for specified time | WaitTime (seconds, max 7 days) | TimeExpired, Error |
+| Wait | Pause for specified time | TimeLimitSeconds + Conditions operand `WaitCompleted` + NextAction | NoMatchingError |
 
 ### Voice & Recording Blocks
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | UpdateContactTextToSpeechVoice | Set TTS voice | TextToSpeechVoice, TextToSpeechEngine | NoMatchingError |
-| UpdateContactRecordingBehavior | Recording + Contact Lens | RecordingBehavior, AnalyticsBehavior | (Success only) |
+| UpdateContactRecordingAndAnalyticsBehavior | Recording + Contact Lens (CURRENT console block) | VoiceBehavior{VoiceRecordingBehavior,VoiceAnalyticsBehavior} or ChatBehavior{ChatAnalyticsBehavior} | NoMatchingError, ChannelMismatch (+InFlightRedactionConfigurationFailed for chat) |
+| UpdateContactRecordingBehavior | LEGACY (do not generate; still importable) | RecordingBehavior, AnalyticsBehavior | (Success only) |
 | UpdateFlowLoggingBehavior | Control flow logging | FlowLoggingBehavior ("Enabled"/"Disabled") | (Success only) |
 
 ### AI/Bot Integration Blocks
@@ -310,36 +311,33 @@ on a correct, complete, importable JSON.
 ### Routing & Transfer Blocks
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
-| TransferContactToQueue | Transfer to queue | QueueId (optional if UpdateContactTargetQueue used) | QueueAtCapacity, NoMatchingError |
-| DequeueContactAndTransferToQueue | Queue-to-queue transfer | QueueId | QueueAtCapacity, NoMatchingError |
-| TransferContactToAgent | Transfer to specific agent | AgentId | AgentNotAvailable, NoMatchingError |
-| TransferToFlow | Transfer to another flow | FlowId | NoMatchingError |
-| TransferParticipantToThirdParty | Transfer to external number | PhoneNumber | CallFailed, NoMatchingError |
-| UpdateContactTargetQueue | Set active queue | QueueId (UUID format) | NoMatchingError |
-| CheckMetricData | Check agent availability | (uses working queue) | True, False, Error |
-| CheckMetricData | Get real-time queue metrics | MetricNames | NoMatchingError |
+| TransferContactToQueue | Transfer to queue | (NO QueueId — set via UpdateContactTargetQueue first) | QueueAtCapacity, NoMatchingError |
+| DequeueContactAndTransferToQueue | Queue-to-queue transfer | QueueId (or AgentId) | QueueAtCapacity, NoMatchingError |
+| TransferToFlow | Transfer to another flow | ContactFlowId | NoMatchingError |
+| TransferParticipantToThirdParty | Transfer to external number | ThirdPartyPhoneNumber | CallFailed, ConnectionTimeLimitExceeded, NoMatchingError |
+| UpdateContactTargetQueue | Set active queue | QueueId (UUID/ARN) OR AgentId | NoMatchingError |
+| CheckMetricData | Check agent availability / queue metrics | MetricType (`NumberOfAgentsAvailable`/`NumberOfContactsInQueue`/`OldestContactInQueueAgeSeconds`/`NumberOfAgentsStaffed`/`NumberOfAgentsOnline`); optional QueueId; branch via Conditions | NoMatchingCondition, NoMatchingError |
 
 ### Condition & Logic Blocks
 | Type | Purpose | Required Transitions | Error Types |
 |------|---------|----------------------|-------------|
 | Compare | Compare attribute values | NextAction, Conditions[] | NoMatchingCondition |
-| CheckContactAttributes | Evaluate attribute values | Conditions[] | NoMatchingCondition |
-| CheckHoursOfOperation | Check business hours | HoursOfOperationId | True(InHours), False(OutOfHours), Error |
-| DistributeByPercentage | A/B testing | Percentage branches | NoMatchingError |
-| Loop | Repeat actions | LoopCount | Looping, Complete |
+| CheckHoursOfOperation | Check business hours | HoursOfOperationId + NextAction + BOTH True/False Conditions | NoMatchingError (NOT NoMatchingCondition) |
+| DistributeByPercentage | A/B testing | Percentage branches | NoMatchingCondition |
+| Loop | Repeat actions | LoopCount + NextAction | Conditions operands `ContinueLooping`/`DoneLooping` |
 
 ### Lambda & Module Blocks
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | InvokeLambdaFunction | Call Lambda function | LambdaFunctionARN, InvocationTimeLimitSeconds (max 8) | NoMatchingError |
 | InvokeFlowModule | Call flow module | FlowModuleId | NoMatchingCondition, NoMatchingError |
-| EndFlowModuleExecution | Return from module | (optional ReturnValue) | (terminal block) |
+| EndFlowExecution | End flow (terminal) | (none) | (terminal block — NO Transitions) |
 
 ### Contact Attribute Blocks
 | Type | Purpose | Required Parameters | Error Types |
 |------|---------|---------------------|-------------|
 | UpdateContactAttributes | Set/update contact attributes | Attributes object | NoMatchingError (32KB limit) |
-| UpdateContactCallbackNumber | Set callback number for queue callback | CallbackNumber | InvalidNumber, NotDialable, NoMatchingError |
+| UpdateContactCallbackNumber | Set callback number for queue callback | CallbackNumber (JSONPath, e.g. $.CustomerEndpoint.Address — not a literal) | InvalidCallbackNumber, CallbackNumberNotDialable (NOT NoMatchingError) |
 | CustomerProfiles | Query/create customer profiles | ProfileRequestData | NoMatchingError |
 | Cases | Link to cases | CaseId | NoMatchingError |
 
@@ -352,9 +350,9 @@ When you need to implement a feature, use ONLY these block combinations:
 | Use Case | Block Sequence | Key Attributes |
 |----------|----------------|----------------|
 | **Callback scheduling** | `UpdateContactCallbackNumber` → `TransferContactToQueue` | `$.CustomerEndpoint.Address` |
-| **Agent availability check** | `UpdateContactTargetQueue` → `CheckMetricData` | Conditions: `True`/`False` |
-| **Queue-depth check** | `CheckMetricData` → `Compare` | `$.Metrics.Queue.Size` |
-| **Retry loop** | `Loop` → `Wait` → action | Branches: `Looping`/`Complete` |
+| **Agent availability check** | `UpdateContactTargetQueue` → `CheckMetricData` (MetricType `NumberOfAgentsAvailable`) | Condition: `NumberGreaterThan 0` |
+| **Queue-depth check** | `CheckMetricData` (MetricType `NumberOfContactsInQueue`) | Condition: `NumberGreaterThan N` |
+| **Retry loop** | `Loop` → `Wait` → action | Operands: `ContinueLooping`/`DoneLooping` |
 | **DTMF input** | `GetParticipantInput` | `$.StoredCustomerInput` |
 | **AI bot dialogue** | `ConnectParticipantWithLexBot` → `Compare` | `$.Lex.SessionAttributes.*` |
 | **Hours-of-operation check** | `CheckHoursOfOperation` | Conditions: `True`/`False` |
@@ -370,13 +368,13 @@ ANY of them makes the flow fail to import with `InvalidContactFlowException`.
 
 | ❌ Wrong | ✅ Correct Alternative |
 |----------|------------------------|
-| `Trigger` / `EntryPoint` | **NONE — there is no entry/trigger block.** A flow simply starts at the action `StartAction` points to. The FIRST real action (e.g. `UpdateFlowLoggingBehavior` or `UpdateContactRecordingBehavior`) IS the start. NEVER emit a `Trigger`/`EntryPoint` wrapper action. |
+| `Trigger` / `EntryPoint` | **NONE — there is no entry/trigger block.** A flow simply starts at the action `StartAction` points to. The FIRST real action (e.g. `UpdateFlowLoggingBehavior` or `UpdateContactRecordingAndAnalyticsBehavior`) IS the start. NEVER emit a `Trigger`/`EntryPoint` wrapper action. |
 | `InvokeAgentAction` | `ConnectParticipantWithLexBot` (AI self-service runs through a Q-in-Connect-enabled **Lex V2 bot** — params are `LexV2Bot.AliasArn` + one of `Text`/`SSML`/`PromptId`. There is NO `AgentAliasArn`, `IdleSessionTimeout`, or `EndConversationPhrase` param.) |
 | `InvokeBedrockAgent` / `InvokeAmazonQConnect` / `InvokeQConnect` | `CreateWisdomSession` (early) + `ConnectParticipantWithLexBot` |
 | `CheckCondition` / `CheckValue` / `Condition` / `CheckAttribute` | `Compare` (params: `ComparisonValue` + `Conditions`) |
 | `SetWorkingQueue` | `UpdateContactTargetQueue` |
 | `SetCallbackNumber` | `UpdateContactCallbackNumber` |
-| `CheckStaffing` / `CheckQueueStatus` | `CheckMetricData` (MetricType: `AgentsAvailable` / `ContactsInQueue`) |
+| `CheckStaffing` / `CheckQueueStatus` | `CheckMetricData` (MetricType: `NumberOfAgentsAvailable` / `NumberOfContactsInQueue`) |
 | `GetQueueMetrics` | `CheckMetricData` or `GetMetricData` |
 | `TransferToAgent` | `TransferContactToQueue` |
 | `TransferToPhoneNumber` / `TransferToThirdParty` | `TransferParticipantToThirdParty` |
@@ -399,7 +397,7 @@ ANY of them makes the flow fail to import with `InvalidContactFlowException`.
 
 **RULE: `StartAction` MUST point at a REAL functional first action (not a
 Trigger/EntryPoint).** The flow's first executed block is typically
-`UpdateFlowLoggingBehavior`, `UpdateContactRecordingBehavior`, or
+`UpdateFlowLoggingBehavior`, `UpdateContactRecordingAndAnalyticsBehavior`, or
 `UpdateContactTextToSpeechVoice` — never a synthetic entry wrapper.
 
 ---
@@ -414,14 +412,14 @@ Trigger/EntryPoint).** The flow's first executed block is typically
 | `TransferContactToQueue` | `{}` (uses queue set by UpdateContactTargetQueue) | `QueueAtCapacity`, `NoMatchingError` |
 | `UpdateContactTargetQueue` | `QueueId` (string ARN — NOT nested object) | `NoMatchingError` |
 | `Compare` | `ComparisonValue` (valid JSONPath root) | `NoMatchingCondition` ONLY (never `NoMatchingError`) |
-| `Loop` | `LoopCount` | Branches: `Looping`, `Complete` |
-| `Wait` | `WaitTime` (seconds) | `NoMatchingError` |
-| `GetParticipantInput` (MENU) | exactly ONE of `Text`/`SSML`, `StoreInput:"False"`, **NO `DTMFConfiguration`** | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
-| `GetParticipantInput` (STORE) | exactly ONE of `Text`/`SSML`, `StoreInput:"True"`, optional `DTMFConfiguration{DisableCancelKey}` only | `InputTimeLimitExceeded`, `NoMatchingError` |
-| `UpdateContactCallbackNumber` | `CallbackNumber` | `InvalidNumber`, `NotDialable`, `NoMatchingError` |
+| `Loop` | `LoopCount` + `Transitions.NextAction` (required) | Conditions operands `ContinueLooping`/`DoneLooping`; Errors optional |
+| `Wait` | `TimeLimitSeconds` (NOT `WaitTime`) + Conditions operand `WaitCompleted` + `NextAction` | `NoMatchingError` |
+| `GetParticipantInput` (MENU) | exactly ONE of `Text`/`SSML`, `StoreInput:"False"`, `InputTimeLimitSeconds` (required), **NO `DTMFConfiguration`** | `InputTimeLimitExceeded`, `NoMatchingCondition`, `NoMatchingError` |
+| `GetParticipantInput` (STORE) | exactly ONE of `Text`/`SSML`, `StoreInput:"True"`, `InputTimeLimitSeconds` (required), `InputValidation.CustomValidation.MaximumLength`, optional `DTMFConfiguration{DisableCancelKey (string!),InputTerminationSequence}` | `NoMatchingError` ONLY |
+| `UpdateContactCallbackNumber` | `CallbackNumber` (JSONPath, not a literal) | `InvalidCallbackNumber`, `CallbackNumberNotDialable` (NOT `NoMatchingError`/`InvalidNumber`/`NotDialable`) |
 | `CheckHoursOfOperation` | `HoursOfOperationId` (non-null) | `NoMatchingError`; Conditions MUST include BOTH `True` AND `False` |
 | `CheckMetricData` | `QueueId` | `NoMatchingError` |
-| `InvokeLambdaFunction` | `LambdaFunctionARN`, `InvocationTimeLimitSeconds` (max 8), `LambdaInvocationAttributes` (NOT `RequestAttributes`), `ResponseValidation.ResponseType`=`STRING_MAP` | `NoMatchingError` |
+| `InvokeLambdaFunction` | `LambdaFunctionARN`, `InvocationTimeLimitSeconds` (1-8), `LambdaInvocationAttributes` (NOT `RequestAttributes`), optional `ResponseValidation.ResponseType`=`STRING_MAP` or `JSON` (NOT `JSON_OBJECT`) | `NoMatchingError` |
 | `ConnectParticipantWithLexBot` | `LexV2Bot.AliasArn` + exactly ONE of `Text`/`SSML`/`PromptId`; optional `LexSessionAttributes` | `NoMatchingError`, `NoMatchingCondition` (NEVER `AgentError`) |
 | `UpdateContactTextToSpeechVoice` | `TextToSpeechVoice`, `TextToSpeechEngine` (NOT `VoiceId`/`Engine`/`LanguageCode`) | `NoMatchingError` |
 | `UpdateContactRecordingBehavior` | `RecordingBehavior{RecordedParticipants,IVRRecordingBehavior}` + `AnalyticsBehavior` (NOT `Agent`/`Customer`) | (none) |
@@ -483,36 +481,48 @@ ActionMetadata for set-voice (REQUIRED — DO NOT OMIT languageCode or overrideC
 ```
 Language code mapping: ko-KR → Seoyeon, en-US → Matthew, ja-JP → Kazuha
 
-### 1b. Recording & Analytics (REQUIRED — use ChannelConfiguration!)
+### 1b. Recording & Analytics (REQUIRED — use the CURRENT block type!)
+**Use `UpdateContactRecordingAndAnalyticsBehavior`** — this is what the Connect
+console emits today. The legacy `UpdateContactRecordingBehavior` block is
+OUTDATED (still accepted for back-compat, but do not generate it).
+
 Voice recording (when channel is VOICE):
 ```json
-{"Identifier": "voice-recording", "Type": "UpdateContactRecordingBehavior",
+{"Identifier": "voice-recording", "Type": "UpdateContactRecordingAndAnalyticsBehavior",
  "Parameters": {
-   "RecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
-   "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
-     "ChannelConfiguration": {"Chat": {"AnalyticsModes": []}, "Voice": {"AnalyticsModes": ["PostContact"]}},
-     "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
-     "SentimentConfiguration": {"Enabled": "True"}}},
- "Transitions": {"NextAction": "next_block"}}
+   "VoiceBehavior": {
+     "VoiceRecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"], "IVRRecordingBehavior": "Enabled"},
+     "VoiceAnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
+       "AnalyticsModes": ["RealTime", "AutomatedInteraction"],
+       "ConversationalAnalyticsRedactionConfiguration": {"Enabled": "False"},
+       "SentimentConfiguration": {"Enabled": "True"},
+       "SummaryConfiguration": {"SummaryModes": ["PostContact", "AutomatedInteraction"]}}}},
+ "Transitions": {"NextAction": "next_block",
+   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "next_block"},
+              {"ErrorType": "ChannelMismatch", "NextAction": "next_block"}]}}
 ```
-⚠️ **Voice `AnalyticsModes` MUST be `["PostContact"]` (NOT `["RealTime", ...]`).**
-`RealTime` in `Voice.AnalyticsModes` is rejected by Amazon Connect on import
-(`InvalidContactFlowException: Invalid Action property value ... ChannelConfiguration.Voice`)
-unless the instance/flow meets real-time Contact Lens preconditions — it breaks
-import for everyone. Use `PostContact`. (Q in Connect real-time assistance does
-NOT require RealTime voice *analytics* in this block — the Lex/Wisdom session
-drives the assistant; post-contact analytics is the safe, always-importable choice.)
+⚠️ **API-verified requirements for this block:** the `Errors` list MUST include
+BOTH `NoMatchingError` and `ChannelMismatch` — import fails without them.
+`AnalyticsModes` here supports `RealTime` + `AutomatedInteraction` together
+(unlike the legacy block). `AutomatedInteraction` covers the AI-agent (IVR)
+portion of the call; `RealTime` gives escalated human agents live transcript +
+sentiment.
 Chat recording (when channel is CHAT):
 ```json
-{"Identifier": "chat-recording", "Type": "UpdateContactRecordingBehavior",
+{"Identifier": "chat-recording", "Type": "UpdateContactRecordingAndAnalyticsBehavior",
  "Parameters": {
-   "RecordingBehavior": {"RecordedParticipants": [], "IVRRecordingBehavior": "Disabled"},
-   "AnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
-     "ChannelConfiguration": {"Chat": {"AnalyticsModes": ["ContactLens"]}, "Voice": {"AnalyticsModes": []}},
-     "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
-     "SentimentConfiguration": {"Enabled": "True"}}},
- "Transitions": {"NextAction": "next_block"}}
+   "ChatBehavior": {
+     "ChatAnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "en-US",
+       "AnalyticsModes": ["ContactLens"],
+       "SentimentConfiguration": {"Enabled": "True"},
+       "SummaryConfiguration": {"SummaryModes": ["PostContact"]}}}},
+ "Transitions": {"NextAction": "next_block",
+   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "next_block"},
+              {"ErrorType": "ChannelMismatch", "NextAction": "next_block"},
+              {"ErrorType": "InFlightRedactionConfigurationFailed", "NextAction": "next_block"}]}}
 ```
+⚠️ The CHAT variant additionally requires the
+`InFlightRedactionConfigurationFailed` error branch (API-verified).
 
 ### 2. Connect Assistant Session (REQUIRED - must be early in flow!)
 This 2-action pattern creates the Connect Assistant (Wisdom) session. Place BEFORE recording setup.
@@ -553,18 +563,23 @@ This 2-action pattern creates the Connect Assistant (Wisdom) session. Place BEFO
               {"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
 ```
 
-### 4. Callback Pattern (UpdateContactCallbackNumber + Transfer)
+### 4. Callback Pattern (set queue → UpdateContactCallbackNumber + Transfer)
+```json
+{"Identifier": "set_queue", "Type": "UpdateContactTargetQueue",
+ "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
+ "Transitions": {"NextAction": "set_callback",
+   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+```
 ```json
 {"Identifier": "set_callback", "Type": "UpdateContactCallbackNumber",
  "Parameters": {"CallbackNumber": "$.CustomerEndpoint.Address"},
  "Transitions": {"NextAction": "transfer_callback",
-   "Errors": [{"ErrorType": "InvalidNumber", "NextAction": "error_handler"},
-              {"ErrorType": "NotDialable", "NextAction": "error_handler"},
-              {"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+   "Errors": [{"ErrorType": "InvalidCallbackNumber", "NextAction": "error_handler"},
+              {"ErrorType": "CallbackNumberNotDialable", "NextAction": "error_handler"}]}}
 ```
 ```json
 {"Identifier": "transfer_callback", "Type": "TransferContactToQueue",
- "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
+ "Parameters": {},
  "Transitions": {"NextAction": "callback_confirmed",
    "Errors": [{"ErrorType": "QueueAtCapacity", "NextAction": "queue_full"},
               {"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
@@ -573,20 +588,23 @@ This 2-action pattern creates the Connect Assistant (Wisdom) session. Place BEFO
 ### 5. Loop + Wait (Retry pattern)
 ```json
 {"Identifier": "retry_loop", "Type": "Loop", "Parameters": {"LoopCount": "3"},
- "Transitions": {"Conditions": [
-   {"Condition": {"Operator": "Equals", "Operands": ["Looping"]}, "NextAction": "wait_30s"},
-   {"Condition": {"Operator": "Equals", "Operands": ["Complete"]}, "NextAction": "max_retries"}],
-   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+ "Transitions": {"NextAction": "max_retries", "Conditions": [
+   {"Condition": {"Operator": "Equals", "Operands": ["ContinueLooping"]}, "NextAction": "wait_30s"},
+   {"Condition": {"Operator": "Equals", "Operands": ["DoneLooping"]}, "NextAction": "max_retries"}]}}
 ```
 ```json
-{"Identifier": "wait_30s", "Type": "Wait", "Parameters": {"WaitTime": "30"},
- "Transitions": {"NextAction": "retry_action", "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+{"Identifier": "wait_30s", "Type": "Wait", "Parameters": {"TimeLimitSeconds": "30"},
+ "Transitions": {"NextAction": "retry_action",
+   "Conditions": [{"Condition": {"Operator": "Equals", "Operands": ["WaitCompleted"]}, "NextAction": "retry_action"}],
+   "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
 ```
 
 ### 6. Queue Metrics Check (CheckMetricData + Compare)
 ```json
-{"Identifier": "get_metrics", "Type": "CheckMetricData", "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
- "Transitions": {"NextAction": "check_queue_size", "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
+{"Identifier": "get_metrics", "Type": "CheckMetricData", "Parameters": {"QueueId": "{{QUEUE_ARN}}", "MetricType": "NumberOfContactsInQueue"},
+ "Transitions": {"NextAction": "check_queue_size",
+   "Conditions": [{"Condition": {"Operator": "NumberGreaterThan", "Operands": ["5"]}, "NextAction": "queue_busy"}],
+   "Errors": [{"ErrorType": "NoMatchingCondition", "NextAction": "check_queue_size"}, {"ErrorType": "NoMatchingError", "NextAction": "error_handler"}]}}
 ```
 ```json
 {"Identifier": "check_queue_size", "Type": "Compare",
@@ -671,12 +689,11 @@ This 2-action pattern creates the Connect Assistant (Wisdom) session. Place BEFO
 | Error Type | Used By | Description |
 |------------|---------|-------------|
 | NoMatchingError | Most blocks | General error (block execution failed) |
-| NoMatchingCondition | Compare, CheckContactAttributes, GetParticipantInput | No condition matched |
+| NoMatchingCondition | Compare, CheckMetricData, GetParticipantInput (MENU) | No condition matched |
 | QueueAtCapacity | TransferContactToQueue | Queue has reached maximum contacts |
-| InputTimeLimitExceeded | GetParticipantInput | Customer didn't provide input within timeout |
-| InvalidNumber | UpdateContactCallbackNumber | Phone number format is invalid |
-| NotDialable | UpdateContactCallbackNumber | Valid number but cannot be dialed |
-| AgentNotAvailable | TransferContactToAgent | Specified agent is not available |
+| InputTimeLimitExceeded | GetParticipantInput (MENU only) | Customer didn't provide input within timeout |
+| InvalidCallbackNumber | UpdateContactCallbackNumber | Callback number format is invalid |
+| CallbackNumberNotDialable | UpdateContactCallbackNumber | Valid callback number but cannot be dialed |
 | CallFailed | TransferParticipantToThirdParty | External call failed to connect |
 
 ---
@@ -688,9 +705,9 @@ The workshop uses a 3-module structure. Your generated flow MUST include these p
 ### Module 1: Basic Setting Configurations
 - **UpdateFlowLoggingBehavior**: Enable flow logging (REQUIRED - often missing!)
 - **Compare**: Check channel (VOICE vs CHAT) for recording settings
-- **UpdateContactRecordingBehavior**:
-  - VOICE: Record Agent+Customer, Voice `AnalyticsModes: ["PostContact"]` (NOT RealTime — import-safe)
-  - CHAT: No recording, Contact Lens only
+- **UpdateContactRecordingAndAnalyticsBehavior** (current console block):
+  - VOICE: `VoiceBehavior` — record Agent+Customer, `AnalyticsModes: ["RealTime", "AutomatedInteraction"]` (both supported together in this block)
+  - CHAT: `ChatBehavior` — Contact Lens analytics only (+`InFlightRedactionConfigurationFailed` error branch)
 
 Reference: `static/contact-flows/basic-setting-configurations.json`
 
@@ -724,7 +741,7 @@ Required elements in order:
 1. **UpdateFlowLoggingBehavior** — Enable flow logging
 2. **CreateWisdomSession** + **UpdateContactData** — Connect Assistant session
 3. **Compare Channel** (VOICE vs CHAT) → different recording settings
-4. **UpdateContactRecordingBehavior** — VOICE/CHAT specific
+4. **UpdateContactRecordingAndAnalyticsBehavior** — VOICE/CHAT specific (legacy UpdateContactRecordingBehavior: do not generate)
 5. **UpdateContactTextToSpeechVoice** — Generative TTS + languageCode in metadata
 6. **ConnectParticipantWithLexBot** — Q in Connect AI agent
 7. **Compare** (check Tool) — Escalate / Complete / loop back
@@ -1024,26 +1041,29 @@ Queue → Transfer Message → Transfer Queue → End; [Complete] → Goodbye �
     },
     {
       "Identifier": "set-recording",
-      "Type": "UpdateContactRecordingBehavior",
+      "Type": "UpdateContactRecordingAndAnalyticsBehavior",
       "Parameters": {
-        "RecordingBehavior": {
-          "RecordedParticipants": ["Agent", "Customer"],
-          "IVRRecordingBehavior": "Enabled"
-        },
-        "AnalyticsBehavior": {
-          "Enabled": "True",
-          "AnalyticsLanguage": "{{LANGUAGE_CODE}}",
-          "ChannelConfiguration": {
-            "Chat": {"AnalyticsModes": ["ContactLens"]},
-            "Voice": {"AnalyticsModes": ["RealTime", "PostContact"]}
+        "VoiceBehavior": {
+          "VoiceRecordingBehavior": {
+            "RecordedParticipants": ["Agent", "Customer"],
+            "IVRRecordingBehavior": "Enabled"
           },
-          "SummaryConfiguration": {"SummaryModes": ["PostContact"]},
-          "SentimentConfiguration": {"Enabled": "True"}
+          "VoiceAnalyticsBehavior": {
+            "Enabled": "True",
+            "AnalyticsLanguage": "en-US",
+            "AnalyticsModes": ["RealTime", "AutomatedInteraction"],
+            "ConversationalAnalyticsRedactionConfiguration": {"Enabled": "False"},
+            "SentimentConfiguration": {"Enabled": "True"},
+            "SummaryConfiguration": {"SummaryModes": ["PostContact", "AutomatedInteraction"]}
+          }
         }
       },
       "Transitions": {
         "NextAction": "lex-bot",
-        "Errors": []
+        "Errors": [
+          {"ErrorType": "NoMatchingError", "NextAction": "lex-bot"},
+          {"ErrorType": "ChannelMismatch", "NextAction": "lex-bot"}
+        ]
       }
     },
     {
@@ -1196,7 +1216,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 ### Baseline Blocks (REQUIRED for Workshop)
 - [ ] UpdateFlowLoggingBehavior: Enable flow logging
 - [ ] CreateWisdomSession + UpdateContactData: Connect Assistant session
-- [ ] UpdateContactRecordingBehavior: Recording + analytics
+- [ ] UpdateContactRecordingAndAnalyticsBehavior: Recording + analytics (current block type)
 - [ ] UpdateContactTextToSpeechVoice: Generative TTS + languageCode in metadata
 - [ ] ConnectParticipantWithLexBot: Q in Connect AI agent
 - [ ] Compare: Check Tool (Escalate / Complete / loop)
@@ -1234,7 +1254,7 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 - [ ] `InvokeLambdaFunction` has `Errors` with `NoMatchingError`
 - [ ] `GetParticipantInput` MENU mode: `StoreInput:"False"`, NO `DTMFConfiguration`, errors `InputTimeLimitExceeded`+`NoMatchingCondition`+`NoMatchingError`
 - [ ] `GetParticipantInput` STORE mode: `StoreInput:"True"`, `InputValidation.CustomValidation.MaximumLength`, error `NoMatchingError` only
-- [ ] `UpdateContactCallbackNumber` has `InvalidNumber`, `NotDialable`, `NoMatchingError` (if used)
+- [ ] `UpdateContactCallbackNumber` has `InvalidCallbackNumber`, `CallbackNumberNotDialable` (NOT `NoMatchingError`) (if used)
 
 ### 3. Identifier Consistency
 - [ ] `StartAction` matches an Action Identifier EXACTLY
@@ -1246,22 +1266,23 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 | Block Type | Parameters | Transitions |
 |------------|------------|-------------|
 | `DisconnectParticipant` | `{}` | `{}` (terminal) |
-| `EndFlowModuleExecution` | optional `ReturnValue` | `{}` (terminal) |
-| `TransferContactToQueue` | `QueueId` (optional) | `NextAction` + `Errors` |
+| `EndFlowExecution` | `{}` | `{}` (terminal) |
+| `TransferContactToQueue` | `{}` (NO `QueueId`) | `NextAction` + `Errors` |
 | `UpdateContactTargetQueue` | `QueueId` (UUID/ARN) | `NextAction` + `Errors` |
-| `CheckMetricData` | `{}` (uses working queue) | `Conditions` (True/False) + `Errors` |
+| `CheckMetricData` | `MetricType` (+ optional `QueueId`) | `Conditions` (numeric) + `Errors` |
 | `Compare` | `ComparisonValue` | `NextAction` + `Conditions` + `Errors` |
-| `GetParticipantInput` (MENU) | `Text`/`SSML`, `StoreInput:"False"` (NO `DTMFConfiguration`) | `NextAction` + `Conditions` + `Errors` |
-| `Wait` | `WaitTime` (seconds) | `NextAction` + `Errors` |
-| `UpdateContactCallbackNumber` | `CallbackNumber` | `NextAction` + `Errors` (3 types) |
+| `GetParticipantInput` (MENU) | `Text`/`SSML`, `StoreInput:"False"`, `InputTimeLimitSeconds` (NO `DTMFConfiguration`) | `NextAction` + `Conditions` + `Errors` |
+| `Wait` | `TimeLimitSeconds` | `NextAction` + `Conditions` (`WaitCompleted`) + `Errors` |
+| `UpdateContactCallbackNumber` | `CallbackNumber` | `NextAction` + `Errors` (`InvalidCallbackNumber`, `CallbackNumberNotDialable`) |
 | `InvokeFlowModule` | `FlowModuleId` | `NextAction` + `Conditions` + `Errors` |
 
 ### 5. Parameter Format Requirements
 - [ ] `QueueId` in UpdateContactTargetQueue must be UUID or ARN (NOT queue name)
 - [ ] `CallbackNumber` must use JSONPath (e.g., `$.CustomerEndpoint.Address`)
 - [ ] `InvocationTimeLimitSeconds` for Lambda must be "8" or less (string)
-- [ ] `WaitTime` must be string (e.g., "30")
-- [ ] `InputTimeLimitSeconds` must be between 1-180 (string)
+- [ ] `Wait` uses `TimeLimitSeconds` (NOT `WaitTime`), string (e.g., "30")
+- [ ] `InputTimeLimitSeconds` required on GetParticipantInput (both modes), string
+- [ ] `DisableCancelKey` must be a string ("True"/"False"), NEVER a JSON boolean
 
 ---
 
@@ -1280,13 +1301,13 @@ Before outputting the Contact Flow JSON, verify ALL of the following:
 8. `CheckMetricData`: MUST have `Conditions` for True/False AND `Errors` array
 9. `Compare`: MUST have `Errors` array with `NoMatchingCondition`
 10. `GetParticipantInput`: MENU mode (has `Conditions`) MUST set `StoreInput:"False"` and MUST NOT include `DTMFConfiguration` (Connect rejects it), 3 error types `InputTimeLimitExceeded`+`NoMatchingCondition`+`NoMatchingError`. STORE mode (no `Conditions`) MUST set `StoreInput:"True"` + `InputValidation.CustomValidation.MaximumLength`, error `NoMatchingError` only.
-11. `UpdateContactCallbackNumber`: MUST have 3 error types: `InvalidNumber`, `NotDialable`, `NoMatchingError`
+11. `UpdateContactCallbackNumber`: MUST have exactly `InvalidCallbackNumber` + `CallbackNumberNotDialable` (NoMatchingError/InvalidNumber/NotDialable are all REJECTED); `CallbackNumber` must be a JSONPath, not a literal
 12. `InvokeLambdaFunction`: MUST have `Errors` with `NoMatchingError`, max timeout is 8 seconds
 13. `MessageParticipant`: SHOULD have `Errors` array with `NoMatchingError`
 14. `InvokeFlowModule`: MUST have `Errors` with `NoMatchingCondition` and `NoMatchingError`
 
 ### Voice & Recording Rules
-15. ALWAYS include `UpdateContactRecordingBehavior` with RealTime analytics for Voice flows
+15. ALWAYS include `UpdateContactRecordingAndAnalyticsBehavior` (VoiceBehavior, RealTime + AutomatedInteraction) for Voice flows
 16. Use appropriate voice for the customer's language (see VOICES BY LANGUAGE)
 
 ### Flow Structure Rules
@@ -1307,7 +1328,7 @@ enable-logging
   → CreateWisdomSession                          ← create the AI-agent session (legacy API name; the product is Amazon Connect AI agents)
   → InvokeLambdaFunction(update-qsession)        ← inject customer info into the AI-agent session
   → SetVoice
-  → UpdateContactRecordingBehavior (RealTime analytics)
+  → UpdateContactRecordingAndAnalyticsBehavior (RealTime + AutomatedInteraction analytics)
   → ConnectParticipantWithLexBot (barge-in disabled)
 ```
 

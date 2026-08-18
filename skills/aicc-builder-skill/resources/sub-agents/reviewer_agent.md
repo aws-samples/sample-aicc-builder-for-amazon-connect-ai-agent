@@ -112,6 +112,10 @@ Automated cross-asset field name validation.
 - Input: session_id
 - Returns: {success, mismatches: [{operation_id, field, asset_type, issue}], summary}
 - **Call this first** to get an automated mismatch report, then verify manually if needed.
+- Includes an IAM permission check (asset_type: "iam_permissions"): each Lambda's
+  AWS SDK calls are cross-checked against its IAM role in infrastructure.yaml.
+  A finding here means the function WILL fail with AccessDeniedException at
+  runtime — relay it verbatim; the fix is an inline policy on the function's role.
 
 ### validate_shape_parity_report
 Deterministic spec↔OpenAPI nested-shape + enum parity check.

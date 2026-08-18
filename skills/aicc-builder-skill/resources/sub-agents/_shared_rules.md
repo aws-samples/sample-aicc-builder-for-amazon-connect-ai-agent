@@ -127,7 +127,8 @@ turns the tool into something the model can't call.
 If a spec field has `enum_values` populated, those EXACT values — same
 casing, same spelling, same order, same punctuation (underscores vs
 hyphens matter) — must appear verbatim in OpenAPI `enum:` and in any
-Lambda validation code (e.g., `if value not in {...}: return 400`).
+Lambda validation code (e.g., `if value not in {...}: ...` returning a
+200 rejection body per BUSINESS_OUTCOME_200_RULE).
 Do NOT paraphrase, translate, abbreviate, or alphabetize. If the customer
 supplied 18 Electrolux program modes, emit all 18 verbatim.
 
@@ -145,6 +146,49 @@ camelCase spelled by the spec. Do NOT rename, flatten, or drop keys.
 `event`-parsing and response-building must use the spec's nested field
 names verbatim. For scalar output fields with `enum_values`, validate
 against those exact values before returning.
+
+### 17. BUSINESS_OUTCOME_200_RULE  (CRITICAL — fixes "there is an issue with the tool")
+An Amazon Connect AI agent treats **any non-2xx HTTP response as a tool
+execution failure**. It never reads the response body, so it cannot tell the
+customer what happened — it just reports that the tool is broken and the turn
+is lost.
+
+Therefore: **a business outcome is NOT an HTTP error.** Every outcome the AI
+agent is supposed to talk about MUST return `200`, with the outcome expressed
+as a field IN THE BODY.
+
+"Business outcome" means any answer the operation is designed to produce,
+including the negative ones:
+
+  - authentication did not match (wrong SSN digits / accountId / PIN)
+  - record not found, no reservation for that phone number
+  - too many attempts / account locked out
+  - date unavailable, seat taken, insufficient balance
+  - a validation problem the customer can fix ("I need your account number")
+
+All of the above → `200` + a discriminator field. Do NOT use 400, 401, 403,
+404, 409 or 429 for any of them.
+
+```python
+# ❌ WRONG — the AI agent says "there is an issue with the tool" and gives up
+if last_four_digits != stored_last_four:
+    return create_response(403, {"verified": False, "lockout": True})
+
+# ✅ RIGHT — the AI agent reads verified/lockout and responds to the customer
+if last_four_digits != stored_last_four:
+    return create_response(200, {"verified": False, "remainingAttempts": remaining,
+                                 "lockout": False})
+```
+
+Reserve non-2xx for faults the AI agent genuinely cannot act on:
+  - `5xx` — the operation itself broke (unhandled exception, database down).
+    Connect retries 5xx, which is the correct behaviour for a transient fault.
+
+The body must let the model distinguish outcomes without the status code, so
+always include an explicit discriminator (`verified`, `found`, `success`,
+`status`, `outcome`, …) plus enough detail to speak to the customer. State the
+same in the OpenAPI `200` schema and in the tool description, so the model
+knows the negative outcome is a normal, expected response.
 
 ## 🔒 END OF GOLDEN RULES — APPLY ALL OF THE ABOVE TO THE OUTPUT BELOW 🔒
 

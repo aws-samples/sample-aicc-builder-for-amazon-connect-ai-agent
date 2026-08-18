@@ -11,11 +11,14 @@ Args:
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
 import types
 from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
 
 
 def extract_prompts(repo_root: Path, skill_root: Path) -> int:
@@ -26,7 +29,8 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> int:
     out_sub = skill_root / "resources/sub-agents"
     out_orch = skill_root / "resources/orchestrator"
     out_schemas = skill_root / "resources/schemas"
-    for d in (out_sub, out_orch, out_schemas):
+    out_scripts = skill_root / "resources/scripts"
+    for d in (out_sub, out_orch, out_schemas, out_scripts):
         d.mkdir(parents=True, exist_ok=True)
 
     # ---------------- 1) shared consistency rules ----------------
@@ -228,6 +232,9 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> int:
         p.write_text(json.dumps(schema, indent=2))
         print(f"[ok] {cls}.schema.json ({p.stat().st_size} bytes)")
 
+    # ---------------- 5b) deterministic asset linters ----------------
+    _extract_linters(src, out_scripts)
+
     # ---------------- 6) COVERAGE ASSERTION (drift-gate blind-spot guard) ----------------
     # The --check drift gate diffs the extractor's output against itself, so it can
     # ONLY catch edits to sections/models the extractor already enumerates. A NEWLY
@@ -237,6 +244,56 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> int:
     # and warns about any the extractor's lists don't cover, so future additions
     # surface instead of rotting.
     return _report_coverage(sp_ns, spec_ns, phases, standalone_orch, schema_models)
+
+
+_LINT_HEADER = '''#!/usr/bin/env python3
+# AUTO-GENERATED — DO NOT EDIT.
+#
+# Mechanically extracted from backend/ecs/src/tools/asset_linters.py by
+# skills/aicc-builder-skill/scripts/_extract_prompts.py: the `strands` import and
+# every @tool-decorated wrapper (they need the S3/session runtime) are stripped,
+# and scripts/_lint_assets_cli.py is appended as the CLI driver.
+#
+# To change a lint rule, edit the backend module and re-run
+# skills/aicc-builder-skill/scripts/extract_prompts.sh.
+'''
+
+
+def _extract_linters(src: Path, out_scripts: Path) -> None:
+    """Generate resources/scripts/lint_assets.py from tools/asset_linters.py.
+
+    The library-tier linters (lint_and_autofix_cfn / lint_and_autofix_openapi /
+    lint_python_source / lint_lambda_status_codes / lint_contact_flow /
+    lint_ai_prompt) are pure str→dict and depend only on the stdlib + PyYAML, so
+    they port verbatim. The @tool wrappers around them read assets from S3 and
+    cannot, so they are dropped along with the `from strands import tool` line.
+
+    Extracting rather than hand-copying is deliberate: the API-verified block
+    schemas and error-branch tables in that module change often, and a stale copy
+    in the skill would fail Contact Flow imports the webapp accepts.
+    """
+    lint_src = src / "tools/asset_linters.py"
+    text = lint_src.read_text()
+    lines = text.splitlines(keepends=True)
+    drop: set[int] = set()
+    dropped_tools: list[str] = []
+    for node in ast.parse(text).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if any(isinstance(d, ast.Name) and d.id == "tool" for d in node.decorator_list):
+                start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+                drop.update(range(start, (node.end_lineno or start) + 1))
+                dropped_tools.append(node.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "strands":
+            drop.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+
+    body = "".join(l for i, l in enumerate(lines, 1) if i not in drop)
+    body = re.sub(r"\n{4,}", "\n\n\n", body)
+    cli = (HERE / "_lint_assets_cli.py").read_text()
+    out = out_scripts / "lint_assets.py"
+    out.write_text(f"{_LINT_HEADER}\n{body.rstrip()}\n\n\n{cli}")
+    out.chmod(0o755)
+    print(f"[ok] lint_assets.py <- tools/asset_linters.py "
+          f"({out.stat().st_size} bytes; dropped @tool: {', '.join(dropped_tools)})")
 
 
 # Backend prompt strings that are intentionally NOT extracted as standalone skill

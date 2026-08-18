@@ -197,7 +197,8 @@ turns the tool into something the model can't call.
 If a spec field has `enum_values` populated, those EXACT values — same
 casing, same spelling, same order, same punctuation (underscores vs
 hyphens matter) — must appear verbatim in OpenAPI `enum:` and in any
-Lambda validation code (e.g., `if value not in {...}: return 400`).
+Lambda validation code (e.g., `if value not in {...}: ...` returning a
+200 rejection body per BUSINESS_OUTCOME_200_RULE).
 Do NOT paraphrase, translate, abbreviate, or alphabetize. If the customer
 supplied 18 Electrolux program modes, emit all 18 verbatim.
 
@@ -215,6 +216,49 @@ camelCase spelled by the spec. Do NOT rename, flatten, or drop keys.
 `event`-parsing and response-building must use the spec's nested field
 names verbatim. For scalar output fields with `enum_values`, validate
 against those exact values before returning.
+
+### 17. BUSINESS_OUTCOME_200_RULE  (CRITICAL — fixes "there is an issue with the tool")
+An Amazon Connect AI agent treats **any non-2xx HTTP response as a tool
+execution failure**. It never reads the response body, so it cannot tell the
+customer what happened — it just reports that the tool is broken and the turn
+is lost.
+
+Therefore: **a business outcome is NOT an HTTP error.** Every outcome the AI
+agent is supposed to talk about MUST return `200`, with the outcome expressed
+as a field IN THE BODY.
+
+"Business outcome" means any answer the operation is designed to produce,
+including the negative ones:
+
+  - authentication did not match (wrong SSN digits / accountId / PIN)
+  - record not found, no reservation for that phone number
+  - too many attempts / account locked out
+  - date unavailable, seat taken, insufficient balance
+  - a validation problem the customer can fix ("I need your account number")
+
+All of the above → `200` + a discriminator field. Do NOT use 400, 401, 403,
+404, 409 or 429 for any of them.
+
+```python
+# ❌ WRONG — the AI agent says "there is an issue with the tool" and gives up
+if last_four_digits != stored_last_four:
+    return create_response(403, {"verified": False, "lockout": True})
+
+# ✅ RIGHT — the AI agent reads verified/lockout and responds to the customer
+if last_four_digits != stored_last_four:
+    return create_response(200, {"verified": False, "remainingAttempts": remaining,
+                                 "lockout": False})
+```
+
+Reserve non-2xx for faults the AI agent genuinely cannot act on:
+  - `5xx` — the operation itself broke (unhandled exception, database down).
+    Connect retries 5xx, which is the correct behaviour for a transient fault.
+
+The body must let the model distinguish outcomes without the status code, so
+always include an explicit discriminator (`verified`, `found`, `success`,
+`status`, `outcome`, …) plus enough detail to speak to the customer. State the
+same in the OpenAPI `200` schema and in the tool description, so the model
+knows the negative outcome is a normal, expected response.
 
 ## 🔒 END OF GOLDEN RULES — APPLY ALL OF THE ABOVE TO THE OUTPUT BELOW 🔒
 
@@ -251,7 +295,9 @@ return {
 
 If a spec field has `enum_values`, any validation you add MUST compare against the
 EXACT set (case/underscores preserved). Do NOT paraphrase or normalize.
-Example: `if payload["state"] not in {"RUNNING", "FINISH", "IDLE"}: return 400`.
+Example: `if payload["state"] not in {"RUNNING", "FINISH", "IDLE"}: ...` — and
+return that rejection as **200** with `success=False`, per
+BUSINESS_OUTCOME_200_RULE, never as a 400.
 
 NEVER emit flattened output like `{"machineType": ..., "state": ..., "remainingSeconds": ...}`
 at the top level when the spec says `machineStatus` is an array of those objects.
@@ -496,6 +542,70 @@ When Lambda is called via API Gateway:
 
 ---
 
+## 🚨 STATUS CODES: BUSINESS OUTCOMES ARE ALWAYS 200 (BUSINESS_OUTCOME_200_RULE)
+
+An Amazon Connect AI agent treats **any non-2xx response as a tool failure**. It
+does not read the body — it tells the customer the tool is broken. So every
+outcome the AI agent must SPEAK ABOUT has to be `200`, with the outcome carried
+in the body.
+
+This includes the negative outcomes, which is the part that is easy to get wrong:
+
+| Scenario | ❌ Never | ✅ Always | Body discriminator |
+|---|---|---|---|
+| Auth digits/PIN/SSN don't match | 401 / 403 | **200** | `"verified": false` |
+| Record / reservation not found | 404 | **200** | `"found": false` |
+| Too many attempts, locked out | 403 / 429 | **200** | `"lockout": true` |
+| Date unavailable, seat taken | 409 | **200** | `"available": false` |
+| Missing/invalid input the customer can supply | 400 | **200** | `"success": false` + which field |
+| Unhandled exception, DB down | — | **500** | `"error"` (Connect retries 5xx — correct for faults) |
+
+`5xx` is the ONLY correct non-2xx: a real fault the agent cannot act on.
+
+```python
+# ❌ WRONG — agent reports "there is an issue with the tool", customer is stuck
+if last_four_digits != stored_last_four:
+    return create_response(403, {"verified": False, "lockout": True})
+if not item:
+    return create_response(404, {"found": False})
+if not account_number:
+    return create_response(400, {"error": "accountNumber is required"})
+
+# ✅ RIGHT — agent reads the body and says the right thing to the customer
+if last_four_digits != stored_last_four:
+    return create_response(200, {
+        "verified": False,
+        "remainingAttempts": remaining,
+        "lockout": False,
+        "message": "The digits provided do not match our records.",
+    })
+if not item:
+    return create_response(200, {
+        "verified": False, "found": False, "lockout": False,
+        "message": "No account was found with that number.",
+    })
+if not account_number:
+    return create_response(200, {
+        "verified": False, "found": False, "lockout": False,
+        "message": "accountNumber is required to verify the caller.",
+    })
+
+# ✅ 5xx stays 5xx — a genuine fault, and Connect's retry is what we want
+except Exception as e:
+    logger.error(f"Error: {e}", exc_info=True)
+    return create_response(500, {"error": "Internal server error"})
+```
+
+**Always include an explicit boolean/enum discriminator** (`verified`, `found`,
+`available`, `success`, `status`) so the model can tell outcomes apart without
+the status code, plus a human-readable `message` it can paraphrase. A bare
+`200 {}` is as useless to the agent as a 403.
+
+Never emit a validation helper that raises straight into a `400`. Convert the
+validation failure into a `200` body that names the missing field.
+
+---
+
 ## RESPONSE FORMATS
 
 ### 1. STRING_MAP Format (Contact Flow Direct - RECOMMENDED)
@@ -571,6 +681,7 @@ def handler(event, context):
             return create_response(200, {"success": True, "data": result})
 
     except Exception as e:
+        # 500 only for genuine faults — never for a business outcome.
         logger.error(f"Error: {e}")
         if is_connect_direct:
             return {"status": "ERROR", "errorMessage": str(e)}
@@ -883,11 +994,18 @@ def handler(event, context):
             return create_response(200, {"success": True, "data": result})
 
     except KeyError as e:
+        # A missing field is a BUSINESS OUTCOME the AI agent must talk about
+        # (it needs to ask the customer for the value), so it returns 200 with
+        # success=False — NOT 400, which the agent would read as a tool failure.
         logger.warning(f"Missing required field: {e}")
         error_result = {"status": "VALIDATION_ERROR", "errorMessage": f"Missing required field: {e}"}
         if is_connect_direct:
             return error_result
-        return create_response(400, {"success": False, "error": str(e)})
+        return create_response(200, {
+            "success": False,
+            "status": "VALIDATION_ERROR",
+            "message": f"Missing required field: {e}",
+        })
 
     except Exception as e:
         logger.error(f"Error processing request: {e}", exc_info=True)

@@ -24,7 +24,8 @@ skills/aicc-builder-skill/
     │   ├── document_analysis.md       # Raw-requirements-doc entry mode
     │   └── operation_spec_template.md # OperationSpec authoring template
     ├── sub-agents/
-    │   ├── _shared_rules.md        # 16 golden rules + Complete/Escalate tool-result contract
+    │   ├── _shared_rules.md        # 17 golden rules (incl. BUSINESS_OUTCOME_200_RULE)
+    │   │                          #   + Complete/Escalate tool-result contract
     │   ├── infrastructure_generator.md
     │   ├── lambda_generator.md
     │   ├── openapi_generator.md
@@ -41,7 +42,11 @@ skills/aicc-builder-skill/
     │   ├── InfrastructureSpec.schema.json
     │   └── ... (12 more JSON Schemas, incl. SessionFlowConfig / ContactFlowSpec / FlowBehavior)
     ├── scripts/
-    │   ├── validate_consistency.py  # 9-check cross-asset validator
+    │   ├── lint_assets.py           # AUTO-GENERATED from backend tools/asset_linters.py:
+    │   │                            #   Lambda syntax + BUSINESS_OUTCOME_200, cfn-lint,
+    │   │                            #   OpenAPI, Contact Flow, AI prompt (+ --fix)
+    │   ├── validate_consistency.py  # 18-check cross-asset validator (incl. IAM, RDS, SQL)
+    │   ├── shape_parity.py          # spec ↔ OpenAPI shape parity HARD GATE
     │   ├── check_spec_complete.py   # Interview-completion gate
     │   └── clues_format.py          # CLUES response helper
     ├── templates/
@@ -149,13 +154,22 @@ or any generated asset exists yet:
 2. **Generation** — Claude runs the in-scope phases one-per-turn
    (infrastructure → lambda *(one per tool)* → openapi → prompt → contact flow →
    faq), loading the matching `resources/sub-agents/*.md` persona each phase,
-   merging fragments, and gating on cfn-lint / OpenAPI validation before the
-   cross-asset consistency check.
+   merging fragments, and running the deterministic gates before moving on.
 
-After Phase 3 and Phase 6, Claude runs
-`resources/scripts/validate_consistency.py` which enforces the same 9
-cross-asset rules the ECS webapp enforces (field names, HTTP methods,
-path prefixes, GSI names, env vars, etc.).
+Three non-LLM gates carry the webapp's safety net, all of them ports of what the
+ECS backend runs:
+
+| Script | Gate | When |
+|---|---|---|
+| `lint_assets.py` | per-asset syntax + import-safety, with auto-fixes (`--fix`) | after every generation phase |
+| `validate_consistency.py` | 18 cross-asset checks | after Phase 3 and Phase 6 |
+| `shape_parity.py` | spec ↔ OpenAPI shape parity (reviewer HARD GATE) | after Phase 3, again at Phase 7 |
+
+`validate_consistency.py` covers the original spec↔asset checks (field names, HTTP
+methods, path prefixes, GSI names, env vars, response wrapper, counts) **plus** the
+IAM permission check (D2), the RDS Data API env/usage contract (D3) and the four SQL
+checks against the scanned schema (D4/D5). All three take `<output_dir>`, accept
+`--json`, and exit 1 on findings.
 
 See `claude/SKILL.md` for the full workflow.
 
@@ -171,11 +185,14 @@ See `claude/SKILL.md` for the full workflow.
 | `import_uploaded_asset_tool` / vision import | `SKILL.md` "Import an existing asset" + `resources/reference/vision_import.md` |
 | `web_search` / `fetch_webpage` (AgentCore Gateway) | Native `WebSearch` / `WebFetch` |
 | Contact-Flow RAG KB | `resources/reference/contact_flow_block_schemas.md` + WebSearch on docs.aws.amazon.com |
-| `merge_*_fragments` + cfn-lint / OpenAPI gates | String-merge at anchor + `cfn-lint` / OpenAPI validate in `SKILL.md` |
+| `merge_*_fragments` + cfn-lint / OpenAPI gates | String-merge at anchor + `resources/scripts/lint_assets.py` |
 | Fixed `update_q_session` Node.js Lambda | `resources/templates/update_q_session/index.js` (copied, not generated) |
 | `workspace_file_tools.py` | Claude's `Read` / `Write` / `Edit` |
 | `s3_asset_storage.py` | Local filesystem under `<output_dir>/assets/v1/` |
 | `validate_consistency.py` (Strands tool) | `resources/scripts/validate_consistency.py` (stdlib + PyYAML) |
+| `shape_parity.py` (reviewer HARD GATE) | `resources/scripts/shape_parity.py` |
+| `asset_linters.py` (`@tool` wrappers over S3) | `resources/scripts/lint_assets.py` (auto-generated, wrappers stripped) |
+| `introspect_database` / `convert_to_infrastructure_schema` | `SKILL.md` "PHASE 0 — existing database": AWS CLI scan or schema-as-document → `state/infrastructure_schema.json` |
 | `<generation_state>` injected block | `state/progress.json`, re-read each turn |
 | 4-phase / 12-step progress sidebar | Printed phase headers + ticking checklist |
 | WebSocket streaming UI | Your normal streamed responses |
@@ -187,25 +204,39 @@ The generated artifacts are equivalent — same paths, same contracts.
 ## Re-syncing from the webapp
 
 When you edit prompts in `backend/ecs/src/prompts/` or
-`backend/ecs/src/agents/*/system_prompt.py`, or change a Pydantic spec model,
-re-run:
+`backend/ecs/src/agents/*/system_prompt.py`, change a Pydantic spec model, or
+change a lint rule in `backend/ecs/src/tools/asset_linters.py`, re-run:
 
 ```bash
 ./scripts/extract_prompts.sh           # regenerate resources/
 ./scripts/extract_prompts.sh --check   # CI / pre-commit drift + coverage gate
 ```
 
-`extract_prompts.sh` regenerates `resources/orchestrator/*.md`,
-`resources/sub-agents/*.md`, and `resources/schemas/*.json` from the Python
-source. The `--check` gate diffs against the backend **and** fails if a NEW
-prompt section or spec model isn't covered by the extractor — so the skill
-can't silently fall out of sync. Review the diff, commit, done.
+**Auto-extracted — never hand-edit:**
 
-> The authored files under `resources/reference/` and
-> `resources/templates/update_q_session/` are **not** auto-extracted. Update
-> them by hand when their backend counterparts
-> (`agents/contact_flow_generator/vision_import.py`, `tools/asset_linters.py`,
-> `tools/asset_packager.py`) change.
+| Output | Source |
+|---|---|
+| `resources/orchestrator/*.md` | `prompts/system_prompt.py`, `prompts/interview_agent_prompt.py` |
+| `resources/sub-agents/*.md` | `agents/*/system_prompt.py` + `agents/_consistency_rules.py` |
+| `resources/schemas/*.json` | `tools/spec_manager.py` (Pydantic → JSON Schema) |
+| `resources/scripts/lint_assets.py` | `tools/asset_linters.py` — the `strands` import and every `@tool` wrapper (they need the S3/session runtime) are stripped, and `scripts/_lint_assets_cli.py` is appended as the CLI driver |
+
+Extracting the linters rather than hand-copying them is deliberate: that module
+carries ~1600 lines of API-verified Contact Flow block/error tables that change
+often, and a stale copy in the skill would reject flows the webapp accepts.
+
+The `--check` gate diffs against the backend **and** fails if a NEW prompt
+section or spec model isn't covered by the extractor — so the skill can't
+silently fall out of sync. Review the diff, commit, done.
+
+> **Authored / hand-maintained:** `resources/reference/*`, `resources/templates/*`
+> (incl. `update_q_session/index.js`, `deploy_workshop.sh`), `resources/examples/*`,
+> `resources/scripts/{validate_consistency,shape_parity,check_spec_complete,clues_format}.py`,
+> and both `SKILL.md` files. `validate_consistency.py` / `shape_parity.py` are hand
+> ports of `tools/validate_consistency.py` / `tools/shape_parity.py` — when a check
+> changes there, port it here and re-run the smoke tests. Also update by hand when
+> `agents/contact_flow_generator/vision_import.py` or `tools/asset_packager.py`
+> change.
 
 ## License
 

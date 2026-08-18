@@ -33,6 +33,7 @@ case "${MODE}" in
     echo "✓ resources/orchestrator/*.md"
     echo "✓ resources/sub-agents/*.md"
     echo "✓ resources/schemas/*.json"
+    echo "✓ resources/scripts/lint_assets.py"
     echo ""
     echo "Next: review 'git diff skills/aicc-builder-skill/resources/' and commit."
     ;;
@@ -44,6 +45,7 @@ case "${MODE}" in
     mkdir -p "${TMP_ROOT}/resources/orchestrator"
     mkdir -p "${TMP_ROOT}/resources/sub-agents"
     mkdir -p "${TMP_ROOT}/resources/schemas"
+    mkdir -p "${TMP_ROOT}/resources/scripts"
 
     # --strict: a coverage gap (a new backend prompt section / spec model the
     # extractor doesn't enumerate) is a hard failure here, not just a warning —
@@ -69,6 +71,18 @@ case "${MODE}" in
         echo ""
       fi
     done
+
+    # resources/scripts/ also holds hand-authored CLI scripts the extractor never
+    # writes, so diff only the generated file rather than the whole directory.
+    if ! diff -q \
+        "${SKILL_ROOT}/resources/scripts/lint_assets.py" \
+        "${TMP_ROOT}/resources/scripts/lint_assets.py" >/dev/null 2>&1; then
+      DRIFT=1
+      echo "DRIFT in resources/scripts/lint_assets.py:"
+      diff "${SKILL_ROOT}/resources/scripts/lint_assets.py" \
+           "${TMP_ROOT}/resources/scripts/lint_assets.py" || true
+      echo ""
+    fi
 
     if [[ "${DRIFT}" -ne 0 ]]; then
       echo "Skill prompts are out of sync with backend/ecs/src/." >&2
