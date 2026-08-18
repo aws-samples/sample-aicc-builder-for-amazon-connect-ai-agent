@@ -125,8 +125,14 @@ rm -f  ~/.kiro/skills/aicc-builder/README.md
 - **Python 3.9+** for the bundled validator scripts
 - **PyYAML** (`pip install pyyaml`) — the consistency validator parses
   the generated OpenAPI YAML
-- That's it. No AWS credentials needed to run the skill itself — you only
-  need them to `aws cloudformation deploy` the generated template.
+- **Optional, but recommended for full parity with the webapp:**
+  `pip install cfn-lint openapi-spec-validator`. The ECS image has both, so the
+  webapp always validates the CloudFormation template and the OpenAPI document.
+  Without them `lint_assets.py` still applies its deterministic autofixes but
+  **skips those two validations** — it logs a warning saying so rather than
+  failing, which is easy to miss in a long run.
+- No AWS credentials needed to run the skill itself — you only need them to
+  `aws cloudformation deploy` the generated template.
 
 ## How it works
 
