@@ -180,7 +180,9 @@ orchestrator text for both paths is in
 `resources/orchestrator/system_prompt.md` → "GENERATION FLOW: EXISTING DATABASE PATH".
 
 **Path A — live scan.** Confirm the target account/region with the user first, use
-**read-only credentials**, and stick to `describe`/`SELECT` calls:
+**read-only credentials**, and stick to `describe`/`SELECT` calls. Which sub-path
+applies depends on how the database is reachable — **A1** (Data API, IAM only) or
+**A2** (a real driver connection, which needs a network path):
 
 ```bash
 aws sts get-caller-identity                                     # confirm the account
@@ -190,7 +192,7 @@ aws dynamodb scan --table-name <T> --max-items 5 --region <R>    # data conventi
 # RDS / Aurora — resolve the identifier to a cluster/instance first
 aws rds describe-db-clusters   --region <R> --query 'DBClusters[].[DBClusterIdentifier,Engine,Endpoint]'
 aws rds describe-db-instances  --region <R> --query 'DBInstances[].[DBInstanceIdentifier,Engine,Endpoint.Address]'
-# Aurora with the Data API enabled — the only engine path reachable from a CLI
+# A1 — Aurora with the Data API enabled: pure IAM, no network path needed
 aws rds-data execute-statement --resource-arn <clusterArn> --secret-arn <secretArn> \
   --database <db> --include-result-metadata --sql "
     SELECT c.table_name, c.column_name, c.data_type, c.udt_name, c.is_nullable,
@@ -201,9 +203,56 @@ aws rds-data execute-statement --resource-arn <clusterArn> --secret-arn <secretA
 ```
 Also pull primary keys, indexes, foreign keys and enum labels (`pg_constraint`,
 `pg_index`, `pg_enum` on PostgreSQL; `information_schema.key_column_usage` +
-`SHOW INDEX` on MySQL/MariaDB). A **driver-only** database (no Data API, private
-subnet) is generally *not* reachable from a laptop — say so and switch to Path B
-rather than guessing.
+`SHOW INDEX` on MySQL/MariaDB).
+
+**Path A2 — driver connection (every non-Data-API engine).** Do NOT assume this is
+impossible from a CLI. Reachability here is a **network** question, not an IAM one:
+credentials get you *authenticated*, but the packets still have to arrive. Work out
+which case you are in before falling back to Path B:
+
+```bash
+aws rds describe-db-instances --region <R> --db-instance-identifier <ID> \
+  --query 'DBInstances[0].{public:PubliclyAccessible,ep:Endpoint.Address,port:Endpoint.Port,sg:VpcSecurityGroups[].VpcSecurityGroupId,subnets:DBSubnetGroup.Subnets[].SubnetIdentifier}'
+aws ec2 describe-security-groups --group-ids <sg> \
+  --query 'SecurityGroups[0].IpPermissions'          # is your IP/CIDR allowed on the port?
+nc -zv <endpoint> <port>                              # 5s answer: reachable or not
+```
+
+| Situation | What to do |
+|---|---|
+| `PubliclyAccessible: true` and the SG allows your egress IP | Connect directly — nothing else needed |
+| You are on the customer's VPN / Direct Connect / a peered network, SG allows your CIDR | Connect directly |
+| Private-only, but you have `ssm:StartSession` and there is an SSM-managed instance in the VPC | **Port-forward** (below). No bastion key, no inbound SSH, no public DB |
+| Private-only, no tunnel available, or the customer won't grant DB access | Path B |
+
+```bash
+# Private RDS via any SSM-managed EC2 instance in its VPC (needs the Session Manager plugin).
+# The DB security group must allow the INSTANCE's security group on the port — not your laptop.
+aws ssm start-session --target <instanceId> --region <R> \
+  --document-name AWS-StartPortForwardingSessionToRemoteHost \
+  --parameters '{"host":["<db-endpoint>"],"portNumber":["5432"],"localPortNumber":["15432"]}'
+# then treat the database as localhost:15432
+```
+A CloudShell **VPC environment** placed in the DB's VPC/subnets/SG works the same way.
+
+Credentials: read the secret (`aws secretsmanager get-secret-value --secret-id <arn>
+--query SecretString`), or — PostgreSQL/MySQL/MariaDB with IAM database
+authentication enabled and the DB user mapped — mint a token instead of a password
+with `aws rds generate-db-auth-token --hostname <ep> --port <p> --username <u>`
+(SSL required). Then run the same catalog queries as A1 through a client: `psql` /
+`mysql`, or Python with `psycopg2` / `pymysql` / `pytds` / `oracledb` — the exact
+drivers the webapp's image ships; `pip install` whichever you need. Ask for a
+**read-only DB user**; every query here is a catalog `SELECT`.
+
+⚠️ Write the result with the **`<engine>-driver`** contract from the table below,
+never the Data API one. That mismatch is a shipped-and-broken Lambda, not a
+cosmetic slip.
+
+> The webapp is under the same constraint on this path and has *fewer* options: its
+> ECS task sits in the app's own VPC, so it reaches a driver database only if the
+> endpoint is publicly accessible or the VPCs are peered — it cannot open an SSM
+> tunnel or ride a VPN. It returns `CONNECTION_FAILED` with the SG/route hint. A
+> laptop with the right credentials is often *better* placed than the webapp here.
 
 **Path B — schema as a document.** DDL dump, ERD image, data dictionary, or sample
 JSON payloads. Extract exact table + column names, SQL types, PK (incl. composite),
