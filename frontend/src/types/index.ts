@@ -157,6 +157,9 @@ export interface AssetPreview {
   previousCreatedAt?: number; // Timestamp of the previous version
   // Diff support - unified diff from workspace modifications
   diffContent?: string; // Unified diff text (from patch_workspace_file or write_with_diff)
+  // True when this event replays a persisted asset on (re)connect (backend
+  // _rehydrate_assets_for_display) rather than reporting live generation.
+  rehydrated?: boolean;
 }
 
 /** Debug information sent with error messages */

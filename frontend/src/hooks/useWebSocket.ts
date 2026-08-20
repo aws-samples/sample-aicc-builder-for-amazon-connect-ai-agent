@@ -11,7 +11,7 @@ import { useAuthStore } from "../stores/authStore";
 import { useSessionStore } from "../stores/sessionStore";
 import type { WebSocketMessage, SubagentActivity, SubagentToolCall, AttachedFile, MessageAttachment, AttachmentData, AssetPreview, BuilderPhase } from "../types";
 import { PHASE_LABELS } from "../types";
-import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type StoredAsset, type ConversationMessage } from "../services/sessions";
+import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type ConversationMessage } from "../services/sessions";
 import { fetchNfsDiagnostics } from "../services/workspaceApi";
 
 // Streaming timeout configuration
@@ -400,6 +400,25 @@ export function useWebSocket() {
     flushPendingStreamContent();
   }, [flushPendingStreamContent]);
 
+  // Timeline segmentation: close the current assistant bubble at a tool /
+  // thinking / sub-agent boundary. The backend streams the WHOLE agentic turn
+  // as anonymous `stream` chunks (no per-message id), so without this every
+  // text segment of the turn — the "starting generation…" narration AND the
+  // final "generation complete" summary — merged into the ONE bubble opened at
+  // the start of the turn, visually ABOVE all the tool cards and streamed
+  // assets. Bedrock/Claude orders content blocks text-then-toolUse within an
+  // assistant message, so any text that arrives after a tool boundary belongs
+  // to the NEXT assistant message: null the stream target and let the next
+  // `stream` chunk open a fresh bubble in chronological position (below the
+  // tool cards). Each segment then carries its own timestamp, which also keeps
+  // session restore ordering correct.
+  const breakStreamSegment = useCallback(() => {
+    flushBeforeInsert();
+    streamTargetMsgIdRef.current = null;
+    streamingMessageIdRef.current = null;
+    lastStreamContentRef.current = "";
+  }, [flushBeforeInsert]);
+
   // Performance: Register tool message index for O(1) lookup
   const registerToolMessage = useCallback((toolUseId: string, messageIndex: number) => {
     toolMessageIndexMapRef.current.set(toolUseId, messageIndex);
@@ -583,8 +602,9 @@ export function useWebSocket() {
     };
 
     // Race fix: a sub-agent card can appear while assistant text is still
-    // streaming. Flush the buffered text into the assistant bubble first.
-    flushBeforeInsert();
+    // streaming. Flush the buffered text into the assistant bubble and close
+    // that bubble — narration that follows belongs below the sub-agent card.
+    breakStreamSegment();
     addMessage({
       role: 'subagent',
       content: content || `${getSubagentDisplayName(subagent)} ${initialStatus}`,
@@ -594,7 +614,7 @@ export function useWebSocket() {
     const newIdx = useBuilderStore.getState().messages.length - 1;
     activeSubagentIndexRef.current.set(subagent, newIdx);
     return newIdx;
-  }, [addMessage, getSubagentDisplayName, flushBeforeInsert]);
+  }, [addMessage, getSubagentDisplayName, breakStreamSegment]);
 
   // Update existing subagent message
   const updateSubagentMessage = useCallback((subagent: string, update: Partial<SubagentActivity>) => {
@@ -752,17 +772,13 @@ export function useWebSocket() {
         case "typing":
           setTyping(true);
           clearStreamTimeout();
-          // Flush anything still buffered for the PREVIOUS bubble before opening
-          // a new one, so its tail isn't appended to the new empty message.
-          flushBeforeInsert();
-          lastStreamContentRef.current = "";
-          streamingMessageIdRef.current = `msg-${Date.now()}-${Math.random()
-            .toString(36)
-            .slice(2, 9)}`;
-          streamTargetMsgIdRef.current = addMessageWithId({
-            role: "assistant",
-            content: "",
-          });
+          // Flush anything still buffered for the PREVIOUS bubble and close it —
+          // this is a new turn. Do NOT pre-create an empty assistant bubble here:
+          // if the turn opens with a thinking/tool card before any text, the
+          // pre-created bubble would be abandoned as an empty gray blob above
+          // the card. The first `stream` chunk opens the bubble instead, in
+          // correct chronological position.
+          breakStreamSegment();
           // Set initial timeout - if no stream data arrives, auto-complete
           setStreamTimeout();
           break;
@@ -1019,8 +1035,9 @@ export function useWebSocket() {
                 (m) => m.role === "tool" && m.toolCall?.tool === data.tool && m.toolCall?.status === "running"
               );
               if (!hasRunningToolMsg) {
-                // Race fix: flush streaming text before inserting a tool card.
-                flushBeforeInsert();
+                // Segment boundary: close the streaming bubble before inserting
+                // the tool card so following text opens a new bubble below it.
+                breakStreamSegment();
                 addMessage({
                   role: "tool",
                   content: "",
@@ -1051,10 +1068,11 @@ export function useWebSocket() {
           // Add tool call message to chat - use toolUseId for deduplication (unique per invocation)
           // This allows same tool (e.g., save_operation_spec) to be called multiple times
           if (data.tool) {
-            // Race fix: a tool_start can arrive while assistant text is still
-            // streaming. Flush the buffered text into the assistant bubble FIRST
-            // so the message isn't left cut off mid-sentence.
-            flushBeforeInsert();
+            // Segment boundary: flush the streamed text into the assistant
+            // bubble and CLOSE it. Claude emits text before toolUse blocks, so
+            // any text after this belongs to the next assistant message — it
+            // must open a new bubble BELOW this tool card, not merge above it.
+            breakStreamSegment();
             const messages = useBuilderStore.getState().messages;
             // Performance: Check map first for O(1), fallback to array check
             const toolUseIdKey = data.toolUseId as string;
@@ -1180,8 +1198,8 @@ export function useWebSocket() {
               }
             } else {
               // Fallback: if tool message not found, add a completed tool message directly
-              // Race fix: flush streaming text before inserting a tool card.
-              flushBeforeInsert();
+              // Segment boundary: close the streaming bubble before the insert.
+              breakStreamSegment();
               addMessage({
                 role: "tool",
                 content: "",
@@ -1250,8 +1268,10 @@ export function useWebSocket() {
               // would target whatever is last, which may no longer be this message.
               appendToMessageById(lastMsg.id, data.content);
             } else {
-              // Race fix: flush streaming text before inserting a thinking card.
-              flushBeforeInsert();
+              // Segment boundary: a thinking block opens the NEXT assistant
+              // message, so close the current bubble — the text that follows
+              // this thinking card belongs in a new bubble below it.
+              breakStreamSegment();
               addMessage({
                 role: "thinking",
                 content: data.content,
@@ -1293,9 +1313,17 @@ export function useWebSocket() {
             }
 
             // Set messageIndex to current message count for proper placement during session restore
-            // This ensures assets appear AFTER the message that triggered their generation
+            // This ensures assets appear AFTER the message that triggered their generation.
+            // EXCEPTION: rehydrated events replay persisted assets on (re)connect —
+            // they are NOT part of the live message flow, and during a session
+            // load the live count is near 0, which would pin the asset to a
+            // bogus position. Leave their placement to createdAt (the backend
+            // sends the asset file's mtime).
+            const isRehydrated = data.assetPreview.rehydrated === true;
             const currentMessages = useBuilderStore.getState().messages;
-            const messageIndex = data.assetPreview.messageIndex ?? currentMessages.length;
+            const messageIndex = isRehydrated
+              ? data.assetPreview.messageIndex
+              : data.assetPreview.messageIndex ?? currentMessages.length;
             updateAssetPreview({
               ...data.assetPreview,
               messageIndex,
@@ -1795,6 +1823,7 @@ export function useWebSocket() {
       clearStreamTimeout,
       setStreamTimeout,
       flushBeforeInsert,
+      breakStreamSegment,
       // Performance optimization functions
       queueStreamUpdate,
       registerToolMessage,
@@ -2880,8 +2909,7 @@ export function useWebSocket() {
             }
           }
 
-          // Interleave messages and asset markers by messageIndex
-          // Assets are placed AFTER the message that triggered their generation
+          // Interleave messages and asset markers chronologically (by createdAt)
           if (history && history.length > 0) {
             console.log("[useWebSocket] Restoring", history.length, "messages from DynamoDB");
 
@@ -2904,77 +2932,90 @@ export function useWebSocket() {
               };
             }> = deserialized;
 
-            // Group assets by their messageIndex
-            // Assets with the same messageIndex will be grouped together
-            const assetsByMessageIndex = new Map<number, StoredAsset[]>();
+            // Placement is TIMESTAMP-FIRST. `messageIndex` was captured against
+            // the LIVE message array, which contains thinking / running-tool
+            // messages that are never persisted — so on restore those indices
+            // systematically overshoot the persisted history and every asset
+            // marker fell into the "past the end" bucket: all assets appeared
+            // appended at the bottom of the conversation. Timestamps don't
+            // drift (messages and asset previews are stamped by the same client
+            // clock), so `createdAt` puts each asset exactly where it was
+            // generated. A CLAMPED messageIndex remains the fallback for legacy
+            // assets saved without createdAt.
+
+            // Message times in ms, forward-filled so untimed messages inherit
+            // the previous known time (keeps the scan monotonic).
+            const msgTimes: number[] = [];
+            {
+              let lastKnown = 0;
+              for (const m of historyMessages) {
+                const t = m.timestamp instanceof Date ? m.timestamp.getTime() : NaN;
+                if (!Number.isNaN(t) && t > 0) lastKnown = t;
+                msgTimes.push(lastKnown);
+              }
+            }
+            const hasAnyMsgTime = msgTimes.some((t) => t > 0);
+
+            // Compute each asset's insertion slot: pos = insert BEFORE message[pos]
+            // (i.e. after message pos-1). pos may be 0 (before everything) or
+            // historyMessages.length (after everything).
+            const clampPos = (idx: number) => Math.min(Math.max(idx, 0), historyMessages.length);
+            const markerInserts: Array<{ pos: number; ts: number; marker: (typeof historyMessages)[number] }> = [];
             if (assets && assets.length > 0) {
               for (const asset of assets) {
-                // ISSUE #3 FIX: Use messageIndex directly, fallback to end of messages
-                // No longer using timestamp-based inference which caused ordering issues
-                let idx: number;
-                if (asset.messageIndex !== undefined && asset.messageIndex !== null) {
-                  idx = asset.messageIndex;
+                let pos: number;
+                let markerTime: number | undefined;
+
+                if (hasAnyMsgTime && typeof asset.createdAt === 'number' && asset.createdAt > 0) {
+                  // After the last message whose (forward-filled) time <= createdAt.
+                  pos = 0;
+                  for (let i = 0; i < msgTimes.length; i++) {
+                    if (msgTimes[i] <= asset.createdAt) pos = i + 1;
+                  }
+                  markerTime = asset.createdAt;
+                } else if (asset.messageIndex !== undefined && asset.messageIndex !== null) {
+                  // Legacy fallback: clamped index. Inherit the neighbor's time
+                  // (+1ms) so ChatWindow's timestamp sort keeps this slot.
+                  pos = clampPos(asset.messageIndex);
+                  markerTime = pos > 0 && msgTimes[pos - 1] > 0 ? msgTimes[pos - 1] + 1 : undefined;
                 } else {
-                  // Legacy assets without messageIndex - place at end
-                  console.warn("[useWebSocket] Asset missing messageIndex, placing at end:", asset.assetType, asset.fileName);
-                  idx = history.length;
+                  console.warn("[useWebSocket] Asset missing createdAt+messageIndex, placing at end:", asset.assetType, asset.fileName);
+                  pos = historyMessages.length;
+                  const lastTime = msgTimes.length > 0 ? msgTimes[msgTimes.length - 1] : 0;
+                  markerTime = lastTime > 0 ? lastTime + 1 : undefined;
                 }
-                if (!assetsByMessageIndex.has(idx)) {
-                  assetsByMessageIndex.set(idx, []);
-                }
-                assetsByMessageIndex.get(idx)!.push(asset);
+
+                markerInserts.push({
+                  pos,
+                  ts: markerTime ?? Number.MAX_SAFE_INTEGER,
+                  marker: {
+                    role: 'asset' as const,
+                    content: `[${getAssetTypeLabel(asset.assetType)}] ${asset.fileName || asset.operationId || ''}`,
+                    timestamp: markerTime ? new Date(markerTime) : undefined,
+                    assetRef: {
+                      assetType: asset.assetType,
+                      operationId: asset.operationId,
+                      fileName: asset.fileName,
+                    },
+                  },
+                });
               }
             }
 
-            // Build final message list by inserting asset markers after their corresponding messages
+            // Merge: walk the messages, injecting markers at their slots.
+            markerInserts.sort((a, b) => (a.pos - b.pos) || (a.ts - b.ts));
             const restoredMessages: typeof historyMessages = [];
-            for (let i = 0; i < historyMessages.length; i++) {
-              // Add the message
-              restoredMessages.push(historyMessages[i]);
-
-              // Add any assets that should appear after this message (messageIndex === i + 1)
-              // Assets with messageIndex N appear after message N-1 (0-indexed)
-              const assetsAfterThisMessage = assetsByMessageIndex.get(i + 1);
-              if (assetsAfterThisMessage) {
-                for (const asset of assetsAfterThisMessage) {
-                  const assetLabel = getAssetTypeLabel(asset.assetType);
-                  const fileName = asset.fileName || asset.operationId || '';
-                  restoredMessages.push({
-                    role: 'asset' as const,
-                    content: `[${assetLabel}] ${fileName}`,
-                    timestamp: asset.createdAt ? new Date(asset.createdAt) : undefined,
-                    assetRef: {
-                      assetType: asset.assetType,
-                      operationId: asset.operationId,
-                      fileName: asset.fileName,
-                    },
-                  });
-                }
+            let insertPtr = 0;
+            for (let i = 0; i <= historyMessages.length; i++) {
+              while (insertPtr < markerInserts.length && markerInserts[insertPtr].pos === i) {
+                restoredMessages.push(markerInserts[insertPtr].marker);
+                insertPtr++;
               }
-            }
-
-            // Add any remaining assets that have messageIndex >= history.length (placed at end)
-            for (const [idx, assetList] of assetsByMessageIndex) {
-              if (idx > history.length) {
-                for (const asset of assetList) {
-                  const assetLabel = getAssetTypeLabel(asset.assetType);
-                  const fileName = asset.fileName || asset.operationId || '';
-                  restoredMessages.push({
-                    role: 'asset' as const,
-                    content: `[${assetLabel}] ${fileName}`,
-                    timestamp: asset.createdAt ? new Date(asset.createdAt) : undefined,
-                    assetRef: {
-                      assetType: asset.assetType,
-                      operationId: asset.operationId,
-                      fileName: asset.fileName,
-                    },
-                  });
-                }
-              }
+              if (i < historyMessages.length) restoredMessages.push(historyMessages[i]);
             }
 
             if (assets && assets.length > 0) {
-              console.log("[useWebSocket] Interleaved", history.length, "messages with", assets.length, "assets by messageIndex");
+              console.log("[useWebSocket] Interleaved", history.length, "messages with", assets.length, "assets by timestamp");
             }
 
             setMessages(restoredMessages);

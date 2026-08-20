@@ -109,10 +109,18 @@ export function ChatWindow() {
     | { type: 'asset'; data: (typeof assetPreviews)[keyof typeof assetPreviews]; key: string; timestamp: number };
 
   const timeline = useMemo<TimelineItem[]>(() => {
+    const markerMessages = messages.filter(m => m.role === 'asset' && m.assetRef);
     const assetsWithMarkers = new Set(
-      messages
-        .filter(m => m.role === 'asset' && m.assetRef)
-        .map(m => buildAssetKey(m.assetRef!.assetType, m.assetRef!.operationId, m.assetRef!.fileName))
+      markerMessages.map(m => buildAssetKey(m.assetRef!.assetType, m.assetRef!.operationId, m.assetRef!.fileName))
+    );
+    // Loose match: backend rehydration replays assets with a slightly different
+    // key shape (e.g. operationId '' vs the generator's id). Hide a store
+    // preview whenever a marker exists for the same assetType + fileName so the
+    // same asset isn't rendered twice (marker inline + preview at the bottom).
+    const looseMarkers = new Set(
+      markerMessages
+        .filter(m => m.assetRef!.fileName)
+        .map(m => `${m.assetRef!.assetType}::${m.assetRef!.fileName}`)
     );
 
     const items: TimelineItem[] = [
@@ -128,7 +136,9 @@ export function ChatWindow() {
           if (preview.isRegeneration) return true;
 
           const baseKey = key.replace(/-\d{13,}$/, '');
-          return !assetsWithMarkers.has(baseKey);
+          if (assetsWithMarkers.has(baseKey)) return false;
+          if (preview.fileName && looseMarkers.has(`${preview.assetType}::${preview.fileName}`)) return false;
+          return true;
         })
         .map(([key, preview]) => ({
           type: 'asset' as const,

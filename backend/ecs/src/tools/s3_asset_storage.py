@@ -94,6 +94,40 @@ def _get_from_nfs(session_id: str, asset_type: str, file_name: str,
     return None
 
 
+def get_asset_mtime_ms(s3_key: str) -> Optional[int]:
+    """Best-effort creation/modification time for an asset, in epoch MILLISECONDS.
+
+    Used by the session-restore rehydration path so replayed asset_preview
+    events carry a `createdAt` the frontend can position chronologically in the
+    chat timeline (previews without one used to default to "now" and pile up at
+    the bottom of a restored conversation).
+
+    NFS mtime first (fast, no network); falls back to S3 HeadObject
+    LastModified. Returns None when neither source is available.
+    """
+    session_id, asset_type, file_name, operation_id = _parse_s3_key_to_nfs_components(s3_key)
+    if session_id is not None and _nfs_available():
+        try:
+            path = _nfs_asset_path(session_id, asset_type, file_name, operation_id)
+            if path.exists():
+                return int(path.stat().st_mtime * 1000)
+        except Exception as e:
+            logger.debug(f"[NFS] mtime read failed for {s3_key}: {e}")
+
+    bucket = get_bucket_name()
+    if not bucket:
+        return None
+    try:
+        s3 = get_s3_client()
+        response = s3.head_object(Bucket=bucket, Key=s3_key)
+        last_modified = response.get("LastModified")
+        if last_modified is not None:
+            return int(last_modified.timestamp() * 1000)
+    except Exception as e:
+        logger.debug(f"[S3] head_object failed for {s3_key}: {e}")
+    return None
+
+
 def _parse_s3_key_to_nfs_components(s3_key: str):
     """
     Parse an S3 key into NFS path components.
