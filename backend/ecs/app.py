@@ -48,6 +48,7 @@ from prompts.system_prompt import SYSTEM_PROMPT, get_document_analysis_prompt, g
 from context import format_history_for_injection
 from context.modification_tracking import (
     format_modification_state_block,
+    record_modification_outcome,
     record_modification_request,
     suggest_placeholder,
 )
@@ -1879,7 +1880,7 @@ async def _rehydrate_assets_for_display(websocket: WebSocket, session_id: str) -
     raises into the connect path.
     """
     try:
-        from tools.s3_asset_storage import list_session_assets, get_asset_from_s3
+        from tools.s3_asset_storage import list_session_assets, get_asset_from_s3, get_asset_mtime_ms
         keys = list_session_assets(session_id) or []
         emitted = 0
         seen: set = set()
@@ -1906,18 +1907,28 @@ async def _rehydrate_assets_for_display(websocket: WebSocket, session_id: str) -
                 continue
             ext = os.path.splitext(file_name)[1].lower()
             language = _REHYDRATE_EXT_TO_LANG.get(ext, "text")
+            # File mtime (NFS) / LastModified (S3) in epoch ms — lets the
+            # frontend place the replayed preview at its true chronological
+            # position instead of defaulting to "now" (= bottom of the chat).
+            try:
+                created_at = get_asset_mtime_ms(key)
+            except Exception:
+                created_at = None
+            preview_payload = {
+                "assetType": c_type,
+                "fileName": file_name,
+                "operationId": op_id,
+                "content": content,
+                "language": language,
+                "isComplete": True,
+                "rehydrated": True,
+            }
+            if created_at:
+                preview_payload["createdAt"] = created_at
             await safe_send_json(websocket, {
                 "type": "asset_preview",
                 "sessionId": session_id,
-                "assetPreview": {
-                    "assetType": c_type,
-                    "fileName": file_name,
-                    "operationId": op_id,
-                    "content": content,
-                    "language": language,
-                    "isComplete": True,
-                    "rehydrated": True,
-                },
+                "assetPreview": preview_payload,
             })
             emitted += 1
         if emitted:
@@ -2332,10 +2343,12 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     # then inject a <modification_state> block so the orchestrator can route
     # edits to the right asset and detect repeated corrections.
     modification_state_block = ""
+    modification_request_recorded = False
     try:
         raw_user_text = user_message if isinstance(user_message, str) else ""
         if raw_user_text:
             record_modification_request(effective_session_id, raw_user_text)
+            modification_request_recorded = True
         mod_state = format_modification_state_block(effective_session_id, raw_user_text)
         if mod_state:
             modification_state_block = (
@@ -2524,10 +2537,14 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                                         "status": "completed",
                                     })
 
-                                # Record tool completion to NFS (real-time, inline)
+                                # Record tool completion to NFS (real-time, inline).
+                                # tool_use_id lets the end-of-turn fallback scan
+                                # (update_from_new_messages) skip this completion
+                                # instead of double-recording it.
                                 try:
                                     _record_tool_completion(
-                                        effective_session_id, tr_tool_name, status
+                                        effective_session_id, tr_tool_name, status,
+                                        tool_use_id=tr_tool_use_id,
                                     )
                                 except Exception:
                                     pass  # non-critical
@@ -2623,6 +2640,16 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             )
             _context_store.save_conversation_history(session_id, session["conversation_history"])
 
+            # Modification tracking: the turn finished without an error, so the
+            # agent's edit (if this was one) stands as claimed. Without this the
+            # outcome stayed null forever and the "same keyword ≥2× after a
+            # claimed success → ask, don't re-patch" rule could never fire.
+            if modification_request_recorded:
+                try:
+                    record_modification_outcome(effective_session_id, "claimed_success")
+                except Exception:
+                    pass  # non-critical
+
         except asyncio.CancelledError:
             # User cancelled generation (cancelGeneration action). Preserve any
             # partial work, notify the client, then re-raise so the task is
@@ -2642,6 +2669,14 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                     _context_store.save_conversation_history(session_id, session["conversation_history"])
             except Exception as save_err:
                 logger.warning(f"[BG] partial save on cancel failed for {session_id}: {save_err}")
+            # Modification tracking: a cancelled turn made no verified change —
+            # mark it 'skipped' so the repeat-detection rule treats the next
+            # identical request as a fresh attempt, not a failed re-patch.
+            if modification_request_recorded:
+                try:
+                    record_modification_outcome(effective_session_id, "skipped")
+                except Exception:
+                    pass  # non-critical
             await safe_send_or_log({
                 "type": "generation_cancelled",
                 "sessionId": session_id,
@@ -2698,10 +2733,24 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                     _context_store.save_conversation_history(session_id, session["conversation_history"])
             except Exception as save_err:
                 logger.error(f"[BG] Failed to save history after max_tokens for {session_id}: {save_err}")
+            # Modification tracking: the truncated tool calls never ran, so no
+            # edit was applied this turn.
+            if modification_request_recorded:
+                try:
+                    record_modification_outcome(effective_session_id, "error")
+                except Exception:
+                    pass  # non-critical
             await safe_send_or_log({"type": "stream_end"})
         except Exception as e:
             logger.error(f"[BG] Streaming error for {session_id}: {e}\n{traceback.format_exc()}")
             await safe_send_or_log({"type": "error", "content": str(e)})
+            # Modification tracking: the turn errored — the requested edit is not
+            # a claimed success.
+            if modification_request_recorded:
+                try:
+                    record_modification_outcome(effective_session_id, "error")
+                except Exception:
+                    pass  # non-critical
             # Save partial history on error
             try:
                 partial = _extract_new_messages(streaming_agent.messages, pre_stream_message_count)

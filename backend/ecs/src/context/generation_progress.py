@@ -90,6 +90,34 @@ def _write_state(session_id: str, state: Dict[str, Any]) -> None:
         logger.warning(f"[generation_progress] failed to write state: {e}")
 
 
+# Completions are recorded on TWO paths: inline per toolResult during
+# stream_async (record_tool_completion — the primary path) and again by the
+# end-of-turn message scan (update_from_new_messages — the fallback for events
+# the inline path missed). Without dedup the scan re-recorded every completion
+# the inline path already logged, doubling the events list (observed: 17
+# identical entries in one second) and — worse — re-applying the review-aware
+# status transition, which downgraded a 'fixed' asset back to 'completed'.
+# Both paths now remember the toolUseIds they consumed and skip known ones.
+_MAX_RECORDED_TOOL_USE_IDS = 500
+
+
+def _already_recorded(state: Dict[str, Any], tool_use_id: Optional[str]) -> bool:
+    if not tool_use_id:
+        return False  # no id → can't dedupe; keep legacy behavior
+    return tool_use_id in state.get("recorded_tool_use_ids", [])
+
+
+def _remember_tool_use_id(state: Dict[str, Any], tool_use_id: Optional[str]) -> None:
+    if not tool_use_id:
+        return
+    ids: List[str] = state.setdefault("recorded_tool_use_ids", [])
+    if tool_use_id in ids:
+        return
+    ids.append(tool_use_id)
+    if len(ids) > _MAX_RECORDED_TOOL_USE_IDS:
+        state["recorded_tool_use_ids"] = ids[-_MAX_RECORDED_TOOL_USE_IDS:]
+
+
 def update_from_new_messages(session_id: str, messages: List[Dict[str, Any]]) -> None:
     """Scan Strands-format messages for sub-agent completions and update progress.
 
@@ -140,6 +168,7 @@ def update_from_new_messages(session_id: str, messages: List[Dict[str, Any]]) ->
                     "asset_id": asset_id,
                     "tool_name": tool_name,
                     "status": "completed" if status == "success" else status,
+                    "tool_use_id": tool_use_id,
                 })
 
     if unmatched_tools:
@@ -155,6 +184,20 @@ def update_from_new_messages(session_id: str, messages: List[Dict[str, Any]]) ->
 
     # Merge into persistent state
     state = _read_state(session_id)
+
+    # Drop completions the inline path (record_tool_completion) already logged
+    # this turn — re-recording duplicated every event and could downgrade a
+    # 'fixed' asset back to 'completed'.
+    deduped = [c for c in completions if not _already_recorded(state, c.get("tool_use_id"))]
+    skipped = len(completions) - len(deduped)
+    if skipped:
+        logger.info(
+            f"[generation_progress] skipped {skipped} completion(s) already recorded inline"
+        )
+    if not deduped:
+        return
+    completions = deduped
+
     assets = state.setdefault("assets", {})
     events = state.setdefault("events", [])
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -178,12 +221,16 @@ def update_from_new_messages(session_id: str, messages: List[Dict[str, Any]]) ->
             "tool": c["tool_name"],
             "updated_at": now,
         }
-        events.append({
+        event: Dict[str, Any] = {
             "asset_id": aid,
             "tool": c["tool_name"],
             "status": new_status,
             "timestamp": now,
-        })
+        }
+        if c.get("tool_use_id"):
+            event["toolUseId"] = c["tool_use_id"]
+        events.append(event)
+        _remember_tool_use_id(state, c.get("tool_use_id"))
 
     _write_state(session_id, state)
     logger.info(
@@ -196,6 +243,7 @@ def record_tool_completion(
     session_id: str,
     tool_name: str,
     status: str = "completed",
+    tool_use_id: Optional[str] = None,
 ) -> bool:
     """Record a single tool completion directly (called from streaming event loop).
 
@@ -203,13 +251,23 @@ def record_tool_completion(
     is received during stream_async, so it does not depend on post-hoc message
     scanning which can miss events due to message sanitization or reference issues.
 
-    Returns True if the tool was recorded, False if it was not a tracked tool.
+    ``tool_use_id`` (when available) is remembered so the end-of-turn fallback
+    scan (update_from_new_messages) does not record the same completion again.
+
+    Returns True if the tool was recorded, False if it was not a tracked tool
+    or was already recorded.
     """
     asset_id = _TOOL_TO_ASSET.get(tool_name)
     if not asset_id:
         return False
 
     state = _read_state(session_id)
+    if _already_recorded(state, tool_use_id):
+        logger.debug(
+            f"[generation_progress] {tool_name} ({tool_use_id}) already recorded — skipping"
+        )
+        return False
+
     assets = state.setdefault("assets", {})
     events = state.setdefault("events", [])
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -230,12 +288,16 @@ def record_tool_completion(
         "tool": tool_name,
         "updated_at": now,
     }
-    events.append({
+    event: Dict[str, Any] = {
         "asset_id": asset_id,
         "tool": tool_name,
         "status": new_status,
         "timestamp": now,
-    })
+    }
+    if tool_use_id:
+        event["toolUseId"] = tool_use_id
+    events.append(event)
+    _remember_tool_use_id(state, tool_use_id)
 
     _write_state(session_id, state)
     logger.info(f"[generation_progress] recorded {tool_name} -> {asset_id}={new_status} for {session_id}")
