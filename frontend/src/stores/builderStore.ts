@@ -14,8 +14,15 @@ import type {
 } from '../types';
 import { PHASE_ORDER } from '../types';
 
-// Performance limits to prevent memory issues in long sessions
-const MAX_MESSAGES = 200;           // Keep last 200 messages in memory
+// Performance limits to prevent memory issues in long sessions.
+// MAX_MESSAGES must comfortably exceed a full ~2h build: the live array also
+// holds ephemeral thinking/running-tool cards that are never persisted, so a
+// 200-entry cap silently trimmed the interview turns out of memory mid-build —
+// and useAutoSave then persisted that trimmed window, deleting them from
+// DynamoDB permanently (observed live on two workshop sessions). The session
+// API's save_history now merges non-destructively as a backstop, but the cap
+// must still cover a realistic session so the on-screen timeline stays whole.
+const MAX_MESSAGES = 1000;          // Keep last 1000 messages in memory
 const MAX_ASSET_PREVIEWS = 50;      // Keep last 50 asset previews
 
 export type Theme = 'light' | 'dark' | 'system';

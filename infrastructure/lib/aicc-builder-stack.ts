@@ -580,10 +580,52 @@ def get_history(user_id, session_id):
             'body': json.dumps({'error': str(e)})
         }
 
+def _load_stored_history(user_id, session_id):
+    """Load and decompress the currently stored history (or [])."""
+    try:
+        response = table.get_item(Key={'userId': user_id, 'sessionId': session_id})
+        raw = response.get('Item', {}).get('conversationHistory', '[]')
+        if raw.startswith('H4sI'):  # gzip magic bytes in base64
+            raw = gzip.decompress(base64.b64decode(raw)).decode('utf-8')
+        stored = json.loads(raw)
+        return stored if isinstance(stored, list) else []
+    except Exception:
+        return []
+
 def save_history(user_id, session_id, body):
-    """Save conversation history for a session (compressed if large)."""
+    """Save conversation history for a session (compressed if large).
+
+    NON-DESTRUCTIVE MERGE: the client keeps only a bounded window of recent
+    messages in memory and PUTs that whole window on every autosave. A long
+    generation run pushes the interview turns (and the first message with
+    attachments) out of that window — a plain overwrite would permanently
+    delete them from DynamoDB (observed live: sessions restored without any
+    interview messages). So instead of overwriting, prepend every stored
+    message strictly OLDER than the incoming batch's first timestamp; the
+    incoming batch remains authoritative for its own time range.
+    """
     try:
         history = body.get('history', [])
+
+        stored = _load_stored_history(user_id, session_id)
+        if stored and history:
+            first_ts = None
+            for m in history:
+                ts = m.get('timestamp')
+                if isinstance(ts, (int, float)) and ts > 0:
+                    first_ts = ts
+                    break
+            if first_ts is not None:
+                prefix = [
+                    m for m in stored
+                    if isinstance(m.get('timestamp'), (int, float)) and m['timestamp'] < first_ts
+                ]
+                if prefix:
+                    history = prefix + history
+        elif stored and not history:
+            # Never wipe stored history with an empty PUT
+            history = stored
+
         history_json = json.dumps(history)
 
         # Compress if larger than 10KB
