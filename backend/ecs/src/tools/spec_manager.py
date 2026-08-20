@@ -1237,9 +1237,60 @@ def _safe_parse_model(model_class, data: dict):
         # If model parsing fails, create instance with just the raw data
         # The extra="allow" config will accept all fields
         try:
-            return model_class.model_construct(**data)
+            return _coerce_nested_models(model_class.model_construct(**data))
         except Exception:
             return model_class.model_construct()
+
+
+def _coerce_nested_models(instance):
+    """Re-materialize nested dicts into their model classes after model_construct.
+
+    ``model_construct`` skips validation entirely, so nested collections stay as
+    raw dicts (e.g. ``spec.input_fields = [{'name': ...}, ...]``). Every
+    downstream consumer then crashes on attribute access — this is exactly the
+    ``AttributeError: 'dict' object has no attribute 'name'`` that killed
+    validate_parameter_consistency in two live workshop sessions, silently
+    disabling the whole deterministic gate. Coerce the known nested fields back
+    into models so the fallback path yields the same shapes as normal parsing.
+    """
+    nested_list_fields = {
+        "input_fields": FieldSpec,
+        "output_fields": FieldSpec,
+        "business_rules": BusinessRule,
+        "error_responses": ErrorResponse,
+        "side_effects": SideEffect,
+        "tools": ToolSpec,
+        "conversation_steps": ConversationStep,
+        "session_tools": ToolSpec,
+    }
+    nested_dict_fields = {
+        "data_source": DataSourceSpec,
+    }
+    for fname, fmodel in nested_list_fields.items():
+        val = getattr(instance, fname, None)
+        if isinstance(val, list) and any(isinstance(x, dict) for x in val):
+            coerced = [
+                _safe_parse_model(fmodel, x) if isinstance(x, dict) else x
+                for x in val
+            ]
+            try:
+                setattr(instance, fname, coerced)
+            except Exception:
+                try:
+                    object.__setattr__(instance, fname, coerced)
+                except Exception:
+                    pass
+    for fname, fmodel in nested_dict_fields.items():
+        val = getattr(instance, fname, None)
+        if isinstance(val, dict):
+            try:
+                setattr(instance, fname, _safe_parse_model(fmodel, val))
+            except Exception:
+                try:
+                    object.__setattr__(instance, fname, _safe_parse_model(fmodel, val))
+                except Exception:
+                    pass
+    return instance
 
 
 @tool

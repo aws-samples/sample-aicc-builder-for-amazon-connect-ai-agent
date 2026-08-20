@@ -1165,6 +1165,8 @@ UpdateQSessionFunctionArn:
 12. **CRITICAL: Environment variable naming** - Use `<ENTITY>_TABLE_NAME` pattern (e.g., `RESERVATIONS_TABLE_NAME`). Document exact names in schema summary's `environment_variables` section
 13. **CRITICAL: IAM permissions** - Include dynamodb:Scan, dynamodb:Query, and /index/* resource for GSI access
 14. **CRITICAL: When `Include Customer Phone Lookup: True`** — MUST include CustomerLookupFunction (Python 3.11, placeholder) + UpdateQSessionFunction (Node.js 18.x, placeholder) + their IAM Roles + AWS::Lambda::Permission for connect.amazonaws.com
+15. **CRITICAL: EVERY Lambda the Contact Flow invokes directly needs a connect.amazonaws.com Permission** — if the Contact Flow spec / flow references a function via `{{X_LAMBDA_ARN}}` (customer lookup, update-q-session, call/result logging like `log_call_result` or `record_monitoring_result`, or any other flow-invoked function), that function MUST have its own `AWS::Lambda::Permission` with `Principal: connect.amazonaws.com` and `SourceAccount: !Ref AWS::AccountId`. An apigateway.amazonaws.com permission does NOT cover Connect — the flow's invoke fails with AccessDeniedException at call time (this exact omission recurred in two live sessions and is now flagged by `validate_parameter_consistency`).
+16. **CRITICAL: UpdateQSessionFunction env vars** — its Environment.Variables MUST declare `CONNECT_INSTANCE_ID: ""` and `AI_ASSISTANT_ID: ""` (deploy.sh fills the values later; the handler throws on every invocation without the keys), and UpdateQSessionRole MUST grant `wisdom:UpdateSessionData` (NOT just `wisdom:UpdateSession` — they are different actions and UpdateSessionData is the one the handler calls).
 
 ---
 

@@ -117,23 +117,106 @@ _QSESSION_POLICY_BLOCK = """\
 def _ensure_qsession_role_permissions(yaml_str: str) -> str:
     """Ensure UpdateQSessionRole carries connect:DescribeContact + wisdom perms.
 
-    If an UpdateQSessionRole resource exists but its section does not mention
-    connect:DescribeContact, append the inline runtime policy right after its
-    ManagedPolicyArns block (same indentation level as other Properties keys).
+    Two live-workshop failure shapes:
+    - the LLM omits the inline policy entirely (only AWSLambdaBasicExecutionRole);
+    - the LLM writes a policy but with the WRONG action set — e.g.
+      ``wisdom:UpdateSession`` instead of ``wisdom:UpdateSessionData`` (found in
+      a live session: AccessDeniedException on every UpdateSessionData call
+      even though the role "looked" configured).
+
+    So the trigger is per-required-action, not merely "does the block mention
+    connect:DescribeContact". If the role already has a Policies section we add
+    the missing actions to its existing wisdom/connect Action list (a second
+    ``Policies:`` key would be invalid YAML); otherwise we append the full
+    inline policy after ManagedPolicyArns.
     """
     m = re.search(r'(^  UpdateQSessionRole:\n(?:^(?:    |\n).*\n?)*)', yaml_str, re.M)
     if not m:
         return yaml_str
     block = m.group(1)
-    if 'connect:DescribeContact' in block:
+    required = [
+        "wisdom:UpdateSessionData",
+        "wisdom:GetSession",
+        "connect:DescribeContact",
+        "connect:GetContactAttributes",
+    ]
+    missing = [a for a in required if a not in block]
+    if not missing:
         return yaml_str
+
+    if re.search(r'^\s+Policies:', block, re.M):
+        # Existing inline policy: append missing actions to the Action list
+        # that already carries wisdom:/connect: actions (or the first one).
+        best = None
+        for am in re.finditer(r'(^(\s+)Action:\n((?:\2\s*- .+\n)+))', block, re.M):
+            if best is None:
+                best = am
+            if 'wisdom:' in am.group(3) or 'connect:' in am.group(3):
+                best = am
+                break
+        if not best:
+            return yaml_str
+        entries = best.group(3)
+        indent_m = re.match(r'(\s*)- ', entries.split('\n')[0] + ' ')
+        item_indent = indent_m.group(1) if indent_m else best.group(2) + "  "
+        addition = "".join(f"{item_indent}- {a}\n" for a in missing)
+        new_block = block.replace(best.group(1), best.group(1) + addition, 1)
+        logger.info(f"[MERGE] Added missing actions {missing} to UpdateQSessionRole's "
+                    "existing inline policy (recurrent LLM omission)")
+        return yaml_str.replace(block, new_block, 1)
+
     mp = re.search(
         r'(^      ManagedPolicyArns:\n(?:^        .*\n)+)', block, re.M)
     if not mp:
         return yaml_str
     new_block = block.replace(mp.group(1), mp.group(1) + _QSESSION_POLICY_BLOCK, 1)
     logger.info("[MERGE] Injected UpdateQSessionRuntimePolicy into UpdateQSessionRole "
-                "(missing connect:DescribeContact — recurrent LLM omission)")
+                f"(missing {missing} — recurrent LLM omission)")
+    return yaml_str.replace(block, new_block, 1)
+
+
+# The static update_q_session handler (asset_packager.UPDATE_Q_SESSION_LAMBDA_CODE)
+# throws on cold start unless CONNECT_INSTANCE_ID and AI_ASSISTANT_ID exist as
+# environment variables (deploy.sh backfills the VALUES after the Connect
+# instance is created — but the CFN template must carry the KEYS). The system
+# prompt shows the exact Environment block, yet the LLM omitted it in two
+# consecutive live sessions, so inject it deterministically at merge time.
+_QSESSION_REQUIRED_ENV = ("CONNECT_INSTANCE_ID", "AI_ASSISTANT_ID")
+
+
+def _ensure_qsession_env_vars(yaml_str: str) -> str:
+    """Ensure UpdateQSessionFunction declares its required env var keys."""
+    m = re.search(r'(^  UpdateQSessionFunction:\n(?:^(?:    |\n).*\n?)*)', yaml_str, re.M)
+    if not m:
+        return yaml_str
+    block = m.group(1)
+    missing = [v for v in _QSESSION_REQUIRED_ENV if v not in block]
+    if not missing:
+        return yaml_str
+
+    vm = re.search(r'(^(\s+)Variables:\n((?:\2\s+\S.*\n)+))', block, re.M)
+    if vm:
+        # Environment.Variables exists — append the missing keys at the same
+        # indent as its existing entries.
+        first_entry = vm.group(3).split('\n')[0]
+        entry_indent = re.match(r'(\s*)', first_entry).group(1)
+        addition = "".join(f'{entry_indent}{v}: ""\n' for v in missing)
+        new_block = block.replace(vm.group(1), vm.group(1) + addition, 1)
+    else:
+        # No Environment block at all — insert one after the Handler line.
+        hm = re.search(r'(^      Handler:.*\n)', block, re.M)
+        if not hm:
+            return yaml_str
+        env_block = (
+            "      Environment:\n"
+            "        Variables:\n"
+            + "".join(f'          {v}: ""\n' for v in _QSESSION_REQUIRED_ENV)
+        )
+        new_block = block.replace(hm.group(1), hm.group(1) + env_block, 1)
+
+    logger.info(f"[MERGE] Injected missing env var keys {missing} into "
+                "UpdateQSessionFunction (handler throws without them; "
+                "deploy.sh backfills the values)")
     return yaml_str.replace(block, new_block, 1)
 
 
@@ -619,6 +702,7 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     final_yaml = _fix_rds_env_var_names(final_yaml)
     final_yaml = _fix_inline_handler_name(final_yaml)
     final_yaml = _ensure_qsession_role_permissions(final_yaml)
+    final_yaml = _ensure_qsession_env_vars(final_yaml)
     final_yaml = _fix_customer_lookup_handler(final_yaml)
     final_yaml = _fix_cfnresponse_import(final_yaml)
     final_yaml = _deduplicate_resources(final_yaml)
