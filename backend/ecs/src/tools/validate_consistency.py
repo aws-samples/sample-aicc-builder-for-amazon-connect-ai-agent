@@ -1443,6 +1443,65 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
                                  f"the value after the Connect instance exists).",
                     })
 
+    # D8: OpenAPI success response keyed under spec.success_status_code
+    #     The openapi_generator has no deterministic builder (it free-writes
+    #     YAML), and its prompt used to say nothing about success_status_code
+    #     at all — it always assumed '200'. A create operation with
+    #     success_status_code=201 (Lambda actually returns 201) then had no
+    #     '201' response declared, so the gateway treated every successful
+    #     call as an undeclared-status tool failure (found live).
+    if openapi_yaml:
+        try:
+            _openapi_doc = yaml.safe_load(openapi_yaml)
+        except Exception:
+            _openapi_doc = None
+        if isinstance(_openapi_doc, dict):
+            _paths = _openapi_doc.get("paths", {}) or {}
+            # op_id -> declared response status codes (as strings)
+            _declared_codes: Dict[str, set] = {}
+            for _path, _methods in _paths.items():
+                if not isinstance(_methods, dict):
+                    continue
+                for _method, _details in _methods.items():
+                    if _method.startswith("x-") or not isinstance(_details, dict):
+                        continue
+                    _op_id = _details.get("operationId", _path)
+                    _codes = {str(c) for c in (_details.get("responses") or {}).keys()}
+                    _declared_codes[_op_id] = _codes
+
+            def _check_success_code(op_id: str, expected_code) -> None:
+                codes = _declared_codes.get(op_id)
+                if codes is None:
+                    kebab = op_id.replace("_", "-")
+                    codes = _declared_codes.get(kebab)
+                if codes is None:
+                    return  # operation not in this OpenAPI doc — other checks cover that
+                if str(expected_code) not in codes:
+                    mismatches.append({
+                        "operation_id": op_id, "field": "success_status_code",
+                        "asset_type": "openapi_status_code",
+                        "issue": f"Spec declares success_status_code={expected_code} for '{op_id}' "
+                                 f"but OpenAPI only declares response(s) {sorted(codes)}. A Lambda "
+                                 f"returning HTTP {expected_code} on success has no matching schema, "
+                                 f"so the gateway treats every successful call as an undeclared-"
+                                 f"status tool failure. Add a '{expected_code}' response to "
+                                 f"/tools/{op_id} in openapi.yaml.",
+                    })
+
+            for _op_id, _spec in specs.items():
+                _expected = getattr(_spec, "success_status_code", None)
+                if _expected is not None:
+                    _check_success_code(_op_id, _expected)
+            for _tool in all_tools:
+                if isinstance(_tool, dict):
+                    _t_id = _tool.get("tool_id") or ""
+                    _t_code = _tool.get("success_status_code")
+                else:
+                    _t_id = getattr(_tool, "tool_id", "") or ""
+                    _t_code = getattr(_tool, "success_status_code", None)
+                if _t_id and _t_code is not None:
+                    _check_success_code(_t_id, _t_code)
+
     summary = f"Found {len(mismatches)} mismatches across {len(expected)} operations"
     if mismatches:
         summary += ". Fix by using patch_workspace_file for simple renames, or re-calling the affected generator with modification_request for structural changes."

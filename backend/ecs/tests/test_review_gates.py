@@ -207,6 +207,105 @@ def test_qsession_env_var_check(gate):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# D8: OpenAPI success response status code vs spec.success_status_code
+# ─────────────────────────────────────────────────────────────────────────────
+
+OPENAPI_MISSING_201 = """\
+openapi: "3.0.1"
+info:
+  title: Demo API
+  version: "1.0.0"
+paths:
+  /tools/create_cleaning_reservation:
+    post:
+      operationId: create_cleaning_reservation
+      responses:
+        '200':
+          description: business failure
+          content:
+            application/json:
+              schema:
+                type: object
+        '500':
+          description: internal error
+          content:
+            application/json:
+              schema:
+                type: object
+"""
+
+OPENAPI_HAS_201 = OPENAPI_MISSING_201.replace(
+    "      responses:\n        '200':",
+    "      responses:\n        '201':\n          description: created\n          content:\n            application/json:\n              schema:\n                type: object\n        '200':",
+)
+
+
+def test_success_status_code_missing_flagged(monkeypatch, tmp_path):
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
+    import tools.validate_consistency as vc
+    from tools.spec_manager import OperationSpec
+
+    spec = OperationSpec(
+        operation_id="create_cleaning_reservation",
+        input_fields=[], output_fields=[],
+        success_status_code=201,
+    )
+    monkeypatch.setattr(vc, "get_all_specs", lambda: {"create_cleaning_reservation": spec})
+    monkeypatch.setattr(vc, "get_all_tools", lambda: [])
+    assets = {"sessions/s/openapi/openapi.yaml": OPENAPI_MISSING_201}
+    monkeypatch.setattr(vc, "list_session_assets", lambda sid: list(assets.keys()))
+    monkeypatch.setattr(vc, "get_asset_from_s3", lambda key: assets.get(key))
+
+    result = vc.validate_parameter_consistency("s")
+    issues = [m for m in result["mismatches"] if m["asset_type"] == "openapi_status_code"]
+    assert len(issues) == 1
+    assert issues[0]["operation_id"] == "create_cleaning_reservation"
+    assert "201" in issues[0]["issue"]
+
+
+def test_success_status_code_present_not_flagged(monkeypatch, tmp_path):
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
+    import tools.validate_consistency as vc
+    from tools.spec_manager import OperationSpec
+
+    spec = OperationSpec(
+        operation_id="create_cleaning_reservation",
+        input_fields=[], output_fields=[],
+        success_status_code=201,
+    )
+    monkeypatch.setattr(vc, "get_all_specs", lambda: {"create_cleaning_reservation": spec})
+    monkeypatch.setattr(vc, "get_all_tools", lambda: [])
+    assets = {"sessions/s/openapi/openapi.yaml": OPENAPI_HAS_201}
+    monkeypatch.setattr(vc, "list_session_assets", lambda sid: list(assets.keys()))
+    monkeypatch.setattr(vc, "get_asset_from_s3", lambda key: assets.get(key))
+
+    result = vc.validate_parameter_consistency("s")
+    issues = [m for m in result["mismatches"] if m["asset_type"] == "openapi_status_code"]
+    assert issues == []
+
+
+def test_success_status_code_default_200_not_flagged(monkeypatch, tmp_path):
+    """The default success_status_code=200 must not false-positive when
+    OpenAPI correctly declares '200' (the overwhelmingly common case)."""
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
+    import tools.validate_consistency as vc
+    from tools.spec_manager import OperationSpec
+
+    spec = OperationSpec(operation_id="op1", input_fields=[], output_fields=[])
+    assert spec.success_status_code == 200
+    monkeypatch.setattr(vc, "get_all_specs", lambda: {"op1": spec})
+    monkeypatch.setattr(vc, "get_all_tools", lambda: [])
+    openapi = OPENAPI_MISSING_201.replace("create_cleaning_reservation", "op1")
+    assets = {"sessions/s/openapi/openapi.yaml": openapi}
+    monkeypatch.setattr(vc, "list_session_assets", lambda sid: list(assets.keys()))
+    monkeypatch.setattr(vc, "get_asset_from_s3", lambda key: assets.get(key))
+
+    result = vc.validate_parameter_consistency("s")
+    issues = [m for m in result["mismatches"] if m["asset_type"] == "openapi_status_code"]
+    assert issues == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4–5. Merge-time backstops (role actions, env var injection)
 # ─────────────────────────────────────────────────────────────────────────────
 
