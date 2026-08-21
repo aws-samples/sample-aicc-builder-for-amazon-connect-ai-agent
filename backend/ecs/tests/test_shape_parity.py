@@ -373,3 +373,93 @@ def test_unresolvable_ref_refused():
                components={"Other": {"type": "string"}})
     with pytest.raises(ShapeParityError, match="Unresolvable"):
         validate_shape_parity(spec, doc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Implicit response-envelope allowance (errorCode / message at response root)
+#
+# Every session review to date reported the SAME hard-gate mismatch: the
+# Lambda + OpenAPI generators unconditionally add errorCode/message to every
+# operation's response (the "200 + business failure" envelope), but nothing
+# ever added those two fields to the spec's output_fields. Flagging this as a
+# mismatch every single time trained reviewers to ignore the gate. These two
+# fields are now implicitly allowed at the response ROOT ONLY.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_envelope_fields_allowed_at_response_root():
+    spec = _op(output_fields=[
+        {"name": "found", "field_type": "boolean"},
+        {"name": "deliveryStatus", "field_type": "string"},
+    ])
+    doc = _doc("op", "POST", "/tools/op", res_schema={
+        "type": "object",
+        "properties": {
+            "found": {"type": "boolean"},
+            "deliveryStatus": {"type": "string"},
+            "errorCode": {"type": "string"},
+            "message": {"type": "string"},
+        },
+    })
+    assert validate_shape_parity(spec, doc) == []
+
+
+def test_genuine_extra_property_still_flagged_alongside_envelope():
+    spec = _op(output_fields=[{"name": "found", "field_type": "boolean"}])
+    doc = _doc("op", "POST", "/tools/op", res_schema={
+        "type": "object",
+        "properties": {
+            "found": {"type": "boolean"},
+            "errorCode": {"type": "string"},
+            "message": {"type": "string"},
+            "totallyUndeclaredField": {"type": "string"},
+        },
+    })
+    mismatches = validate_shape_parity(spec, doc)
+    assert len(mismatches) == 1
+    assert mismatches[0].reason == "property_extra_in_openapi"
+    assert mismatches[0].path.endswith("totallyUndeclaredField")
+
+
+def test_envelope_fields_not_allowed_inside_nested_object():
+    """The allowance is scoped to the response ROOT only — an undeclared
+    errorCode/message nested inside another object is still a real gap."""
+    spec = _op(output_fields=[
+        {"name": "detail", "field_type": "object", "properties": [
+            {"name": "id", "field_type": "string"},
+        ]},
+    ])
+    doc = _doc("op", "POST", "/tools/op", res_schema={
+        "type": "object",
+        "properties": {
+            "detail": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "errorCode": {"type": "string"},
+                },
+            },
+        },
+    })
+    mismatches = validate_shape_parity(spec, doc)
+    assert len(mismatches) == 1
+    assert mismatches[0].path.endswith("detail.properties.errorCode")
+
+
+def test_envelope_fields_still_checked_if_declared_in_spec():
+    """If the spec DOES declare errorCode/message, normal type/enum checks
+    still apply — the allowance only suppresses the "extra property" report,
+    it does not exempt the field from comparison when declared."""
+    spec = _op(output_fields=[
+        {"name": "found", "field_type": "boolean"},
+        {"name": "errorCode", "field_type": "enum", "enum_values": ["NOT_FOUND"]},
+    ])
+    doc = _doc("op", "POST", "/tools/op", res_schema={
+        "type": "object",
+        "properties": {
+            "found": {"type": "boolean"},
+            "errorCode": {"type": "string"},  # missing enum: keyword
+            "message": {"type": "string"},
+        },
+    })
+    mismatches = validate_shape_parity(spec, doc)
+    assert any(m.reason == "missing_enum_in_openapi" for m in mismatches)
