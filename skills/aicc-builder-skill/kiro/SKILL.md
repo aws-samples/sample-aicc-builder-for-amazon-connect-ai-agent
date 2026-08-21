@@ -324,6 +324,11 @@ substitute for the webapp's `input_hint`), e.g. "다음으로 환불 가능 기�
 Checklist before leaving interview mode — every operation must have:
 - `operation_id` (snake_case, verb_noun)
 - `input_fields[]` / `output_fields[]` with `name` (camelCase), `field_type`, `required`
+  — `output_fields` MUST include a branchable discriminator (`verified`/`found`/
+  `success`/`status`/…) **plus `errorCode` (string) and `message` (string)**: the
+  Lambda and OpenAPI generators emit both unconditionally on every response, so a
+  spec that omits them fails the `shape_parity.py` HARD GATE on every run
+- `success_status_code` when success is not `200` (e.g. `201` for a create operation)
 - `primary_key_field` (if DB-backed)
 - `data_source` (db_type, table_name) — optional for stateless ops
 - `tools[]` with `role: "primary"` and any helpers

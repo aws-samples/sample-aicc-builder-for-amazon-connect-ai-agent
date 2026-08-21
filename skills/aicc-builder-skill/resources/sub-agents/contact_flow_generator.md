@@ -682,6 +682,16 @@ This 2-action pattern creates the Connect Assistant (Wisdom) session. Place BEFO
 | User-defined | `$.Attributes.{name}` | Custom attribute |
 | Loop | `$.Loop.{name}.Index` | Current iteration |
 
+**⚠️ Session-attribute name contract (deterministic cross-check applies):**
+Every `$.Lex.SessionAttributes.{key}` your flow READS (other than `Tool`) must
+use a name the AI prompt instructs the bot to SET. The canonical escalation
+context names are `escalationReason`, `escalationSummary`, `customerIntent` —
+these are what the prompt generator teaches the bot. Do NOT invent synonyms
+(`conversationSummary`, `summary`, `intent`, `operationId`, …): the bot never
+sets them, so the flow reads an empty value and the agent screen loses its
+context. `validate_parameter_consistency` flags every flow-read session
+attribute that does not appear in the prompt.
+
 ---
 
 ## ERROR TYPES REFERENCE
@@ -1101,7 +1111,7 @@ Queue → Transfer Message → Transfer Queue → End; [Complete] → Goodbye �
         "Attributes": {
           "customerIntent": "$.Lex.SessionAttributes.customerIntent",
           "escalationReason": "$.Lex.SessionAttributes.escalationReason",
-          "conversationSummary": "$.Lex.SessionAttributes.conversationSummary"
+          "escalationSummary": "$.Lex.SessionAttributes.escalationSummary"
         }
       },
       "Transitions": {

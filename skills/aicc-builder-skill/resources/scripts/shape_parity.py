@@ -344,6 +344,21 @@ def _fields_to_synthetic_object(fields: list, object_name: str) -> dict:
     }
 
 
+# The Lambda and OpenAPI generators unconditionally add these two fields to
+# EVERY operation's response body — they are the standard "200 + business
+# failure" envelope (see the orchestrator "discriminator" rule): a
+# non-2xx is read by nothing (the AI agent treats it as a broken tool), so
+# every negative outcome must be expressed in the 200 body via `errorCode`
+# + `message`. An OperationSpec that forgot to also declare them in
+# `output_fields` is not a real mismatch — it is a spec omission the
+# generators correctly compensated for. Flagging it as a HARD GATE mismatch
+# on every single session (observed live, repeatedly) trains reviewers to
+# ignore the gate. Treat them as implicitly declared at the response ROOT
+# only (never inside nested objects/arrays, where an undeclared property is
+# still a real mismatch).
+_IMPLICIT_RESPONSE_ENVELOPE_FIELDS = {"errorCode", "message"}
+
+
 def validate_shape_parity(spec: dict, openapi_doc: dict) -> list[ShapeMismatch]:
     """Compare one OperationSpec dict to an OpenAPI document.
 
@@ -387,7 +402,17 @@ def validate_shape_parity(spec: dict, openapi_doc: dict) -> list[ShapeMismatch]:
             ))
         elif out_fields:
             synthetic = _fields_to_synthetic_object(out_fields, f"{owner_label}.response")
-            _compare(synthetic, res_schema, f"{owner_label}.response", openapi_doc, set(), mismatches)
+            bundle_mismatches: list[ShapeMismatch] = []
+            _compare(synthetic, res_schema, f"{owner_label}.response", openapi_doc, set(), bundle_mismatches)
+            # Drop "extra property" mismatches for the standard error envelope
+            # at the response ROOT only — see _IMPLICIT_RESPONSE_ENVELOPE_FIELDS.
+            root_prefix = f"{owner_label}.response.properties."
+            for m in bundle_mismatches:
+                if (m.reason == "property_extra_in_openapi"
+                        and m.path.startswith(root_prefix)
+                        and m.path[len(root_prefix):] in _IMPLICIT_RESPONSE_ENVELOPE_FIELDS):
+                    continue
+                mismatches.append(m)
 
     # Compare operation-level input/output fields (when no tools[] drives them).
     tools = spec.get("tools") or []

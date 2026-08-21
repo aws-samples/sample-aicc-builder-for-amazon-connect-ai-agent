@@ -310,6 +310,7 @@ The Orchestrator provides operations with explicit schema. You MUST use these va
   "operation_id": "check_reservation",      // Use for operationId
   "api_path": "/check_reservation",         // Spec field — prepend `/tools` when emitting the paths key → `/tools/check_reservation`
   "http_method": "POST",                    // Use for method (post, get, etc.) — MUST match CFN HttpMethod exactly
+  "success_status_code": 200,               // Use for the responses: key of the SUCCESS schema — NOT always '200' (e.g. 201 for a create operation)
   "description": "Look up a customer reservation",
   "input_fields": [
     {"name": "phoneNumber", "type": "string", "required": true}
@@ -332,8 +333,13 @@ The Orchestrator provides operations with explicit schema. You MUST use these va
    - `http_method: "POST"` → `post:` under the path
 3. **operation_id**: Use for `operationId` and `x-amazon-connect-tool-name`
 4. **input_fields**: Generate `requestBody` schema from this
-5. **output_fields**: Generate `responses.200` schema from this
+5. **output_fields**: Generate the response schema for the success outcome from this — key it under `success_status_code` (see rule 7), NOT a hardcoded `'200'`
 6. **error_codes**: Include in ErrorResponse schema enum
+7. **success_status_code**: Key the SUCCESS response under this exact value
+   (default `200` — do not assume it, read the field). A create operation
+   commonly declares `201`; if you emit `'200'` while the spec/Lambda use
+   `201`, the gateway treats every successful call as an undeclared-status
+   failure (see the dedicated section below).
 
 ### 🚨 CRITICAL: PATH FORMAT — `/tools/<operation_id>` WITH UNDERSCORES
 
@@ -727,6 +733,42 @@ responses:
 Do NOT emit `'400'`, `'401'`, `'403'`, `'404'`, `'409'` or `'429'` response
 entries for business outcomes — a declared 4xx teaches the model to expect a
 failure it cannot handle, and the Lambda must not return one either.
+
+### 🚨 Success status code MUST match the spec's `success_status_code`
+
+`BUSINESS_OUTCOME_200_RULE` above governs *failure* outcomes only — it does NOT
+mean every operation's success response is `'200'`. Each OperationSpec carries
+its own `success_status_code` (default `200`, but creation operations are
+commonly `201`). Read it and declare the response under THAT status code, not
+a hardcoded `'200'`:
+
+```yaml
+responses:
+  '201':   # ← spec.success_status_code, NOT hardcoded '200'
+    description: "Reservation created successfully"
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/CreateReservationResponse'
+  '500':
+    description: "Internal error — retryable fault"
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/ErrorResponse'
+```
+
+**Omitting the spec's real success status code is itself a HARD-GATE
+mismatch** (`validate_shape_parity_report` looks for the response schema
+under `success_status_code` specifically, and a Lambda that returns
+`return 201, body` while OpenAPI only declares `'200'`/`'500'` makes the
+gateway treat every successful call as an undeclared-status tool failure).
+Cross-check the exact value against the operation's spec before writing the
+`responses:` block — do not assume `200`.
+
+Business-outcome failures (the 200-body table above) still belong alongside
+the success code even when success itself is `201` — e.g. `INVALID_INPUT`
+stays a `200` body outcome, it is never folded into the `201` response.
 
 ---
 
