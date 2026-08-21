@@ -120,6 +120,11 @@ rm -rf ~/.kiro/skills/aicc-builder/claude ~/.kiro/skills/aicc-builder/kiro \
 rm -f  ~/.kiro/skills/aicc-builder/README.md
 ```
 
+Then verify: restart Kiro (or start a new `kiro-cli chat` session) and confirm
+`aicc-builder` appears in the loaded-skills list. Trigger it with any of the
+natural-language triggers in the frontmatter description ("amazon connect",
+"aicc", …).
+
 ## Requirements
 
 - **Python 3.9+** for the bundled validator scripts
@@ -240,7 +245,13 @@ silently fall out of sync. Review the diff, commit, done.
 > `resources/scripts/{validate_consistency,shape_parity,check_spec_complete,clues_format}.py`,
 > and both `SKILL.md` files. `validate_consistency.py` / `shape_parity.py` are hand
 > ports of `tools/validate_consistency.py` / `tools/shape_parity.py` — when a check
-> changes there, port it here and re-run the smoke tests. Also update by hand when
+> changes there, port it here and re-run the smoke tests:
+>
+> ```bash
+> python3 scripts/smoke_test_validators.py   # requires PyYAML
+> ```
+>
+> Also update by hand when
 > `agents/contact_flow_generator/vision_import.py` or `tools/asset_packager.py`
 > change.
 
