@@ -47,6 +47,16 @@ Checks (check id → what it catches):
     sql_missing_required_column  INSERT omits a NOT NULL column with no default
     sql_param_type_mismatch      :param bound with the wrong Data API value key
 
+  Contact Flow / prompt / status-code contracts (D6–D9)
+    connect_invoke_permission    flow-invoked Lambda without a
+                                 connect.amazonaws.com AWS::Lambda::Permission
+    session_attribute_contract   flow reads $.Lex.SessionAttributes.<name>
+                                 the AI prompt never instructs the bot to set
+    lambda_env                   UpdateQSessionFunction missing the
+                                 CONNECT_INSTANCE_ID / AI_ASSISTANT_ID keys
+    openapi_status_code          spec success_status_code (e.g. 201) has no
+                                 matching response declared in openapi.yaml
+
 Usage:
     python validate_consistency.py <output_dir>
     python validate_consistency.py <output_dir> --json
@@ -250,6 +260,68 @@ def load_openapi(assets_dir: Path) -> Dict[str, Dict[str, Set[str]]]:
                         out_f |= _schema_props(spec, sw["schema"])
             out[op_id] = {"input": in_f, "output": out_f}
     return out
+
+
+def load_openapi_response_codes(assets_dir: Path) -> Dict[str, Set[str]]:
+    """operationId (or path) -> declared response status codes, as strings.
+
+    Used by the success_status_code check (webapp D8): a Lambda that returns
+    HTTP 201 on success while OpenAPI only declares '200'/'500' makes the
+    gateway treat every successful call as an undeclared-status tool failure.
+    """
+    cand = list((assets_dir / "openapi").glob("*.y*ml")) if (assets_dir / "openapi").is_dir() else []
+    if not cand:
+        return {}
+    try:
+        spec = yaml.safe_load(cand[0].read_text())
+    except Exception as e:
+        print(f"WARN: openapi parse failed: {e}", file=sys.stderr)
+        return {}
+    codes_by_op: Dict[str, Set[str]] = {}
+    for path, methods in (spec.get("paths") or {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, details in methods.items():
+            if method.startswith("x-") or not isinstance(details, dict):
+                continue
+            op_id = details.get("operationId") or path
+            codes_by_op[op_id] = {str(c) for c in (details.get("responses") or {}).keys()}
+    return codes_by_op
+
+
+def load_contact_flow_text(assets_dir: Path) -> Optional[str]:
+    """Concatenated raw JSON text of every Contact Flow under assets/.../contact_flow/.
+
+    The session-attribute and connect-permission checks scan it textually,
+    exactly like the webapp validator does. Handles both the flat layout
+    (contact_flow/contact_flow.json) and imported ids
+    (contact_flow/imported_flow/contact_flow.json).
+    """
+    cf_dir = assets_dir / "contact_flow"
+    if not cf_dir.is_dir():
+        return None
+    texts: List[str] = []
+    for p in sorted(cf_dir.rglob("*.json")):
+        try:
+            texts.append(p.read_text())
+        except Exception as e:
+            print(f"WARN: failed to read {p}: {e}", file=sys.stderr)
+    return "\n".join(texts) if texts else None
+
+
+def load_prompt_text(assets_dir: Path) -> Optional[str]:
+    """Raw text of the AI agent prompt(s) (yaml / yml / md / txt)."""
+    p_dir = assets_dir / "prompt"
+    if not p_dir.is_dir():
+        return None
+    texts: List[str] = []
+    for pat in ("*.yaml", "*.yml", "*.md", "*.txt"):
+        for p in sorted(p_dir.rglob(pat)):
+            try:
+                texts.append(p.read_text())
+            except Exception as e:
+                print(f"WARN: failed to read {p}: {e}", file=sys.stderr)
+    return "\n".join(texts) if texts else None
 
 
 # --------------------------------------------------------------------------
@@ -1274,6 +1346,137 @@ def validate(output_dir: Path) -> List[dict]:
             mismatches.extend(_check_sql_casts(op_id, code, enum_types))
             mismatches.extend(_check_sql_insert_required_columns(op_id, code, infra))
             mismatches.extend(_check_sql_param_types(op_id, code, type_index))
+
+    contact_flow_json = load_contact_flow_text(assets)
+    prompt_text = load_prompt_text(assets)
+
+    # D6) Contact Flow → Lambda invoke permissions (Principal connect.amazonaws.com)
+    #     Every Lambda the flow calls directly via InvokeLambdaFunction needs an
+    #     AWS::Lambda::Permission with Principal connect.amazonaws.com — an
+    #     apigateway.amazonaws.com permission does NOT cover it. Missing grants
+    #     were found for different functions in two consecutive live sessions
+    #     (log_call_result / get_monitoring_target / record_monitoring_result):
+    #     the call fails with AccessDeniedException and the flow takes its error
+    #     branch, silently dropping call logging / personalization.
+    if contact_flow_json and infra_yaml:
+        flow_lambda_refs = set(re.findall(
+            r'\{\{\s*([A-Z0-9_]+?)_LAMBDA_ARN\s*\}\}', contact_flow_json))
+        if flow_lambda_refs:
+            # Map: normalized function token -> has connect permission
+            connect_permitted: Set[str] = set()
+            for pm in re.finditer(
+                    r'^  (\w+):\n((?:^    .*\n?)+)', infra_yaml, re.M):
+                body = pm.group(2)
+                if 'AWS::Lambda::Permission' not in body:
+                    continue
+                if 'connect.amazonaws.com' not in body:
+                    continue
+                fn = re.search(
+                    r'FunctionName:.*?(?:!GetAtt\s+(\w+)\.Arn|!Ref\s+(\w+)|"(\w+)")',
+                    body)
+                if fn:
+                    name = fn.group(1) or fn.group(2) or fn.group(3) or ""
+                    connect_permitted.add(
+                        re.sub(r'(function|lambda)$', '', name.lower().replace("_", "").replace("-", "")))
+            # All function logical ids present in the template (to skip
+            # placeholders resolved outside this stack, e.g. deploy.sh-created)
+            template_functions = {
+                re.sub(r'(function|lambda)$', '', fm.group(1).lower().replace("_", "").replace("-", ""))
+                for fm in re.finditer(
+                    r'^  (\w+):\n(?:^    .*\n?)*?^    Type:\s*AWS::Lambda::Function',
+                    infra_yaml, re.M)
+            }
+            for ref in sorted(flow_lambda_refs):
+                norm = ref.lower().replace("_", "")
+                if norm not in template_functions:
+                    continue  # function not defined in this template — skip
+                if norm not in connect_permitted:
+                    mismatches.append({
+                        "check": "connect_invoke_permission", "operation_id": ref.lower(), "field": "",
+                        "issue": f"Contact Flow invokes Lambda '{{{{{ref}_LAMBDA_ARN}}}}' directly, "
+                                 f"but the CloudFormation template has no AWS::Lambda::Permission with "
+                                 f"Principal connect.amazonaws.com for that function. The flow's "
+                                 f"invoke fails with AccessDeniedException at call time (an "
+                                 f"apigateway.amazonaws.com permission does not cover Connect). "
+                                 f"Add a Permission resource with Principal connect.amazonaws.com "
+                                 f"and SourceAccount !Ref AWS::AccountId.",
+                    })
+
+    # D7) Contact Flow ↔ Prompt session-attribute name contract
+    #     The flow reads $.Lex.SessionAttributes.<name> that only the AI agent
+    #     (per its prompt) can set. A name the prompt never mentions is a
+    #     guaranteed empty value at runtime — found live as conversationSummary
+    #     (flow) vs escalationSummary (prompt): agent-screen context always blank.
+    if contact_flow_json and prompt_text:
+        flow_session_attrs = set(re.findall(
+            r'\$\.Lex\.SessionAttributes\.(\w+)', contact_flow_json))
+        # 'Tool' is the canonical bot-result contract (validated separately by
+        # the contact flow linter); skip it here.
+        flow_session_attrs.discard("Tool")
+        for attr in sorted(flow_session_attrs):
+            if attr not in prompt_text:
+                mismatches.append({
+                    "check": "session_attribute_contract", "operation_id": "__flow__", "field": attr,
+                    "issue": f"Contact Flow reads $.Lex.SessionAttributes.{attr} but the AI "
+                             f"prompt never mentions '{attr}' — the bot will never set it, so "
+                             f"the flow always reads an empty value. Either instruct the bot "
+                             f"to set '{attr}' in the prompt, or rename the flow attribute to "
+                             f"one the prompt already defines.",
+                })
+
+    # D8) update_q_session env-var contract
+    #     The static handler throws on cold start without CONNECT_INSTANCE_ID /
+    #     AI_ASSISTANT_ID env vars. deploy.sh backfills the VALUES, but the CFN
+    #     template must declare the KEYS — omitted by the LLM in two consecutive
+    #     live sessions.
+    if infra_yaml and 'UpdateQSessionFunction' in infra_yaml:
+        qf = re.search(r'(^  UpdateQSessionFunction:\n(?:^(?:    |\n).*\n?)*)', infra_yaml, re.M)
+        if qf:
+            qblock = qf.group(1)
+            for env_key in ("CONNECT_INSTANCE_ID", "AI_ASSISTANT_ID"):
+                if env_key not in qblock:
+                    mismatches.append({
+                        "check": "lambda_env", "operation_id": "update_q_session", "field": env_key,
+                        "issue": f"UpdateQSessionFunction is missing the '{env_key}' environment "
+                                 f"variable — the handler throws on every invocation without it, "
+                                 f"so customer data is never injected into the AI session. Add "
+                                 f"'{env_key}: \"\"' under Environment.Variables (deploy.sh fills "
+                                 f"the value after the Connect instance exists).",
+                    })
+
+    # D9) OpenAPI success response keyed under spec.success_status_code
+    #     The openapi_generator has no deterministic builder (it free-writes
+    #     YAML) and historically always assumed '200'. A create operation with
+    #     success_status_code=201 (Lambda actually returns 201) then had no
+    #     '201' response declared, so the gateway treated every successful
+    #     call as an undeclared-status tool failure (found live).
+    declared_codes = load_openapi_response_codes(assets)
+    if declared_codes:
+        def _check_success_code(op_id: str, expected_code) -> None:
+            codes = declared_codes.get(op_id)
+            if codes is None:
+                codes = declared_codes.get("/" + op_id.replace("_", "-"))
+            if codes is None:
+                return  # operation not in this OpenAPI doc — other checks cover that
+            if str(expected_code) not in codes:
+                mismatches.append({
+                    "check": "openapi_status_code", "operation_id": op_id, "field": "success_status_code",
+                    "issue": f"Spec declares success_status_code={expected_code} for '{op_id}' "
+                             f"but OpenAPI only declares response(s) {sorted(codes)}. A Lambda "
+                             f"returning HTTP {expected_code} on success has no matching schema, "
+                             f"so the gateway treats every successful call as an undeclared-"
+                             f"status tool failure. Add a '{expected_code}' response to "
+                             f"/tools/{op_id} in openapi.yaml.",
+                })
+
+        for op_id, s in specs.items():
+            expected_code = s.get("success_status_code")
+            if expected_code is not None:
+                _check_success_code(op_id, expected_code)
+        for tool_id, t in tools.items():
+            t_code = t.get("success_status_code")
+            if t_code is not None:
+                _check_success_code(tool_id, t_code)
 
     return mismatches
 

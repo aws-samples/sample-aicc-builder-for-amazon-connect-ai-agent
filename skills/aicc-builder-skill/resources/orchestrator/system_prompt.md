@@ -2280,9 +2280,17 @@ CloudFormation, Lambda, and OpenAPI, each operation MUST include these fields:
    correct for a transient fault).
 
    Also make sure `output_fields` includes an explicit **discriminator** the model
-   can branch on — `verified`, `found`, `available`, `success` or `status` — plus a
-   customer-readable `message`. Without it a 200 cannot express "failed", and the
-   agent cannot tell a negative outcome from a positive one.
+   can branch on — `verified`, `found`, `available`, `success` or `status` — plus
+   the two fields every downstream generator (Lambda, OpenAPI) ALWAYS emits for a
+   200-body business failure: `errorCode` (string) and `message` (string).
+
+   **CRITICAL**: `errorCode` and `message` are NOT optional extras — omit them
+   from `output_fields` and the shape-parity gate (`validate_shape_parity_report`)
+   reports a HARD-GATE mismatch on every single generation, because the Lambda
+   and OpenAPI generators both add `errorCode`/`message` to every response
+   unconditionally (that's how the agent tells a business failure from success
+   on a 200). Declare them in `output_fields` from the start so parity holds on
+   the first pass instead of needing a post-hoc `update_operation_spec` fix.
 
    ```python
    # ✅ authentication operation: the failure modes are 200 + a discriminator
@@ -2293,6 +2301,7 @@ CloudFormation, Lambda, and OpenAPI, each operation MUST include these fields:
            {"name": "remainingAttempts", "type": "number"},
            {"name": "lockout", "type": "boolean"},
            {"name": "message", "type": "string"},
+           {"name": "errorCode", "type": "string", "required": false},  # ← REQUIRED field, not optional to declare
        ],
        error_responses=[
            {"status_code": 200, "error_code": "UNAUTHORIZED",

@@ -9,6 +9,8 @@
 [![Python](https://img.shields.io/badge/Python-3.11-blue?style=flat&logo=python)](https://python.org/)
 [![Strands Agents](https://img.shields.io/badge/Strands-Agents-purple?style=flat)](https://strandsagents.com/)
 
+[![Use as a CLI Skill — no deployment needed](https://img.shields.io/badge/%E2%9A%A1_Use_as_a_CLI_Skill-Claude_Code_%C2%B7_Kiro-1a1a2e?style=for-the-badge)](skills/aicc-builder-skill/)
+
 [English](#english) · [한국어](#한국어) · [日本語](#日本語)
 
 </div>
