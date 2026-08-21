@@ -3101,6 +3101,10 @@ async def handle_inject_history_ws(websocket: WebSocket, session_id: str, data: 
                     logger.info(f"[injectHistory] Dropping system-role message (not supported by Bedrock)")
                 continue
             if isinstance(content, str):
+                # Attachment-only user messages persist with empty text —
+                # Bedrock rejects empty text blocks, so substitute a stub.
+                if not content.strip():
+                    content = "[사용자가 파일을 첨부했습니다 / user sent an attachment]"
                 injected_strands.append({"role": role, "content": [{"text": content}]})
             elif isinstance(content, list):
                 injected_strands.append({"role": role, "content": content})

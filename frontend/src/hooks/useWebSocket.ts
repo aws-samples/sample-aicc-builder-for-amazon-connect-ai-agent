@@ -196,12 +196,14 @@ function deserializeHistoryMessages(
   timestamp?: Date;
   toolCall?: import("../types").ToolCall;
   subagentActivity?: import("../types").SubagentActivity;
+  attachments?: import("../types").MessageAttachment[];
 }> {
   return history
     .filter(msg => {
-      // user/assistant/system must have content
+      // user/assistant/system must have content (or persisted attachments —
+      // a user message sent with only files has empty text)
       if (msg.role === 'user' || msg.role === 'assistant' || msg.role === 'system') {
-        return msg.content && msg.content.trim() !== '';
+        return (msg.content && msg.content.trim() !== '') || (msg.attachments && msg.attachments.length > 0);
       }
       // tool messages must have toolCall data
       if (msg.role === 'tool') return !!msg.toolCall;
@@ -261,6 +263,17 @@ function deserializeHistoryMessages(
         role: msg.role as 'user' | 'assistant' | 'system',
         content: msg.content,
         timestamp: ts,
+        // Restore attachment chips (metadata only — no binary/preview)
+        ...(msg.attachments && msg.attachments.length > 0
+          ? {
+              attachments: msg.attachments.map(att => ({
+                name: att.name,
+                type: att.type,
+                mimeType: att.mimeType,
+                size: att.size,
+              })),
+            }
+          : {}),
       };
     });
 }
@@ -2925,6 +2938,7 @@ export function useWebSocket() {
               timestamp?: Date;
               toolCall?: import("../types").ToolCall;
               subagentActivity?: import("../types").SubagentActivity;
+              attachments?: import("../types").MessageAttachment[];
               assetRef?: {
                 assetType: string;
                 operationId?: string;

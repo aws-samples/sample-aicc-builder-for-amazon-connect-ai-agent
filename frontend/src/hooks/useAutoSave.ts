@@ -64,8 +64,9 @@ export function useAutoSave() {
         if (st === 'started' || st === 'running') return false;
         return true;
       }
-      // user/assistant/system: must have content
-      if (!msg.content || msg.content.trim() === '') return false;
+      // user/assistant/system: must have content OR attachments
+      // (a user message sent with only files has empty text but must survive)
+      if ((!msg.content || msg.content.trim() === '') && !(msg.attachments && msg.attachments.length > 0)) return false;
       return true;
     });
     if (persistableMessages.length === 0) return;
@@ -129,6 +130,19 @@ export function useAutoSave() {
         role: msg.role as 'user' | 'assistant' | 'system',
         content: msg.content,
         timestamp: ts,
+        // Persist attachment metadata (name/type/mime/size — no binary) so
+        // the first message sent with a requirements doc still shows its
+        // attachment chips after a session restore.
+        ...(msg.attachments && msg.attachments.length > 0
+          ? {
+              attachments: msg.attachments.map(att => ({
+                name: att.name,
+                type: att.type,
+                mimeType: att.mimeType,
+                size: att.size,
+              })),
+            }
+          : {}),
       };
     });
 

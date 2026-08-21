@@ -221,6 +221,16 @@ export interface StoredSubagentActivity {
 }
 
 /**
+ * Attachment metadata persisted with a message (no binary payload)
+ */
+export interface StoredAttachment {
+  name: string;
+  type: 'image' | 'document';
+  mimeType: string;
+  size?: number;
+}
+
+/**
  * Conversation message type
  */
 export interface ConversationMessage {
@@ -231,6 +241,8 @@ export interface ConversationMessage {
   toolCall?: StoredToolCall;
   /** Serialized sub-agent activity (for role='subagent') */
   subagentActivity?: StoredSubagentActivity;
+  /** Attachment metadata (for user messages sent with files) */
+  attachments?: StoredAttachment[];
 }
 
 /**
