@@ -75,7 +75,42 @@ def _read_state(session_id: str) -> Dict[str, Any]:
                 return json.load(f)
     except Exception as e:
         logger.warning(f"[generation_progress] failed to read state: {e}")
+
+    # NFS miss — fall back to the durable S3 copy directly rather than
+    # trusting hydrate_session_workspace to have already run (detect_phase()
+    # is called from the WebSocket 'connected' handler before injectHistory
+    # / hydration ever fires — see app.py websocket_handler). Without this,
+    # a lazily-imported NFS view makes every fresh connection look like
+    # phase="interview" regardless of real progress.
+    try:
+        from tools.s3_asset_storage import get_bucket_name, get_s3_client
+        bucket = get_bucket_name()
+        if bucket:
+            safe_session = session_id.replace("..", "_").replace("/", "_")
+            key = f"assets/{safe_session}/context/generation_progress.json"
+            obj = get_s3_client().get_object(Bucket=bucket, Key=key)
+            state = json.loads(obj["Body"].read().decode("utf-8"))
+            # Best-effort warm the NFS view for next time.
+            try:
+                _write_to_nfs_only(session_id, state)
+            except Exception:
+                pass
+            return state
+    except Exception:
+        pass  # no S3 backup yet (new session) — normal, fall through
+
     return {"assets": {}, "events": []}
+
+
+def _write_to_nfs_only(session_id: str, state: Dict[str, Any]) -> None:
+    """Write state to NFS without re-triggering the S3 backup (avoids a
+    read->write->write loop when _read_state warms a cold NFS cache)."""
+    path = _progress_path(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, default=str)
+    tmp.rename(path)
 
 
 def _write_state(session_id: str, state: Dict[str, Any]) -> None:
@@ -88,6 +123,29 @@ def _write_state(session_id: str, state: Dict[str, Any]) -> None:
         tmp.rename(path)
     except Exception as e:
         logger.warning(f"[generation_progress] failed to write state: {e}")
+
+    # Durable S3 backup — generation_progress.json previously lived on NFS
+    # ONLY. mountpoint-s3 imports directories lazily (ON_DIRECTORY_FIRST_ACCESS),
+    # so a fresh ECS task (or a reconnect the ALB routes to a different task)
+    # can see "no file" on NFS for a session whose progress genuinely exists
+    # in S3, and detect_phase() then falls back to phase="interview" — even
+    # though hydrate_session_workspace() runs on every injectHistory, because
+    # it never covered this file (fixed alongside this write path; see
+    # s3_asset_storage.hydrate_session_workspace's context/ prefix).
+    try:
+        from tools.s3_asset_storage import get_bucket_name, get_s3_client
+        bucket = get_bucket_name()
+        if bucket:
+            safe_session = session_id.replace("..", "_").replace("/", "_")
+            key = f"assets/{safe_session}/context/generation_progress.json"
+            get_s3_client().put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=json.dumps(state, ensure_ascii=False, default=str).encode("utf-8"),
+                ContentType="application/json",
+            )
+    except Exception as e:
+        logger.warning(f"[generation_progress] S3 backup write failed for {session_id}: {e}")
 
 
 # Completions are recorded on TWO paths: inline per toolResult during

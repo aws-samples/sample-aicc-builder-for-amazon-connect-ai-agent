@@ -761,10 +761,11 @@ def hydrate_session_workspace(session_id: str) -> dict:
     two: it lists the authoritative durable copy and copies any missing files
     into the NFS view so the workspace tree shows the full session contents.
 
-    Covers three S3 prefixes:
+    Covers four S3 prefixes:
       - assets/{sid}/{type}/...      → /mnt/s3/sessions/{sid}/assets/{type}/...
       - assets/{sid}/specs/{op}.json → /mnt/s3/sessions/{sid}/assets/specs/...
       - assets/{sid}/state/...       → /mnt/s3/sessions/{sid}/state/...
+      - assets/{sid}/context/...     → /mnt/s3/sessions/{sid}/context/...
 
     Idempotent: files already present on NFS are skipped.
 
@@ -816,6 +817,21 @@ def hydrate_session_workspace(session_id: str) -> dict:
         if not rel:
             continue
         plan.append((key, mount_root / "state" / rel))
+
+    # Context files (generation_progress.json, conversation_history.json,
+    # shared_state.json, ...). generation_progress.json specifically drives
+    # detect_phase(): without this prefix, a lazily-imported NFS view (a
+    # fresh ECS task, or a task the ALB just routed a reconnect to) makes
+    # _read_state() see "no file" and fall back to phase="interview" even
+    # though the S3 copy has the real review/generation state — observed
+    # live as a session whose AI context correctly resumed mid-regeneration
+    # while the phase stepper UI stayed stuck on "Interview".
+    context_prefix = f"assets/{safe_session}/context/"
+    for key in _list_s3_prefix(context_prefix):
+        rel = key[len(context_prefix):]
+        if not rel:
+            continue
+        plan.append((key, mount_root / "context" / rel))
 
     result["listed"] = len(plan)
     if not plan:
