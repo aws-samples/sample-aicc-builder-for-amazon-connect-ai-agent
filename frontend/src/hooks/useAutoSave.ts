@@ -28,6 +28,9 @@ export function useAutoSave() {
   const saveAssetsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSessionDataTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamingSaveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Tears down streamingSaveIntervalRef once a post-streaming message burst
+  // has settled (see the safety-net comment in the subscribe callback below).
+  const trailingSaveGraceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const lastSavedMessagesRef = useRef<string>('');
   const lastSavedAssetsRef = useRef<string>('');
@@ -42,6 +45,10 @@ export function useAutoSave() {
     if (streamingSaveIntervalRef.current) {
       clearInterval(streamingSaveIntervalRef.current);
       streamingSaveIntervalRef.current = null;
+    }
+    if (trailingSaveGraceRef.current) {
+      clearTimeout(trailingSaveGraceRef.current);
+      trailingSaveGraceRef.current = null;
     }
   }, [currentSessionId]);
 
@@ -226,30 +233,63 @@ export function useAutoSave() {
       const isTypingChanged = state.isTyping !== prevIsTyping;
 
       // ── History save ──
-      // Two strategies: immediate save on transitions, periodic save during streaming
+      // Two strategies: immediate save on transitions, periodic save during streaming.
+      //
+      // BUG (observed live): once isTyping flips false, the debounced save
+      // below re-arms on EVERY subsequent messages-array change — and tool /
+      // subagent / asset messages keep landing well after stream_end/message
+      // (asset_preview, tool_start, tool_end are independent WS event types
+      // sent while multiple assets are still streaming). A turn that
+      // generates many assets back-to-back can keep re-arming this timer
+      // indefinitely, so the debounced save NEVER fires and the whole final
+      // turn — including the assistant's last chat message — is missing
+      // from persisted history. The asset-save path below has no such gap
+      // (it saves newly-completed assets synchronously), which is why
+      // restored sessions showed all asset markers piled at the bottom with
+      // no matching chat message: the message never made it to DynamoDB.
+      //
+      // Fix: keep the periodic 15s safety net running for a grace window
+      // after isTyping goes false (not just during it), so a burst of
+      // trailing asset/tool messages can no longer starve the save forever.
       if (state.messages !== prevMessages && state.messages.length > 0) {
         prevMessages = state.messages;
         if (!state.isTyping) {
           // Not streaming: save with short debounce (response complete or user message before streaming)
           if (saveHistoryTimeoutRef.current) clearTimeout(saveHistoryTimeoutRef.current);
           saveHistoryTimeoutRef.current = setTimeout(saveHistoryToDynamoDB, 2000);
+          // Safety net: if trailing tool/asset messages keep re-arming the
+          // debounce above, this independent interval still fires every 15s
+          // and is NOT reset by the same events, guaranteeing the turn is
+          // eventually persisted even if the debounce never quiesces.
+          if (!streamingSaveIntervalRef.current) {
+            streamingSaveIntervalRef.current = setInterval(saveHistoryToDynamoDB, 15_000);
+            trailingSaveGraceRef.current = setTimeout(() => {
+              if (streamingSaveIntervalRef.current) {
+                clearInterval(streamingSaveIntervalRef.current);
+                streamingSaveIntervalRef.current = null;
+              }
+            }, 60_000); // stop the safety net once the burst has clearly settled
+          }
         }
       }
 
       if (isTypingChanged) {
         prevIsTyping = state.isTyping;
         if (state.isTyping) {
+          if (trailingSaveGraceRef.current) {
+            clearTimeout(trailingSaveGraceRef.current);
+            trailingSaveGraceRef.current = null;
+          }
           // Streaming started → save immediately (captures user's question + initial state)
           saveHistoryToDynamoDB();
           // Start periodic saves during streaming (every 15s)
           if (streamingSaveIntervalRef.current) clearInterval(streamingSaveIntervalRef.current);
           streamingSaveIntervalRef.current = setInterval(saveHistoryToDynamoDB, 15_000);
         } else {
-          // Streaming ended → stop periodic saves, do final save
-          if (streamingSaveIntervalRef.current) {
-            clearInterval(streamingSaveIntervalRef.current);
-            streamingSaveIntervalRef.current = null;
-          }
+          // Streaming ended → do a final save now (do NOT stop the periodic
+          // interval here — trailing asset/tool messages may still be
+          // arriving; the safety net above owns tearing it down once the
+          // burst settles).
           if (saveHistoryTimeoutRef.current) clearTimeout(saveHistoryTimeoutRef.current);
           saveHistoryTimeoutRef.current = setTimeout(saveHistoryToDynamoDB, 2000);
         }
@@ -286,6 +326,7 @@ export function useAutoSave() {
       if (saveAssetsTimeoutRef.current) clearTimeout(saveAssetsTimeoutRef.current);
       if (saveSessionDataTimeoutRef.current) clearTimeout(saveSessionDataTimeoutRef.current);
       if (streamingSaveIntervalRef.current) clearInterval(streamingSaveIntervalRef.current);
+      if (trailingSaveGraceRef.current) clearTimeout(trailingSaveGraceRef.current);
     };
   }, [saveHistoryToDynamoDB, saveAssetsToDynamoDB, saveSessionDataToDynamoDB]);
 }
