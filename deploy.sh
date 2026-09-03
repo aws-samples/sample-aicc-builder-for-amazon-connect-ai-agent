@@ -545,6 +545,12 @@ if [ "$DEPLOY_INFRA" = true ]; then
     echo -e "\n${YELLOW}Step 1: Deploying CDK Infrastructure...${NC}"
     cd "$SCRIPT_DIR/infrastructure"
 
+    echo "Compiling CDK app (tsc)..."
+    if ! npm run build 2>&1 | tail -20; then
+        echo -e "${RED}TypeScript compilation failed. Check errors above.${NC}"
+        exit 1
+    fi
+
     # Check CDK bootstrap
     if ! aws cloudformation describe-stacks --stack-name CDKToolkit --region "$AWS_DEFAULT_REGION" > /dev/null 2>&1; then
         echo "Bootstrapping CDK..."
