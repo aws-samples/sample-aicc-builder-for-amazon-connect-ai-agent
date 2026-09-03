@@ -30,6 +30,12 @@ const albDnsSsmParamName = `/aicc-builder${suffix}/alb-dns`;
 // stack from the ECS stack (same pattern as albDnsSsmParamName).
 const contactFlowKbIdSsmParamName = `/aicc-builder${suffix}/contact-flow-kb-id`;
 
+// Opt-in: create a VPC Block Public Access exclusion so the internet-facing ALB
+// is reachable in accounts/Regions where VPC BPA is enabled (block-ingress /
+// block-bidirectional). Off by default — enable with -c allowVpcPublicAccess=true.
+const allowVpcPublicAccess =
+  app.node.tryGetContext("allowVpcPublicAccess") === "true";
+
 // Main AICC Builder Stack first — owns AssetsBucket, Cognito, CloudFront, Lambda API.
 // CloudFront reads ALB DNS via SSM dynamic reference (no CFN cross-stack edge).
 const mainStack = new AiccBuilderStack(app, mainStackId, {
@@ -48,6 +54,7 @@ new EcsStack(app, ecsStackId, {
   assetsBucket: mainStack.assetsBucket,
   albDnsSsmParamName,
   contactFlowKbIdSsmParamName,
+  allowVpcPublicAccess,
 });
 
 // Knowledge Base Stack for Contact Flow Generator RAG

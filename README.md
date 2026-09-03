@@ -352,45 +352,7 @@ Then trigger with `/aicc-builder`. Full install + usage details:
 
 ## Architecture
 
-```
-                        ┌──────────────────────────┐
-                        │   CloudFront + S3         │
-                        │   React Web App           │
-                        └────────────┬─────────────┘
-                                     │ WebSocket (Cognito JWT)
-                        ┌────────────▼─────────────┐
-                        │   ALB (idle 4h, sticky)   │
-                        └────────────┬─────────────┘
-                        ┌────────────▼─────────────┐
-                        │   ECS Fargate (ARM64)     │
-                        │   FastAPI + Uvicorn       │
-                        │                           │
-                        │   ┌───────────────────┐   │
-                        │   │   Orchestrator    │   │
-                        │   │  (Claude Opus 4.8)│   │
-                        │   └───────┬───────────┘   │
-                        │           │ Agent-as-Tool  │
-                        │   ┌───────▼───────────┐   │
-                        │   │  9 Sub-Agents     │   │
-                        │   │  (specialized)    │   │
-                        │   └───────────────────┘   │
-                        │           │               │
-                        │   ┌───────▼───────────┐   │
-                        │   │  /mnt/s3 (NFS)    │   │
-                        │   │  S3 Files Mount   │   │
-                        │   └───────────────────┘   │
-                        └────────────┬─────────────┘
-                                     │
-                 ┌───────────┬───────┼───────┬──────────┐
-                 │           │       │       │          │
-              DynamoDB    Bedrock    S3    Cognito   CloudWatch
-                             │        │                  (X-Ray)
-                   ┌─────────┴───┐ ┌──┴────────┐
-                   │ Opus 4.8 +  │ │ S3 Files  │
-                   │ KB on S3    │ │ (NFS)     │
-                   │ Vectors(RAG)│ └───────────┘
-                   └─────────────┘
-```
+![AICC Builder runtime architecture — browser → CloudFront → ALB → ECS Fargate orchestrator, with Bedrock, S3 Vectors KB RAG, AgentCore Gateway, S3 Files NFS, DynamoDB, Cognito and CloudWatch](./docs/images/aicc-builder-architecture.png)
 
 Runtime highlights:
 

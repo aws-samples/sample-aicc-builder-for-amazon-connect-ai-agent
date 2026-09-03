@@ -52,6 +52,29 @@ export interface EcsStackProps extends cdk.StackProps {
    * disabled), so RAG degrades gracefully when the param is absent.
    */
   contactFlowKbIdSsmParamName?: string;
+
+  /**
+   * Create a VPC Block Public Access (BPA) exclusion for this VPC.
+   *
+   * VPC BPA is an account/Region-level control (AWS::EC2::VPCBlockPublicAccessOptions)
+   * that can block ALL internet-gateway ingress/egress regardless of security
+   * groups, NACLs, and route tables. When an account has BPA set to
+   * `block-ingress` (or `block-bidirectional`), the internet-facing ALB in this
+   * stack becomes unreachable: the frontend still loads (served from S3 via
+   * CloudFront, which does not traverse the IGW) and the ECS task stays healthy
+   * (internal traffic), but `/ws` and `/api/*` requests time out because they
+   * never reach the ALB. Confirmed via Reachability Analyzer, which reports
+   * `VPC_BLOCK_PUBLIC_ACCESS_ENABLED` on the ALB subnets.
+   *
+   * Setting this true creates an `allow-bidirectional` exclusion for this VPC so
+   * the ALB is reachable even when the account guardrail is on. This opens the
+   * VPC to the internet, so it is OFF by default and must be enabled
+   * deliberately (context `-c allowVpcPublicAccess=true` in deploy.sh, or this
+   * prop). Creating the exclusion is harmless when BPA is not enabled.
+   *
+   * @default false
+   */
+  allowVpcPublicAccess?: boolean;
 }
 
 export class EcsStack extends cdk.Stack {
@@ -83,6 +106,31 @@ export class EcsStack extends cdk.Stack {
         },
       ],
     });
+
+    // ========================================
+    // VPC Block Public Access (BPA) exclusion — optional, opt-in
+    // ========================================
+    // If the account/Region has VPC BPA enabled (block-ingress or
+    // block-bidirectional), the internet-facing ALB below is unreachable from
+    // the internet no matter how SGs/NACLs/routes are configured, so /ws and
+    // /api/* time out while the S3/CloudFront-served frontend still loads.
+    // Create an allow-bidirectional exclusion for this VPC so the ALB works
+    // under BPA. Opt-in only (see EcsStackProps.allowVpcPublicAccess), because
+    // it deliberately opens this VPC to the internet. No-op when BPA is off.
+    // Uses a raw CfnResource so it works on CDK versions without the L1
+    // ec2.CfnVpcBlockPublicAccessExclusion construct.
+    const allowVpcPublicAccess =
+      props?.allowVpcPublicAccess ??
+      this.node.tryGetContext("allowVpcPublicAccess") === "true";
+    if (allowVpcPublicAccess) {
+      new cdk.CfnResource(this, "VpcBpaExclusion", {
+        type: "AWS::EC2::VPCBlockPublicAccessExclusion",
+        properties: {
+          VpcId: vpc.vpcId,
+          InternetGatewayExclusionMode: "allow-bidirectional",
+        },
+      });
+    }
 
     // ========================================
     // ECR Repository (pre-created by deploy.sh to avoid chicken-and-egg)
