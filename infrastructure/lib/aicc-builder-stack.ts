@@ -1171,7 +1171,15 @@ def generate_upload_presigned_url(user_id, session_id, body):
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
         allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-        originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER,
+        // Forward everything EXCEPT the Host header. ALL_VIEWER forwards the
+        // viewer Host (the CloudFront domain) to the ALB origin, which breaks
+        // the WebSocket upgrade handshake to /ws (the 101 never completes and
+        // the client times out). AllViewerExceptHostHeader still forwards the
+        // Sec-WebSocket-* handshake headers, cookies (sticky sessions), and
+        // query strings (token/sessionId) while letting CloudFront set Host to
+        // the ALB origin. Standard choice for ALB / API Gateway custom origins.
+        originRequestPolicy:
+          cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
       };
       additionalBehaviors["/ws"] = albBehavior;
       additionalBehaviors["/api/*"] = albBehavior;

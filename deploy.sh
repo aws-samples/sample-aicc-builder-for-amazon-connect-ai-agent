@@ -131,6 +131,7 @@ DEPLOY_FRONTEND=true
 FORCE_BUILD=false
 SKIP_CHECKS=false
 STAGE="dev"
+ALLOW_VPC_PUBLIC_ACCESS=false
 
 print_usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -142,6 +143,11 @@ print_usage() {
     echo "  --force            Force rebuild even if no changes detected"
     echo "  --skip-checks      Skip hash checks (faster but may rebuild unnecessarily)"
     echo "  --stage <name>     Deploy to a named stage (e.g., dev, staging, prod). Default: dev"
+    echo "  --allow-vpc-public-access"
+    echo "                     Create a VPC Block Public Access (BPA) exclusion for this VPC."
+    echo "                     Needed ONLY when the account/Region has VPC BPA enabled"
+    echo "                     (e.g., Control Tower block-ingress) and /ws //api/* time out."
+    echo "                     Deliberately opens this VPC to the internet — off by default."
     echo "  --help             Show this help message"
     echo ""
     echo "Environment variables:"
@@ -194,6 +200,10 @@ while [[ $# -gt 0 ]]; do
             STAGE="$2"
             shift 2
             ;;
+        --allow-vpc-public-access)
+            ALLOW_VPC_PUBLIC_ACCESS=true
+            shift
+            ;;
         --help|-h)
             print_usage
             exit 0
@@ -232,6 +242,11 @@ if [ -n "$STAGE" ]; then
     STAGE_SUFFIX="-${STAGE}"
     CDK_CONTEXT_ARGS="-c stage=${STAGE}"
     echo -e "${CYAN}Stage: ${STAGE} (stack suffix: ${STAGE_SUFFIX})${NC}"
+fi
+
+if [ "$ALLOW_VPC_PUBLIC_ACCESS" = true ]; then
+    CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c allowVpcPublicAccess=true"
+    echo -e "${YELLOW}VPC Block Public Access exclusion ENABLED: this VPC will be excluded from the account BPA guardrail (allow-bidirectional).${NC}"
 fi
 
 STACK_NAME="AiccBuilderStack${STAGE_SUFFIX}"
