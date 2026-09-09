@@ -235,3 +235,38 @@ def test_infrastructure_spec_inherits_runtime_target():
     # the saved spec now wins even if the seed disappears
     afs.set_runtime_target(SID, "classic")
     assert afs.get_runtime_target() == "acxd"
+
+
+def test_parallel_mutations_do_not_lose_updates():
+    """Strands runs a turn's tool calls in parallel; no upsert may be lost."""
+    import concurrent.futures
+    from tools.session_context import current_session_id as _csid
+
+    def work(i):
+        tok = _csid.set(SID)
+        try:
+            return afs.upsert_acxd_flow_plan(
+                flow_id=f"Flow{chr(65 + i)}", purpose=str(i), role="welcome" if i == 0 else "operation",
+                operation_id=None if i == 0 else f"op{i}",
+                steps=[{"step": 1, "description": "x", "node_type": "basic"}])
+        finally:
+            _csid.reset(tok)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(work, range(8)))
+    assert all(r["success"] for r in results), results
+    assert len(afs.get_acxd_flow_spec().flows) == 8
+
+
+def test_list_parameters_accept_json_strings():
+    import json as _json
+    res = _upsert(steps=_json.dumps(_steps()))
+    assert res["success"], res
+    assert afs.confirm_acxd_flow_steps("ProcessReturn", step_numbers="[1, 2]")["awaiting_confirmation"] == [3, 4]
+    res = afs.save_acxd_policies(guardrails='[{"name":"PII","policy":"mask cards","action":"mask"}]',
+                                 kb_topics='["shipping","returns"]')
+    assert res["success"] and res["guardrail_count"] == 1 and res["kb_topics"] == 2
+    res = afs.save_acxd_application_settings(channels='["voice","chat"]', locales='["ko","en-US"]')
+    assert res["application"]["locales"] == ["ko-KR", "en-US"]
+    bad = _upsert(steps="not json")
+    assert not bad["success"] and "JSON" in bad["error"]

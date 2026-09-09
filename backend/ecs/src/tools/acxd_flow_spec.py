@@ -38,7 +38,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 from strands import tool
@@ -458,6 +458,25 @@ def _load_or_new() -> ACXDFlowSpec:
     return get_acxd_flow_spec() or ACXDFlowSpec()
 
 
+# The orchestrator runs independent tool calls of one turn in parallel, and
+# every mutating tool below is a read-modify-write of the whole spec file.
+# Live run 1 lost three guardrails and a confirmation to exactly that race, so
+# mutations are serialized per session.
+import threading
+
+_spec_locks: dict[str, threading.RLock] = {}
+_spec_locks_guard = threading.Lock()
+
+
+def _spec_lock(session_id: Optional[str]) -> threading.RLock:
+    key = session_id or "__no_session__"
+    with _spec_locks_guard:
+        lock = _spec_locks.get(key)
+        if lock is None:
+            lock = _spec_locks[key] = threading.RLock()
+        return lock
+
+
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
@@ -549,6 +568,27 @@ def acxd_flow_spec_ready() -> tuple[bool, List[str]]:
 # Interview tools
 # ---------------------------------------------------------------------------
 
+def _as_list(value, name: str) -> list:
+    """Accept a real list or its JSON-string form (the model sometimes passes
+    `steps="[...]"`; the Classic behaviors parameter has the same history)."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{name} must be a JSON list, got a string that is not valid JSON: {e}")
+        if not isinstance(parsed, list):
+            raise ValueError(f"{name} must be a list")
+        return parsed
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    raise ValueError(f"{name} must be a list")
+
+
 def _decision_key(s: ACXDNodeStep) -> tuple:
     """What the user actually confirmed: the determinism class of the step and
     what it decides. A node-type *name* correction inside the same class
@@ -568,8 +608,8 @@ def upsert_acxd_flow_plan(
     purpose: str,
     role: str = "operation",
     operation_id: str = None,
-    steps: list[dict] = None,
-    slots: list[dict] = None,
+    steps: Union[list[dict], str] = None,
+    slots: Union[list[dict], str] = None,
     uses_knowledge_base: bool = False,
     escalation_conditions: str = None,
 ) -> dict:
@@ -618,78 +658,79 @@ def upsert_acxd_flow_plan(
     Returns:
         The saved plan summary, coerced/normalized steps, and the step numbers awaiting confirmation.
     """
-    try:
-        if not _FLOW_ID_RE.match(flow_id or ""):
-            return {"success": False,
-                    "error": f"flow_id '{flow_id}' must be letters only, 3-64 chars (ACXD constraint)"}
-        if role not in FLOW_ROLES:
-            return {"success": False, "error": f"role must be one of {FLOW_ROLES}"}
-        if role == "operation" and not operation_id:
-            return {"success": False, "error": "operation flows must name their operation_id"}
-
-        spec = _load_or_new()
-        existing = spec.flow(flow_id)
-        prev_steps = {s.step: s for s in (existing.steps if existing else [])}
-
-        notes: List[str] = []
-        new_steps: List[ACXDNodeStep] = []
-        for raw in steps or []:
-            raw = dict(raw or {})
-            raw.pop("user_confirmed", None)          # never trust a confirmation from the proposer
-            raw.pop("confirmation_pending_reason", None)
-            requested_type = raw.get("node_type")
-            canonical = canonical_node_type(requested_type)
-            if canonical is None:
+    with _spec_lock(_current_session_id()):
+        try:
+            if not _FLOW_ID_RE.match(flow_id or ""):
                 return {"success": False,
-                        "error": f"step {raw.get('step')}: unknown node_type '{requested_type}'. "
-                                 f"Use one of {sorted(SUPPORTED_NODE_TYPES)}"}
-            if canonical != requested_type:
-                notes.append(f"step {raw.get('step')}: node_type '{requested_type}' normalized to '{canonical}'")
-            raw["node_type"] = canonical
-            if canonical == "data_request" and not raw.get("data_request_id"):
-                raw["data_request_id"] = operation_id
-            s = ACXDNodeStep.model_validate(raw)
-            note = enforce_determinism_policy(s)
-            if note:
-                notes.append(note)
-            prev = prev_steps.get(s.step)
-            if prev and prev.user_confirmed and _decision_key(prev) == _decision_key(s):
-                s.user_confirmed = True                # unchanged decision keeps its confirmation
-            elif prev and prev.user_confirmed:
-                s.confirmation_pending_reason = "decision changed since confirmation"
-            new_steps.append(s)
-        new_steps.sort(key=lambda s: s.step)
+                        "error": f"flow_id '{flow_id}' must be letters only, 3-64 chars (ACXD constraint)"}
+            if role not in FLOW_ROLES:
+                return {"success": False, "error": f"role must be one of {FLOW_ROLES}"}
+            if role == "operation" and not operation_id:
+                return {"success": False, "error": "operation flows must name their operation_id"}
 
-        all_confirmed = bool(new_steps) and all(s.user_confirmed for s in new_steps)
-        plan = ACXDFlowPlan(
-            flow_id=flow_id, purpose=purpose, role=role, operation_id=operation_id,
-            steps=new_steps,
-            slots=[ACXDSlotPlan.model_validate(x) for x in (slots or [])],
-            uses_knowledge_base=uses_knowledge_base,
-            escalation_conditions=escalation_conditions,
-            # A plan whose every decision the user already confirmed stays approved.
-            confirmed=bool(existing and existing.confirmed and all_confirmed),
-        )
-        spec.flows = [f for f in spec.flows if f.flow_id != flow_id] + [plan]
-        save_acxd_flow_spec(spec)
-        return {
-            "success": True,
-            "flow_id": flow_id,
-            "role": role,
-            "step_count": len(new_steps),
-            "coerced": notes,
-            "awaiting_confirmation": plan.unconfirmed_steps,
-            "flow_approved": plan.confirmed,
-            "message": ("Plan saved. Show the steps and their determinism labels to the user; "
-                        "call confirm_acxd_flow_steps only after they explicitly agree."
-                        if plan.unconfirmed_steps else "Plan saved; all decisions remain confirmed."),
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+            spec = _load_or_new()
+            existing = spec.flow(flow_id)
+            prev_steps = {s.step: s for s in (existing.steps if existing else [])}
+
+            notes: List[str] = []
+            new_steps: List[ACXDNodeStep] = []
+            for raw in _as_list(steps, 'steps'):
+                raw = dict(raw or {})
+                raw.pop("user_confirmed", None)          # never trust a confirmation from the proposer
+                raw.pop("confirmation_pending_reason", None)
+                requested_type = raw.get("node_type")
+                canonical = canonical_node_type(requested_type)
+                if canonical is None:
+                    return {"success": False,
+                            "error": f"step {raw.get('step')}: unknown node_type '{requested_type}'. "
+                                     f"Use one of {sorted(SUPPORTED_NODE_TYPES)}"}
+                if canonical != requested_type:
+                    notes.append(f"step {raw.get('step')}: node_type '{requested_type}' normalized to '{canonical}'")
+                raw["node_type"] = canonical
+                if canonical == "data_request" and not raw.get("data_request_id"):
+                    raw["data_request_id"] = operation_id
+                s = ACXDNodeStep.model_validate(raw)
+                note = enforce_determinism_policy(s)
+                if note:
+                    notes.append(note)
+                prev = prev_steps.get(s.step)
+                if prev and prev.user_confirmed and _decision_key(prev) == _decision_key(s):
+                    s.user_confirmed = True                # unchanged decision keeps its confirmation
+                elif prev and prev.user_confirmed:
+                    s.confirmation_pending_reason = "decision changed since confirmation"
+                new_steps.append(s)
+            new_steps.sort(key=lambda s: s.step)
+
+            all_confirmed = bool(new_steps) and all(s.user_confirmed for s in new_steps)
+            plan = ACXDFlowPlan(
+                flow_id=flow_id, purpose=purpose, role=role, operation_id=operation_id,
+                steps=new_steps,
+                slots=[ACXDSlotPlan.model_validate(x) for x in _as_list(slots, 'slots')],
+                uses_knowledge_base=uses_knowledge_base,
+                escalation_conditions=escalation_conditions,
+                # A plan whose every decision the user already confirmed stays approved.
+                confirmed=bool(existing and existing.confirmed and all_confirmed),
+            )
+            spec.flows = [f for f in spec.flows if f.flow_id != flow_id] + [plan]
+            save_acxd_flow_spec(spec)
+            return {
+                "success": True,
+                "flow_id": flow_id,
+                "role": role,
+                "step_count": len(new_steps),
+                "coerced": notes,
+                "awaiting_confirmation": plan.unconfirmed_steps,
+                "flow_approved": plan.confirmed,
+                "message": ("Plan saved. Show the steps and their determinism labels to the user; "
+                            "call confirm_acxd_flow_steps only after they explicitly agree."
+                            if plan.unconfirmed_steps else "Plan saved; all decisions remain confirmed."),
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @tool
-def confirm_acxd_flow_steps(flow_id: str, step_numbers: list[int] = None, approve_flow: bool = True) -> dict:
+def confirm_acxd_flow_steps(flow_id: str, step_numbers: Union[list[int], str] = None, approve_flow: bool = True) -> dict:
     """
     Record the user's EXPLICIT confirmation of determinism decisions for a flow.
 
@@ -705,24 +746,26 @@ def confirm_acxd_flow_steps(flow_id: str, step_numbers: list[int] = None, approv
     Returns:
         Remaining unconfirmed steps for this flow.
     """
-    spec = get_acxd_flow_spec()
-    plan = spec.flow(flow_id) if spec else None
-    if plan is None:
-        return {"success": False, "error": f"no plan for flow '{flow_id}' — call upsert_acxd_flow_plan first"}
-    wanted = set(step_numbers) if step_numbers else {s.step for s in plan.steps}
-    for s in plan.steps:
-        if s.step in wanted:
-            s.user_confirmed = True
-            s.confirmation_pending_reason = None
-    if approve_flow and not plan.unconfirmed_steps:
-        plan.confirmed = True
-    save_acxd_flow_spec(spec)
-    return {"success": True, "flow_id": flow_id, "confirmed": sorted(wanted),
-            "awaiting_confirmation": plan.unconfirmed_steps, "flow_approved": plan.confirmed}
+    with _spec_lock(_current_session_id()):
+        spec = get_acxd_flow_spec()
+        plan = spec.flow(flow_id) if spec else None
+        if plan is None:
+            return {"success": False, "error": f"no plan for flow '{flow_id}' — call upsert_acxd_flow_plan first"}
+        numbers = [int(n) for n in _as_list(step_numbers, 'step_numbers')]
+        wanted = set(numbers) if numbers else {s.step for s in plan.steps}
+        for s in plan.steps:
+            if s.step in wanted:
+                s.user_confirmed = True
+                s.confirmation_pending_reason = None
+        if approve_flow and not plan.unconfirmed_steps:
+            plan.confirmed = True
+        save_acxd_flow_spec(spec)
+        return {"success": True, "flow_id": flow_id, "confirmed": sorted(wanted),
+                "awaiting_confirmation": plan.unconfirmed_steps, "flow_approved": plan.confirmed}
 
 
 @tool
-def save_acxd_policies(guardrails: list[dict] = None, kb_name: str = None, kb_topics: list[str] = None) -> dict:
+def save_acxd_policies(guardrails: Union[list[dict], str] = None, kb_name: str = None, kb_topics: Union[list[str], str] = None) -> dict:
     """
     Save guardrails and the knowledge-base shell (runtime target acxd only).
 
@@ -733,31 +776,32 @@ def save_acxd_policies(guardrails: list[dict] = None, kb_name: str = None, kb_to
         kb_name: Knowledge base name (articles come from the FAQ asset).
         kb_topics: FAQ topics the KB should cover.
     """
-    try:
-        spec = _load_or_new()
-        if guardrails is not None:
-            spec.guardrails = [ACXDGuardrailPlan.model_validate(g) for g in guardrails]
-        if kb_name is not None:
-            spec.knowledge_base.name = kb_name
-        if kb_topics is not None:
-            spec.knowledge_base.topics = list(kb_topics)
-        save_acxd_flow_spec(spec)
-        return {"success": True, "guardrail_count": len(spec.guardrails),
-                "kb_topics": len(spec.knowledge_base.topics)}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    with _spec_lock(_current_session_id()):
+        try:
+            spec = _load_or_new()
+            if guardrails is not None:
+                spec.guardrails = [ACXDGuardrailPlan.model_validate(g) for g in _as_list(guardrails, 'guardrails')]
+            if kb_name is not None:
+                spec.knowledge_base.name = kb_name
+            if kb_topics is not None:
+                spec.knowledge_base.topics = [str(t) for t in _as_list(kb_topics, 'kb_topics')]
+            save_acxd_flow_spec(spec)
+            return {"success": True, "guardrail_count": len(spec.guardrails),
+                    "kb_topics": len(spec.knowledge_base.topics)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @tool
 def save_acxd_application_settings(
     name: str = None,
     description: str = None,
-    channels: list[str] = None,
-    locales: list[str] = None,
+    channels: Union[list[str], str] = None,
+    locales: Union[list[str], str] = None,
     primary_locale: str = None,
     speech_engine: str = None,
     idle_chat_timeout_seconds: int = None,
-    context_variables: list[dict] = None,
+    context_variables: Union[list[dict], str] = None,
     environment: str = None,
 ) -> dict:
     """
@@ -772,32 +816,33 @@ def save_acxd_application_settings(
                             "from_contact_attribute":"$.CustomerEndpoint.Address"}].
         environment: ACXD deployment environment (default 'development').
     """
-    try:
-        spec = _load_or_new()
-        app = spec.application
-        if name is not None:
-            app.name = name
-        if description is not None:
-            app.description = description
-        if channels is not None:
-            app.channels = list(channels)
-        if locales is not None:
-            app.locales = [canonical_language(c) for c in locales]
-        if primary_locale is not None:
-            app.primary_locale = canonical_language(primary_locale)
-        if speech_engine is not None:
-            app.speech_engine = speech_engine
-        if idle_chat_timeout_seconds is not None:
-            app.idle_chat_timeout_seconds = idle_chat_timeout_seconds
-        if context_variables is not None:
-            app.context_variables = [ACXDContextVariable.model_validate(v) for v in context_variables]
-        if environment is not None:
-            app.environment = environment
-        save_acxd_flow_spec(spec)
-        problems = [p for p in validate_acxd_flow_spec(spec) if p.startswith("application:")]
-        return {"success": not problems, "application": app.model_dump(), "problems": problems}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    with _spec_lock(_current_session_id()):
+        try:
+            spec = _load_or_new()
+            app = spec.application
+            if name is not None:
+                app.name = name
+            if description is not None:
+                app.description = description
+            if channels is not None:
+                app.channels = [str(c) for c in _as_list(channels, 'channels')]
+            if locales is not None:
+                app.locales = [canonical_language(c) for c in _as_list(locales, 'locales')]
+            if primary_locale is not None:
+                app.primary_locale = canonical_language(primary_locale)
+            if speech_engine is not None:
+                app.speech_engine = speech_engine
+            if idle_chat_timeout_seconds is not None:
+                app.idle_chat_timeout_seconds = idle_chat_timeout_seconds
+            if context_variables is not None:
+                app.context_variables = [ACXDContextVariable.model_validate(v) for v in _as_list(context_variables, 'context_variables')]
+            if environment is not None:
+                app.environment = environment
+            save_acxd_flow_spec(spec)
+            problems = [p for p in validate_acxd_flow_spec(spec) if p.startswith("application:")]
+            return {"success": not problems, "application": app.model_dump(), "problems": problems}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @tool
