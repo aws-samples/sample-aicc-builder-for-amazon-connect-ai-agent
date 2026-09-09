@@ -106,6 +106,18 @@ def _read_state(session_id: str) -> Dict[str, Any]:
                 return json.load(f)
     except Exception as e:
         logger.warning(f"[generation_progress] failed to read state: {e}")
+    # The NFS file was not visible to a task that started after it was written
+    # (live: a redeploy mid-generation dropped a session back to 'interview' and
+    # the model then narrated tool calls it could not make). The S3 workspace
+    # copy is the durable one.
+    try:
+        from tools.project_workspace import ProjectWorkspace, get_workspace_for
+        ws = get_workspace_for(session_id) or ProjectWorkspace(session_id)
+        data = ws._load_json(["generation_progress.json"])
+        if isinstance(data, dict) and data.get("assets"):
+            return data
+    except Exception as e:  # pragma: no cover - storage outage
+        logger.debug(f"[generation_progress] workspace read skipped: {e}")
     return {"assets": {}, "events": []}
 
 
@@ -119,6 +131,39 @@ def _write_state(session_id: str, state: Dict[str, Any]) -> None:
         tmp.rename(path)
     except Exception as e:
         logger.warning(f"[generation_progress] failed to write state: {e}")
+    try:
+        from tools.project_workspace import ProjectWorkspace, get_workspace_for
+        ws = get_workspace_for(session_id) or ProjectWorkspace(session_id)
+        ws._save_json(["generation_progress.json"], state)
+    except Exception as e:  # pragma: no cover - storage outage
+        logger.debug(f"[generation_progress] workspace mirror skipped: {e}")
+
+
+#: S3 asset-type prefixes that prove generation has started, keyed by the
+#: progress asset id they imply. Used only when the progress state is absent.
+_ASSET_TYPE_TO_PROGRESS = {
+    "lambda": "lambda", "openapi": "openapi", "prompt": "prompt",
+    "contact_flow": "contact_flow", "cdk": "cdk", "cloudformation": "cdk",
+    "infrastructure": "cdk", "acxd_flow": "acxd_application",
+    "acxd_application": "acxd_application", "faq": "knowledge_base",
+}
+
+
+def _infer_assets_from_storage(session_id: str) -> Dict[str, Dict[str, str]]:
+    """Rebuild a minimal completion map from the session's stored assets."""
+    inferred: Dict[str, Dict[str, str]] = {}
+    try:
+        from tools.s3_asset_storage import list_session_assets
+        for key in list_session_assets(session_id) or []:
+            parts = str(key).split("/")
+            # assets/{sid}/{asset_type}/...
+            asset_type = parts[2] if len(parts) > 3 and parts[0] == "assets" else None
+            progress_id = _ASSET_TYPE_TO_PROGRESS.get(asset_type or "")
+            if progress_id and progress_id not in inferred:
+                inferred[progress_id] = {"status": "completed", "inferred": True}
+    except Exception as e:  # pragma: no cover - storage outage
+        logger.debug(f"[generation_progress] asset inference skipped: {e}")
+    return inferred
 
 
 # Completions are recorded on TWO paths: inline per toolResult during
@@ -524,7 +569,17 @@ def detect_phase(session_id: str) -> str:
         from tools.interview_completion import check_interview_handoff
         if check_interview_handoff(session_id):
             return "generation"
-        return state.get("phase", "interview")
+        # No progress state visible (fresh task after a redeploy, NFS lag): the
+        # stored assets are the ground truth for whether generation began.
+        inferred = _infer_assets_from_storage(session_id)
+        if inferred:
+            logger.info(
+                f"[generation_progress] {session_id}: progress state absent, "
+                f"inferred {sorted(inferred)} from stored assets"
+            )
+            assets = inferred
+        else:
+            return state.get("phase", "interview")
 
     # Check which core assets are completed
     core_completed = set()
