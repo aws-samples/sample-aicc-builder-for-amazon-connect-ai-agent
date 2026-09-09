@@ -2615,6 +2615,60 @@ DO NOT silently run a pipeline. Be conversational:
 """
 
 # =============================================================================
+# ACXD_RUNTIME_TARGET_PROMPT — Target-specific generation and review overlay
+# =============================================================================
+ACXD_RUNTIME_TARGET_PROMPT = """
+## ACXD RUNTIME TARGET — THIS OVERRIDES CONFLICTING CLASSIC PHASE WORDING
+
+This build targets Agentic CX Designer (ACXD), not the Classic Lex plus AI-prompt
+runtime. Keep the Classic infrastructure, Lambda, and OpenAPI contract, but use
+the following target-specific generation sequence. The one-phase-per-turn rule
+still applies: complete exactly one numbered phase, present its result, ask for
+approval, and stop. Never auto-fix a finding. In modification mode, use
+`patch_acxd_asset` for a minimal patch only, let its bundle validation decide
+whether it can stand, and wait for explicit user approval before any further edit.
+
+### ACXD generation phases
+1. **Infrastructure** — generate the Connect/API Gateway/Lambda infrastructure.
+   Do not add AgentCore Gateway or Lex resources for ACXD.
+2. **Lambda** — generate the operation backends that Data Requests will call.
+3. **OpenAPI** — generate the API Gateway contract; it is the source of truth for
+   ACXD Data Request request and response fields.
+4. **ACXD Application** — call `generate_acxd_application`, not
+   `prompt_generator_agent`. It generates the confirmed flow graphs, Data
+   Requests, slot types, guardrails, knowledge-base shell/articles, context
+   variables, and application asset. Do not combine this with another generator
+   in the same turn.
+5. **Contact Flow** — call `contact_flow_generator_agent` with the Agentic CX
+   block requirements, not Lex requirements. The flow must bind the ACXD
+   workspace/application/alias, use the selected speech engine, expose no more
+   than ten context variables, and route Default, Escalation, Error, and (for
+   chat) Idle chat timeout branches. Follow-on reads use
+   `$.AgenticCX.ContextVariables.<name>`.
+6. **FAQ and Knowledge Base** — call `faq_generator_agent` for the customer FAQ
+   material and feed its articles into the ACXD knowledge-base asset. FAQ lookup
+   remains a native `knowledge_base` node, not a Lambda or API operation.
+7. **Review** — call `reviewer_agent` and `validate_parameter_consistency` so the
+   ACXD-only D9 checks run. Review flow graph/schema validity, confirmed
+   deterministic versus generative decisions, Data Request/OpenAPI parity, slot
+   type/field parity, FAQ/knowledge-base parity, guardrails, letters-only flow
+   IDs and ASCII metadata, and Agentic CX Contact Flow bindings. Present every
+   finding and wait for explicit user-selected fixes; never auto-fix.
+
+### ACXD native-capability rules
+- Use a native `knowledge_base` node for FAQ retrieval.
+- Use native `escalation` or `end` nodes plus a Contact Flow branch for transfer
+  or completion. Never create a Lambda or API operation whose sole purpose is
+  FAQ lookup, escalation, or ending a conversation.
+- `choice` is the conditional business-rule node. `split` is only percentage
+  A/B routing and must not be used for conditional branching.
+- Money, refund, payment, authorization, eligibility, compliance, and identity
+  decisions stay deterministic without exception. A generative step may explain
+  a fixed result but may not make that decision.
+"""
+
+
+# =============================================================================
 # Phase-based prompt composition
 # =============================================================================
 PHASE_PROMPTS = {
@@ -2692,25 +2746,34 @@ Contact Flow) without the cost and latency of the full bundle.
 """
 
 
-def get_phase_system_prompt(phase: str, scope: Optional[list] = None) -> list:
-    """Return phase-specific system prompt sections with cachePoint for Bedrock prompt caching.
+def get_phase_system_prompt(
+    phase: str,
+    scope: Optional[list] = None,
+    runtime_target: str = "classic",
+) -> list:
+    """Return phase-specific prompts, including the ACXD target overlay when selected.
 
-    When ``phase == "generation"`` and ``scope`` is a proper subset of the scoped
-    segments (i.e. a partial run), the forceful full-pipeline GENERATION_PROMPT is
-    swapped for a scoped variant that only permits the in-scope generators.
+    The runtime target is fixed at session start and passed explicitly so prompt
+    selection never depends on stale conversation history. Scoped generation still
+    trims the Classic asset list, while the ACXD overlay remains authoritative for
+    an ACXD target.
     """
+    is_acxd = runtime_target == "acxd"
     if phase == "interview":
         from prompts.interview_agent_prompt import get_interview_agent_prompt
-        return get_interview_agent_prompt()
+        return get_interview_agent_prompt(runtime_target=runtime_target)
 
     if phase == "generation" and scope:
         scope_set = set(scope)
+        full_produced_assets = (
+            (_FULL_PRODUCED_ASSETS - {"prompt"}) | {"acxd_application"}
+            if is_acxd else _FULL_PRODUCED_ASSETS
+        )
         # Scoped run = contains a scoped segment AND is missing at least one
-        # full-pipeline asset (i.e. it's not a full build). Compared in
-        # produced-asset id space (knowledge_base, not faq).
+        # target-specific full-pipeline asset.
         is_scoped = (
             bool(scope_set & SCOPED_GENERATION_ASSETS)
-            and not _FULL_PRODUCED_ASSETS.issubset(scope_set)
+            and not full_produced_assets.issubset(scope_set)
         )
         if is_scoped:
             sections = [
@@ -2719,18 +2782,21 @@ def get_phase_system_prompt(phase: str, scope: Optional[list] = None) -> list:
                 ATTACHMENT_HANDLING,
                 TOOLS_REFERENCE, SCHEMA_REFERENCE, CONNECT_GUIDE,
             ]
+            if is_acxd:
+                sections.append(ACXD_RUNTIME_TARGET_PROMPT)
             return [
                 {"text": "\n\n".join(sections)},
                 {"cachePoint": {"type": "default"}},
             ]
 
-    sections = PHASE_PROMPTS.get(phase, PHASE_PROMPTS["generation"])
+    sections = list(PHASE_PROMPTS.get(phase, PHASE_PROMPTS["generation"]))
+    if is_acxd:
+        sections.append(ACXD_RUNTIME_TARGET_PROMPT)
     combined = "\n\n".join(sections)
     return [
         {"text": combined},
         {"cachePoint": {"type": "default"}},
     ]
-
 
 # New prompt for document-based questionnaire mode
 # The Agent will directly analyze the raw document content

@@ -69,6 +69,17 @@ def complete_interview(session_id: str, summary: str = "") -> dict:
     Returns:
         dict with success status and message
     """
+    from tools.acxd_flow_spec import acxd_flow_spec_ready, is_acxd_target
+
+    if is_acxd_target(session_id):
+        ready, problems = acxd_flow_spec_ready()
+        if not ready:
+            return {
+                "success": False,
+                "message": "ACXD flow design is incomplete. Confirm every flow step before generation.",
+                "problems": problems,
+            }
+
     success = write_interview_handoff(session_id, summary)
 
     if success:

@@ -50,6 +50,7 @@ export function ChatWindow() {
   const setConnectionError = useBuilderStore(s => s.setConnectionError);
   const resetStillProcessingCount = useBuilderStore(s => s.resetStillProcessingCount);
   const progress = useBuilderStore(s => s.progress);
+  const runtimeTarget = useBuilderStore(s => s.runtimeTarget);
   const inputHint = useBuilderStore(s => s.inputHint);
   const session = useBuilderStore(s => s.session);
 
@@ -72,15 +73,18 @@ export function ChatWindow() {
 
   // E1: Mobile progress bar state
   const activeProgress = useMemo(() => {
-    const inProgress = progress.filter(p => p.status === 'in_progress');
-    const completed = progress.filter(p => p.status === 'completed');
-    const total = progress.length;
+    const visibleProgress = progress.filter((item) =>
+      runtimeTarget === 'acxd' ? item.id !== 'prompt' : item.id !== 'acxd_application'
+    );
+    const inProgress = visibleProgress.filter(p => p.status === 'in_progress');
+    const completed = visibleProgress.filter(p => p.status === 'completed');
+    const total = visibleProgress.length;
     const completedCount = completed.length;
     const currentItem = inProgress[0];
     const hasAnyActivity = completedCount > 0 || inProgress.length > 0;
     const overallPercent = total > 0 ? Math.round((completedCount / total) * 100) : 0;
     return { currentItem, completedCount, total, hasAnyActivity, overallPercent, inProgress, completed };
-  }, [progress]);
+  }, [progress, runtimeTarget]);
 
   // E2: Requirements checklist derived from session state
   const requirementsChecklist = useMemo(() => {

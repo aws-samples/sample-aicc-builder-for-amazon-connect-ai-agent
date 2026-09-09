@@ -2,6 +2,34 @@
  * Type definitions for AICC Builder
  */
 
+export type RuntimeTarget = 'classic' | 'acxd';
+
+export type AssetType =
+  | 'lambda'
+  | 'openapi'
+  | 'prompt'
+  | 'contact_flow'
+  | 'cdk'
+  | 'cloudformation'
+  | 'company'
+  | 'operations'
+  | 'validation'
+  | 'research'
+  | 'faq'
+  | 'package'
+  | 'review'
+  | 'operation_spec'
+  | 'workspace_update'
+  | 'workspace_file'
+  | 'requirement'
+  | 'acxd_flow'
+  | 'acxd_slot_type'
+  | 'acxd_data_request'
+  | 'acxd_guardrail'
+  | 'acxd_knowledge_base'
+  | 'acxd_application'
+  | 'acxd_context_variable';
+
 export interface ToolCall {
   tool: string;
   /** Unique identifier for this specific tool invocation (allows same tool to be called multiple times) */
@@ -126,6 +154,7 @@ export interface ProgressItem {
   id: string;
   label: string;
   labelKo: string;
+  labelJa?: string;
   status: 'pending' | 'in_progress' | 'completed';
   /** Progress percentage (0-100) for granular tracking */
   progress?: number;
@@ -138,7 +167,7 @@ export interface ProgressItem {
 }
 
 export interface AssetPreview {
-  assetType: 'lambda' | 'openapi' | 'prompt' | 'contact_flow' | 'cdk' | 'cloudformation' | 'company' | 'operations' | 'validation' | 'research' | 'faq' | 'package' | 'review' | 'operation_spec' | 'workspace_update' | 'workspace_file' | 'requirement';
+  assetType: AssetType;
   operationId?: string;
   fileName?: string;
   content: string;
@@ -173,7 +202,7 @@ export interface ErrorDebugInfo {
 }
 
 export interface WebSocketMessage {
-  type: 'message' | 'typing' | 'error' | 'attachment_error' | 'session_update' | 'assets' | 'progress' | 'stream' | 'stream_end' | 'tool_status' | 'progress_update' | 'questionnaire_status' | 'template' | 'tool_start' | 'tool_end' | 'tool_input_update' | 'thinking' | 'asset_preview' | 'asset_generating' | 'asset_complete' | 'asset_imported' | 'download_ready' | 'history' | 'history_injected' | 'context_injected' | 'session_created' | 'subagent_progress' | 'subagent_tool_use' | 'subagent_tool_result' | 'subagent_stream' | 'subagent_error' | 'heartbeat' | 'pong' | 'connected' | 'background_task_active' | 'phase_changed' | 'input_hint' | 'generation_cancelled' | 'generation_cancel_noop' | 'max_tokens_truncated';
+  type: 'message' | 'typing' | 'error' | 'attachment_error' | 'session_update' | 'session_info' | 'ack' | 'assets' | 'progress' | 'stream' | 'stream_end' | 'tool_status' | 'progress_update' | 'questionnaire_status' | 'template' | 'tool_start' | 'tool_end' | 'tool_input_update' | 'thinking' | 'asset_preview' | 'asset_generating' | 'asset_complete' | 'asset_imported' | 'download_ready' | 'history' | 'history_injected' | 'context_injected' | 'session_created' | 'subagent_progress' | 'subagent_tool_use' | 'subagent_tool_result' | 'subagent_stream' | 'subagent_error' | 'heartbeat' | 'pong' | 'connected' | 'background_task_active' | 'phase_changed' | 'input_hint' | 'generation_cancelled' | 'generation_cancel_noop' | 'max_tokens_truncated';
   // Chat-input placeholder hint (backend-computed)
   placeholder?: string;
   role?: 'user' | 'assistant';
@@ -240,9 +269,12 @@ export interface WebSocketMessage {
   api_title?: string;
   flow_name?: string;
   files_count?: number;
-  // Generation scope + selected model (carried on session_created / connected)
+  // Generation scope, selected model, and runtime target (session-created / ack events)
   scope?: string[];
   selectedModel?: string;
+  startMode?: 'full' | 'segment' | 'improve';
+  runtime_target?: RuntimeTarget;
+  runtimeTarget?: RuntimeTarget;
   // asset_imported: result of an importAsset action
   lint?: {
     ok: boolean;

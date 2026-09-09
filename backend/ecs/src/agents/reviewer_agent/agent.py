@@ -546,6 +546,29 @@ async def reviewer_agent(
     except Exception as e:
         logger.warning(f"[REVIEWER] Failed to auto-load infrastructure spec: {e}")
 
+    # ACXD is a Classic Full runtime target, not a separate reviewer. Inject
+    # both authoritative artifacts so the reviewer can compare the interview
+    # decisions with the generated nodes rather than infer intent from prose.
+    try:
+        from tools.acxd_flow_spec import get_acxd_flow_spec, is_acxd_target
+        if is_acxd_target(session_id):
+            from tools.acxd_bundle import load_acxd_bundle
+            import json as _json
+            flow_spec = get_acxd_flow_spec(session_id)
+            acxd_context = {
+                "runtime_target": "acxd",
+                "flow_spec": flow_spec.model_dump() if flow_spec else None,
+                "bundle": load_acxd_bundle(session_id),
+            }
+            infra_spec_section += (
+                "\n## ACXD Runtime Review Context (authoritative)\n"
+                + _json.dumps(acxd_context, ensure_ascii=False, indent=2)
+                + "\n"
+            )
+            logger.info("[REVIEWER] Loaded ACXD bundle and ACXDFlowSpec")
+    except Exception as e:
+        logger.warning(f"[REVIEWER] Failed to load ACXD review context: {e}")
+
     yield {
         "type": "progress",
         "agent": "reviewer_agent",

@@ -180,6 +180,27 @@ async function getWebSocketUrl(
   return url;
 }
 
+/** Every createNewSession action carries the selected build contract. */
+function createConversationStartPayload() {
+  const state = useBuilderStore.getState();
+  return {
+    action: 'createNewSession',
+    scope: state.scope ?? [],
+    startMode: state.startMode,
+    runtime_target: state.runtimeTarget,
+    model: state.selectedModel,
+    effort: state.selectedEffort === 'default' ? '' : state.selectedEffort,
+  };
+}
+
+/** Accept snake_case from the backend while tolerating the legacy camel alias. */
+function restoreRuntimeTarget(message: Pick<WebSocketMessage, 'runtime_target' | 'runtimeTarget'>): void {
+  const target = message.runtime_target ?? message.runtimeTarget;
+  if (target === 'classic' || target === 'acxd') {
+    useBuilderStore.getState().setRuntimeTarget(target);
+  }
+}
+
 // localStorage key for tracking last received message log sequence
 const MSG_LOG_SEQ_KEY_PREFIX = "aicc-msg-log-seq-";
 
@@ -512,6 +533,7 @@ export function useWebSocket() {
     lambda_generator: { name: 'Lambda Generator', icon: '⚡', color: 'orange' },
     openapi_generator: { name: 'OpenAPI Generator', icon: '📄', color: 'blue' },
     prompt_generator: { name: 'Prompt Generator', icon: '💬', color: 'purple' },
+    acxd_application_generator: { name: 'ACXD Application Generator', icon: '🧩', color: 'fuchsia' },
     contact_flow_generator: { name: 'Contact Flow Generator', icon: '📞', color: 'green' },
     infrastructure_generator: { name: 'Infrastructure Generator', icon: '🏗️', color: 'slate' },
     interviewer: { name: 'Interviewer', icon: '🎤', color: 'pink' },
@@ -953,6 +975,10 @@ export function useWebSocket() {
           if (data.session && typeof data.session === 'object') {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const session = data.session as any;
+            const runtimeTarget = session.runtime_target ?? session.runtimeTarget;
+            if (runtimeTarget === 'classic' || runtimeTarget === 'acxd') {
+              useBuilderStore.getState().setRuntimeTarget(runtimeTarget);
+            }
             updateSession({
               companyName: session.company_name ?? session.companyName ?? null,
               industry: session.industry ?? null,
@@ -1017,6 +1043,7 @@ export function useWebSocket() {
             save_operation_spec: { id: "operations", runningProgress: 50 },
             generate_lambda_function: { id: "lambda", runningProgress: 50 },
             generate_ai_prompt: { id: "prompt", runningProgress: 50 },
+            generate_acxd_application: { id: "acxd_application", runningProgress: 50 },
             generate_openapi_spec: { id: "openapi", runningProgress: 50 },
             generate_contact_flow: { id: "contact_flow", runningProgress: 50 },
             generate_flow_mermaid_only: { id: "contact_flow", runningProgress: 30 },
@@ -1126,6 +1153,8 @@ export function useWebSocket() {
               generate_lambda_function: { id: "lambda", runningProgress: 50 },
               lambda_generator_agent: { id: "lambda", runningProgress: 50 },
               generate_ai_prompt: { id: "prompt", runningProgress: 50 },
+              generate_acxd_application: { id: "acxd_application", runningProgress: 50 },
+              acxd_application_generator: { id: "acxd_application", runningProgress: 50 },
               prompt_generator_agent: { id: "prompt", runningProgress: 50 },
               generate_openapi_spec: { id: "openapi", runningProgress: 50 },
               openapi_generator_agent: { id: "openapi", runningProgress: 50 },
@@ -1240,6 +1269,8 @@ export function useWebSocket() {
               generate_lambda_function: "lambda",
               lambda_generator_agent: "lambda",
               generate_ai_prompt: "prompt",
+              generate_acxd_application: "acxd_application",
+              acxd_application_generator: "acxd_application",
               prompt_generator_agent: "prompt",
               generate_openapi_spec: "openapi",
               openapi_generator_agent: "openapi",
@@ -1297,7 +1328,7 @@ export function useWebSocket() {
           // Handle "generating" indicator (no content yet)
           if (data.assetType) {
             updateAssetPreview({
-              assetType: data.assetType as 'lambda' | 'openapi' | 'prompt' | 'contact_flow' | 'cdk' | 'cloudformation' | 'company' | 'operations' | 'validation',
+              assetType: data.assetType as AssetPreview['assetType'],
               operationId: data.operationId,
               fileName: data.fileName,
               content: "",  // No content yet
@@ -1348,6 +1379,7 @@ export function useWebSocket() {
                 lambda: "lambda",
                 openapi: "openapi",
                 prompt: "prompt",
+                acxd_application: "acxd_application",
                 contact_flow: "contact_flow",
                 cdk: "cdk",
                 cloudformation: "cdk",  // infrastructure_generator uses cloudformation
@@ -1387,6 +1419,7 @@ export function useWebSocket() {
               lambda_generator: "lambda",
               openapi_generator: "openapi",
               prompt_generator: "prompt",
+              acxd_application_generator: "acxd_application",
               contact_flow_generator: "contact_flow",
               infrastructure_generator: "cdk",  // CloudFormation/CDK infrastructure
               faq_generator: "knowledge_base",
@@ -1626,6 +1659,7 @@ export function useWebSocket() {
 
         case "history_injected":
           // Acknowledgment from backend that history was injected
+          restoreRuntimeTarget(data);
           // CRITICAL: Only NOW mark session as ready to accept messages
           // This ensures history is fully loaded before user can send messages
           disarmSessionReadyWatchdog();
@@ -1651,6 +1685,7 @@ export function useWebSocket() {
 
         case "session_created":
           // Acknowledgment from backend that a fresh session was created
+          restoreRuntimeTarget(data);
           // CRITICAL: Only NOW mark session as ready to accept messages
           disarmSessionReadyWatchdog();
           useBuilderStore.getState().setSessionReady(true);
@@ -1700,6 +1735,13 @@ export function useWebSocket() {
           }
           break;
 
+        case "session_info":
+        case "ack":
+          // Lightweight session-info acknowledgments may arrive before the full
+          // connected/session_created event. Preserve the echoed target.
+          restoreRuntimeTarget(data);
+          break;
+
         case "context_injected":
           // Acknowledgment from backend that context was injected
           if (data.success) {
@@ -1711,6 +1753,7 @@ export function useWebSocket() {
 
         case "connected":
           // Backend sends sessionId on WebSocket connect — detect mismatch
+          restoreRuntimeTarget(data);
           console.log("[useWebSocket] Backend connected event, backend sessionId:", data.sessionId, "phase:", data.phase);
           // Restore phase from backend
           if (data.phase) {
@@ -2009,7 +2052,7 @@ export function useWebSocket() {
       } else {
         console.log("[useWebSocket] No history found for reconnect, sending createNewSession");
         // No history to inject, send createNewSession to backend
-        ws.send(JSON.stringify({ action: "createNewSession" }));
+        ws.send(JSON.stringify(createConversationStartPayload()));
         // Wait for session_created response
         console.log("[useWebSocket] Waiting for session_created response after reconnect...");
       }
@@ -2017,7 +2060,7 @@ export function useWebSocket() {
       console.error("[useWebSocket] Failed to inject history on reconnect:", error);
       // On error, still try to create a new session so user can continue
       try {
-        ws.send(JSON.stringify({ action: "createNewSession" }));
+        ws.send(JSON.stringify(createConversationStartPayload()));
         console.log("[useWebSocket] Sent createNewSession after reconnect error");
       } catch (sendError) {
         console.error("[useWebSocket] Failed to send createNewSession:", sendError);
@@ -2823,16 +2866,7 @@ export function useWebSocket() {
         const waitForWsAndCreateSession = () => {
           if (globalWs?.readyState === WebSocket.OPEN) {
             console.log("[useWebSocket] Sending createNewSession to backend");
-            const st = useBuilderStore.getState();
-            globalWs.send(
-              JSON.stringify({
-                action: "createNewSession",
-                // Scope = [] for full build, [segment] for a single segment.
-                scope: st.scope ?? [],
-                model: st.selectedModel,
-                effort: st.selectedEffort === 'default' ? '' : st.selectedEffort,
-              })
-            );
+            globalWs.send(JSON.stringify(createConversationStartPayload()));
             // DO NOT set isSessionReady here!
             // Wait for backend's "session_created" response in handleMessage
             console.log("[useWebSocket] Waiting for session_created response from backend...");
@@ -3129,7 +3163,7 @@ export function useWebSocket() {
             const notifyBackendAssetsOnly = () => {
               if (globalWs?.readyState === WebSocket.OPEN) {
                 console.log("[useWebSocket] Sending createNewSession for assets-only session");
-                globalWs.send(JSON.stringify({ action: "createNewSession" }));
+                globalWs.send(JSON.stringify(createConversationStartPayload()));
                 // Set timeout for session_created response
                 setTimeout(() => {
                   if (!useBuilderStore.getState().isSessionReady) {
@@ -3161,7 +3195,7 @@ export function useWebSocket() {
             const notifyBackendEmpty = () => {
               if (globalWs?.readyState === WebSocket.OPEN) {
                 console.log("[useWebSocket] Sending createNewSession for empty session");
-                globalWs.send(JSON.stringify({ action: "createNewSession" }));
+                globalWs.send(JSON.stringify(createConversationStartPayload()));
                 // Set timeout for session_created response
                 setTimeout(() => {
                   if (!useBuilderStore.getState().isSessionReady) {

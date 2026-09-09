@@ -529,8 +529,83 @@ Users should feel like they're talking to ONE helpful assistant.
 """
 
 
-def get_interview_agent_prompt() -> list:
-    """Return interview agent prompt with cachePoint for Bedrock prompt caching."""
+ACXD_INTERVIEW_INSERTION = """
+## ACXD RUNTIME TARGET: FLOW DESIGN INSERTION
+
+This session targets Agentic CX Designer (ACXD). Keep the Classic Full interview
+and insert the following requirements. Do not start a separate interview or skip
+any Classic specification.
+
+### Phase 1 — Discovery additions
+Collect the delivery channels: `voice`, `chat`, or both. Collect the speech engine:
+- `agentic_voice` (recommended)
+- `transcribe`
+- `speech_to_speech`
+
+Explain the recommendation in plain language and save the eventual decision with
+`save_acxd_application_settings`.
+
+### Phase 2.5 — Advanced-requirement mapping
+- If a caller uses DTMF/keypad input, design it as a `user_input` node and define
+  the corresponding slot type, including its field name, validation, examples,
+  and sensitivity.
+- For every external integration, ask whether it is real or a simulation. A real
+  integration becomes an `external` Data Request; a simulation becomes a `mock`
+  Data Request. Do not silently replace a real integration with a mock.
+
+### Phase 3 — ACXD flow design, after ContactFlowSpec
+After `save_contact_flow_spec` has captured the Connect Contact Flow requirements,
+design the ACXD flows before moving to the analysis document.
+
+1. For **each saved business operation**, call `upsert_acxd_flow_plan` once to
+   propose exactly one operation flow. Include every ordered step with:
+   `node_type`, `determinism`, `determinism_rationale`, and
+   `decision_category`.
+2. Explain each recommendation in plain language with an everyday analogy. A
+   deterministic step is like an automatic door: the same rule produces the
+   same result every time. A generative step is like a skilled staff member
+   choosing polite wording for the situation. Show the complete proposed step
+   table to the user.
+3. Do **not** call `confirm_acxd_flow_steps` while proposing. Call it only after
+   the user explicitly agrees to the shown steps and their determinism labels.
+   An affirmative response to the shown plan is the required confirmation; do
+   not ask the user to repeat it.
+4. Also design the mandatory system flows with `upsert_acxd_flow_plan`:
+   `welcome`, `fallback`, and `escalation`. Show and explicitly confirm these
+   plans in the same way.
+5. Capture guardrails and knowledge-base topics with `save_acxd_policies`, then
+   capture application name, channels, locales, speech engine, chat idle timeout,
+   and no more than ten context variables with `save_acxd_application_settings`.
+
+### Non-negotiable ACXD rules
+- Steps whose decision category is `money`, `refund`, `payment`,
+  `authorization`, `eligibility`, `compliance`, or `identity` are always
+  `deterministic`. There are no exceptions. If a user wants flexible language,
+  keep the decision deterministic and use a later generative message to explain
+  the already-fixed result.
+- Map FAQ retrieval to a native `knowledge_base` node. Map handoff and completion
+  to native `escalation` or `end` nodes plus the appropriate Contact Flow branch.
+  Never create a Lambda or API operation solely for FAQ lookup, escalation, or
+  ending a conversation.
+- Every `flow_id` must contain letters only and be 3–64 characters long.
+- Use `choice` for conditional branching. Never use `split`: `split` is reserved
+  for percentage A/B routing, not a business-rule decision.
+
+### Phase 4 — Confirmation and analysis document
+The analysis document must include an **ACXD flow design** section containing the
+confirmed operation and system flows, determinism decisions, slots, Data Request
+real/mock choices, guardrails, knowledge-base topics, and application settings.
+`complete_interview` is allowed only after this section and all ACXD flow decisions
+have been explicitly confirmed.
+"""
+
+
+def get_interview_agent_prompt(runtime_target: str = "classic") -> list:
+    """Return the interview prompt, adding ACXD guidance only for that target."""
+    text = INTERVIEW_AGENT_SYSTEM_PROMPT
+    if runtime_target == "acxd":
+        text += "\n\n" + ACXD_INTERVIEW_INSERTION
+
     # Attachments can arrive during the interview too (e.g. a Full Build where the
     # user drops a flow image or JSON). Reuse the shared attachment-handling
     # guidance so the interviewer acknowledges uploads and routes them to the
@@ -538,9 +613,9 @@ def get_interview_agent_prompt() -> list:
     # cycle with system_prompt.py.
     try:
         from prompts.system_prompt import ATTACHMENT_HANDLING
-        text = INTERVIEW_AGENT_SYSTEM_PROMPT + "\n\n" + ATTACHMENT_HANDLING
+        text += "\n\n" + ATTACHMENT_HANDLING
     except Exception:
-        text = INTERVIEW_AGENT_SYSTEM_PROMPT
+        pass
     return [
         {"text": text},
         {"cachePoint": {"type": "default"}},

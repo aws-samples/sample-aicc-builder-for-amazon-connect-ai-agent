@@ -57,6 +57,13 @@ AGENT_CONFIGS = {
     # NOTE: the legacy `interviewer` sub-agent was removed.
     # All interviews now run through the phase-based prompt in
     # `prompts/interview_agent_prompt.py`, not a separate agent pool entry.
+    # ---- runtime target = acxd: the one LLM generator ACXD adds (flows) ----
+    "acxd_flow_generator": {
+        "system_prompt_module": "agents.acxd_flow_generator.system_prompt",
+        "system_prompt_var": "ACXD_FLOW_GENERATOR_SYSTEM_PROMPT",
+        "temperature": 0.2,
+        "max_tokens": 64000,
+    },
 }
 
 # Singleton pool storage

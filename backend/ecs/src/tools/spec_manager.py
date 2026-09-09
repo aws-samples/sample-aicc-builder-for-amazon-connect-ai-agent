@@ -705,6 +705,17 @@ class InfrastructureSpec(FlexibleBaseModel):
         description="AWS region for all resources",
     )
 
+    # Runtime target — what sits between the Contact Flow and the backend.
+    # 'classic': Lex + AI Prompt + AgentCore Gateway (v2).
+    # 'acxd'   : Agentic CX Designer application (flows / data requests / KB /
+    #            guardrails) behind the Agentic CX contact-flow block. The CFN,
+    #            Lambda, OpenAPI, Contact Flow and FAQ assets are still built.
+    runtime_target: str = Field(
+        default="classic",
+        description="'classic' (Lex + AI Prompt + AgentCore Gateway) or 'acxd' (Agentic CX Designer)",
+        validation_alias=AliasChoices("runtime_target", "runtimeTarget"),
+    )
+
     # Database
     db_type: str = Field(
         description="Database type: 'dynamodb', 'rds_mysql', 'rds_postgresql'",
@@ -2375,9 +2386,19 @@ def save_infrastructure_spec(
         parsed_api_gw = _safe_parse_model(ApiGatewayConfig, api_gateway_config) if api_gateway_config else None
         parsed_vpc = _safe_parse_model(VpcConfig, vpc_config) if vpc_config else None
 
+        # The runtime target is a start-screen decision, not an interview
+        # answer: copy it from the session seed so the spec (and the bundle
+        # built from it) carries it. Never exposed as a tool parameter.
+        try:
+            from tools.acxd_flow_spec import get_runtime_target
+            runtime_target = get_runtime_target()
+        except Exception:  # pragma: no cover - defensive
+            runtime_target = "classic"
+
         spec = InfrastructureSpec(
             project_name=project_name,
             region=region,
+            runtime_target=runtime_target,
             db_type=db_type,
             rds_config=parsed_rds,
             dynamodb_config=parsed_dynamodb,

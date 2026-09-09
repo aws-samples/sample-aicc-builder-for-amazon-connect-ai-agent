@@ -18,6 +18,8 @@ from strands import tool
 
 from .spec_manager import get_all_specs, get_all_tools
 from .s3_asset_storage import list_session_assets, get_asset_from_s3
+from .acxd_bundle import load_acxd_bundle
+from .acxd_flow_spec import get_acxd_flow_spec, is_acxd_target
 
 logger = logging.getLogger(__name__)
 
@@ -1512,3 +1514,666 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
         "summary": summary,
         "operations_checked": len(expected),
     }
+
+
+# ---------------------------------------------------------------------------
+# D9 — ACXD runtime-target consistency gate
+# ---------------------------------------------------------------------------
+# D1–D8 intentionally stay fail-soft. D9 is the ACXD packaging gate: every
+# returned entry uses a stable design-document id and an explicit error
+# severity so packagers and reviewers can relay it without interpretation.
+_D1_D8_IMPLEMENTATION = _validate_parameter_consistency_impl
+
+
+def _d9_issue(check_id: str, message: str, **details: Any) -> dict:
+    issue = {"id": check_id, "severity": "error", "message": message}
+    issue.update({key: value for key, value in details.items() if value is not None})
+    return issue
+
+
+def _d9_violation_issue(check_id: str, violation: Any) -> dict:
+    return _d9_issue(
+        check_id,
+        str(getattr(violation, "message", violation)),
+        code=getattr(violation, "code", None),
+        path=getattr(violation, "path", None),
+        asset_type="acxd",
+    )
+
+
+def _d9_as_mismatch(issue: dict) -> dict:
+    """Keep D9 in the established D1–D8 `mismatches` list shape."""
+    return {
+        "id": issue["id"],
+        "severity": issue["severity"],
+        "message": issue["message"],
+        "operation_id": issue.get("operation_id", "__acxd__"),
+        "field": issue.get("field", ""),
+        "asset_type": issue.get("asset_type", "acxd"),
+        "issue": issue["message"],
+        **{
+            key: value for key, value in issue.items()
+            if key not in {"id", "severity", "message", "operation_id", "field", "asset_type"}
+        },
+    }
+
+
+def _d9_doc(value: Any) -> Optional[dict]:
+    """Parse a JSON/YAML mapping while accepting already-decoded fixtures."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        loaded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        try:
+            loaded = yaml.safe_load(value)
+        except yaml.YAMLError:
+            return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _load_d9_openapi_documents(session_id: str, bundle: dict) -> list[dict]:
+    """Read OpenAPI documents from injected bundle data or the asset store."""
+    candidates = []
+    for key in ("openapi_documents", "openapi_docs", "openapi"):
+        value = bundle.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+        elif isinstance(value, (dict, str)):
+            candidates.append(value)
+    documents = [doc for candidate in candidates if (doc := _d9_doc(candidate)) and doc.get("paths")]
+    if documents:
+        return documents
+
+    for key in list_session_assets(session_id) if session_id else []:
+        parts = key.split("/")
+        if "openapi" not in parts or not key.lower().endswith((".yaml", ".yml", ".json")):
+            continue
+        content = get_asset_from_s3(key)
+        doc = _d9_doc(content)
+        if doc and doc.get("paths"):
+            documents.append(doc)
+    return documents
+
+
+def _load_d9_faq_documents(session_id: str, bundle: dict) -> list[Any]:
+    """Read ordinary Classic FAQ assets; ACXD KB articles are their rendering."""
+    for key in ("faq_documents", "faq"):
+        value = bundle.get(key)
+        if isinstance(value, list):
+            return value
+        if value is not None:
+            return [value]
+
+    documents: list[Any] = []
+    for asset_key in list_session_assets(session_id) if session_id else []:
+        parts = asset_key.split("/")
+        if "faq" not in parts:
+            continue
+        content = get_asset_from_s3(asset_key)
+        if content:
+            documents.append(content)
+    return documents
+
+
+def _d9_schema_properties(schema: Any) -> set[str]:
+    if not isinstance(schema, dict):
+        return set()
+    return set((schema.get("properties") or {}).keys())
+
+
+def _d9_openapi_operations(documents: list[dict]) -> dict[str, dict]:
+    """Index OpenAPI paths, resolving components and the Classic data wrapper."""
+    operations: dict[str, dict] = {}
+
+    def resolved(document: dict, schema: Any) -> dict:
+        if not isinstance(schema, dict):
+            return {}
+        return _resolve_ref(document, schema["$ref"]) if "$ref" in schema else schema
+
+    def request_properties(document: dict, schema: Any) -> set[str]:
+        return _get_schema_props(document, schema) if isinstance(schema, dict) else set()
+
+    def response_properties(document: dict, schema: Any) -> set[str]:
+        root = resolved(document, schema)
+        properties = root.get("properties") or {}
+        # The Classic OpenAPI generator may wrap normal tool output under
+        # `data`; ACXDGenerationContext intentionally unwraps the same shape.
+        if isinstance(properties.get("data"), dict):
+            return _get_schema_props(document, properties["data"])
+        return set(properties)
+
+    for doc in documents:
+        for path, methods in (doc.get("paths") or {}).items():
+            if not isinstance(methods, dict):
+                continue
+            for method, operation in methods.items():
+                if method.lower() not in {"get", "post", "put", "patch", "delete"}:
+                    continue
+                if not isinstance(operation, dict):
+                    continue
+                request_fields: set[str] = set()
+                request_body = operation.get("requestBody") or {}
+                for media in (request_body.get("content") or {}).values() if isinstance(request_body, dict) else []:
+                    if isinstance(media, dict):
+                        request_fields.update(request_properties(doc, media.get("schema")))
+                response_fields: set[str] = set()
+                for status, response in (operation.get("responses") or {}).items():
+                    if not str(status).startswith("2") or not isinstance(response, dict):
+                        continue
+                    for media in (response.get("content") or {}).values():
+                        if isinstance(media, dict):
+                            response_fields.update(response_properties(doc, media.get("schema")))
+                operations[path] = {
+                    "request": request_fields,
+                    "response": response_fields,
+                    "operation_id": operation.get("operationId"),
+                }
+    return operations
+
+
+def _d9_get(value: Any, *names: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        for name in names:
+            if name in value and value[name] is not None:
+                return value[name]
+        return default
+    for name in names:
+        candidate = getattr(value, name, None)
+        if candidate is not None:
+            return candidate
+    return default
+
+
+def _d9_field_index(operation: Any) -> dict[str, Any]:
+    fields = list(_d9_get(operation, "input_fields", "inputFields", default=[]) or [])
+    fields.extend(_d9_get(operation, "output_fields", "outputFields", default=[]) or [])
+    return {
+        name: field for field in fields
+        if (name := _d9_get(field, "name", "field_name", "fieldName"))
+    }
+
+
+def _d9_constraint_metadata(slot_type: dict) -> dict:
+    metadata = slot_type.get("metadata") or {}
+    constraints = metadata.get("constraints") if isinstance(metadata, dict) else None
+    return constraints if isinstance(constraints, dict) else metadata if isinstance(metadata, dict) else {}
+
+
+def _d9_article_has_question_and_answer(article: Any) -> bool:
+    if not isinstance(article, dict):
+        return False
+    question = article.get("question") or article.get("title")
+    if isinstance(question, dict):
+        question = question.get("text")
+    responses = article.get("responses") or []
+    answer = article.get("answer")
+    if not answer and isinstance(responses, list):
+        answer = next((response.get("body") for response in responses if isinstance(response, dict)), None)
+    return bool(str(question or "").strip() and str(answer or "").strip())
+
+
+def _d9_faq_has_question_and_answer(document: Any) -> bool:
+    if isinstance(document, dict):
+        return bool(str(document.get("question") or "").strip() and str(document.get("answer") or "").strip())
+    text = str(document or "")
+    question = re.search(r"(?:^|\n)##?\s*(?:질문|Question)\s*\n+([^\n#]+)", text, re.IGNORECASE)
+    answer = re.search(r"(?:^|\n)##?\s*(?:답변|Answer)\s*\n+([^\n#]+)", text, re.IGNORECASE)
+    return bool(question and answer and question.group(1).strip() and answer.group(1).strip())
+
+
+def _d9_contact_flow_parts(document: Any) -> tuple[dict, Optional[dict], list[dict]]:
+    outer = _d9_doc(document) or {}
+    content = outer.get("content")
+    if isinstance(content, str):
+        content = _d9_doc(content)
+    flow = content if isinstance(content, dict) else outer
+    metadata = flow.get("Metadata") or flow.get("metadata") or {}
+    binding = metadata.get("acxdBinding") if isinstance(metadata, dict) else None
+    if not isinstance(binding, dict):
+        binding = outer.get("acxdBinding")
+    actions = [action for action in (flow.get("Actions") or flow.get("actions") or []) if isinstance(action, dict)]
+    return flow, binding if isinstance(binding, dict) else None, actions
+
+
+def _d9_binding_target(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return value.get("actionId") or value.get("identifier") or value.get("Identifier") or value.get("target")
+    return None
+
+
+def _d9_context_variable_names(bundle: dict, flow_spec: dict) -> set[str]:
+    names: set[str] = set()
+    application = flow_spec.get("application") or {}
+    for value in application.get("context_variables") or application.get("contextVariables") or []:
+        name = _d9_get(value, "name", "key")
+        if name:
+            names.add(str(name))
+    for value in bundle.get("context_variables") or []:
+        name = _d9_get(value, "name", "key", "variableName")
+        if name:
+            names.add(str(name))
+    app_doc = bundle.get("application") or {}
+    for value in app_doc.get("contextVariables") or app_doc.get("context_variables") or []:
+        name = _d9_get(value, "name", "key", "variableName")
+        if name:
+            names.add(str(name))
+    return names
+
+
+def _d9_is_full_locale(value: Any) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z]{2,3}-[A-Z]{2}", value):
+        return False
+    try:
+        from tools.acxd_contract import LANGUAGE_CODES
+        return value in LANGUAGE_CODES
+    except Exception:
+        return True
+
+
+def _d9_non_ascii_metadata(document: Any, path: str = "") -> list[tuple[str, str]]:
+    findings: list[tuple[str, str]] = []
+    if isinstance(document, list):
+        for index, value in enumerate(document):
+            findings.extend(_d9_non_ascii_metadata(value, f"{path}[{index}]"))
+        return findings
+    if not isinstance(document, dict):
+        return findings
+    for key, value in document.items():
+        item_path = f"{path}.{key}" if path else key
+        if key in {"description", "aiDescription"} and isinstance(value, str):
+            if any(ord(character) > 0x7F for character in value):
+                findings.append((item_path, key))
+        findings.extend(_d9_non_ascii_metadata(value, item_path))
+    return findings
+
+
+def _d9_structural_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
+    from tools.validate_acxd_consistency import validate_acxd_consistency
+
+    issues: list[dict] = []
+    flows = bundle.get("flows") or []
+    if not flows:
+        issues.append(_d9_issue("D9-1", "No ACXD flow assets were generated", asset_type="flow"))
+    for violation in validate_acxd_consistency(bundle, spec=flow_spec):
+        code = getattr(violation, "code", "")
+        message = str(getattr(violation, "message", violation))
+        lowered = message.lower()
+        if code.startswith("DETERMINISM_"):
+            check_id = "D9-2"
+        elif code.startswith("CONTACT_FLOW"):
+            check_id = "D9-6"
+        elif code.startswith("DATA_REQUEST"):
+            check_id = "D9-3"
+        elif code.startswith("SLOT_"):
+            check_id = "D9-4"
+        elif code.startswith("KB_"):
+            check_id = "D9-5"
+        elif code == "ASCII_METADATA" or (
+            code == "SCHEMA" and any(token in lowered for token in (
+                "flowid", "nodeid", "description", "aidescription", "languagecode",
+            ))
+        ):
+            # D9-7 performs the field-specific checks below; avoid reporting
+            # its schema manifestation as a misleading D9-1 failure too.
+            continue
+        else:
+            check_id = "D9-1"
+        issues.append(_d9_violation_issue(check_id, violation))
+    return issues
+
+
+def _d9_data_request_checks(bundle: dict, session_id: str) -> list[dict]:
+    issues: list[dict] = []
+    documents = _load_d9_openapi_documents(session_id, bundle)
+    operations = _d9_openapi_operations(documents)
+    for data_request in bundle.get("data_requests") or []:
+        if not isinstance(data_request, dict):
+            continue
+        webhook = data_request.get("webhook") or {}
+        if webhook.get("implementation") != "external":
+            continue
+        request_id = data_request.get("dataRequestId") or "<unknown>"
+        url = str(webhook.get("url") or "")
+        match = re.search(r"/tools/([^/?#]+)", url)
+        if not match:
+            issues.append(_d9_issue(
+                "D9-3", f"Data Request {request_id!r} external URL must contain /tools/<operation>",
+                asset_type="data_request", field="webhook.url",
+            ))
+            continue
+        path = f"/tools/{match.group(1)}"
+        operation = operations.get(path)
+        if operation is None:
+            issues.append(_d9_issue(
+                "D9-3", f"Data Request {request_id!r} targets {path}, but OpenAPI has no such path",
+                asset_type="data_request", field="webhook.url", operation_id=match.group(1),
+            ))
+            continue
+        expected_request = _d9_schema_properties(data_request.get("requestSchema"))
+        expected_response = _d9_schema_properties(data_request.get("responseSchema"))
+        if expected_request != operation["request"]:
+            issues.append(_d9_issue(
+                "D9-3", f"Data Request {request_id!r} request fields {sorted(expected_request)} do not match "
+                f"OpenAPI {path} fields {sorted(operation['request'])}",
+                asset_type="data_request", field="requestSchema", operation_id=match.group(1),
+            ))
+        if expected_response != operation["response"]:
+            issues.append(_d9_issue(
+                "D9-3", f"Data Request {request_id!r} response fields {sorted(expected_response)} do not match "
+                f"OpenAPI {path} fields {sorted(operation['response'])}",
+                asset_type="data_request", field="responseSchema", operation_id=match.group(1),
+            ))
+    return issues
+
+
+def _d9_slot_type_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
+    if not flow_spec:
+        return [_d9_issue("D9-4", "ACXDFlowSpec is missing; slot constraints cannot be verified", asset_type="slot_type")]
+    slot_types = {
+        slot_type.get("slotTypeId"): slot_type
+        for slot_type in bundle.get("slot_types") or []
+        if isinstance(slot_type, dict) and slot_type.get("slotTypeId")
+    }
+    operation_specs = get_all_specs() or {}
+    issues: list[dict] = []
+    builtin = {"text", "number", "boolean"}
+    for flow in flow_spec.get("flows") or []:
+        if not isinstance(flow, dict) or flow.get("role", "operation") != "operation":
+            continue
+        operation_id = flow.get("operation_id")
+        fields = _d9_field_index(operation_specs.get(operation_id))
+        for slot in flow.get("slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            field_name = slot.get("field_name") or slot.get("fieldName") or slot.get("name")
+            field = fields.get(field_name)
+            if field is None:
+                issues.append(_d9_issue(
+                    "D9-4", f"Flow {flow.get('flow_id')!r} slot {slot.get('name')!r} maps to unknown "
+                    f"OperationSpec field {field_name!r}", asset_type="slot_type", field=field_name,
+                    operation_id=operation_id,
+                ))
+                continue
+            expected_enum = list(_d9_get(field, "enum_values", "enum", "allowed_values", "options", default=[]) or [])
+            expected_regex = _d9_get(field, "pattern", "regex")
+            expected_min = _d9_get(field, "min_length", "minLength")
+            expected_max = _d9_get(field, "max_length", "maxLength")
+            if not any(value is not None and value != [] for value in (expected_enum, expected_regex, expected_min, expected_max)):
+                continue
+            type_id = str(slot.get("type") or "")
+            # Task B derives a custom SlotType even for a built-in slot when
+            # FieldSpec adds enum/regex/length constraints. Mirror its
+            # _slot_type_id rule so D9 validates the emitted asset, not the
+            # pre-generation builtin spelling in ACXDFlowSpec.
+            if type_id.lower() in builtin:
+                seed = re.sub(r"[^A-Za-z]", "", str(slot.get("name") or ""))
+                type_id = (f"{seed}Value" if 0 < len(seed) < 3 else seed) or "CustomValue"
+                type_id = type_id[:100]
+            slot_type = slot_types.get(type_id)
+            if slot_type is None:
+                issues.append(_d9_issue(
+                    "D9-4", f"Constrained field {field_name!r} requires a generated custom slot type; "
+                    f"{type_id or '<missing>'!r} is not available", asset_type="slot_type", field=field_name,
+                    operation_id=operation_id,
+                ))
+                continue
+            actual_enum = [entry.get("value") for entry in slot_type.get("values") or [] if isinstance(entry, dict)]
+            metadata = _d9_constraint_metadata(slot_type)
+            actual_regex = slot.get("regex") or metadata.get("regex") or metadata.get("pattern")
+            actual_min = metadata.get("minLength", metadata.get("min_length"))
+            actual_max = metadata.get("maxLength", metadata.get("max_length"))
+            if expected_enum and actual_enum != expected_enum:
+                issues.append(_d9_issue(
+                    "D9-4", f"Slot type {type_id!r} enum {actual_enum!r} does not match "
+                    f"OperationSpec {field_name!r} enum {expected_enum!r}", asset_type="slot_type",
+                    field=field_name, operation_id=operation_id,
+                ))
+            if expected_regex and actual_regex != expected_regex:
+                issues.append(_d9_issue(
+                    "D9-4", f"Slot type {type_id!r} regex {actual_regex!r} does not match "
+                    f"OperationSpec {field_name!r} regex {expected_regex!r}", asset_type="slot_type",
+                    field=field_name, operation_id=operation_id,
+                ))
+            if expected_min is not None and actual_min != expected_min:
+                issues.append(_d9_issue(
+                    "D9-4", f"Slot type {type_id!r} minLength {actual_min!r} does not match "
+                    f"OperationSpec {field_name!r} min_length {expected_min!r}", asset_type="slot_type",
+                    field=field_name, operation_id=operation_id,
+                ))
+            if expected_max is not None and actual_max != expected_max:
+                issues.append(_d9_issue(
+                    "D9-4", f"Slot type {type_id!r} maxLength {actual_max!r} does not match "
+                    f"OperationSpec {field_name!r} max_length {expected_max!r}", asset_type="slot_type",
+                    field=field_name, operation_id=operation_id,
+                ))
+    return issues
+
+
+def _d9_knowledge_base_checks(bundle: dict, flow_spec: Optional[dict], session_id: str) -> list[dict]:
+    issues: list[dict] = []
+    knowledge_bases = [kb for kb in bundle.get("knowledge_bases") or [] if isinstance(kb, dict)]
+    spec_kb = (flow_spec or {}).get("knowledge_base") or {}
+    planned = bool(spec_kb.get("name") or spec_kb.get("topics")) or any(
+        bool(flow.get("uses_knowledge_base"))
+        for flow in (flow_spec or {}).get("flows") or [] if isinstance(flow, dict)
+    )
+    if planned and not knowledge_bases:
+        return [_d9_issue("D9-5", "ACXDFlowSpec requires a knowledge base but no KB asset was generated", asset_type="knowledge_base")]
+    if not knowledge_bases:
+        return issues
+    for kb in knowledge_bases:
+        articles = kb.get("articles") or []
+        if not articles:
+            issues.append(_d9_issue("D9-5", f"Knowledge base {kb.get('name')!r} has no articles", asset_type="knowledge_base"))
+            continue
+        for index, article in enumerate(articles):
+            if not _d9_article_has_question_and_answer(article):
+                issues.append(_d9_issue(
+                    "D9-5", f"Knowledge base {kb.get('name')!r} article {index} needs a non-empty question and answer",
+                    asset_type="knowledge_base",
+                ))
+    faq_documents = _load_d9_faq_documents(session_id, bundle)
+    if not faq_documents:
+        issues.append(_d9_issue("D9-5", "Knowledge-base articles require generated FAQ source documents", asset_type="faq"))
+    else:
+        for index, document in enumerate(faq_documents):
+            if not _d9_faq_has_question_and_answer(document):
+                issues.append(_d9_issue(
+                    "D9-5", f"FAQ source document {index} needs a non-empty question and answer", asset_type="faq",
+                ))
+    return issues
+
+
+def _d9_contact_flow_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
+    contact_flows = bundle.get("contact_flows") or []
+    if not contact_flows:
+        return [_d9_issue("D9-6", "ACXD runtime target requires a Contact Flow with an AgenticCX binding", asset_type="contact_flow")]
+    issues: list[dict] = []
+    context_names = _d9_context_variable_names(bundle, flow_spec or {})
+    required_branches = ("Default", "Escalation", "Error", "IdleChatTimeout")
+    for index, document in enumerate(contact_flows):
+        flow, binding, actions = _d9_contact_flow_parts(document)
+        action_ids = {action.get("Identifier") or action.get("identifier") for action in actions}
+        action_ids.discard(None)
+        agentic_actions = [action for action in actions if str(action.get("Identifier") or action.get("identifier") or "").startswith("AgenticCX")]
+        if not agentic_actions:
+            issues.append(_d9_issue("D9-6", "Contact Flow has no AgenticCX action", asset_type="contact_flow", path=f"contact_flows[{index}]"))
+        if binding is None:
+            issues.append(_d9_issue("D9-6", "Contact Flow has no Metadata.acxdBinding", asset_type="contact_flow", path=f"contact_flows[{index}]"))
+            continue
+        context_variables = binding.get("contextVariables") or []
+        if len(context_variables) > 10:
+            issues.append(_d9_issue("D9-6", f"Agentic CX binding has {len(context_variables)} context variables; maximum is 10", asset_type="contact_flow", path=f"contact_flows[{index}].Metadata.acxdBinding.contextVariables"))
+        branches = binding.get("branches") or {}
+        for branch in required_branches:
+            target = _d9_binding_target(branches.get(branch))
+            if not target:
+                issues.append(_d9_issue("D9-6", f"Agentic CX binding is missing the {branch!r} branch", asset_type="contact_flow", path=f"contact_flows[{index}].Metadata.acxdBinding.branches"))
+            elif target not in action_ids:
+                issues.append(_d9_issue("D9-6", f"Agentic CX {branch!r} branch targets {target!r}, which is not an action Identifier", asset_type="contact_flow", path=f"contact_flows[{index}].Metadata.acxdBinding.branches.{branch}"))
+        serialized = json.dumps(flow, ensure_ascii=False)
+        for variable_name in sorted(set(re.findall(r"\$\.AgenticCX\.ContextVariables\.([A-Za-z_][A-Za-z0-9_]*)", serialized))):
+            if variable_name not in context_names:
+                issues.append(_d9_issue("D9-6", f"Contact Flow references $.AgenticCX.ContextVariables.{variable_name}, but application context variables do not define it", asset_type="contact_flow", field=variable_name))
+    return issues
+
+
+def _d9_identity_metadata_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
+    issues: list[dict] = []
+    flow_id_pattern = re.compile(r"^[A-Za-z]{3,64}$")
+    uuid_pattern = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+    for flow_index, flow in enumerate(bundle.get("flows") or []):
+        if not isinstance(flow, dict):
+            continue
+        flow_id = flow.get("flowId")
+        if not isinstance(flow_id, str) or not flow_id_pattern.fullmatch(flow_id):
+            issues.append(_d9_issue("D9-7", f"flowId {flow_id!r} must contain letters only and be 3–64 characters", asset_type="flow", path=f"flows[{flow_index}].flowId"))
+        for node_id, node in (flow.get("nodes") or {}).items():
+            if not isinstance(node_id, str) or not uuid_pattern.fullmatch(node_id):
+                issues.append(_d9_issue("D9-7", f"Flow node id {node_id!r} must be a UUID", asset_type="flow", path=f"flows[{flow_index}].nodes"))
+            if isinstance(node, dict) and node.get("nodeId") != node_id:
+                issues.append(_d9_issue("D9-7", f"Flow nodeId {node.get('nodeId')!r} must match UUID map key {node_id!r}", asset_type="flow", path=f"flows[{flow_index}].nodes[{node_id!r}].nodeId"))
+        flow_locales = []
+        for key in ("mainLanguageCode", "languageCode"):
+            if flow.get(key) is not None:
+                flow_locales.append(flow[key])
+        flow_locales.extend(flow.get("languageCodes") or [])
+        if not flow_locales:
+            issues.append(_d9_issue("D9-7", f"Flow {flow_id!r} must declare full locale codes", asset_type="flow", path=f"flows[{flow_index}]"))
+        for locale in flow_locales:
+            if not _d9_is_full_locale(locale):
+                issues.append(_d9_issue("D9-7", f"Locale {locale!r} must be a supported full locale code such as 'en-US'", asset_type="flow", path=f"flows[{flow_index}]"))
+    for family in ("flows", "slot_types", "data_requests", "guardrails", "knowledge_bases"):
+        for path, key in _d9_non_ascii_metadata(bundle.get(family) or [], family):
+            issues.append(_d9_issue("D9-7", f"{key} must be ASCII-only metadata", asset_type=family, path=path))
+    if bundle.get("application") is None:
+        issues.append(_d9_issue("D9-7", "ACXD application asset is missing; full locale metadata cannot be verified", asset_type="application"))
+    else:
+        for path, key in _d9_non_ascii_metadata(bundle["application"], "application"):
+            issues.append(_d9_issue("D9-7", f"{key} must be ASCII-only metadata", asset_type="application", path=path))
+        settings = bundle["application"].get("settings") or {}
+        app_locales = []
+        for key in ("languageCode",):
+            if settings.get(key) is not None:
+                app_locales.append(settings[key])
+        app_locales.extend(settings.get("languageCodes") or [])
+        app_locales.extend(entry.get("languageCode") for entry in settings.get("languageSettings") or [] if isinstance(entry, dict))
+        if not app_locales:
+            issues.append(_d9_issue("D9-7", "ACXD application must declare full locale codes", asset_type="application", path="application.settings"))
+        for locale in app_locales:
+            if not _d9_is_full_locale(locale):
+                issues.append(_d9_issue("D9-7", f"Locale {locale!r} must be a supported full locale code such as 'en-US'", asset_type="application", path="application.settings"))
+    application_spec = (flow_spec or {}).get("application") or {}
+    for locale in list(application_spec.get("locales") or []) + ([application_spec["primary_locale"]] if application_spec.get("primary_locale") else []):
+        if not _d9_is_full_locale(locale):
+            issues.append(_d9_issue("D9-7", f"ACXDFlowSpec locale {locale!r} must be a supported full locale code", asset_type="application"))
+    return issues
+
+
+def _d9_external_backend_checks(bundle: dict, classic_mismatches: list[dict]) -> list[dict]:
+    if not any(
+        isinstance(data_request, dict)
+        and (data_request.get("webhook") or {}).get("implementation") == "external"
+        for data_request in bundle.get("data_requests") or []
+    ):
+        return []
+    category_by_asset_type = {
+        "iam_permissions": "D2",
+        "rds_env_contract": "D3",
+        "rds_data_api": "D3",
+        "sql_param_type_mismatch": "D4",
+        "sql_schema_mismatch": "D4",
+        "sql_type_mismatch": "D4",
+        "sql_missing_required_column": "D4",
+        "connect_invoke_permission": "D5",
+    }
+    issues: list[dict] = []
+    for mismatch in classic_mismatches:
+        source_id = category_by_asset_type.get(mismatch.get("asset_type"))
+        if source_id:
+            issues.append(_d9_issue(
+                "D9-8", f"{source_id} failure required by an external Data Request: {mismatch.get('issue', '')}",
+                asset_type=mismatch.get("asset_type"), operation_id=mismatch.get("operation_id"),
+                field=mismatch.get("field"), source_id=source_id,
+            ))
+    return issues
+
+
+def _dedupe_d9_issues(issues: list[dict]) -> list[dict]:
+    seen: set[tuple[Any, ...]] = set()
+    result: list[dict] = []
+    for issue in issues:
+        key = (issue.get("id"), issue.get("message"), issue.get("path"), issue.get("field"))
+        if key not in seen:
+            seen.add(key)
+            result.append(issue)
+    return result
+
+
+def run_d9_checks(session_id: str, *, classic_mismatches: Optional[list[dict]] = None) -> list[dict]:
+    """Run D9-1…D9-8 for an ACXD runtime target.
+
+    Returns only stable machine-readable findings:
+    ``[{"id": "D9-1", "severity": "error", "message": "...", ...}]``.
+    It is intentionally callable by the packager without invoking the reviewer.
+    """
+    if not is_acxd_target(session_id):
+        return []
+    try:
+        bundle = load_acxd_bundle(session_id)
+    except Exception as exc:
+        return [_d9_issue("D9-1", f"Could not load ACXD asset bundle: {exc}", asset_type="bundle")]
+    flow_spec_model = get_acxd_flow_spec(session_id)
+    flow_spec = None
+    if hasattr(flow_spec_model, "model_dump"):
+        flow_spec = flow_spec_model.model_dump()
+    elif isinstance(flow_spec_model, dict):
+        flow_spec = flow_spec_model
+    if flow_spec is None:
+        return [_d9_issue("D9-1", "ACXDFlowSpec is missing for this ACXD session", asset_type="flow_spec")]
+
+    if classic_mismatches is None:
+        # Use the pre-D9 implementation to fold D2–D5 without recursion.
+        try:
+            legacy = _D1_D8_IMPLEMENTATION(session_id)
+            classic_mismatches = list(legacy.get("mismatches") or [])
+        except Exception:
+            classic_mismatches = []
+
+    issues: list[dict] = []
+    issues.extend(_d9_structural_checks(bundle, flow_spec))       # D9-1 / D9-2 + retained cross-refs
+    issues.extend(_d9_data_request_checks(bundle, session_id))    # D9-3
+    issues.extend(_d9_slot_type_checks(bundle, flow_spec))        # D9-4
+    issues.extend(_d9_knowledge_base_checks(bundle, flow_spec, session_id))  # D9-5
+    issues.extend(_d9_contact_flow_checks(bundle, flow_spec))     # D9-6
+    issues.extend(_d9_identity_metadata_checks(bundle, flow_spec))  # D9-7
+    issues.extend(_d9_external_backend_checks(bundle, classic_mismatches))  # D9-8
+    return _dedupe_d9_issues(issues)
+
+
+def _validate_parameter_consistency_impl(session_id: str) -> dict:
+    """Preserve D1–D8 behavior and append D9 only for ACXD sessions."""
+    result = _D1_D8_IMPLEMENTATION(session_id)
+    try:
+        acxd_target = is_acxd_target(session_id)
+    except Exception:
+        acxd_target = False
+    mismatches = list(result.get("mismatches") or [])
+    if acxd_target:
+        mismatches.extend(_d9_as_mismatch(issue) for issue in run_d9_checks(
+            session_id, classic_mismatches=mismatches,
+        ))
+    # An additive severity field preserves existing D1–D8 issue payloads while
+    # letting packagers use one uniform severity filter for all D-series gates.
+    for mismatch in mismatches:
+        mismatch.setdefault("severity", "error")
+    result["mismatches"] = mismatches
+    result["success"] = not mismatches
+    if acxd_target:
+        result["summary"] = f"{result.get('summary', '')}; ACXD D9 found {sum(1 for issue in mismatches if issue.get('id', '').startswith('D9-'))} violation(s)"
+    return result

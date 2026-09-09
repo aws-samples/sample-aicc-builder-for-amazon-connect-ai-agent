@@ -1,0 +1,198 @@
+"""ACXDFlowSpec contract tests — determinism confirmation rules, readiness
+validation, persistence, and the runtime-target precedence chain."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+import pytest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SRC = os.path.abspath(os.path.join(_HERE, "..", "src"))
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+from tools import acxd_flow_spec as afs  # noqa: E402
+from tools.session_context import current_session_id  # noqa: E402
+
+SID = "test-acxd-flow-spec"
+
+
+@pytest.fixture(autouse=True)
+def _session(tmp_path, monkeypatch):
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
+    (tmp_path / "sessions" / SID / "state").mkdir(parents=True)
+    tok = current_session_id.set(SID)
+    yield tmp_path
+    current_session_id.reset(tok)
+
+
+def _steps():
+    return [
+        {"step": 1, "description": "Ask for the order id", "node_type": "user_input",
+         "determinism": "deterministic", "decision_category": "general"},
+        {"step": 2, "description": "Look up the order", "node_type": "data_request",
+         "determinism": "deterministic"},
+        {"step": 3, "description": "Decide whether the refund is auto-approved",
+         "node_type": "generative_text", "determinism": "generative",
+         "decision_category": "refund"},
+        {"step": 4, "description": "Explain the outcome", "node_type": "generative_text",
+         "determinism": "deterministic"},
+    ]
+
+
+def _upsert(**over):
+    kwargs = dict(flow_id="ProcessReturn", purpose="Refunds", role="operation",
+                  operation_id="process_return", steps=_steps())
+    kwargs.update(over)
+    return afs.upsert_acxd_flow_plan(**kwargs)
+
+
+# --- upsert / determinism policy -----------------------------------------
+
+def test_upsert_never_records_confirmation_and_coerces_money_steps():
+    res = _upsert(steps=[dict(s, user_confirmed=True) for s in _steps()])
+    assert res["success"]
+    assert res["awaiting_confirmation"] == [1, 2, 3, 4]
+    plan = afs.get_acxd_flow_spec().flow("ProcessReturn")
+    s3 = plan.steps[2]
+    assert s3.determinism == "deterministic" and s3.node_type == "choice"
+    assert any("refund" in n for n in res["coerced"])
+    # generative node type forces the generative label
+    assert plan.steps[3].determinism == "generative"
+    # data_request step defaults to the operation's data request
+    assert plan.steps[1].data_request_id == "process_return"
+
+
+def test_upsert_rejects_bad_flow_id_and_missing_operation():
+    assert not _upsert(flow_id="process-return")["success"]
+    assert not _upsert(flow_id="Ab")["success"]
+    assert not _upsert(operation_id=None)["success"]
+    assert not _upsert(role="nope")["success"]
+
+
+def test_confirm_then_reupsert_keeps_unchanged_and_resets_changed():
+    _upsert()
+    res = afs.confirm_acxd_flow_steps("ProcessReturn")
+    assert res["awaiting_confirmation"] == [] and res["flow_approved"]
+
+    changed = _steps()
+    changed[0]["node_type"] = "user_choice"          # decision changed
+    res = _upsert(steps=changed)
+    assert res["awaiting_confirmation"] == [1]
+    plan = afs.get_acxd_flow_spec().flow("ProcessReturn")
+    assert plan.steps[0].confirmation_pending_reason
+    assert plan.steps[1].user_confirmed
+    assert plan.confirmed is False                    # a re-upsert re-opens the plan
+
+
+def test_partial_confirmation_does_not_approve_flow():
+    _upsert()
+    res = afs.confirm_acxd_flow_steps("ProcessReturn", step_numbers=[1, 2])
+    assert res["awaiting_confirmation"] == [3, 4]
+    assert res["flow_approved"] is False
+
+
+def test_confirm_unknown_flow_fails():
+    assert not afs.confirm_acxd_flow_steps("Nope")["success"]
+
+
+# --- readiness validation -------------------------------------------------
+
+def _full_spec():
+    _upsert()
+    afs.confirm_acxd_flow_steps("ProcessReturn")
+    for role, fid in (("welcome", "WelcomeFlow"), ("fallback", "FallbackFlow"),
+                      ("escalation", "EscalationFlow")):
+        afs.upsert_acxd_flow_plan(flow_id=fid, purpose=role, role=role,
+                                  steps=[{"step": 1, "description": role, "node_type": "basic"}])
+        afs.confirm_acxd_flow_steps(fid)
+    return afs.get_acxd_flow_spec()
+
+
+def test_validate_ready_spec_has_no_problems():
+    spec = _full_spec()
+    assert afs.validate_acxd_flow_spec(spec, {"process_return"}) == []
+
+
+def test_validate_reports_unconfirmed_missing_system_flows_and_unknown_operation():
+    _upsert()
+    spec = afs.get_acxd_flow_spec()
+    problems = afs.validate_acxd_flow_spec(spec, {"other_op"})
+    joined = "\n".join(problems)
+    assert "not confirmed by the user" in joined
+    assert "not approved by the user" in joined
+    assert "missing system flow with role 'welcome'" in joined
+    assert "has no OperationSpec" in joined
+
+
+def test_validate_application_and_guardrail_constraints():
+    spec = _full_spec()
+    afs.save_acxd_policies(guardrails=[{"name": "Abuse", "policy": "route abuse",
+                                        "action": "route", "route_flow_id": "Missing"}])
+    afs.save_acxd_application_settings(
+        channels=["voice", "fax"], locales=["ko"], speech_engine="agentic_voice",
+        context_variables=[{"name": f"v{i}"} for i in range(11)])
+    spec = afs.get_acxd_flow_spec()
+    assert spec.application.locales == ["ko-KR"]       # canonicalized
+    problems = "\n".join(afs.validate_acxd_flow_spec(spec, {"process_return"}))
+    assert "route_flow_id" in problems
+    assert "unknown channel 'fax'" in problems
+    assert "at most 10 context variables" in problems
+
+
+def test_acxd_flow_spec_ready_wrapper():
+    ok, problems = afs.acxd_flow_spec_ready()
+    assert not ok and problems
+    _full_spec()
+    ok, problems = afs.acxd_flow_spec_ready()
+    # OperationSpec 'process_return' is not saved in this test session
+    assert not ok and any("has no OperationSpec" in p for p in problems)
+
+
+# --- persistence ----------------------------------------------------------
+
+def test_persists_to_state_dir_and_restores(tmp_path):
+    _upsert()
+    path = tmp_path / "sessions" / SID / "state" / "acxd_flow_spec.json"
+    assert path.is_file()
+    data = json.loads(path.read_text())
+    assert data["flows"][0]["flow_id"] == "ProcessReturn"
+    assert afs.get_acxd_flow_spec().flow("ProcessReturn").purpose == "Refunds"
+
+
+def test_get_spec_without_session_is_none():
+    tok = current_session_id.set(None)
+    try:
+        assert afs.get_acxd_flow_spec() is None
+    finally:
+        current_session_id.reset(tok)
+
+
+# --- runtime target -------------------------------------------------------
+
+def test_runtime_target_defaults_to_classic():
+    assert afs.get_runtime_target() == "classic"
+    assert afs.is_acxd_target() is False
+
+
+def test_runtime_target_seed_file(tmp_path):
+    assert afs.set_runtime_target(SID, "acxd")
+    assert (tmp_path / "sessions" / SID / "state" / "runtime_target.json").is_file()
+    assert afs.get_runtime_target() == "acxd"
+    assert afs.is_acxd_target()
+    assert not afs.set_runtime_target(SID, "lex")
+
+
+def test_infrastructure_spec_inherits_runtime_target():
+    from tools import spec_manager as sm
+    afs.set_runtime_target(SID, "acxd")
+    res = sm.save_infrastructure_spec(project_name="acme", db_type="dynamodb")
+    assert res.get("success", True), res
+    infra = sm.get_infrastructure_spec()
+    assert infra is not None and infra.runtime_target == "acxd"
+    # the saved spec now wins even if the seed disappears
+    afs.set_runtime_target(SID, "classic")
+    assert afs.get_runtime_target() == "acxd"

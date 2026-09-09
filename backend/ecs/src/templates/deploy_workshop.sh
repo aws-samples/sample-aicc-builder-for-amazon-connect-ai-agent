@@ -39,8 +39,31 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMMAND="${1:-deploy}"
+TARGET="${DEPLOY_TARGET:-classic}"
+DRY_RUN=false
+COMMAND="deploy"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target)
+            [ "$#" -gt 1 ] || { echo "ERROR: --target requires classic or acxd" >&2; exit 2; }
+            TARGET="$2"; shift 2 ;;
+        --target=*)
+            TARGET="${1#--target=}"; shift ;;
+        --dry-run)
+            DRY_RUN=true; shift ;;
+        deploy|cleanup|clean|destroy|delete|status)
+            COMMAND="$1"; shift ;;
+        *)
+            echo "Usage: $0 [deploy|cleanup|status] [--target classic|acxd] [--dry-run]" >&2
+            exit 2 ;;
+    esac
+done
+case "$TARGET" in
+    classic|acxd) ;;
+    *) echo "ERROR: --target must be classic or acxd (got '$TARGET')" >&2; exit 2 ;;
+esac
 STATE_FILE="$SCRIPT_DIR/.aicc_deploy_state"
+RUNNER_STATE_FILE="$SCRIPT_DIR/.deploy-state.json"
 
 # Auto-detect project name from CloudFormation template directory
 DETECTED_PROJECT_NAME=""
@@ -167,6 +190,20 @@ state_set() {
     grep -v "^$1=" "$STATE_FILE" > "$STATE_FILE.tmp" 2>/dev/null || true
     echo "$1=$2" >> "$STATE_FILE.tmp"
     mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
+
+runner_contact_flow_id() {
+    [ -f "$RUNNER_STATE_FILE" ] || return 0
+    python3 - "$RUNNER_STATE_FILE" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    for resource in json.load(open(sys.argv[1])).get("resources", []):
+        if resource.get("kind") == "contact-flow":
+            print(resource.get("id", ""))
+            break
+except Exception:
+    pass
+PYEOF
 }
 
 # =============================================================================
@@ -683,6 +720,11 @@ phase_connect_instance() {
         INSTANCE_COUNT=$(jget "$INSTANCES_JSON" "InstanceSummaryList" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
 
         if [ "$INSTANCE_COUNT" -eq 0 ]; then
+            if [ "$TARGET" = "acxd" ]; then
+                echo "❌ ACXD requires an existing Connect Customer instance; this script will not create a generic Connect instance." >&2
+                echo "   Create/select a Connect Customer instance in the console, export CONNECT_INSTANCE_ID, then retry." >&2
+                exit 1
+            fi
             info "No Connect instance found. Creating a new one..."
             # Instance aliases are GLOBALLY unique (like S3 buckets) — retry
             # with a random suffix if the deterministic name is taken.
@@ -729,6 +771,10 @@ for inst in json.load(sys.stdin)['InstanceSummaryList']:
             menu+=("Create a new instance")
             choose "Which Connect instance do you want to deploy to?" "$default_idx" "${menu[@]}"
             if [ "$CHOICE_VALUE" = "Create a new instance" ]; then
+                if [ "$TARGET" = "acxd" ]; then
+                    echo "❌ Select an existing Connect Customer instance for ACXD; generic instance creation is unsupported." >&2
+                    exit 1
+                fi
                 ask_text "New instance alias" "aicc-workshop-${ACCOUNT_ID: -4}"
                 ALIAS="$ANSWER"
                 CREATE_RESULT=$(aws connect create-instance \
@@ -873,6 +919,10 @@ for kb in json.load(sys.stdin).get('knowledgeBaseSummaries', []):
 phase_env_vars() {
     echo ""
     echo "🔑 Phase 7: Injecting Lambda environment variables..."
+    if [ "$TARGET" = "acxd" ]; then
+        info "ACXD uses the runner's WEBHOOK_URL wiring; no Q in Connect session variables are required"
+        return 0
+    fi
     # Prefer the exported ARN; fall back to fuzzy-matching the stack's Lambdas
     # (many generated templates don't export UpdateQSessionFunctionArn)
     if [ -z "${UPDATE_Q_SESSION_ARN:-}" ]; then
@@ -1685,6 +1735,11 @@ CONTACT_FLOW_ARN=""
 phase_contact_flow() {
     echo ""
     echo "📋 Phase 11: Preparing & importing Contact Flow..."
+    if [ "$TARGET" = "acxd" ]; then
+        info "The ACXD runner imported or updated contact-flow/contact_flow.json as its final manifest step"
+        info "Complete the Agentic CX placeholder wiring in WIRING-GUIDE.md before publishing"
+        return 0
+    fi
     [ -z "$FLOW_JSON" ] && { info "No contact-flow/ directory, skipping"; return 0; }
 
     local WORK_FLOW="/tmp/${PROJECT_NAME}_flow_resolved.json"
@@ -2523,9 +2578,179 @@ do_summary() {
 }
 
 # =============================================================================
+# ACXD target helpers
+# =============================================================================
+verify_acxd_connect_customer() {
+    local instance_type normalized
+    instance_type=$(aws connect describe-instance --instance-id "$CONNECT_INSTANCE_ID" --region "$REGION" \
+        --query 'Instance.InstanceType' --output text 2>/dev/null || echo "")
+    normalized=$(echo "$instance_type" | tr '[:upper:]-' '[:lower:]_')
+    case "$normalized" in
+        connect_customer|customer|customer_instance)
+            ok "Verified Connect Customer instance: $CONNECT_INSTANCE_ID ($instance_type)" ;;
+        *)
+            echo "❌ ACXD requires a Connect Customer instance for the Agentic CX block." >&2
+            echo "   describe-instance reported InstanceType='${instance_type:-unknown}'." >&2
+            exit 1 ;;
+    esac
+}
+
+ensure_acxd_runner() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "❌ Node.js 20+ is required for ACXD deployment." >&2
+        exit 1
+    fi
+    local node_major
+    node_major=$(node -p "process.versions.node.split('.')[0]")
+    if [ "$node_major" -lt 20 ]; then
+        echo "❌ Node.js 20+ is required (found $(node --version))." >&2
+        exit 1
+    fi
+    if [ ! -d "$SCRIPT_DIR/node_modules/amazon-connect-acxd-sdk" ]; then
+        info "Installing pinned ACXD runner dependency..."
+        (cd "$SCRIPT_DIR" && npm install --omit=dev --no-fund --no-audit)
+    fi
+}
+
+ensure_acxd_credentials() {
+    [ "$DRY_RUN" = "true" ] && return 0
+    if [ -z "${ACXD_WORKSPACE_ID:-}" ]; then
+        if [ "$IS_TTY" = "false" ]; then
+            echo "❌ ACXD_WORKSPACE_ID must be exported for a non-interactive deploy." >&2
+            exit 1
+        fi
+        read -r -p "   ACXD workspace ID: " ACXD_WORKSPACE_ID
+        export ACXD_WORKSPACE_ID
+    fi
+    if [ -z "${ACXD_API_KEY:-}" ]; then
+        if [ "$IS_TTY" = "false" ]; then
+            echo "❌ ACXD_API_KEY must be exported for a non-interactive deploy." >&2
+            exit 1
+        fi
+        read -r -s -p "   ACXD API key (input hidden): " ACXD_API_KEY
+        echo ""
+        export ACXD_API_KEY
+    fi
+}
+
+run_acxd_runner() {
+    ensure_acxd_runner
+    if [ -n "${API_ENDPOINT:-}" ]; then
+        export WEBHOOK_URL="${WEBHOOK_URL:-$API_ENDPOINT}"
+        export AICC_CFN_ALREADY_DEPLOYED=1
+        info "WEBHOOK_URL sourced from CloudFormation ApiEndpoint"
+    fi
+    ensure_acxd_credentials
+    local args=(deploy --manifest deploy-manifest.json)
+    [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+    (cd "$SCRIPT_DIR" && node runner.js "${args[@]}")
+}
+
+do_acxd_summary() {
+    echo ""
+    hr
+    echo "  ✅ ACXD deployment complete"
+    hr
+    echo "  Project:          $PROJECT_NAME"
+    echo "  Connect instance: ${CONNECT_INSTANCE_ID:-N/A}"
+    echo "  API endpoint:     ${API_ENDPOINT:-N/A}"
+    [ -n "${CONTACT_FLOW_ID:-}" ] && echo "  Contact flow:     $CONTACT_FLOW_ID"
+    echo ""
+    (cd "$SCRIPT_DIR" && node runner.js status) || true
+    echo ""
+    echo "  Complete the Agentic CX block wiring and channel attachment in WIRING-GUIDE.md."
+    hr
+}
+
+do_acxd_deploy() {
+    if [ "$DRY_RUN" = "true" ]; then
+        info "ACXD dry run: passing through to the static runner; no AWS or ACXD resources will change"
+        run_acxd_runner
+        return 0
+    fi
+    if [ -z "$CFN_TEMPLATE" ]; then
+        echo "❌ No CloudFormation template found under cloudformation/." >&2
+        exit 1
+    fi
+    do_preflight
+    phase_cloudformation
+    phase_lambda_code
+    phase_openapi
+    info "Phase 4 skipped for ACXD: knowledge-base articles deploy through the runner"
+    phase_connect_instance
+    verify_acxd_connect_customer
+    info "Phase 6 skipped for ACXD: Q in Connect is not used"
+    phase_env_vars
+    info "Phases 8–10: deploying ACXD resources with the static runner"
+    run_acxd_runner
+    phase_contact_flow
+    CONTACT_FLOW_ID=$(runner_contact_flow_id)
+    [ -n "$CONTACT_FLOW_ID" ] && state_set CONTACT_FLOW_ID "$CONTACT_FLOW_ID"
+    info "Phase 12 skipped for ACXD: AI Prompt, AI Agent, and security profile are not used"
+    phase_phone_number
+    do_acxd_summary
+}
+
+do_acxd_status() {
+    hr
+    echo "  AICC Builder - ACXD Deployment Status"
+    echo "  Project: $PROJECT_NAME | Region: $REGION"
+    hr
+    STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+        --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NOT_FOUND")
+    echo "  Shared CloudFormation: $STACK_STATUS"
+    [ "$STACK_STATUS" != "NOT_FOUND" ] && echo "     API Endpoint: $(get_output ApiEndpoint)"
+    echo "  Classic/shared state (.aicc_deploy_state):"
+    for kv in CONNECT_INSTANCE_ID CONTACT_FLOW_ID PHONE_NUMBER_ID; do
+        v=$(state_get "$kv")
+        [ -n "$v" ] && echo "  🔹 $kv: $v"
+    done
+    echo "  ACXD runner state (.deploy-state.json):"
+    if [ -f "$RUNNER_STATE_FILE" ]; then
+        (cd "$SCRIPT_DIR" && node runner.js status) || true
+    else
+        echo "  (not created yet)"
+    fi
+    hr
+}
+
+do_acxd_cleanup() {
+    hr
+    echo "  AICC Builder - ACXD Cleanup"
+    echo "  Project: $PROJECT_NAME | Region: $REGION"
+    hr
+    echo "  This reads .aicc_deploy_state and .deploy-state.json, then removes only"
+    echo "  resources recorded by the ACXD runner (including the imported contact flow)."
+    do_acxd_status
+    if [ -z "$AUTO" ]; then
+        read -r -p "  Type 'delete' to remove the recorded ACXD resources: " CONFIRM
+        [ "$CONFIRM" = "delete" ] || { echo "  Cancelled."; return 0; }
+    fi
+    CONNECT_INSTANCE_ID="${CONNECT_INSTANCE_ID:-$(state_get CONNECT_INSTANCE_ID)}"
+    export CONNECT_INSTANCE_ID
+    ensure_acxd_runner
+    ensure_acxd_credentials
+    (cd "$SCRIPT_DIR" && node runner.js cleanup --yes)
+    if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" &>/dev/null; then
+        info "Deleting shared CloudFormation stack: $STACK_NAME"
+        aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
+        aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" || true
+    fi
+    rm -f "$STATE_FILE"
+}
+
+# =============================================================================
 # DEPLOY: phase runner
 # =============================================================================
 do_deploy() {
+    if [ "$TARGET" = "acxd" ]; then
+        do_acxd_deploy
+        return
+    fi
+    if [ "$DRY_RUN" = "true" ]; then
+        echo "❌ --dry-run is currently supported only with --target acxd." >&2
+        exit 2
+    fi
     if [ -z "$CFN_TEMPLATE" ]; then
         echo "❌ No CloudFormation template found under cloudformation/."
         exit 1
@@ -2574,6 +2799,10 @@ do_deploy() {
 # CLEANUP (reverse order — phone/flow/AI agent/bot/MCP/Gateway/Assistant/CFN)
 # =============================================================================
 do_cleanup() {
+    if [ "$TARGET" = "acxd" ]; then
+        do_acxd_cleanup
+        return
+    fi
     hr
     echo "  AICC Builder - Resource Cleanup"
     echo "  Project: $PROJECT_NAME | Region: $REGION | Account: $ACCOUNT_ID"
@@ -2891,6 +3120,10 @@ for p in json.load(sys.stdin).get('credentialProviders', []):
 # STATUS
 # =============================================================================
 do_status() {
+    if [ "$TARGET" = "acxd" ]; then
+        do_acxd_status
+        return
+    fi
     hr
     echo "  AICC Builder - Deployment Status"
     echo "  Project: $PROJECT_NAME | Region: $REGION"

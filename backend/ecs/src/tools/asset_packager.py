@@ -26,12 +26,14 @@ packages them into a downloadable ZIP with the following structure:
 """
 
 import io
+import json
 import logging
 import os
 import re
 import zipfile
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 from botocore.exceptions import ClientError
 from strands import tool
@@ -145,6 +147,243 @@ ASSET_TYPE_FOLDER_MAP = {
     "knowledge-base": "knowledge-base",  # Alias
 }
 
+# Raw ACXD assets are rewritten to this stable deployment layout only when the
+# session target is ACXD. The Classic loop stays unchanged otherwise.
+ACXD_STORAGE_TYPES = frozenset({
+    "acxd_flow", "acxd_slot_type", "acxd_data_request", "acxd_guardrail",
+    "acxd_knowledge_base", "acxd_application", "acxd_context_variable",
+    "acxd_secret", "acxd_deploy_manifest",
+})
+ACXD_RUNNER_FILES = (
+    "runner.js", "package.json", "lib/manifest.js", "lib/client.js",
+    "lib/state.js", "lib/steps.js",
+)
+_ACXD_RUNNER_DIR = Path(__file__).resolve().parent.parent / "templates" / "acxd_runner"
+
+
+class ACXDPackagingError(ValueError):
+    """Raised when an ACXD bundle cannot safely be handed to a customer."""
+
+
+def _slug(value: Any, fallback: str = "unnamed") -> str:
+    """Create a path-safe, Unicode-preserving file stem."""
+    value = re.sub(r"[^\w.-]+", "-", str(value or "")).strip(".-")
+    return value or fallback
+
+
+def _is_acxd_target(session_id: str) -> bool:
+    """Late-load the target contract so old Classic sessions remain unaffected."""
+    try:
+        from .acxd_flow_spec import is_acxd_target
+        return bool(is_acxd_target(session_id))
+    except Exception as exc:  # Classic packaging must remain available.
+        logger.debug("[packager] ACXD target lookup unavailable: %s", exc)
+        return False
+
+
+def _load_acxd_bundle(session_id: str) -> dict:
+    from .acxd_bundle import load_acxd_bundle
+    return load_acxd_bundle(session_id)
+
+
+def _format_d9_violation(violation: Any) -> str:
+    if isinstance(violation, dict):
+        identifier = violation.get("id") or violation.get("code") or "D9"
+        message = violation.get("message") or violation.get("error") or str(violation)
+        location = violation.get("path") or violation.get("asset")
+        return f"{identifier}{f' ({location})' if location else ''}: {message}"
+    return str(violation)
+
+
+def _run_d9_checks(session_id: str, bundle: dict) -> list[str]:
+    """Use Task C's D9 helper, falling back before it lands during integration."""
+    checker = None
+    try:
+        from . import validate_consistency
+        checker = getattr(validate_consistency, "run_d9_checks", None)
+    except Exception as exc:
+        logger.debug("[packager] run_d9_checks import unavailable: %s", exc)
+    if callable(checker):
+        result = checker(session_id)
+        if isinstance(result, dict):
+            result = (result.get("violations") or result.get("problems")
+                      or result.get("issues") or [])
+        return [_format_d9_violation(item) for item in (result or [])]
+
+    from .validate_acxd_consistency import validate_acxd_consistency
+    spec = None
+    try:
+        from .acxd_flow_spec import get_acxd_flow_spec
+        flow_spec = get_acxd_flow_spec(session_id)
+        spec = flow_spec.model_dump() if flow_spec else None
+    except Exception as exc:
+        logger.debug("[packager] ACXD flow spec unavailable for fallback: %s", exc)
+    return [_format_d9_violation(item)
+            for item in validate_acxd_consistency(bundle, spec=spec)]
+
+
+def _prepare_acxd_package(session_id: str, project_name: str) -> tuple[dict, dict, list[str]]:
+    from .acxd_manifest_builder import (
+        build_manifest,
+        check_manifest_coverage,
+        validate_deploy_manifest,
+    )
+
+    bundle = _load_acxd_bundle(session_id)
+    manifest = build_manifest(bundle, project_name=project_name)
+    problems = [f"D9: {item}" for item in _run_d9_checks(session_id, bundle)]
+    problems.extend(validate_deploy_manifest(manifest))
+    problems.extend(check_manifest_coverage(manifest, bundle))
+    return bundle, manifest, problems
+
+
+def _manifest_file_problems(manifest: dict, bundle_paths: set[str]) -> list[str]:
+    """Reject a manifest that references backend files absent from the ZIP."""
+    problems: list[str] = []
+    for step in manifest.get("steps") or []:
+        params = step.get("params") or {}
+        if step.get("type") == "deploy-cfn-backend":
+            template = params.get("templatePath")
+            if template and template not in bundle_paths:
+                problems.append(
+                    f"manifest deploy-cfn-backend references {template!r}, but the "
+                    "bundle has no generated backend template")
+        for lambda_dir in params.get("lambdaDirs") or []:
+            prefix = lambda_dir.rstrip("/") + "/"
+            if not any(item.startswith(prefix) for item in bundle_paths):
+                problems.append(
+                    f"manifest {step.get('type')!r} references lambda dir {lambda_dir!r}, "
+                    "but the bundle has no generated handler")
+    return problems
+
+
+def build_acxd_zip_entries(
+    project_name: str,
+    bundle: dict,
+    manifest: dict,
+    spec: Optional[dict] = None,
+    extra_files: Optional[dict] = None,
+) -> list[tuple[str, bytes, bool]]:
+    """Return ACXD-only archive entries after manifest/coverage validation.
+
+    ``spec`` and ``extra_files`` are accepted for compatibility with the
+    retired standalone packager. D9 is session-aware and now runs from the
+    unified packager before this helper is called.
+    """
+    from .acxd_manifest_builder import check_manifest_coverage, validate_deploy_manifest
+
+    problems = validate_deploy_manifest(manifest) + check_manifest_coverage(manifest, bundle)
+    if problems:
+        raise ACXDPackagingError("ACXD manifest is invalid:\n  - " + "\n  - ".join(problems))
+
+    entries: list[tuple[str, bytes, bool]] = []
+    seen: set[str] = set()
+
+    def add(relative_path: str, payload: bytes | str, executable: bool = False) -> None:
+        if relative_path in seen:
+            raise ACXDPackagingError(
+                f"duplicate ACXD bundle path {relative_path!r}; refusing an ambiguous ZIP")
+        seen.add(relative_path)
+        entries.append((relative_path,
+                        payload.encode("utf-8") if isinstance(payload, str) else payload,
+                        executable))
+
+    def add_json(relative_path: str, document: Any) -> None:
+        add(relative_path, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+
+    for index, flow in enumerate(bundle.get("flows") or []):
+        add_json(f"assets/acxd/flows/{_slug((flow or {}).get('flowId'), f'flow-{index}')}.json", flow)
+    for index, slot_type in enumerate(bundle.get("slot_types") or []):
+        add_json(f"assets/acxd/slot-types/{_slug((slot_type or {}).get('slotTypeId'), f'slot-type-{index}')}.json", slot_type)
+    for index, data_request in enumerate(bundle.get("data_requests") or []):
+        add_json(f"assets/acxd/data-requests/{_slug((data_request or {}).get('dataRequestId'), f'data-request-{index}')}.json", data_request)
+    for index, guardrail in enumerate(bundle.get("guardrails") or []):
+        add_json(f"assets/acxd/guardrails/{_slug((guardrail or {}).get('name'), f'guardrail-{index}')}.json", guardrail)
+    for index, knowledge_base in enumerate(bundle.get("knowledge_bases") or []):
+        add_json(f"assets/acxd/knowledge-bases/{_slug((knowledge_base or {}).get('name'), f'knowledge-base-{index}')}.json", knowledge_base)
+    for index, secret in enumerate(bundle.get("secrets") or []):
+        safe_secret = {key: secret[key] for key in ("name", "description", "valueEnv")
+                       if isinstance(secret, dict) and key in secret}
+        add_json(f"assets/acxd/secrets/{_slug(safe_secret.get('name'), f'secret-{index}')}.json", safe_secret)
+
+    # Empty context variables are still part of the explicit block contract.
+    add_json("assets/acxd/context-variables.json", bundle.get("context_variables") or [])
+    if bundle.get("application"):
+        add_json("assets/acxd/application.json", bundle["application"])
+    for index, contact_flow in enumerate(bundle.get("contact_flows") or []):
+        file_name = "contact_flow.json" if index == 0 else f"contact_flow-{index}.json"
+        add_json(f"contact-flow/{file_name}", contact_flow)
+    add_json("deploy-manifest.json", manifest)
+
+    for relative_path in ACXD_RUNNER_FILES:
+        source = _ACXD_RUNNER_DIR / relative_path
+        if not source.is_file():
+            raise ACXDPackagingError(f"static ACXD runner file is missing: {source}")
+        add(relative_path, source.read_bytes(), executable=relative_path == "runner.js")
+    return entries
+
+
+def _generate_acxd_readme_section() -> str:
+    return """## ACXD runtime target
+
+This bundle targets **Amazon Connect Agentic CX Designer (ACXD)**. Classic
+CloudFormation, Lambda, OpenAPI, and Connect Contact Flow assets remain in the
+archive; ACXD replaces the Classic Lex, AI Prompt, and AgentCore Gateway phases.
+
+```bash
+./deploy.sh --target acxd --dry-run
+./deploy.sh --target acxd
+./deploy.sh status --target acxd
+./deploy.sh cleanup --target acxd
+```
+
+The script prompts for `ACXD_WORKSPACE_ID` and `ACXD_API_KEY` when needed and
+never writes either into the bundle. For external Data Requests it passes the
+CloudFormation API Gateway output as `WEBHOOK_URL`. Read `WIRING-GUIDE.md`
+after deployment: the Agentic CX block and channel attachment are manual until
+AWS publishes a Flow-Language representation for that block.
+"""
+
+
+def _binding_for_contact_flow(contact_flow: dict) -> dict:
+    metadata = contact_flow.get("Metadata") if isinstance(contact_flow, dict) else None
+    return ((metadata or {}).get("acxdBinding")
+            or (contact_flow.get("acxdBinding") if isinstance(contact_flow, dict) else None)
+            or {})
+
+
+def _generate_wiring_guide(bundle: dict) -> str:
+    application = bundle.get("application") or {}
+    lines = [
+        "# Agentic CX block wiring",
+        "",
+        "AWS documents Agentic CX block settings and branches, but not its",
+        "Flow-Language action type. The generated contact flow therefore keeps a",
+        "placeholder instead of guessing a non-portable JSON action.",
+        "",
+        "1. Run `./deploy.sh --target acxd` and use a **Connect Customer** instance.",
+        "2. Open the imported contact flow and replace the action whose Identifier",
+        "   starts with `AgenticCX` with an **Agentic CX** block.",
+        f"3. Select the workspace, deployed application **{application.get('name', 'ACXD application')}**, and alias.",
+        "4. Configure speech engine/audio filler and, for chat, idle timeout. Pass at",
+        "   most 10 context variables.",
+        "5. Wire **Default**, **Escalation**, **Error**, and **Idle chat timeout**.",
+        "   Later actions can read `$.AgenticCX.ContextVariables.<name>`.",
+        "6. Publish, then attach the flow to the intended phone number (voice) or",
+        "   selected chat channel/widget (chat).",
+        "",
+    ]
+    for contact_flow in bundle.get("contact_flows") or []:
+        binding = _binding_for_contact_flow(contact_flow)
+        branches = binding.get("branches") or {}
+        if branches:
+            lines.append("## Generated branch targets")
+            for branch in ("Default", "Escalation", "Error", "IdleChatTimeout"):
+                if branch in branches:
+                    lines.append(f"- **{branch}** → `{branches[branch]}`")
+            lines.append("")
+    return "\n".join(lines)
+
 
 @tool
 def package_and_upload_assets(
@@ -239,16 +478,44 @@ def package_assets_impl(
             f"({len(s3_keys)} keys, {len(parsed_assets)} parsed)"
         )
 
+        acxd_plan = None
+        if not asset_type_filter and _is_acxd_target(session_id):
+            try:
+                acxd_bundle, acxd_manifest, acxd_problems = _prepare_acxd_package(
+                    session_id, project_name)
+            except Exception as exc:
+                logger.exception("[packager] unable to prepare ACXD package")
+                return {
+                    "success": False,
+                    "error": f"ACXD packaging refused: unable to run D9/manifest validation: {exc}",
+                    "session_id": session_id,
+                }
+            if acxd_problems:
+                return {
+                    "success": False,
+                    "error": "ACXD packaging refused:\n- " + "\n- ".join(acxd_problems),
+                    "problems": acxd_problems,
+                    "session_id": session_id,
+                }
+            acxd_plan = (acxd_bundle, acxd_manifest)
+
         # Create in-memory ZIP file
         zip_buffer = io.BytesIO()
         file_list = []
         assets_found = {}
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zip_paths: set[str] = set()
             for s3_key, asset_info in parsed_assets.items():
                 asset_type = asset_info["asset_type"]
                 operation_id = asset_info.get("operation_id")
                 file_name = asset_info["file_name"]
+
+                # Target-specific assets are written below from load_acxd_bundle;
+                # prompts are intentionally absent for the ACXD runtime target.
+                if acxd_plan and (asset_type.lower() in ACXD_STORAGE_TYPES
+                                  or asset_type.lower() in {"prompt", "contact_flow", "contactflow", "contact-flow"}):
+                    continue
 
                 content = get_asset_from_s3(s3_key, s3_only=True)
                 if not content:
@@ -263,12 +530,40 @@ def package_assets_impl(
                 )
 
                 if zip_path:
+                    if acxd_plan and zip_path in zip_paths:
+                        raise ACXDPackagingError(
+                            f"duplicate archive path {zip_path!r}; refusing an ambiguous ACXD bundle")
                     zf.writestr(zip_path, content)
+                    zip_paths.add(zip_path)
                     file_list.append(zip_path)
 
                     if asset_type not in assets_found:
                         assets_found[asset_type] = []
                     assets_found[asset_type].append(file_name)
+
+            if acxd_plan:
+                acxd_bundle, acxd_manifest = acxd_plan
+                for relative_path, payload, executable in build_acxd_zip_entries(
+                        project_name, acxd_bundle, acxd_manifest):
+                    zip_path = f"{project_name}/{relative_path}"
+                    if zip_path in zip_paths:
+                        raise ACXDPackagingError(
+                            f"duplicate archive path {zip_path!r}; refusing an ambiguous ACXD bundle")
+                    zf.writestr(zip_path, payload)
+                    if executable:
+                        zf.getinfo(zip_path).external_attr = 0o755 << 16
+                    zip_paths.add(zip_path)
+                    file_list.append(zip_path)
+
+                backend_problems = _manifest_file_problems(
+                    acxd_manifest,
+                    {item[len(project_name) + 1:] for item in zip_paths
+                     if item.startswith(f"{project_name}/")},
+                )
+                if backend_problems:
+                    raise ACXDPackagingError(
+                        "ACXD bundle is missing manifest-referenced backend assets:\n  - "
+                        + "\n  - ".join(backend_problems))
 
             # Add README with deployment instructions
             if include_readme and file_list:
@@ -276,8 +571,11 @@ def package_assets_impl(
                     project_name=project_name,
                     assets_found=assets_found
                 )
+                if acxd_plan:
+                    readme_content += "\n\n" + _generate_acxd_readme_section() + "\n"
                 readme_path = f"{project_name}/README.md"
                 zf.writestr(readme_path, readme_content)
+                zip_paths.add(readme_path)
                 file_list.append(readme_path)
 
             # Add deploy.sh for CloudShell one-click deployment (from template)
@@ -297,7 +595,14 @@ def package_assets_impl(
                     # Set executable permission via external_attr
                     info = zf.getinfo(deploy_path)
                     info.external_attr = 0o755 << 16
+                    zip_paths.add(deploy_path)
                     file_list.append(deploy_path)
+
+            if acxd_plan:
+                wiring_path = f"{project_name}/WIRING-GUIDE.md"
+                zf.writestr(wiring_path, _generate_wiring_guide(acxd_plan[0]))
+                zip_paths.add(wiring_path)
+                file_list.append(wiring_path)
 
         # Check if we actually packaged anything
         if not file_list:
@@ -365,6 +670,7 @@ def package_assets_impl(
             "total_size_mb": round(total_size / (1024 * 1024), 2),
             "s3_key": s3_key,
             "assets_found": assets_found,
+            "runtime_target": "acxd" if acxd_plan else "classic",
             "message": f"Assets packaged successfully! {len(file_list)} files, {round(total_size / 1024, 1)} KB"
         }
 

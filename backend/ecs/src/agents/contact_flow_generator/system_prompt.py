@@ -1376,6 +1376,33 @@ Rules:
 - Do NOT include unchanged JSON in "new" — only the replacement for "old"
 """
 
+ACXD_CONTACT_FLOW_ADDENDUM = """
+
+## ACXD runtime target — Agentic CX placeholder contract
+
+The caller has selected the ACXD runtime target. Do not generate a Lex bot
+block (`ConnectParticipantWithLexBot`) or a Lex/GetParticipantInput AI-dialogue
+pattern. Replace that hand-off with this importable placeholder until AWS
+publishes the Agentic CX Flow-Language action type:
+
+```json
+{
+  "Identifier": "AgenticCXPlaceholder",
+  "Type": "MessageParticipant",
+  "Parameters": {"Text": ">>> AGENTIC CX PLACEHOLDER <<<"}
+}
+```
+
+The deterministic post-processor owns the final wiring. Keep the surrounding
+flow simple and include real actions for these targets: Default → disconnect,
+Escalation → `TransferContactToQueue`, Error → a fallback
+`MessageParticipant`, and IdleChatTimeout → disconnect. Any value formerly
+read from `$.Lex.SessionAttributes.<name>` must instead be read from
+`$.AgenticCX.ContextVariables.<name>`. The completed JSON carries
+`Metadata.acxdBinding` with `{ACXD_WORKSPACE_ID}`, `{ACXD_APPLICATION_ID}` and
+`{ACXD_ALIAS_ID}` placeholders; do not invent real identifiers.
+"""
+
 # Append CLUES response efficiency instructions
 try:
     from tools.clues_format import get_clues_suffix

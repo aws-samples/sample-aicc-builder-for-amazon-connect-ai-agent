@@ -1,0 +1,409 @@
+"""Adapter from Classic Full specifications to the ACXD generation contract.
+
+ACXD is a runtime target, not a second interview.  The generation layer keeps
+its compact, former ``ACXDSpec`` input shape through this adapter while all
+business facts remain owned by Classic ``OperationSpec`` / ``InfrastructureSpec``
+and ``ACXDFlowSpec`` holds only ACXD-specific design decisions.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import logging
+import re
+from dataclasses import dataclass
+from typing import Any, Optional
+
+import yaml
+
+from tools.acxd_flow_spec import get_acxd_flow_spec
+from tools.project_workspace import ensure_workspace
+from tools.session_context import current_session_id
+from tools.spec_manager import get_all_specs, get_infrastructure_spec
+
+logger = logging.getLogger(__name__)
+
+_BUILTIN_SLOT_TYPES = {
+    "text", "string", "number", "integer", "int", "boolean", "bool",
+    "date", "datetime", "email", "phone",
+}
+
+
+def _session_id(session_id: Optional[str] = None) -> str:
+    return session_id or current_session_id.get() or "default"
+
+
+def _model_dump(value: Any) -> dict:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    return dict(value or {}) if isinstance(value, dict) else {}
+
+
+def _normalise_data_request_id(raw: str) -> str:
+    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(raw or ""))
+    words = re.sub(r"[^A-Za-z0-9]+", " ", words).split()
+    if not words:
+        return "dataRequest"
+    head, *rest = words
+    return head.lower() + "".join(word[:1].upper() + word[1:] for word in rest)
+
+
+def _field_dict(field: Any) -> dict:
+    raw = _model_dump(field)
+    field_type = raw.get("field_type") or raw.get("type") or "text"
+    result = {
+        "name": raw.get("name"),
+        "type": field_type,
+        "required": bool(raw.get("required", True)),
+        "description": raw.get("description"),
+    }
+    for source, target in (
+        ("enum_values", "enum_values"),
+        ("enum", "enum_values"),
+        ("pattern", "regex"),
+        ("min_length", "min_length"),
+        ("max_length", "max_length"),
+        ("example_value", "example"),
+        ("example", "example"),
+        ("is_pii", "sensitive"),
+    ):
+        if raw.get(source) is not None:
+            result[target] = raw[source]
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _business_profile(infrastructure: dict) -> dict:
+    """Read the existing project workspace without introducing a second profile."""
+    project: dict = {}
+    try:
+        workspace = ensure_workspace()
+        if workspace:
+            project = workspace.load_project() or {}
+    except Exception as exc:  # pragma: no cover - workspace outage is non-fatal
+        logger.debug("[ACXDContext] project profile load skipped: %s", exc)
+    nested = project.get("business_profile") or project.get("businessProfile") or {}
+    profile = dict(nested) if isinstance(nested, dict) else {}
+    for key in (
+        "company_name", "companyName", "industry", "description", "tone",
+        "language", "primary_language", "primaryLocale",
+    ):
+        if project.get(key) is not None:
+            profile.setdefault(key, project[key])
+    if infrastructure.get("project_name"):
+        profile.setdefault("project_name", infrastructure["project_name"])
+        profile.setdefault("company_name", infrastructure["project_name"])
+    if profile.get("companyName") and not profile.get("company_name"):
+        profile["company_name"] = profile["companyName"]
+    if profile.get("primary_language") and not profile.get("language"):
+        profile["language"] = profile["primary_language"]
+    return profile
+
+
+def _resolve_schema(schema: Any, components: dict) -> dict:
+    if not isinstance(schema, dict):
+        return {}
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+        return _resolve_schema(components.get(ref.rsplit("/", 1)[-1]), components)
+    return schema
+
+
+def _schema_fields(schema: Any, components: dict) -> list[dict]:
+    schema = _resolve_schema(schema, components)
+    if not isinstance(schema, dict):
+        return []
+    required = set(schema.get("required") or [])
+    fields: list[dict] = []
+    for name, raw in (schema.get("properties") or {}).items():
+        prop = _resolve_schema(raw, components)
+        if not isinstance(prop, dict):
+            prop = {}
+        field = {
+            "name": name,
+            "type": prop.get("type", "text"),
+            "required": name in required,
+            "description": prop.get("description"),
+        }
+        if prop.get("enum") is not None:
+            field["enum_values"] = prop["enum"]
+        if prop.get("pattern"):
+            field["regex"] = prop["pattern"]
+        if prop.get("minLength") is not None:
+            field["min_length"] = prop["minLength"]
+        if prop.get("maxLength") is not None:
+            field["max_length"] = prop["maxLength"]
+        if prop.get("example") is not None:
+            field["example"] = prop["example"]
+        fields.append({key: value for key, value in field.items() if value is not None})
+    return fields
+
+
+def _operation_contracts(openapi: dict) -> dict[str, dict]:
+    """Index OpenAPI operations by operationId with request/response fields."""
+    components = (openapi.get("components") or {}).get("schemas") or {}
+    contracts: dict[str, dict] = {}
+    for path, methods in (openapi.get("paths") or {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, operation in methods.items():
+            if method.lower() not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            if not isinstance(operation, dict) or not operation.get("operationId"):
+                continue
+            request_schema = (
+                ((operation.get("requestBody") or {}).get("content") or {})
+                .get("application/json", {}).get("schema")
+            )
+            request_fields = _schema_fields(request_schema, components)
+            for parameter in operation.get("parameters") or []:
+                if not isinstance(parameter, dict) or not parameter.get("name"):
+                    continue
+                parameter_schema = _resolve_schema(parameter.get("schema"), components)
+                request_fields.append({
+                    "name": parameter["name"],
+                    "type": parameter_schema.get("type", "text"),
+                    "required": bool(parameter.get("required")),
+                    "description": parameter.get("description"),
+                })
+
+            responses = operation.get("responses") or {}
+            response = next(
+                (value for key, value in responses.items() if str(key).startswith("2")),
+                responses.get("default") or {},
+            )
+            response_schema = (
+                ((response.get("content") or {}).get("application/json") or {})
+                .get("schema")
+            ) if isinstance(response, dict) else {}
+            response_schema = _resolve_schema(response_schema, components)
+            data_schema = _resolve_schema(
+                (response_schema.get("properties") or {}).get("data"), components
+            )
+            response_fields = _schema_fields(
+                data_schema if data_schema else response_schema, components
+            )
+            contracts[operation["operationId"]] = {
+                "path": path,
+                "http_method": method.upper(),
+                "request_fields": request_fields,
+                "response_fields": response_fields,
+            }
+    return contracts
+
+
+def _load_openapi_document(session_id: str) -> dict:
+    """Read the OpenAPI asset through the shared asset storage layer."""
+    try:
+        from tools.s3_asset_storage import get_asset_from_s3, list_session_assets
+
+        keys = list_session_assets(session_id)
+        candidates = [
+            key for key in keys
+            if "/openapi/" in f"/{key}" and key.lower().endswith((".yaml", ".yml", ".json"))
+        ]
+        candidates.sort(key=lambda key: (not key.endswith("openapi.yaml"), key))
+        for key in candidates:
+            content = get_asset_from_s3(key)
+            if not content:
+                continue
+            try:
+                loaded = json.loads(content) if key.lower().endswith(".json") else yaml.safe_load(content)
+            except (json.JSONDecodeError, yaml.YAMLError) as exc:
+                logger.warning("[ACXDContext] invalid OpenAPI asset %s: %s", key, exc)
+                continue
+            if isinstance(loaded, dict) and loaded.get("paths"):
+                return loaded
+    except Exception as exc:  # pragma: no cover - storage outage is non-fatal
+        logger.debug("[ACXDContext] OpenAPI asset load skipped: %s", exc)
+    return {}
+
+
+def _section(content: str, headings: tuple[str, ...]) -> str:
+    pattern = r"(?:^|\n)## (?:" + "|".join(re.escape(item) for item in headings) + r")\s*\n(.*?)(?=\n## |\Z)"
+    match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
+def _article_from_content(content: str) -> Optional[dict]:
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and parsed.get("question") and parsed.get("answer"):
+        return {
+            "question": parsed["question"],
+            "answer": parsed["answer"],
+            "tags": parsed.get("tags") or parsed.get("keywords") or [],
+        }
+    question = _section(content, ("Question", "질문 (Question)", "질문"))
+    answer = _section(content, ("Answer", "답변 (Answer)", "답변"))
+    keywords = _section(content, ("Keywords", "메타데이터 (Metadata)"))
+    if not question or not answer:
+        return None
+    tags: list[str] = []
+    keyword_match = re.search(r"(?:키워드|Keywords)\s*:\s*(.+)", keywords, re.IGNORECASE)
+    if keyword_match:
+        tags = [item.strip() for item in keyword_match.group(1).split(",") if item.strip()]
+    return {"question": question, "answer": answer, "tags": tags}
+
+
+def _load_faq_articles(session_id: str) -> list[dict]:
+    """Parse FAQ assets produced by the unchanged FAQ generator."""
+    articles: list[dict] = []
+    try:
+        from tools.s3_asset_storage import get_asset_from_s3, list_session_assets
+
+        for key in sorted(list_session_assets(session_id)):
+            if "/faq/" not in f"/{key}" or not key.lower().endswith((".txt", ".md", ".json")):
+                continue
+            content = get_asset_from_s3(key)
+            if not content:
+                continue
+            article = _article_from_content(content)
+            if article:
+                articles.append(article)
+    except Exception as exc:  # pragma: no cover - storage outage is non-fatal
+        logger.debug("[ACXDContext] FAQ asset load skipped: %s", exc)
+    return articles
+
+
+def _slot_type_id(raw: str) -> str:
+    candidate = re.sub(r"[^A-Za-z]", "", raw or "")
+    if len(candidate) < 3:
+        candidate = f"{candidate}Value" if candidate else "CustomValue"
+    return candidate[:100]
+
+
+def _derive_slot_types(flow_plans: list[dict], operations: dict[str, Any]) -> list[dict]:
+    """Derive custom ACXD slot types from flow slots and FieldSpec constraints."""
+    output: dict[str, dict] = {}
+    for plan in flow_plans:
+        operation = operations.get(plan.get("operation_id"))
+        input_fields = {
+            field.get("name"): field
+            for field in (_field_dict(item) for item in (_model_dump(operation).get("input_fields") or []))
+            if field.get("name")
+        }
+        for slot in plan.get("slots") or []:
+            if not isinstance(slot, dict) or not slot.get("name"):
+                continue
+            field = input_fields.get(slot.get("field_name") or slot["name"], {})
+            declared_type = str(slot.get("type") or field.get("type") or "text")
+            constrained = any(
+                field.get(key) is not None
+                for key in ("enum_values", "regex", "min_length", "max_length")
+            )
+            custom = declared_type.lower() not in _BUILTIN_SLOT_TYPES or constrained
+            if not custom:
+                continue
+            slot_type_id = _slot_type_id(
+                declared_type if declared_type.lower() not in _BUILTIN_SLOT_TYPES else slot["name"]
+            )
+            slot["type"] = slot_type_id
+            values = field.get("enum_values") or slot.get("examples") or []
+            if not values and field.get("example") is not None:
+                values = [field["example"]]
+            if not values:
+                values = [slot["name"]]
+            metadata = {
+                key: field[key]
+                for key in ("regex", "min_length", "max_length")
+                if field.get(key) is not None
+            }
+            current = output.setdefault(slot_type_id, {
+                "slotTypeId": slot_type_id,
+                "values": [],
+                "sensitive": bool(slot.get("sensitive") or field.get("sensitive")),
+                "description": slot.get("description") or field.get("description") or "",
+                "metadata": {"constraints": metadata} if metadata else {},
+            })
+            known = {str(item.get("value")) for item in current["values"]}
+            for value in values:
+                text = str(value)
+                if text and text not in known:
+                    current["values"].append({"value": text[:256]})
+                    known.add(text)
+    return list(output.values())
+
+
+@dataclass(frozen=True)
+class ACXDGenerationContext:
+    """Thin ``model_dump`` compatibility shim for retained ACXD generators."""
+
+    payload: dict
+
+    def model_dump(self) -> dict:
+        return copy.deepcopy(self.payload)
+
+
+def build_generation_context(session_id: Optional[str] = None) -> ACXDGenerationContext:
+    """Build the former ACXDSpec-shaped dict from the new source-of-truth specs."""
+    sid = _session_id(session_id)
+    infrastructure = _model_dump(get_infrastructure_spec())
+    operations = get_all_specs()
+    flow_spec = get_acxd_flow_spec(session_id)
+    flow_data = _model_dump(flow_spec)
+    plans = copy.deepcopy(flow_data.get("flows") or [])
+    openapi = _load_openapi_document(sid)
+    contracts = _operation_contracts(openapi)
+
+    data_integrations: list[dict] = []
+    request_ids: dict[str, str] = {}
+    for operation_id, operation in operations.items():
+        op = _model_dump(operation)
+        raw_id = str(op.get("operation_id") or operation_id)
+        data_request_id = _normalise_data_request_id(raw_id)
+        request_ids[raw_id] = data_request_id
+        contract = contracts.get(raw_id, {})
+        data_integrations.append({
+            "data_request_id": data_request_id,
+            "operation_ref": raw_id,
+            "mode": "external",
+            "http_method": contract.get("http_method") or op.get("http_method") or "POST",
+            "request_fields": contract.get("request_fields")
+            or [_field_dict(field) for field in (op.get("input_fields") or [])],
+            "response_fields": contract.get("response_fields")
+            or [_field_dict(field) for field in (op.get("output_fields") or [])],
+            "purpose": op.get("summary") or op.get("description") or raw_id,
+        })
+
+    for plan in plans:
+        operation_id = plan.get("operation_id")
+        for step in plan.get("steps") or []:
+            if not isinstance(step, dict) or step.get("node_type") != "data_request":
+                continue
+            raw_id = step.get("data_request_id") or operation_id
+            if raw_id in request_ids:
+                step["data_request_id"] = request_ids[raw_id]
+
+    slot_types = _derive_slot_types(plans, operations)
+    kb_plan = copy.deepcopy(flow_data.get("knowledge_base") or {})
+    articles = _load_faq_articles(sid)
+    if articles:
+        kb_plan["articles"] = articles
+
+    application = copy.deepcopy(flow_data.get("application") or {})
+    locales = application.get("locales") or []
+    if locales:
+        application.setdefault("languages", locales)
+    if application.get("primary_locale"):
+        application.setdefault("primary_language", application["primary_locale"])
+
+    payload = {
+        "business_profile": _business_profile(infrastructure),
+        "flows": plans,
+        "slot_types": slot_types,
+        "data_integrations": data_integrations,
+        "guardrails": copy.deepcopy(flow_data.get("guardrails") or []),
+        "knowledge_base": kb_plan,
+        "application": application,
+        "infrastructure": infrastructure,
+        "deployment": {"environment": application.get("environment") or "development"},
+    }
+    return ACXDGenerationContext(payload)
+
+
+def get_acxd_spec(session_id: Optional[str] = None) -> ACXDGenerationContext:
+    """Compatibility entry point replacing the deleted ``acxd_spec_manager``."""
+    return build_generation_context(session_id)

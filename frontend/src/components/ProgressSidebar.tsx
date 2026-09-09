@@ -54,6 +54,7 @@ const STEP_ICONS: Record<string, ReactNode> = {
   validation: <Check className="w-4 h-4" />,
   lambda: <FileCode className="w-4 h-4" />,
   prompt: <MessageSquare className="w-4 h-4" />,
+  acxd_application: <Boxes className="w-4 h-4" />,
   openapi: <FileJson className="w-4 h-4" />,
   contact_flow: <Workflow className="w-4 h-4" />,
   cdk: <Boxes className="w-4 h-4" />,
@@ -167,6 +168,7 @@ function useAvailableAssetTypes() {
       else if (p.assetType === 'contact_flow') flags |= 8;
       else if (p.assetType === 'cdk' || p.assetType === 'cloudformation') flags |= 16;
       else if (p.assetType === 'faq' || p.assetType === 'package') flags |= 32;
+      else if (p.assetType.startsWith('acxd_')) flags |= 64;
     }
     return flags;
   });
@@ -188,6 +190,7 @@ export function ProgressSidebar() {
   const setShowDownloadModal = useBuilderStore(s => s.setShowDownloadModal);
   const currentPhase = useBuilderStore(s => s.currentPhase);
   const scope = useBuilderStore(s => s.scope);
+  const runtimeTarget = useBuilderStore(s => s.runtimeTarget);
   const [isDownloading, setIsDownloading] = useState(false);
   // E4: real download lifecycle + toast (replaces the fake 2s timer).
   const [downloadState, setDownloadState] = useState<'idle' | 'packaging' | 'ready' | 'error'>('idle');
@@ -203,6 +206,9 @@ export function ProgressSidebar() {
   //   run) don't execute. So we keep the interview + review + packaging steps
   //   visible and trim only the generation lanes that won't run. A flow-only run
   //   therefore shows ~7 honest steps, not a misleading 1–2.
+  const targetProgress = progress.filter((item) =>
+    runtimeTarget === 'acxd' ? item.id !== 'prompt' : item.id !== 'acxd_application'
+  );
   const inScopeProgressIds = scope
     ? new Set([...scope.map((s) => SCOPE_TO_PROGRESS_ID[s] || s)])
     : null;
@@ -211,8 +217,8 @@ export function ProgressSidebar() {
   const isStepInScope = (item: ProgressItem) =>
     !inScopeProgressIds || ALWAYS_IN_SCOPE.has(item.id) || inScopeProgressIds.has(item.id);
 
-  const inScopeSteps = progress.filter(isStepInScope);
-  const outOfScopeSteps = inScopeProgressIds ? progress.filter((p) => !isStepInScope(p)) : [];
+  const inScopeSteps = targetProgress.filter(isStepInScope);
+  const outOfScopeSteps = inScopeProgressIds ? targetProgress.filter((p) => !isStepInScope(p)) : [];
 
   // Completion meter reflects the in-scope steps only.
   const completedCount = inScopeSteps.filter((p) => p.status === 'completed').length;
@@ -429,7 +435,7 @@ export function ProgressSidebar() {
                           {STEP_ICONS[item.id] || <Circle className="w-3.5 h-3.5" />}
                         </div>
                         <span className="text-xs text-surface-400 dark:text-surface-500 line-through">
-                          {language === 'ko-KR' ? item.labelKo : item.label}
+                          {localizedProgressLabel(item, language)}
                         </span>
                       </div>
                     ))}
@@ -820,6 +826,12 @@ function AssetDownloadButton({ icon, label, assetType }: AssetDownloadButtonProp
   );
 }
 
+function localizedProgressLabel(item: ProgressItem, language: string): string {
+  if (language === 'ko-KR') return item.labelKo;
+  if (language === 'ja-JP') return item.labelJa || item.label;
+  return item.label;
+}
+
 interface ProgressStepProps {
   item: ProgressItem;
   language: string;
@@ -827,7 +839,7 @@ interface ProgressStepProps {
 
 function ProgressStep({ item, language }: ProgressStepProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const label = language === 'ko-KR' ? item.labelKo : item.label;
+  const label = localizedProgressLabel(item, language);
   const icon = STEP_ICONS[item.id] || <Circle className="w-4 h-4" />;
   const colors = STATUS_COLORS[item.status] || STATUS_COLORS.pending;
   const hasSubSteps = item.subSteps && item.subSteps.length > 0;
