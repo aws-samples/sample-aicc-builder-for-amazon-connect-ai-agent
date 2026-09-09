@@ -88,13 +88,43 @@ def test_confirm_then_reupsert_keeps_unchanged_and_resets_changed():
     assert res["awaiting_confirmation"] == [] and res["flow_approved"]
 
     changed = _steps()
-    changed[0]["node_type"] = "user_choice"          # decision changed
+    changed[0]["determinism"] = "generative"         # deterministic → generative: a real change
+    changed[0]["node_type"] = "generative_text"
     res = _upsert(steps=changed)
     assert res["awaiting_confirmation"] == [1]
     plan = afs.get_acxd_flow_spec().flow("ProcessReturn")
     assert plan.steps[0].confirmation_pending_reason
     assert plan.steps[1].user_confirmed
-    assert plan.confirmed is False                    # a re-upsert re-opens the plan
+    assert plan.confirmed is False                    # a changed decision re-opens the plan
+
+
+def test_node_type_name_correction_keeps_confirmation():
+    steps = _steps()
+    steps[3]["node_type"] = "generative_message"      # invented name, same generative class
+    res = _upsert(steps=steps)
+    assert any("normalized to 'generative_text'" in n for n in res["coerced"])
+    afs.confirm_acxd_flow_steps("ProcessReturn")
+    fixed = _steps()                                  # now the real name
+    res = _upsert(steps=fixed)
+    assert res["awaiting_confirmation"] == []
+    assert res["flow_approved"] is True
+
+
+def test_unknown_node_type_is_rejected_with_catalogue():
+    steps = _steps()
+    steps[0]["node_type"] = "teleport"
+    res = _upsert(steps=steps)
+    assert not res["success"] and "teleport" in res["error"] and "user_input" in res["error"]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("message", "basic"), ("generative_message", "generative_text"),
+    ("escalation(native)", "escalate"), ("end_call", "end"), ("branch", "choice"),
+    ("Data Request", "data_request"), ("kb", "knowledge_base"), ("user_input", "user_input"),
+    ("nonsense", None),
+])
+def test_canonical_node_type(raw, expected):
+    assert afs.canonical_node_type(raw) == expected
 
 
 def test_partial_confirmation_does_not_approve_flow():

@@ -561,6 +561,17 @@ design the ACXD flows before moving to the analysis document.
    propose exactly one operation flow. Include every ordered step with:
    `node_type`, `determinism`, `determinism_rationale`, and
    `decision_category`.
+   `node_type` must be a real ACXD node type — use exactly these names:
+   - deterministic: `start`, `end`, `basic` (fixed message), `user_input`
+     (collect one slot), `user_choice` (menu), `choice` (rule branch — never
+     `split`, which is a percentage A/B test), `data_request` (call the
+     operation's Data Request), `escalate` (hand off to a human queue),
+     `redirect` (jump to another flow), `wait`, `define`, `transform`, `loop`
+   - generative: `generative_text` (LLM-worded message), `generative_task`,
+     `generative_journey` (LLM agent with tools), `knowledge_base` (answer from
+     the FAQ knowledge base), `intent_capture` (LLM intent routing)
+   Do not invent names such as `message`, `generative_message` or `escalation`;
+   the tool rejects unknown names.
 2. Explain each recommendation in plain language with an everyday analogy. A
    deterministic step is like an automatic door: the same rule produces the
    same result every time. A generative step is like a skilled staff member
@@ -584,7 +595,7 @@ design the ACXD flows before moving to the analysis document.
   keep the decision deterministic and use a later generative message to explain
   the already-fixed result.
 - Map FAQ retrieval to a native `knowledge_base` node. Map handoff and completion
-  to native `escalation` or `end` nodes plus the appropriate Contact Flow branch.
+  to native `escalate` or `end` nodes plus the appropriate Contact Flow branch.
   Never create a Lambda or API operation solely for FAQ lookup, escalation, or
   ending a conversation.
 - Every `flow_id` must contain letters only and be 3–64 characters long.

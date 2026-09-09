@@ -85,6 +85,49 @@ MAX_CONTEXT_VARIABLES = 10
 
 _FLOW_ID_RE = re.compile(r"^[A-Za-z]{3,64}$")
 
+#: Names an LLM tends to invent for ACXD node types → the real node type.
+#: Anything not in SUPPORTED_NODE_TYPES after aliasing is rejected with the
+#: valid list, so a wrong name never reaches the spec or the generator.
+NODE_TYPE_ALIASES = {
+    "message": "basic", "say": "basic", "speak": "basic", "prompt": "basic",
+    "text": "basic", "static_message": "basic", "announcement": "basic",
+    "generative_message": "generative_text", "generative_response": "generative_text",
+    "generate_message": "generative_text", "llm_message": "generative_text",
+    "ai_message": "generative_text", "generative": "generative_text",
+    "input": "user_input", "collect": "user_input", "slot": "user_input",
+    "collect_input": "user_input", "ask": "user_input", "dtmf": "user_input",
+    "menu": "user_choice", "options": "user_choice",
+    "branch": "choice", "condition": "choice", "if": "choice", "decision": "choice",
+    "route": "choice", "router": "choice", "switch": "choice", "compare": "choice",
+    "api_call": "data_request", "api": "data_request", "lambda": "data_request",
+    "tool": "data_request", "lookup": "data_request", "query": "data_request",
+    "db_lookup": "data_request", "data": "data_request", "http": "data_request",
+    "kb": "knowledge_base", "faq": "knowledge_base", "knowledge": "knowledge_base",
+    "rag": "knowledge_base", "search": "knowledge_base",
+    "escalation": "escalate", "transfer": "escalate", "handoff": "escalate",
+    "agent_transfer": "escalate", "human": "escalate", "queue_transfer": "escalate",
+    "end_call": "end", "end_conversation": "end", "hangup": "end", "complete": "end",
+    "finish": "end", "disconnect": "end", "terminate": "end", "goodbye": "end",
+    "intent": "intent_capture", "intent_router": "intent_capture", "classify": "intent_capture",
+    "journey": "generative_journey", "agent": "generative_journey", "task": "generative_task",
+    "jump": "redirect", "goto": "redirect", "subflow": "redirect", "call_flow": "redirect",
+    "set": "define", "assign": "define", "variable": "define",
+    "delay": "wait", "pause": "wait", "sleep": "wait",
+    "comment": "note", "map": "transform", "format": "transform", "repeat": "loop", "retry": "loop",
+}
+
+
+def canonical_node_type(raw: Optional[str]) -> Optional[str]:
+    """Return the real ACXD node type for *raw*, or ``None`` when unknown."""
+    if not raw:
+        return None
+    key = re.sub(r"[\s\-]+", "_", str(raw).strip().lower())
+    key = re.sub(r"\(.*\)$", "", key).strip("_")     # 'escalation(native)' → 'escalation'
+    key = key.removesuffix("_node")
+    if key in SUPPORTED_NODE_TYPES:
+        return key
+    return NODE_TYPE_ALIASES.get(key)
+
 
 def _state_dir(session_id: Optional[str]) -> Optional[Path]:
     mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
@@ -507,7 +550,16 @@ def acxd_flow_spec_ready() -> tuple[bool, List[str]]:
 # ---------------------------------------------------------------------------
 
 def _decision_key(s: ACXDNodeStep) -> tuple:
-    return (s.node_type, s.determinism, (s.decision_category or "general").lower())
+    """What the user actually confirmed: the determinism class of the step and
+    what it decides. A node-type *name* correction inside the same class
+    (e.g. an invented 'generative_message' fixed to 'generative_text') does
+    not re-open a confirmation; switching a step between deterministic and
+    generative, or changing its decision category, does."""
+    return (
+        "generative" if s.node_type in GENERATIVE_NODE_TYPES else "deterministic",
+        s.determinism,
+        (s.decision_category or "general").lower(),
+    )
 
 
 @tool
@@ -528,11 +580,23 @@ def upsert_acxd_flow_plan(
     one flow per OperationSpec) and for the system flows (role welcome / fallback /
     escalation, optionally unknown / frustration / help / repeat / resume).
 
+    node_type MUST be one of the real ACXD node types (nothing else is accepted):
+      deterministic: start, end, basic (fixed message), user_input (collect a slot),
+        user_choice (menu), choice (rule branch — NOT 'split'), split (percentage A/B),
+        data_request (call a Data Request / backend API), escalate (hand off to a
+        human queue), redirect (jump to another flow), wait, note, define, transform, loop
+      generative: generative_text (LLM-worded message), generative_task,
+        generative_journey (LLM agent), knowledge_base (answer from the KB), intent_capture
+    Common wrong names are auto-corrected (message→basic, generative_message→
+    generative_text, escalation→escalate, end_call→end, branch→choice); anything
+    else is rejected with this list.
+
     Each step carries the AI's recommendation: node_type, determinism
     ('deterministic' or 'generative') and a plain-language rationale. This tool
     NEVER records a confirmation — present the steps to the user, and only after
-    they agree call confirm_acxd_flow_steps. Re-upserting a step with a changed
-    node_type/determinism resets its confirmation.
+    they agree call confirm_acxd_flow_steps. Re-upserting a step whose decision
+    changed (deterministic↔generative, or decision_category) resets its
+    confirmation; a pure node-type name correction keeps it.
 
     Money, refund, payment, authorization, eligibility, compliance and identity
     decisions (decision_category) are always deterministic; a generative label on
@@ -552,7 +616,7 @@ def upsert_acxd_flow_plan(
         escalation_conditions: When this flow hands off to a human, in plain language.
 
     Returns:
-        The saved plan summary, coerced steps, and the step numbers awaiting confirmation.
+        The saved plan summary, coerced/normalized steps, and the step numbers awaiting confirmation.
     """
     try:
         if not _FLOW_ID_RE.match(flow_id or ""):
@@ -573,7 +637,16 @@ def upsert_acxd_flow_plan(
             raw = dict(raw or {})
             raw.pop("user_confirmed", None)          # never trust a confirmation from the proposer
             raw.pop("confirmation_pending_reason", None)
-            if raw.get("node_type") == "data_request" and not raw.get("data_request_id"):
+            requested_type = raw.get("node_type")
+            canonical = canonical_node_type(requested_type)
+            if canonical is None:
+                return {"success": False,
+                        "error": f"step {raw.get('step')}: unknown node_type '{requested_type}'. "
+                                 f"Use one of {sorted(SUPPORTED_NODE_TYPES)}"}
+            if canonical != requested_type:
+                notes.append(f"step {raw.get('step')}: node_type '{requested_type}' normalized to '{canonical}'")
+            raw["node_type"] = canonical
+            if canonical == "data_request" and not raw.get("data_request_id"):
                 raw["data_request_id"] = operation_id
             s = ACXDNodeStep.model_validate(raw)
             note = enforce_determinism_policy(s)
@@ -587,13 +660,15 @@ def upsert_acxd_flow_plan(
             new_steps.append(s)
         new_steps.sort(key=lambda s: s.step)
 
+        all_confirmed = bool(new_steps) and all(s.user_confirmed for s in new_steps)
         plan = ACXDFlowPlan(
             flow_id=flow_id, purpose=purpose, role=role, operation_id=operation_id,
             steps=new_steps,
             slots=[ACXDSlotPlan.model_validate(x) for x in (slots or [])],
             uses_knowledge_base=uses_knowledge_base,
             escalation_conditions=escalation_conditions,
-            confirmed=False,
+            # A plan whose every decision the user already confirmed stays approved.
+            confirmed=bool(existing and existing.confirmed and all_confirmed),
         )
         spec.flows = [f for f in spec.flows if f.flow_id != flow_id] + [plan]
         save_acxd_flow_spec(spec)
@@ -604,8 +679,10 @@ def upsert_acxd_flow_plan(
             "step_count": len(new_steps),
             "coerced": notes,
             "awaiting_confirmation": plan.unconfirmed_steps,
-            "message": "Plan saved. Show the steps and their determinism labels to the user; "
-                       "call confirm_acxd_flow_steps only after they explicitly agree.",
+            "flow_approved": plan.confirmed,
+            "message": ("Plan saved. Show the steps and their determinism labels to the user; "
+                        "call confirm_acxd_flow_steps only after they explicitly agree."
+                        if plan.unconfirmed_steps else "Plan saved; all decisions remain confirmed."),
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
