@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -151,6 +152,9 @@ def _read_json(path: Optional[Path]) -> Optional[dict]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
+        # A half-written NFS file (seen live when two tool threads raced on the
+        # same tmp name) must not shadow the S3 copy: report None so callers
+        # fall back to the workspace read.
         logger.warning("[ACXDFlowSpec] read failed for %s: %s", path, e)
         return None
 
@@ -158,10 +162,10 @@ def _read_json(path: Optional[Path]) -> Optional[dict]:
 def _write_json_atomic(path: Path, payload: dict) -> bool:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str),
                        encoding="utf-8")
-        tmp.rename(path)
+        tmp.replace(path)
         return True
     except OSError as e:
         logger.warning("[ACXDFlowSpec] write failed for %s: %s", path, e)
@@ -462,8 +466,6 @@ def _load_or_new() -> ACXDFlowSpec:
 # every mutating tool below is a read-modify-write of the whole spec file.
 # Live run 1 lost three guardrails and a confirmation to exactly that race, so
 # mutations are serialized per session.
-import threading
-
 _spec_locks: dict[str, threading.RLock] = {}
 _spec_locks_guard = threading.Lock()
 
