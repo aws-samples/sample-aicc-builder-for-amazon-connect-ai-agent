@@ -270,3 +270,9 @@ def test_list_parameters_accept_json_strings():
     assert res["application"]["locales"] == ["ko-KR", "en-US"]
     bad = _upsert(steps="not json")
     assert not bad["success"] and "JSON" in bad["error"]
+
+
+def test_every_operation_needs_a_flow_plan():
+    spec = _full_spec()
+    problems = afs.validate_acxd_flow_spec(spec, {"process_return", "track_order"})
+    assert any("operation 'track_order' has no ACXD flow plan" in p for p in problems)

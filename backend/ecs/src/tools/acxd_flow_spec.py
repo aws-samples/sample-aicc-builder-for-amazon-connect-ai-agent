@@ -431,6 +431,14 @@ def get_acxd_flow_spec(session_id: Optional[str] = None) -> Optional[ACXDFlowSpe
                 data = ws._load_json([_SPEC_FILE])
             except Exception as e:
                 logger.warning("[ACXDFlowSpec] workspace restore failed: %s", e)
+            if data is None:
+                # ProjectWorkspace reads NFS first and gives up on invalid JSON
+                # there; the S3 copy is the durable one, so read it directly.
+                try:
+                    raw = ws._get_s3(ws._s3_key(_SPEC_FILE))
+                    data = json.loads(raw) if raw else None
+                except Exception as e:
+                    logger.warning("[ACXDFlowSpec] S3 restore failed: %s", e)
     if not data:
         return None
     try:
@@ -534,6 +542,10 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
     for role in REQUIRED_SYSTEM_FLOW_ROLES:
         if role not in roles:
             problems.append(f"missing system flow with role '{role}'")
+    if known_operation_ids is not None:
+        covered = {f.operation_id for f in spec.operation_flows()}
+        for op in sorted(known_operation_ids - covered):
+            problems.append(f"operation '{op}' has no ACXD flow plan (one operation flow per OperationSpec)")
     for g in spec.guardrails:
         if g.action == "route" and (not g.route_flow_id or g.route_flow_id not in seen):
             problems.append(f"guardrail '{g.name}': route action needs an existing route_flow_id")
