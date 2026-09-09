@@ -359,11 +359,15 @@ export function ChatWindow() {
   // observed dropping a large importAsset payload onto a closing socket.
   const whenSessionReady = useCallback((fn: () => void, expectSessionId?: string, attempt = 0) => {
     const ready = useBuilderStore.getState().isSessionReady;
-    const onExpected = !expectSessionId || getCurrentSessionId() === expectSessionId;
+    const current = getCurrentSessionId();
+    const onExpected = !expectSessionId || current === expectSessionId;
     if (ready && onExpected) {
       fn();
     } else if (attempt < 80) {
       setTimeout(() => whenSessionReady(fn, expectSessionId, attempt + 1), 250);
+    } else {
+      // Never fail silently: a dropped kickoff leaves the user on a blank start screen.
+      console.error('[ChatWindow] whenSessionReady gave up', { ready, current, expectSessionId });
     }
   }, [getCurrentSessionId]);
 
@@ -449,7 +453,8 @@ export function ChatWindow() {
           }));
           void sendMessageWithAttachments(kickoff, readyAttached, meta);
         } else {
-          sendMessage(kickoff);
+          const ok = sendMessage(kickoff);
+          if (!ok) console.error('[ChatWindow] kickoff sendMessage returned false');
         }
         if (currentSessionId) {
           updateSessionTitle(currentSessionId, description.trim() || (files[0]?.name ?? kickoff));

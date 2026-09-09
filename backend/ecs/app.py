@@ -99,6 +99,7 @@ from tools.acxd_flow_spec import (
     RUNTIME_TARGET_CLASSIC,
     RUNTIME_TARGETS,
     get_runtime_target,
+    get_runtime_target_if_set,
     set_runtime_target,
 )
 # Conversational asset-import tools (replace the old auto-firing importAsset path):
@@ -2035,13 +2036,19 @@ async def websocket_handler(
 
     # Send connected event (include current phase + NFS progress for frontend restoration)
     _conn_progress = _get_frontend_progress(session_id)
-    await safe_send_json(websocket, {
+    _conn_payload = {
         "type": "connected",
         "sessionId": session_id,
         "phase": _detect_phase(session_id),
-        "runtime_target": _normalize_runtime_target(get_runtime_target(session_id)),
         "progressState": _conn_progress if _conn_progress else None,
-    })
+    }
+    # Echo the runtime target only when this session has one persisted. A fresh
+    # session must not push the default at the client: that overwrote the
+    # start-screen choice before the user had sent it (seen live on dev).
+    _conn_rt = get_runtime_target_if_set(session_id)
+    if _conn_rt:
+        _conn_payload["runtime_target"] = _conn_rt
+    await safe_send_json(websocket, _conn_payload)
 
     # Check for running background task and reattach WebSocket
     _bg_active = False
@@ -3239,7 +3246,7 @@ async def handle_inject_history_ws(websocket: WebSocket, session_id: str, data: 
         "messageCount": len(session.get("conversation_history", [])),
         "hasWorkspace": bool(workspace_summary),
         "phase": _detect_phase(_hi_sid),
-        "runtime_target": _normalize_runtime_target(get_runtime_target(_hi_sid)),
+        **({"runtime_target": get_runtime_target_if_set(_hi_sid)} if get_runtime_target_if_set(_hi_sid) else {}),
         "progressState": _hi_progress if _hi_progress else None,
     })
 

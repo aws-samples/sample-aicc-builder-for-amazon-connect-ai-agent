@@ -125,26 +125,58 @@ def _write_json_atomic(path: Path, payload: dict) -> bool:
         return False
 
 
+def _workspace(session_id: Optional[str]):
+    """S3-backed workspace for *session_id* (stateless, safe to construct ad hoc).
+
+    ``ensure_workspace()`` needs the contextvar-bound session; the runtime
+    target is set from app.py before a turn is bound, so build one directly.
+    """
+    if not session_id:
+        return None
+    try:
+        from tools.project_workspace import ProjectWorkspace, get_workspace_for
+        return get_workspace_for(session_id) or ProjectWorkspace(session_id)
+    except Exception as e:  # pragma: no cover - storage outage
+        logger.debug("[ACXDFlowSpec] workspace unavailable: %s", e)
+        return None
+
+
+_runtime_target_cache: dict[str, str] = {}
+
+
 def set_runtime_target(session_id: str, target: str) -> bool:
     """Persist the session's runtime target (chosen on the start screen).
 
     Written once at session start, before any spec exists. Copied into
     ``InfrastructureSpec.runtime_target`` when that spec is saved, so a
     downloaded bundle carries the decision even without the state dir.
+    Stored in memory, on the NFS state dir when mounted, and in the S3
+    workspace (``state/runtime_target.json``) — the ECS task does not
+    always have the S3 Files mount, and local dev never does.
     """
     if target not in RUNTIME_TARGETS or not session_id:
         return False
+    _runtime_target_cache[session_id] = target
+    payload = {"runtime_target": target}
+    ok = False
     state = _state_dir(session_id)
-    if state is None:
-        return False
-    return _write_json_atomic(state / _RUNTIME_TARGET_FILE, {"runtime_target": target})
+    if state is not None:
+        ok = _write_json_atomic(state / _RUNTIME_TARGET_FILE, payload)
+    ws = _workspace(session_id)
+    if ws is not None:
+        try:
+            ok = bool(ws._save_json([_RUNTIME_TARGET_FILE], payload)) or ok
+        except Exception as e:  # pragma: no cover
+            logger.debug("[ACXDFlowSpec] workspace persist skipped: %s", e)
+    return True  # the in-memory record alone is enough for this process
 
 
 def get_runtime_target(session_id: Optional[str] = None) -> str:
     """Return ``classic`` or ``acxd`` for the session.
 
-    Precedence: saved ``InfrastructureSpec.runtime_target`` → start-screen
-    seed file → ``classic`` (v2 sessions predate the field).
+    Precedence: saved ``InfrastructureSpec.runtime_target`` → in-memory
+    seed → NFS seed → S3 workspace seed → ``classic`` (v2 sessions
+    predate the field).
     """
     sid = session_id or _current_session_id()
     if not sid:
@@ -157,10 +189,62 @@ def get_runtime_target(session_id: Optional[str] = None) -> str:
             return target
     except Exception as e:  # pragma: no cover - defensive
         logger.debug("[ACXDFlowSpec] infra spec lookup failed: %s", e)
+    cached = _runtime_target_cache.get(sid)
+    if cached in RUNTIME_TARGETS:
+        return cached
     state = _state_dir(sid)
     data = _read_json(state / _RUNTIME_TARGET_FILE) if state else None
+    if not data:
+        ws = _workspace(sid)
+        if ws is not None:
+            try:
+                data = ws._load_json([_RUNTIME_TARGET_FILE])
+            except Exception as e:  # pragma: no cover
+                logger.debug("[ACXDFlowSpec] workspace read skipped: %s", e)
     target = (data or {}).get("runtime_target")
-    return target if target in RUNTIME_TARGETS else RUNTIME_TARGET_CLASSIC
+    if target in RUNTIME_TARGETS:
+        _runtime_target_cache[sid] = target
+        return target
+    return RUNTIME_TARGET_CLASSIC
+
+
+def get_runtime_target_if_set(session_id: Optional[str] = None) -> Optional[str]:
+    """Like :func:`get_runtime_target` but ``None`` when nothing was ever persisted.
+
+    Used for the ``connected`` echo: a fresh, unseeded session must not push
+    ``classic`` at the client, or it overwrites a start-screen choice the user
+    has made but not yet sent.
+    """
+    sid = session_id or _current_session_id()
+    if not sid:
+        return None
+    try:
+        from tools.spec_manager import get_infrastructure_spec
+        infra = get_infrastructure_spec()
+        target = getattr(infra, "runtime_target", None) if infra else None
+        if target in RUNTIME_TARGETS:
+            return target
+    except Exception:  # pragma: no cover
+        pass
+    if _runtime_target_cache.get(sid) in RUNTIME_TARGETS:
+        return _runtime_target_cache[sid]
+    state = _state_dir(sid)
+    data = _read_json(state / _RUNTIME_TARGET_FILE) if state else None
+    if not data:
+        ws = _workspace(sid)
+        if ws is not None:
+            try:
+                data = ws._load_json([_RUNTIME_TARGET_FILE])
+            except Exception:  # pragma: no cover
+                data = None
+    target = (data or {}).get("runtime_target")
+    return target if target in RUNTIME_TARGETS else None
+
+
+def clear_runtime_target(session_id: Optional[str]) -> None:
+    """Drop the in-memory seed (session cleanup / tests)."""
+    if session_id:
+        _runtime_target_cache.pop(session_id, None)
 
 
 def is_acxd_target(session_id: Optional[str] = None) -> bool:
@@ -294,13 +378,12 @@ def get_acxd_flow_spec(session_id: Optional[str] = None) -> Optional[ACXDFlowSpe
     state = _state_dir(sid)
     data = _read_json(state / _SPEC_FILE) if state else None
     if data is None:
-        try:
-            from tools.project_workspace import ensure_workspace
-            ws = ensure_workspace()
-            if ws and hasattr(ws, "_load_json"):
+        ws = _workspace(sid)
+        if ws is not None:
+            try:
                 data = ws._load_json([_SPEC_FILE])
-        except Exception as e:
-            logger.warning("[ACXDFlowSpec] workspace restore failed: %s", e)
+            except Exception as e:
+                logger.warning("[ACXDFlowSpec] workspace restore failed: %s", e)
     if not data:
         return None
     try:
@@ -319,14 +402,12 @@ def save_acxd_flow_spec(spec: ACXDFlowSpec, session_id: Optional[str] = None) ->
     state = _state_dir(sid)
     if state is not None:
         ok = _write_json_atomic(state / _SPEC_FILE, payload)
-    try:
-        from tools.project_workspace import ensure_workspace
-        ws = ensure_workspace()
-        if ws and hasattr(ws, "_save_json"):
-            ws._save_json([_SPEC_FILE], payload)
-            ok = True
-    except Exception as e:
-        logger.debug("[ACXDFlowSpec] workspace persist skipped: %s", e)
+    ws = _workspace(sid)
+    if ws is not None:
+        try:
+            ok = bool(ws._save_json([_SPEC_FILE], payload)) or ok
+        except Exception as e:
+            logger.debug("[ACXDFlowSpec] workspace persist skipped: %s", e)
     return ok
 
 

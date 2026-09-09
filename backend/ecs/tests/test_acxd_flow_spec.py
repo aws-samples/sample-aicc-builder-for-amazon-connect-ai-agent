@@ -24,9 +24,18 @@ SID = "test-acxd-flow-spec"
 def _session(tmp_path, monkeypatch):
     monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
     (tmp_path / "sessions" / SID / "state").mkdir(parents=True)
+    afs.clear_runtime_target(SID)
     tok = current_session_id.set(SID)
     yield tmp_path
     current_session_id.reset(tok)
+    afs.clear_runtime_target(SID)
+
+
+def test_runtime_target_survives_without_nfs_mount(tmp_path, monkeypatch):
+    """The ECS task may run without the S3 Files mount (seen live on dev)."""
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path / "missing-mount"))
+    assert afs.set_runtime_target(SID, "acxd")
+    assert afs.get_runtime_target(SID) == "acxd"
 
 
 def _steps():
