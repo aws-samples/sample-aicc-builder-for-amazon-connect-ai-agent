@@ -94,6 +94,13 @@ from tools.project_workspace import (
     load_requirement_document,
 )
 from tools.interview_completion import complete_interview, check_interview_handoff
+from tools.acxd_flow_spec import (
+    ACXD_INTERVIEW_TOOLS,
+    RUNTIME_TARGET_CLASSIC,
+    RUNTIME_TARGETS,
+    get_runtime_target,
+    set_runtime_target,
+)
 # Conversational asset-import tools (replace the old auto-firing importAsset path):
 # the orchestrator calls these after acknowledging an upload (and, for images,
 # asking the user) to lint + seed an external Contact Flow / AI Prompt into
@@ -147,6 +154,7 @@ from context.generation_progress import (
     get_generation_scope as _get_generation_scope,
     set_generation_scope as _set_generation_scope,
     mark_imported_session as _mark_imported_session,
+    get_full_asset_set as _get_full_asset_set,
     FULL_ASSET_SET as _FULL_ASSET_SET,
 )
 from tools.model_selection import (
@@ -177,6 +185,7 @@ SUBAGENT_TO_PROGRESS_ID = {
     "lambda_generator_agent": "lambda",
     "openapi_generator_agent": "openapi",
     "prompt_generator_agent": "prompt",
+    "generate_acxd_application": "acxd_application",
     "contact_flow_generator_agent": "contact_flow",
     "faq_generator_agent": "knowledge_base",
     "reviewer_agent": "review",
@@ -275,31 +284,87 @@ _GENERATOR_TOOL_TO_ASSET = {
 }
 
 
-def get_tools_for_phase(phase: str, scope: Optional[list] = None) -> list:
-    """Return the appropriate tool list for the given phase.
+def _normalize_runtime_target(value: Any) -> str:
+    """Return a supported target; missing or invalid client values stay Classic."""
+    return value if value in RUNTIME_TARGETS else RUNTIME_TARGET_CLASSIC
 
-    When *scope* is a proper subset of the full asset set, the generator
-    sub-agents whose produced asset is out of scope are dropped from the tool
-    list (a tool the model can't call can't be misused). Non-generator tools
-    (workspace, spec, lint, review) are always kept.
+
+def _full_asset_set_for_runtime(runtime_target: str) -> set[str]:
+    """Keep tool trimming aligned with the target-specific progress asset id."""
+    if runtime_target == "acxd":
+        return (set(_FULL_ASSET_SET) - {"prompt"}) | {"acxd_application"}
+    return set(_FULL_ASSET_SET)
+
+
+def _load_acxd_application_tool():
+    """Load Task B's generator lazily so Classic startup never depends on it."""
+    try:
+        from tools.acxd_application_generator import generate_acxd_application
+        return generate_acxd_application
+    except ImportError as exc:
+        logger.warning("[acxd] application generator unavailable: %s", exc)
+        return None
+
+
+def _load_acxd_asset_patcher():
+    """Load the ACXD patch-only tool without making a missing optional module fatal."""
+    try:
+        from tools.acxd_asset_patcher import patch_acxd_asset
+        return patch_acxd_asset
+    except ImportError as exc:
+        logger.warning("[acxd] asset patcher unavailable: %s", exc)
+        return None
+
+
+def get_tools_for_phase(
+    phase: str,
+    scope: Optional[list] = None,
+    runtime_target: str = RUNTIME_TARGET_CLASSIC,
+) -> list:
+    """Return target-aware tools for a phase and optional generated-asset scope.
+
+    ACXD retains the Classic interview and backend generators but augments the
+    interview with ACXD flow-design tools. In generation it replaces the Classic
+    prompt generator with Task B's ACXD application generator and exposes only the
+    patch-only ACXD asset editor for modifications.
     """
+    runtime_target = _normalize_runtime_target(runtime_target)
+    is_acxd = runtime_target == "acxd"
     if phase == "interview":
-        return INTERVIEW_TOOLS
+        return INTERVIEW_TOOLS + ACXD_INTERVIEW_TOOLS if is_acxd else INTERVIEW_TOOLS
 
-    # Full build (no scope, or scope == full set) → unmodified generation tools.
     scope_set = set(scope) if scope else set()
-    if not scope_set or scope_set >= set(_FULL_ASSET_SET):
-        return GENERATION_TOOLS
+    if is_acxd and "prompt" in scope_set:
+        scope_set.discard("prompt")
+        scope_set.add("acxd_application")
+    full_asset_set = _full_asset_set_for_runtime(runtime_target)
+    is_full_build = not scope_set or scope_set >= full_asset_set
 
-    # Proper subset: drop generators whose asset isn't in scope.
-    trimmed = []
-    for t in GENERATION_TOOLS:
-        asset = _GENERATOR_TOOL_TO_ASSET.get(t)
-        if asset is not None and asset not in scope_set:
-            continue  # out-of-scope generator → drop
-        trimmed.append(t)
-    return trimmed
+    # The Classic prompt generator is deliberately absent for ACXD. All other
+    # Classic generators continue to produce the backend and Contact Flow assets.
+    generation_tools = [
+        tool for tool in GENERATION_TOOLS
+        if not (is_acxd and tool is prompt_generator_agent)
+    ]
 
+    if not is_full_build:
+        generation_tools = [
+            tool for tool in generation_tools
+            if (_GENERATOR_TOOL_TO_ASSET.get(tool) is None
+                or _GENERATOR_TOOL_TO_ASSET[tool] in scope_set)
+        ]
+
+    if not is_acxd:
+        return generation_tools
+
+    application_tool = _load_acxd_application_tool()
+    if application_tool and (is_full_build or "acxd_application" in scope_set):
+        generation_tools.append(application_tool)
+
+    patch_tool = _load_acxd_asset_patcher()
+    if patch_tool:
+        generation_tools.append(patch_tool)
+    return generation_tools
 
 
 # ========================================
@@ -676,9 +741,10 @@ def get_or_create_session(session_id: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # Determine phase to select appropriate tools
+    # Determine phase and fixed runtime target before selecting tools.
     initial_phase = _detect_phase(session_id)
-    tools = get_tools_for_phase(initial_phase)
+    runtime_target = _normalize_runtime_target(get_runtime_target(session_id))
+    tools = get_tools_for_phase(initial_phase, runtime_target=runtime_target)
 
     agent = Agent(
         model=model,
@@ -704,6 +770,8 @@ def get_or_create_session(session_id: str) -> Dict[str, Any]:
         "tools": tools,
         "conversation_history": conversation_history,
         "session_data": {},
+        "runtime_target": runtime_target,
+        "_runtime_target_seeded": False,
         "document_mode": False,
         "uploaded_document": None,
         "created_at": datetime.utcnow().isoformat(),
@@ -1971,6 +2039,7 @@ async def websocket_handler(
         "type": "connected",
         "sessionId": session_id,
         "phase": _detect_phase(session_id),
+        "runtime_target": _normalize_runtime_target(get_runtime_target(session_id)),
         "progressState": _conn_progress if _conn_progress else None,
     })
 
@@ -2178,6 +2247,19 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     except Exception as e:
         logger.warning(f"workspace_init_failed: {e}")
 
+    # The target is fixed on the first user message. A createNewSession request
+    # seeds it earlier for the acknowledgement, while this path also covers
+    # direct WebSocket clients that send their first message without that action.
+    if not session.get("_runtime_target_seeded"):
+        requested_target = message.get("runtime_target", message.get("runtimeTarget"))
+        runtime_target = _normalize_runtime_target(
+            requested_target if requested_target is not None else session.get("runtime_target")
+        )
+        if not set_runtime_target(effective_session_id, runtime_target):
+            logger.warning("[runtime_target] could not persist %s for %s", runtime_target, effective_session_id)
+        session["runtime_target"] = runtime_target
+        session["_runtime_target_seeded"] = True
+
     set_message_index(len(session["conversation_history"]))
 
     # Set up Sub-Agent callback handler for streaming
@@ -2262,17 +2344,27 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                 "- get_operation_spec(operation_id) for individual operation details\n"
                 "- get_session_flow_config_tool() for session-level config\n"
                 "- load_requirement_document(doc_type=\"analysis\") for the requirements analysis document\n"
-                "Begin generation following the 5-phase workflow."
+                "Begin generation following the runtime-target-specific workflow."
             )
             strands_messages = [{"role": "user", "content": [{"text": bootstrap_msg}]}]
 
     # Single-segment scope: trim generators + use the scoped generation prompt.
     generation_scope = _get_generation_scope(effective_session_id)
-    phase_prompt = get_phase_system_prompt(current_phase, scope=generation_scope)
-    phase_tools = get_tools_for_phase(current_phase, scope=generation_scope)
+    runtime_target = _normalize_runtime_target(get_runtime_target(effective_session_id))
+    session["runtime_target"] = runtime_target
+    phase_prompt = get_phase_system_prompt(
+        current_phase,
+        scope=generation_scope,
+        runtime_target=runtime_target,
+    )
+    phase_tools = get_tools_for_phase(
+        current_phase,
+        scope=generation_scope,
+        runtime_target=runtime_target,
+    )
     logger.info(
         f"[phase] Using phase '{current_phase}' system prompt for {effective_session_id} "
-        f"(scope={generation_scope})"
+        f"(scope={generation_scope}, runtime_target={runtime_target})"
     )
 
     # Create streaming agent
@@ -3147,6 +3239,7 @@ async def handle_inject_history_ws(websocket: WebSocket, session_id: str, data: 
         "messageCount": len(session.get("conversation_history", [])),
         "hasWorkspace": bool(workspace_summary),
         "phase": _detect_phase(_hi_sid),
+        "runtime_target": _normalize_runtime_target(get_runtime_target(_hi_sid)),
         "progressState": _hi_progress if _hi_progress else None,
     })
 
@@ -3155,9 +3248,10 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
     """Create a fresh session.
 
     Accepts an optional ``scope`` (subset of {contact_flow, prompt, faq} for a
-    partial run) and ``model`` (one of the allowlisted Bedrock ids) chosen on the
-    start screen. Both are persisted to NFS so detect_phase / the phase prompt /
-    every BedrockModel construction reason about the right values from turn one.
+    partial run), ``model`` (one of the allowlisted Bedrock ids), and
+    ``runtime_target`` (``classic`` or ``acxd``) chosen on the start screen. They
+    are persisted to NFS so detect_phase / the phase prompt / every BedrockModel
+    construction reason about the right values from turn one.
 
     NEVER purge state while an agent task is running for this session. The
     frontend fires createNewSession on reconnect-with-no-history (useWebSocket.ts),
@@ -3187,7 +3281,8 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
             "type": "session_created",
             "sessionId": session_id,
             "phase": _detect_phase(session_id),
-            "scope": [] if set(_live_scope) >= set(_FULL_ASSET_SET) else _live_scope,
+            "scope": [] if set(_live_scope) >= _get_full_asset_set(_eff_live) else _live_scope,
+            "runtime_target": _normalize_runtime_target(get_runtime_target(_eff_live)),
             "selectedModel": _get_selected_model(_eff_live) or resolve_model_id(),
         })
         return
@@ -3238,10 +3333,16 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
         if isinstance(session_store.get(session_id), dict) else session_id
     try:
         _scope = data.get("scope")
-        if isinstance(_scope, list):
-            _set_generation_scope(_eff_for_state, _scope)
+        _set_generation_scope(_eff_for_state, _scope if isinstance(_scope, list) else [])
+        _runtime_target = _normalize_runtime_target(
+            data.get("runtime_target", data.get("runtimeTarget"))
+        )
+        if not set_runtime_target(_eff_for_state, _runtime_target):
+            logger.warning(
+                "[createNewSession] set runtime target failed for %s", _eff_for_state
+            )
     except Exception as _se:
-        logger.warning(f"[createNewSession] set scope failed: {_se}")
+        logger.warning(f"[createNewSession] set scope/runtime target failed: {_se}")
     try:
         _model = validate_model_id(data.get("model"))
         if _model:
@@ -3260,12 +3361,13 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
     # set, so we must collapse that back to [] here — otherwise the progress panel
     # would mistake a full build for a 6-asset "scope" and trim interview/review.
     _resolved_scope = _get_generation_scope(_eff_for_state)
-    _ui_scope = [] if set(_resolved_scope) >= set(_FULL_ASSET_SET) else _resolved_scope
+    _ui_scope = [] if set(_resolved_scope) >= _get_full_asset_set(_eff_for_state) else _resolved_scope
     await safe_send_json(websocket, {
         "type": "session_created",
         "sessionId": session_id,
         "phase": _detect_phase(session_id),
         "scope": _ui_scope,
+        "runtime_target": _normalize_runtime_target(get_runtime_target(_eff_for_state)),
         "selectedModel": _get_selected_model(_eff_for_state) or resolve_model_id(),
     })
 
