@@ -221,3 +221,24 @@ def generate_acxd_application(modification_request: str = None) -> dict:
     counts = bundle_summary(bundle)
     status = "partial" if problems else "success"
     return _result(status, counts, problems)
+
+
+def refresh_acxd_knowledge_base(session_id: str | None = None) -> dict:
+    """Re-render ``acxd_knowledge_base/knowledge_base.json`` from the FAQ asset.
+
+    Phase 4 builds the KB before phase 6 writes the FAQ, so the first render has
+    no articles. The FAQ generator calls this when the runtime target is acxd;
+    it is also safe to call from a modification turn.
+    """
+    session_id = session_id or current_session_id.get() or "default"
+    spec = get_acxd_spec().model_dump()
+    articles = (spec.get("knowledge_base") or {}).get("articles") or []
+    knowledge_base = build_knowledge_base(spec)
+    if not knowledge_base:
+        return {"status": "skipped", "reason": "no knowledge base planned", "articles": 0}
+    errors = validate_acxd_asset("knowledge_base", knowledge_base)
+    if errors:
+        return {"status": "error", "problems": [f"knowledge_base: {e}" for e in errors], "articles": len(articles)}
+    _save_asset(session_id, "acxd_knowledge_base", "knowledge_base.json", knowledge_base)
+    logger.info("[acxd_application] knowledge base re-rendered with %d articles", len(articles))
+    return {"status": "success", "articles": len(articles), "name": knowledge_base.get("name")}

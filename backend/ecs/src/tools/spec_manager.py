@@ -1139,7 +1139,7 @@ def _normalize_field_constraints(data: dict) -> dict:
         for k in ("date_format", "format", "dateFormat"):
             if k in data and ("자" in str(data.get(k)) or "char" in str(data.get(k)).lower()):
                 data[k] = None
-    return data
+    return _enforce_exact_length_phrase(data)
 
 
 def _mask_to_regex(mask: str) -> str:
@@ -1205,10 +1205,53 @@ def _apply_length_constraint(data: dict, text: str) -> bool:
             data["min_length"] = n; applied = True
         if data.get("max_length") is None:
             data["max_length"] = n; applied = True
-        if ("숫자" in text or "digit" in text.lower()) and data.get("pattern") is None:
-            data["pattern"] = r"^\d{" + str(n) + r"}$"
+        if data.get("pattern") is None:
+            data["pattern"] = _exact_length_pattern(text, n)
+            applied = True
         return applied
     return applied
+
+
+def _exact_length_pattern(text: str, n: int) -> Optional[str]:
+    """Regex for an exact-length phrase: alphanumeric beats digits ("영숫자 12자리"
+    contains the substring "숫자" but means letters AND digits)."""
+    low = text.lower()
+    if "영숫자" in text or "alphanumeric" in low or "영문" in text or "letters" in low:
+        return r"^[A-Za-z0-9]{" + str(n) + r"}$"
+    if "숫자" in text or "digit" in low:
+        return r"^\d{" + str(n) + r"}$"
+    return None
+
+
+def _enforce_exact_length_phrase(data: dict) -> dict:
+    """The customer's words win over the model's numbers.
+
+    Live run 1: the interviewer stored max_length=9 for a field whose own
+    description said "영숫자 12자리" (a 12-char alphanumeric serial), and the slot
+    type then rejected every real serial number. When the description or
+    validation text states an exact length N, min/max are forced to N and a
+    pattern is derived when none was given.
+    """
+    if not isinstance(data, dict):
+        return data
+    ftype = (data.get("field_type") or data.get("type") or "").lower()
+    if ftype in ("date", "datetime", "time", "number", "integer", "boolean", "array", "object"):
+        return data
+    text = " ".join(str(data.get(k) or "") for k in ("description", "validation", "constraints", "format_hint"))
+    ex = _LEN_EXACT_RE.search(text)
+    if not ex or _LEN_RANGE_RE.search(text):
+        return data
+    n = int(ex.group(1))
+    for key in ("min_length", "max_length"):
+        if data.get(key) is not None and data.get(key) != n:
+            data[key] = n
+    if data.get("min_length") is None:
+        data["min_length"] = n
+    if data.get("max_length") is None:
+        data["max_length"] = n
+    if data.get("pattern") is None:
+        data["pattern"] = _exact_length_pattern(text, n)
+    return data
 
 
 def _safe_parse_model(model_class, data: dict):

@@ -1719,9 +1719,16 @@ def _d9_faq_has_question_and_answer(document: Any) -> bool:
     if isinstance(document, dict):
         return bool(str(document.get("question") or "").strip() and str(document.get("answer") or "").strip())
     text = str(document or "")
-    question = re.search(r"(?:^|\n)##?\s*(?:질문|Question)\s*\n+([^\n#]+)", text, re.IGNORECASE)
-    answer = re.search(r"(?:^|\n)##?\s*(?:답변|Answer)\s*\n+([^\n#]+)", text, re.IGNORECASE)
-    return bool(question and answer and question.group(1).strip() and answer.group(1).strip())
+    # Same parser the ACXD generation context uses to turn FAQ documents into
+    # KB articles, so D9-5 and the generator agree on what a valid FAQ is
+    # (the FAQ generator writes headings like "## 질문 (Question)").
+    try:
+        from .acxd_generation_context import _article_from_content
+        return _article_from_content(text) is not None
+    except Exception:
+        question = re.search(r"(?:^|\n)##?\s*(?:질문|Question)[^\n]*\n+([^\n#]+)", text, re.IGNORECASE)
+        answer = re.search(r"(?:^|\n)##?\s*(?:답변|Answer)[^\n]*\n+([^\n#]+)", text, re.IGNORECASE)
+        return bool(question and answer and question.group(1).strip() and answer.group(1).strip())
 
 
 def _d9_contact_flow_parts(document: Any) -> tuple[dict, Optional[dict], list[dict]]:
