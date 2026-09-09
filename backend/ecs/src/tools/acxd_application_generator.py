@@ -90,6 +90,21 @@ def _result(
     }
 
 
+def _missing_flow_ids(session_id: str) -> list[str]:
+    """Flow plans in the spec that have no generated flow document yet."""
+    try:
+        from tools.acxd_flow_spec import get_acxd_flow_spec
+        spec = get_acxd_flow_spec(session_id)
+        planned = [f.flow_id for f in (spec.flows if spec else [])]
+        existing = {
+            (doc.get("flowId") or "") for doc in (load_acxd_bundle(session_id).get("flows") or [])
+        }
+        return [fid for fid in planned if fid not in existing]
+    except Exception as e:  # pragma: no cover - storage outage
+        logger.warning("[acxd_application] could not compute missing flows: %s", e)
+        return []
+
+
 @tool
 def generate_acxd_application(modification_request: str = None) -> dict:
     """Generate the phase-4 ACXD application bundle.
@@ -99,27 +114,39 @@ def generate_acxd_application(modification_request: str = None) -> dict:
     entry point: callers must use ``read_acxd_asset`` then ``patch_acxd_asset``
     with an exact old/new replacement; no generated asset is replaced wholesale.
     """
+    session_id = current_session_id.get() or "default"
+    regenerate_only: list[str] | None = None
     if modification_request:
-        return _result(
-            "patch_required",
-            {},
-            [
-                "ACXD modification requests are patch-only. Read the target with "
-                "read_acxd_asset and apply the exact change with patch_acxd_asset; "
-                "the application bundle was not regenerated."
-            ],
-            action=modification_request,
-        )
+        # Patch-only applies to assets that exist. When the previous generation
+        # left confirmed flow plans without a flow document (live runs 2/3: the
+        # Welcome flow failed validation, the tool returned error, and every
+        # later call was refused as "patch-only" — a deadlock), generating the
+        # MISSING flows is not a modification of anything.
+        missing = _missing_flow_ids(session_id)
+        if not missing:
+            return _result(
+                "patch_required",
+                {},
+                [
+                    "ACXD modification requests are patch-only. Read the target with "
+                    "read_acxd_asset and apply the exact change with patch_acxd_asset; "
+                    "the application bundle was not regenerated."
+                ],
+                action=modification_request,
+            )
+        logger.info("[acxd_application] modification request while flows %s are missing — "
+                    "generating the missing flows instead of refusing", missing)
+        regenerate_only = missing
 
     ready, readiness_problems = acxd_flow_spec_ready()
     if not ready:
         return _result("error", {}, readiness_problems)
 
-    session_id = current_session_id.get() or "default"
     spec = get_acxd_spec().model_dump()
     problems: list[str] = []
 
-    flow_result = _raw_callable(generate_acxd_flows)()
+    flow_result = (_raw_callable(generate_acxd_flows)(flow_ids=regenerate_only)
+                   if regenerate_only else _raw_callable(generate_acxd_flows)())
     failed = list(flow_result.get("failed") or []) if isinstance(flow_result, dict) else []
     if not isinstance(flow_result, dict) or flow_result.get("status") == "error" or failed:
         flow_problems = [

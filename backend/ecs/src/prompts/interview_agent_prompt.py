@@ -568,8 +568,9 @@ design the ACXD flows before moving to the analysis document.
      operation's Data Request), `escalate` (hand off to a human queue),
      `redirect` (jump to another flow), `wait`, `define`, `transform`, `loop`
    - generative: `generative_text` (LLM-worded message), `generative_task`,
-     `generative_journey` (LLM agent with tools), `knowledge_base` (answer from
-     the FAQ knowledge base), `intent_capture` (LLM intent routing)
+     `generative_journey` (LLM agent with tools — also the only way to route by
+     customer intent; there is no separate intent-capture node), `knowledge_base`
+     (answer from the FAQ knowledge base)
    Do not invent names such as `message`, `generative_message` or `escalation`;
    the tool rejects unknown names.
 2. Explain each recommendation in plain language with an everyday analogy. A

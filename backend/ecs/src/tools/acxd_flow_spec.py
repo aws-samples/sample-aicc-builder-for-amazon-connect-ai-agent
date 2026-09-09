@@ -109,7 +109,12 @@ NODE_TYPE_ALIASES = {
     "agent_transfer": "escalate", "human": "escalate", "queue_transfer": "escalate",
     "end_call": "end", "end_conversation": "end", "hangup": "end", "complete": "end",
     "finish": "end", "disconnect": "end", "terminate": "end", "goodbye": "end",
-    "intent": "intent_capture", "intent_router": "intent_capture", "classify": "intent_capture",
+    # intent_capture is in the SDK enum but is not a deployable node (live: the
+    # palette has none, metadata is dropped, and the flow failed on the first
+    # utterance). Intent routing is the generative journey's job.
+    "intent_capture": "generative_journey", "intent": "generative_journey",
+    "intent_router": "generative_journey", "classify": "generative_journey",
+    "intent_routing": "generative_journey", "nlu": "generative_journey",
     "journey": "generative_journey", "agent": "generative_journey", "task": "generative_task",
     "jump": "redirect", "goto": "redirect", "subflow": "redirect", "call_flow": "redirect",
     "set": "define", "assign": "define", "variable": "define",
@@ -125,9 +130,11 @@ def canonical_node_type(raw: Optional[str]) -> Optional[str]:
     key = re.sub(r"[\s\-]+", "_", str(raw).strip().lower())
     key = re.sub(r"\(.*\)$", "", key).strip("_")     # 'escalation(native)' → 'escalation'
     key = key.removesuffix("_node")
+    if key in NODE_TYPE_ALIASES:          # aliases win: intent_capture → generative_journey
+        return NODE_TYPE_ALIASES[key]
     if key in SUPPORTED_NODE_TYPES:
         return key
-    return NODE_TYPE_ALIASES.get(key)
+    return None
 
 
 def _state_dir(session_id: Optional[str]) -> Optional[Path]:
@@ -640,7 +647,8 @@ def upsert_acxd_flow_plan(
         data_request (call a Data Request / backend API), escalate (hand off to a
         human queue), redirect (jump to another flow), wait, note, define, transform, loop
       generative: generative_text (LLM-worded message), generative_task,
-        generative_journey (LLM agent), knowledge_base (answer from the KB), intent_capture
+        generative_journey (LLM agent; also the ONLY way to route by customer intent —
+        'intent_capture' is not deployable and is mapped here), knowledge_base (answer from the KB)
     Common wrong names are auto-corrected (message→basic, generative_message→
     generative_text, escalation→escalate, end_call→end, branch→choice); anything
     else is rejected with this list.
