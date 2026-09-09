@@ -836,6 +836,17 @@ Cover these topics:
                 "s3_key": package_result.get("s3_key")
             }
 
+        # Runtime target acxd: whatever the sub-agent did (fresh documents or a
+        # patch-only "no change" turn), the ACXD knowledge base must mirror the
+        # FAQ documents that exist now. Phase 4 built it before any FAQ existed.
+        try:
+            from tools.acxd_flow_spec import is_acxd_target
+            if is_acxd_target():
+                from tools.acxd_application_generator import refresh_acxd_knowledge_base
+                result["acxd_knowledge_base"] = refresh_acxd_knowledge_base()
+        except Exception as _kb_exc:  # pragma: no cover - defensive
+            logger.warning(f"[FAQ] ACXD knowledge base refresh skipped: {_kb_exc}")
+
         yield result
 
     except Exception as e:

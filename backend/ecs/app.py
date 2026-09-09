@@ -307,6 +307,15 @@ def _load_acxd_application_tool():
         return None
 
 
+def _load_acxd_kb_refresh_tool():
+    try:
+        from tools.acxd_application_generator import refresh_acxd_knowledge_base_tool
+        return refresh_acxd_knowledge_base_tool
+    except ImportError as exc:
+        logger.warning("[acxd] knowledge base refresh tool unavailable: %s", exc)
+        return None
+
+
 def _load_acxd_asset_patcher():
     """Load the ACXD patch-only tool without making a missing optional module fatal."""
     try:
@@ -365,6 +374,9 @@ def get_tools_for_phase(
     patch_tool = _load_acxd_asset_patcher()
     if patch_tool:
         generation_tools.append(patch_tool)
+    kb_tool = _load_acxd_kb_refresh_tool()
+    if kb_tool:
+        generation_tools.append(kb_tool)
     # Spec-level modification requests after the interview (a flow step
     # re-designed, a guardrail added) go through the same ACXD spec tools the
     # interview used, then generate_acxd_application re-runs — just as the

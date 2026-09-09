@@ -242,3 +242,19 @@ def refresh_acxd_knowledge_base(session_id: str | None = None) -> dict:
     _save_asset(session_id, "acxd_knowledge_base", "knowledge_base.json", knowledge_base)
     logger.info("[acxd_application] knowledge base re-rendered with %d articles", len(articles))
     return {"status": "success", "articles": len(articles), "name": knowledge_base.get("name")}
+
+
+@tool
+def refresh_acxd_knowledge_base_tool() -> dict:
+    """
+    Re-render the ACXD knowledge base (acxd_knowledge_base/knowledge_base.json)
+    from the FAQ documents that exist now (runtime target acxd only).
+
+    Use after the FAQ phase, or whenever a review reports that the knowledge
+    base has no articles / is out of sync with the FAQ documents. Deterministic —
+    no LLM; the FAQ documents are the source of truth and are not modified.
+
+    Returns:
+        {"status": "success", "articles": N, "name": ...} or an error with problems.
+    """
+    return refresh_acxd_knowledge_base()
