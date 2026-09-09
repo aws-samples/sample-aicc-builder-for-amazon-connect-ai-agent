@@ -365,6 +365,13 @@ def get_tools_for_phase(
     patch_tool = _load_acxd_asset_patcher()
     if patch_tool:
         generation_tools.append(patch_tool)
+    # Spec-level modification requests after the interview (a flow step
+    # re-designed, a guardrail added) go through the same ACXD spec tools the
+    # interview used, then generate_acxd_application re-runs — just as the
+    # Classic OperationSpec tools stay available during generation.
+    for tool in ACXD_INTERVIEW_TOOLS:
+        if tool not in generation_tools:
+            generation_tools.append(tool)
     return generation_tools
 
 
