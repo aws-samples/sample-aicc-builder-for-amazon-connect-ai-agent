@@ -381,6 +381,44 @@
             "escalate": {
               "not": {},
               "description": "not a FlowNodeMetadata field — escalation messages go in node.messages"
+            },
+            "knowledgeBase": {
+              "type": "object",
+              "description": "KnowledgeBaseNodeConfig — the service requires name (live-verified 2026-09-10); scopeTags is not a field",
+              "required": [
+                "name",
+                "knowledgeBaseId"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "knowledgeBaseId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "prompt": {
+                  "type": "string"
+                },
+                "question": {
+                  "type": "string"
+                },
+                "includeCitation": {
+                  "type": "boolean"
+                },
+                "timeout": {
+                  "type": "number"
+                },
+                "minConfidenceScore": {
+                  "type": "number"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "filters": {}
+              },
+              "additionalProperties": false
             }
           }
         }

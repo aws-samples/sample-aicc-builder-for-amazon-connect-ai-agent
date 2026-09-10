@@ -50,6 +50,13 @@ from tools.acxd_contract import (
 
 logger = logging.getLogger(__name__)
 
+# amazon-connect-acxd-sdk KnowledgeBaseNodeConfig — the only keys the service
+# accepts on a knowledge_base node's metadata.knowledgeBase (name is required).
+_KB_NODE_KEYS = frozenset({
+    "name", "knowledgeBaseId", "prompt", "question", "includeCitation",
+    "timeout", "minConfidenceScore", "brandId", "filters",
+})
+
 MAX_ATTEMPTS = 5
 
 
@@ -370,7 +377,7 @@ def _stub_node(node_type: str, node_id: str, description: str, spec: dict) -> Op
         kb = (spec.get("knowledge_base") or {}).get("name")
         if not kb:
             return None
-        node["metadata"] = {"knowledgeBase": {"knowledgeBaseId": f"{{KB:{kb}}}"}}
+        node["metadata"] = {"knowledgeBase": {"knowledgeBaseId": f"{{KB:{kb}}}", "name": kb}}
     elif node_type in ("escalate", "end", "note", "wait"):
         pass                       # no required configuration
     elif node_type in ("choice", "split"):
@@ -760,6 +767,23 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                     ]
             # escalation hands control back to the Contact Flow — nothing follows it
             node["childNodes"] = []
+        elif ntype == "knowledge_base":
+            # LIVE-VERIFIED (2026-09-10, second real deployment): the service
+            # requires `metadata.knowledgeBase.name` even though the SDK type
+            # marks it optional, and KnowledgeBaseNodeConfig has no `scopeTags`.
+            # The name is the bundle KB name carried in the {KB:<name>}
+            # placeholder the runner resolves to the real knowledgeBaseId.
+            kb = meta.get("knowledgeBase") if isinstance(meta.get("knowledgeBase"), dict) else {}
+            meta["knowledgeBase"] = kb
+            kb_name = (spec.get("knowledge_base") or {}).get("name") or ""
+            kb_id = kb.get("knowledgeBaseId") or (f"{{KB:{kb_name}}}" if kb_name else "")
+            if kb_id:
+                kb["knowledgeBaseId"] = kb_id
+            if not kb.get("name"):
+                m = re.fullmatch(r"\{KB:([^}]+)\}", str(kb_id))
+                kb["name"] = m.group(1) if m else (kb_name or str(kb_id))
+            for unknown in [k for k in kb if k not in _KB_NODE_KEYS]:
+                kb.pop(unknown, None)
 
     # 2. Map map-key/nodeId disagreements onto the map key (the key wins).
     for nid, node in list(nodes.items()):

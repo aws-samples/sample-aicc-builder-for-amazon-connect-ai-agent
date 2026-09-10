@@ -69,7 +69,7 @@ def coherent_bundle() -> dict:
         "nodes": {
             S: {"nodeId": S, "type": "start", "childNodes": [{"nodeId": K}]},
             K: {"nodeId": K, "type": "knowledge_base",
-                "metadata": {"knowledgeBase": {"knowledgeBaseId": "{KB:Product FAQ}"}},
+                "metadata": {"knowledgeBase": {"knowledgeBaseId": "{KB:Product FAQ}", "name": "Product FAQ"}},
                 "childNodes": [{"nodeId": E}]},
             E: {"nodeId": E, "type": "end"},
         },

@@ -23,6 +23,7 @@ from agents.acxd_flow_generator.agent import (  # noqa: E402
     build_generation_prompt,
     extract_flow_json,
     normalize_generated_flow,
+    repair_generated_flow,
     run_flow_generation,
     stub_bundle_for_validation,
     validate_generated_flow,
@@ -322,7 +323,7 @@ def test_non_ascii_kb_name_is_sanitized_and_placeholder_resolves():
     flow = copy.deepcopy(REFUND_FLOW)
     gid = [k for k, v in flow["nodes"].items() if v["type"] == "generative_text"][0]
     flow["nodes"][gid] = {"nodeId": gid, "type": "knowledge_base",
-                          "metadata": {"knowledgeBase": {"knowledgeBaseId": f"{{KB:{kb['name']}}}"}},
+                          "metadata": {"knowledgeBase": {"knowledgeBaseId": f"{{KB:{kb['name']}}}", "name": kb['name']}},
                           "childNodes": flow["nodes"][gid]["childNodes"]}
     plan = copy.deepcopy(PLAN)
     plan["steps"][3]["node_type"] = "knowledge_base"
@@ -1092,3 +1093,23 @@ def test_journey_tools_and_intent_capture_are_repaired():
     # actually DEPLOYED and passed a live multi-turn test binds each data
     # request as an mcpFlow pointing at its generated helper flow.
     assert tool == {"type": "flow", "flowId": "toolGetPrice"}, tool
+
+
+def test_knowledge_base_node_gets_required_name_and_only_sdk_keys():
+    """Second real deployment (2026-09-10): the service requires
+    metadata.knowledgeBase.name and has no scopeTags field."""
+    flow = copy.deepcopy(REFUND_FLOW)
+    gid = [k for k, v in flow["nodes"].items() if v["type"] == "generative_text"][0]
+    flow["nodes"][gid] = {"nodeId": gid, "type": "knowledge_base",
+                          "metadata": {"knowledgeBase": {"knowledgeBaseId": "{KB:Product FAQ}",
+                                                         "scopeTags": []}, "maxRetries": 2},
+                          "childNodes": flow["nodes"][gid]["childNodes"]}
+    plan = copy.deepcopy(PLAN)
+    plan["steps"][3]["node_type"] = "knowledge_base"
+    spec = {**SPEC, "flows": [plan]}
+    assert any("name" in p for p in validate_generated_flow(flow, plan, spec))
+    fixed = repair_generated_flow(normalize_generated_flow(flow, spec), plan, spec)
+    kb = fixed["nodes"][gid]["metadata"]["knowledgeBase"]
+    assert kb == {"knowledgeBaseId": "{KB:Product FAQ}", "name": "Product FAQ"}
+    assert fixed["nodes"][gid]["metadata"]["maxRetries"] == 2
+    assert validate_generated_flow(fixed, plan, spec) == []

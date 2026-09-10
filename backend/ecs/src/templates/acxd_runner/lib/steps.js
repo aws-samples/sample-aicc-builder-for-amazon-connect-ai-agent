@@ -219,13 +219,36 @@ const upsertDataRequests = idUpsertStep({
   transform: (doc, ctx) => resolveAssetPlaceholders(doc, ctx),
 });
 
+// KnowledgeBaseNodeConfig keys the service accepts (SDK models_0.d.ts). The
+// service also REQUIRES `name` although the type marks it optional — the second
+// real deployment failed with "metadata.knowledgeBase.name is required".
+const KB_NODE_KEYS = new Set(['name', 'knowledgeBaseId', 'prompt', 'question',
+  'includeCitation', 'timeout', 'minConfidenceScore', 'brandId', 'filters']);
+
+/** Make knowledge_base nodes deployable: name from the {KB:<name>} placeholder, known keys only. */
+function normalizeFlowForService(rawDoc, doc) {
+  const rawNodes = (rawDoc && rawDoc.nodes) || {};
+  for (const [nodeId, node] of Object.entries(doc.nodes || {})) {
+    if (!node || node.type !== 'knowledge_base' || !node.metadata) continue;
+    const kb = node.metadata.knowledgeBase;
+    if (!kb || typeof kb !== 'object') continue;
+    if (!kb.name) {
+      const rawKb = rawNodes[nodeId] && rawNodes[nodeId].metadata && rawNodes[nodeId].metadata.knowledgeBase;
+      const m = rawKb && typeof rawKb.knowledgeBaseId === 'string' && rawKb.knowledgeBaseId.match(/^\{KB:([^}]+)\}$/);
+      if (m) kb.name = m[1];
+    }
+    for (const key of Object.keys(kb)) if (!KB_NODE_KEYS.has(key)) delete kb[key];
+  }
+  return doc;
+}
+
 const upsertFlows = idUpsertStep({
   label: 'flow', kind: 'flow',
   idField: 'flowId', identifierField: 'flowIdentifier',
   getCmd: 'GetFlowCommand', createCmd: 'CreateFlowCommand',
   updateCmd: 'UpdateFlowCommand',
   deleteCmd: 'DeleteFlowCommand',
-  transform: (doc, ctx) => resolveAssetPlaceholders(doc, ctx),
+  transform: (doc, ctx) => normalizeFlowForService(doc, resolveAssetPlaceholders(doc, ctx)),
 });
 
 /** Name-addressable resources (no get-by-name): list + match. */
@@ -599,4 +622,4 @@ const STEPS = {
   'import-contact-flows': importContactFlows,
 };
 
-module.exports = { STEPS, listAll, send };
+module.exports = { STEPS, listAll, send, normalizeFlowForService };
