@@ -114,6 +114,11 @@ def build_data_request(plan: dict) -> dict:
     request_fields = plan.get("request_fields") or []
     response_fields = plan.get("response_fields") or []
     operation = plan.get("operation_ref") or raw_id
+    # The generation context resolves the deployed path from the OperationSpec's
+    # tool (/tools/<tool_id>); fall back to the operation name for older plans.
+    tool_path = str(plan.get("path") or f"/tools/{operation}")
+    if not tool_path.startswith("/"):
+        tool_path = "/" + tool_path
 
     if mode == "mock":
         webhook = {
@@ -133,7 +138,7 @@ def build_data_request(plan: dict) -> dict:
         webhook = {
             "implementation": "external",
             "method": plan.get("http_method", "POST"),
-            "url": f"{{WEBHOOK_URL}}/tools/{operation}",
+            "url": f"{{WEBHOOK_URL}}{tool_path}",
             # A header takes a SECRET, not a variable — that is the whole point
             # of Secrets in ACXD. When the interview captured an auth header we
             # emit a {{secrets.<name>}} reference; the deploy runner creates the

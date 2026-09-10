@@ -81,3 +81,17 @@ def test_japanese_alphanumeric_phrase_in_description():
                                           "description": "請求番号（英数字8桁）"})
     assert field["pattern"] == r"^[A-Za-z0-9]{8}$"
     assert field["max_length"] == 8
+
+
+# --- Data Request path follows the OperationSpec tool, not the operation id ---
+
+def test_data_request_url_uses_the_resolved_tool_path():
+    from tools.acxd_data_request_builder import build_data_request
+    plan = {"data_request_id": "checkBalance", "operation_ref": "verify_and_get_balance",
+            "path": "/tools/verify_and_get_balance", "mode": "external",
+            "request_fields": [{"name": "cardLast4", "type": "text"}],
+            "response_fields": [{"name": "balance", "type": "number"}]}
+    doc = build_data_request(plan)
+    assert doc["webhook"]["url"] == "{WEBHOOK_URL}/tools/verify_and_get_balance"
+    legacy = build_data_request({**plan, "path": None, "operation_ref": None})
+    assert legacy["webhook"]["url"] == "{WEBHOOK_URL}/tools/checkBalance"

@@ -386,12 +386,30 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
         raw_id = str(op.get("operation_id") or operation_id)
         data_request_id = _normalise_data_request_id(raw_id)
         request_ids[raw_id] = data_request_id
-        contract = contracts.get(raw_id, {})
+        # The Classic contract exposes an operation through its TOOLS: the Lambda
+        # folder, the OpenAPI operationId and the API path are /tools/<tool_id>,
+        # and tool_id is often not the operation_id (live: operation
+        # `check_balance` → tool `verify_and_get_balance`). A Data Request that
+        # targets /tools/<operation_id> then calls a path that does not exist.
+        tools = [t for t in (op.get("tools") or []) if isinstance(t, dict) and t.get("tool_id")]
+        primary_tool = tools[0] if tools else {}
+        tool_id = str(primary_tool.get("tool_id") or raw_id)
+        contract = contracts.get(tool_id) or contracts.get(raw_id) or {}
+        for key in (_normalise_data_request_id(tool_id), _normalise_data_request_id(raw_id)):
+            if contract:
+                break
+            contract = contracts.get(key) or {}
+        path = primary_tool.get("path") or contract.get("path") or f"/tools/{tool_id}"
+        if not str(path).startswith("/tools/"):
+            path = f"/tools/{str(path).strip('/').split('/')[-1]}"
         data_integrations.append({
             "data_request_id": data_request_id,
-            "operation_ref": raw_id,
+            "operation_ref": tool_id,
+            "operation_id": raw_id,
+            "path": path,
             "mode": "external",
-            "http_method": contract.get("http_method") or op.get("http_method") or "POST",
+            "http_method": contract.get("http_method") or primary_tool.get("http_method")
+            or op.get("http_method") or "POST",
             "request_fields": contract.get("request_fields")
             or [_field_dict(field) for field in (op.get("input_fields") or [])],
             "response_fields": contract.get("response_fields")
