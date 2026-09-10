@@ -81,6 +81,45 @@ def enforce_ascii_metadata(doc: Any) -> Any:
     return out
 
 
+# amazon-connect-acxd-sdk KnowledgeBaseNodeConfig keys; the service requires
+# `name` (live-verified 2026-09-10) and rejects fields outside this set.
+KB_NODE_KEYS = frozenset({
+    "name", "knowledgeBaseId", "prompt", "question", "includeCitation",
+    "timeout", "minConfidenceScore", "brandId", "filters",
+})
+_KB_PLACEHOLDER = re.compile(r"^\{KB:([^}]+)\}$")
+
+
+def normalize_flow_for_service(flow: Any) -> Any:
+    """Deterministic service-contract repairs applied whenever a bundle is
+    loaded (packaging, D9, runner). Mechanical only — it never changes a
+    flow's behaviour:
+
+    - knowledge_base nodes: `metadata.knowledgeBase.name` is required by the
+      service (the SDK type says optional); derive it from the `{KB:<name>}`
+      placeholder, and drop keys KnowledgeBaseNodeConfig does not have.
+
+    Flows generated before a contract fix stay deployable; the generator is
+    fixed at the source as well, so this is a safety net, not the fix.
+    """
+    if not isinstance(flow, dict) or not isinstance(flow.get("nodes"), dict):
+        return flow
+    for node in flow["nodes"].values():
+        if not isinstance(node, dict) or node.get("type") != "knowledge_base":
+            continue
+        meta = node.get("metadata")
+        kb = meta.get("knowledgeBase") if isinstance(meta, dict) else None
+        if not isinstance(kb, dict):
+            continue
+        if not kb.get("name"):
+            match = _KB_PLACEHOLDER.match(str(kb.get("knowledgeBaseId") or ""))
+            if match:
+                kb["name"] = match.group(1)
+        for key in [k for k in kb if k not in KB_NODE_KEYS]:
+            kb.pop(key, None)
+    return flow
+
+
 def _assets_root(session_id: str) -> Optional[Path]:
     mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
     if not session_id or not os.path.isdir(mount):
@@ -165,6 +204,7 @@ def load_acxd_bundle(session_id: str) -> dict:
     bundle: dict = {key: [] for key in ACXD_LIST_TYPES.values()}
     for asset_type, key in ACXD_LIST_TYPES.items():
         bundle[key] = _read_json_docs(session_id, asset_type)
+    bundle["flows"] = [normalize_flow_for_service(f) for f in bundle["flows"]]
 
     apps = _read_json_docs(session_id, ACXD_APPLICATION_TYPE)
     bundle["application"] = apps[0] if apps else None
