@@ -89,16 +89,28 @@ def _project_slug(value: Any) -> str:
 
 
 def _derive_lambda_dirs(bundle: dict) -> list[str]:
-    """Return generated handler directories for external Data Requests."""
+    """Return generated handler directories for external Data Requests.
+
+    The Classic Lambda generator stores handlers under the OPERATION id
+    (``lambda/check_warranty/index.py``), while the Data Request id is the
+    camelCase ACXD identifier (``checkWarranty``). The webhook URL carries the
+    operation (``{WEBHOOK_URL}/tools/<operation>``), so derive the directory
+    from it and only fall back to the Data Request id when there is no URL.
+    """
     dirs: list[str] = []
     for data_request in bundle.get("data_requests") or []:
         if not isinstance(data_request, dict):
             continue
-        if (data_request.get("webhook") or {}).get("implementation") != "external":
+        webhook = data_request.get("webhook") or {}
+        if webhook.get("implementation") != "external":
             continue
-        request_id = data_request.get("dataRequestId")
-        if request_id:
-            directory = f"lambda/{request_id}"
+        operation = None
+        match = re.search(r"/tools/([A-Za-z0-9_\-]+)", str(webhook.get("url") or ""))
+        if match:
+            operation = match.group(1)
+        directory_name = operation or data_request.get("dataRequestId")
+        if directory_name:
+            directory = f"lambda/{directory_name}"
             if directory not in dirs:
                 dirs.append(directory)
     return dirs

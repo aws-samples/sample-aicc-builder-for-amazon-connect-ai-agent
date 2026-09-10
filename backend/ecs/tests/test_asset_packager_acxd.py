@@ -46,7 +46,7 @@ def _package(monkeypatch, *, acxd: bool, d9=None):
     session_id = "session-1"
     contents = {
         f"assets/{session_id}/infrastructure/infrastructure.yaml": "Resources: {}\n",
-        f"assets/{session_id}/lambda/getOrder/index.py": "def handler(event, context): return {}\n",
+        f"assets/{session_id}/lambda/get_order/index.py": "def handler(event, context): return {}\n",
         f"assets/{session_id}/contact_flow/contact_flow.json": '{"Version":"2019-10-30","Actions":[]}',
         f"assets/{session_id}/prompt/ai_agent_prompt.yaml": "system: classic\n",
     }
