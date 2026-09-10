@@ -105,3 +105,51 @@ def test_acxd_prompt_blocks_are_present_only_for_acxd_target():
     assert "ACXD RUNTIME TARGET — THIS OVERRIDES CONFLICTING CLASSIC PHASE WORDING" in acxd_generation
     assert "generate_acxd_application" in acxd_generation
     assert "SCOPED GENERATION MODE" not in acxd_full_generation
+
+
+class _FakeWebSocket:
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send_text(self, payload):  # pragma: no cover - safe_send_json may use either
+        import json as _json
+        self.sent.append(_json.loads(payload))
+
+    async def send_json(self, payload):
+        self.sent.append(payload)
+
+
+@pytest.mark.anyio
+async def test_set_runtime_target_action_switches_an_empty_session(app_mod):
+    """Live report (dev, 2026-09-10): the session is auto-created with the
+    default target when opened, so picking ACXD on the start screen afterwards
+    had no effect — the radio change must re-seed the still-empty session."""
+    sid = "session-empty-acxd"
+    app_mod.session_store[sid] = {"conversation_history": [], "runtime_target": "classic", "_runtime_target_seeded": True}
+    ws = _FakeWebSocket()
+
+    await app_mod.handle_set_runtime_target_ws(ws, sid, {"runtime_target": "acxd"})
+
+    assert ws.sent[-1]["type"] == "runtime_target_updated"
+    assert ws.sent[-1]["accepted"] is True
+    assert ws.sent[-1]["runtime_target"] == "acxd"
+    assert app_mod.session_store[sid]["runtime_target"] == "acxd"
+    assert app_mod.get_runtime_target(sid) == "acxd"
+
+
+@pytest.mark.anyio
+async def test_set_runtime_target_action_is_refused_once_the_conversation_started(app_mod):
+    sid = "session-started-classic"
+    app_mod.set_runtime_target(sid, "classic")
+    app_mod.session_store[sid] = {
+        "conversation_history": [{"role": "user", "content": [{"text": "hi"}]}],
+        "runtime_target": "classic",
+        "_runtime_target_seeded": True,
+    }
+    ws = _FakeWebSocket()
+
+    await app_mod.handle_set_runtime_target_ws(ws, sid, {"runtime_target": "acxd"})
+
+    assert ws.sent[-1]["accepted"] is False
+    assert ws.sent[-1]["runtime_target"] == "classic"
+    assert app_mod.get_runtime_target(sid) == "classic"

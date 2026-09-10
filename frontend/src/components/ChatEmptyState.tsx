@@ -29,6 +29,7 @@ import {
   type SegmentType,
 } from '../stores/builderStore';
 import { RUNTIME_TARGETS, runtimeTargetForKey } from '../lib/runtimeTarget';
+import { sendRuntimeTarget } from '../hooks/useWebSocket';
 import { ModelSelector } from './ModelSelector';
 import { validateFile, MAX_FILES } from './ChatAttachmentButton';
 import { AttachmentPreview } from './AttachmentPreview';
@@ -163,7 +164,17 @@ export function ChatEmptyState({ language, onStart }: ChatEmptyStateProps) {
   // before Start because `connected`/`session_created` echoed the auto-created
   // classic session).
   const runtimeTarget = useBuilderStore((s) => s.pendingRuntimeTarget ?? s.runtimeTarget);
-  const setRuntimeTarget = useBuilderStore((s) => s.setPendingRuntimeTarget);
+  const setPendingRuntimeTarget = useBuilderStore((s) => s.setPendingRuntimeTarget);
+  // The session already exists (auto-created on open, seeded with the default)
+  // by the time the radio is touched, so the choice is pushed to the backend
+  // immediately; the pending value is the fallback the first message carries.
+  const setRuntimeTarget = useCallback(
+    (target: RuntimeTarget) => {
+      setPendingRuntimeTarget(target);
+      sendRuntimeTarget(target);
+    },
+    [setPendingRuntimeTarget],
+  );
 
   const [description, setDescription] = useState('');
   const [stagedFiles, setStagedFiles] = useState<AttachedFile[]>([]);

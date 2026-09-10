@@ -2076,6 +2076,8 @@ async def websocket_handler(
                 await handle_inject_history_ws(websocket, session_id, data)
             elif action == "createNewSession":
                 await handle_create_new_session_ws(websocket, session_id, data)
+            elif action == "setRuntimeTarget":
+                await handle_set_runtime_target_ws(websocket, session_id, data)
             elif action == "importAsset":
                 await handle_import_asset_ws(websocket, session_id, data)
             elif action == "ping":
@@ -2209,9 +2211,16 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     # earlier process before a restart) always wins over the connect-time default
     # cached in `session` — re-deriving it here is what turned a start-screen
     # ACXD choice back into Classic on the first message.
+    requested_target = message.get("runtime_target", message.get("runtimeTarget"))
+    # "Started" must also hold after the interview→generation handoff, which
+    # empties the in-memory history, so the phase is consulted as well.
+    conversation_started = (
+        bool(session.get("conversation_history"))
+        or bool(session.get("_handoff_processed"))
+        or _detect_phase(effective_session_id) != "interview"
+    )
     if not session.get("_runtime_target_seeded"):
         persisted_target = get_runtime_target_if_set(effective_session_id)
-        requested_target = message.get("runtime_target", message.get("runtimeTarget"))
         runtime_target = _normalize_runtime_target(
             persisted_target
             if persisted_target is not None
@@ -2221,6 +2230,18 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             logger.warning("[runtime_target] could not persist %s for %s", runtime_target, effective_session_id)
         session["runtime_target"] = runtime_target
         session["_runtime_target_seeded"] = True
+    elif requested_target is not None and not conversation_started:
+        # The session was created — and seeded with the default — the moment it
+        # was opened, before the user reached the start-screen radio. Until the
+        # conversation starts, the choice carried by the first message is the
+        # user's explicit decision and replaces that default.
+        runtime_target = _normalize_runtime_target(requested_target)
+        if runtime_target != session.get("runtime_target"):
+            if set_runtime_target(effective_session_id, runtime_target):
+                logger.info("[runtime_target] first message switched %s to %s", effective_session_id, runtime_target)
+                session["runtime_target"] = runtime_target
+            else:
+                logger.warning("[runtime_target] could not persist %s for %s", runtime_target, effective_session_id)
 
     set_message_index(len(session["conversation_history"]))
 
@@ -3339,6 +3360,47 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
         "scope": _ui_scope,
         "runtime_target": _normalize_runtime_target(get_runtime_target(_eff_for_state)),
         "selectedModel": _get_selected_model(_eff_for_state) or resolve_model_id(),
+    })
+
+
+async def handle_set_runtime_target_ws(websocket: WebSocket, session_id: str, data: Dict[str, Any]):
+    """Start-screen radio change on a session that already exists.
+
+    The session is created — and its target seeded with the default — when it is
+    opened, before the user reaches the radio. Until the conversation starts the
+    choice may still change; afterwards the target is fixed and the echo simply
+    carries the persisted value with ``accepted: false``.
+    """
+    _live = session_store.get(session_id)
+    _eff = _live.get("session_data", {}).get("original_session_id", session_id) \
+        if isinstance(_live, dict) else session_id
+    requested = _normalize_runtime_target(data.get("runtime_target", data.get("runtimeTarget")))
+    started = bool(
+        isinstance(_live, dict)
+        and (_live.get("conversation_history") or _live.get("_handoff_processed"))
+    ) or _detect_phase(_eff) != "interview"
+    if started:
+        await safe_send_json(websocket, {
+            "type": "runtime_target_updated",
+            "sessionId": session_id,
+            "runtime_target": _normalize_runtime_target(get_runtime_target(_eff)),
+            "accepted": False,
+            "reason": "conversation_started",
+        })
+        return
+    if not set_runtime_target(_eff, requested):
+        logger.warning("[setRuntimeTarget] could not persist %s for %s", requested, _eff)
+        await safe_send_json(websocket, {"type": "error", "content": "Could not save the runtime target."})
+        return
+    if isinstance(_live, dict):
+        _live["runtime_target"] = requested
+        _live["_runtime_target_seeded"] = True
+    logger.info("[setRuntimeTarget] runtime_target=%s for %s", requested, _eff)
+    await safe_send_json(websocket, {
+        "type": "runtime_target_updated",
+        "sessionId": session_id,
+        "runtime_target": requested,
+        "accepted": True,
     })
 
 

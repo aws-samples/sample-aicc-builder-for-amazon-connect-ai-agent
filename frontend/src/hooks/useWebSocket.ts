@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { useBuilderStore } from "../stores/builderStore";
 import { useAuthStore } from "../stores/authStore";
 import { useSessionStore } from "../stores/sessionStore";
-import type { WebSocketMessage, SubagentActivity, SubagentToolCall, AttachedFile, MessageAttachment, AttachmentData, AssetPreview, BuilderPhase } from "../types";
+import type { WebSocketMessage, SubagentActivity, SubagentToolCall, AttachedFile, MessageAttachment, AttachmentData, AssetPreview, BuilderPhase, RuntimeTarget } from "../types";
 import { PHASE_LABELS } from "../types";
 import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type ConversationMessage } from "../services/sessions";
 import { fetchNfsDiagnostics } from "../services/workspaceApi";
@@ -180,6 +180,13 @@ async function getWebSocketUrl(
   return url;
 }
 
+/** The start-screen choice wins; the active session's echoed target is only
+ * the fallback when the user never touched the radio. */
+function effectiveRuntimeTarget(): RuntimeTarget {
+  const state = useBuilderStore.getState();
+  return state.pendingRuntimeTarget ?? state.runtimeTarget;
+}
+
 /** Every createNewSession action carries the selected build contract. */
 function createConversationStartPayload() {
   const state = useBuilderStore.getState();
@@ -187,19 +194,40 @@ function createConversationStartPayload() {
     action: 'createNewSession',
     scope: state.scope ?? [],
     startMode: state.startMode,
-    // The start-screen choice wins; the active session's echoed target is only
-    // the fallback when the user never touched the radio.
-    runtime_target: state.pendingRuntimeTarget ?? state.runtimeTarget,
+    runtime_target: effectiveRuntimeTarget(),
     model: state.selectedModel,
     effort: state.selectedEffort === 'default' ? '' : state.selectedEffort,
   };
 }
 
-/** Accept snake_case from the backend while tolerating the legacy camel alias. */
+/**
+ * The session is created (and its target seeded with the default) the moment
+ * it is opened, before the user reaches the radio. A radio change on the still
+ * empty session is therefore pushed to the backend right away so the persisted
+ * target — and the right panel, via the echo — follow the choice instead of
+ * waiting for a session rotation. Returns false when nothing could be sent; the
+ * pending choice still rides on the first message in that case.
+ */
+export function sendRuntimeTarget(target: RuntimeTarget): boolean {
+  if (globalWs?.readyState !== WebSocket.OPEN) return false;
+  try {
+    globalWs.send(JSON.stringify({ action: 'setRuntimeTarget', runtime_target: target }));
+    return true;
+  } catch (err) {
+    console.warn('[useWebSocket] setRuntimeTarget send failed:', err);
+    return false;
+  }
+}
+
+/** Accept snake_case from the backend while tolerating the legacy camel alias.
+ * An echo is the session's persisted truth, so it also consumes the pending
+ * start-screen choice — otherwise a stale pick would leak into the next session. */
 function restoreRuntimeTarget(message: Pick<WebSocketMessage, 'runtime_target' | 'runtimeTarget'>): void {
   const target = message.runtime_target ?? message.runtimeTarget;
   if (target === 'classic' || target === 'acxd') {
-    useBuilderStore.getState().setRuntimeTarget(target);
+    const store = useBuilderStore.getState();
+    store.setRuntimeTarget(target);
+    if (store.pendingRuntimeTarget !== null) store.setPendingRuntimeTarget(null);
   }
 }
 
@@ -1685,6 +1713,16 @@ export function useWebSocket() {
           }
           break;
 
+        case "runtime_target_updated":
+          // Echo of a setRuntimeTarget action (start-screen radio on an empty
+          // session). `accepted: false` means the conversation had already
+          // started and the persisted target stands — the echo carries it.
+          restoreRuntimeTarget(data);
+          if (data.accepted === false) {
+            console.warn("[useWebSocket] runtime target is fixed once the conversation has started");
+          }
+          break;
+
         case "session_created":
           // Acknowledgment from backend that a fresh session was created
           restoreRuntimeTarget(data);
@@ -2423,6 +2461,7 @@ export function useWebSocket() {
           language: useBuilderStore.getState().language,
           model: useBuilderStore.getState().selectedModel,
           effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
+          runtime_target: effectiveRuntimeTarget(),
         })
       );
 
@@ -2582,6 +2621,7 @@ export function useWebSocket() {
               language: useBuilderStore.getState().language,
               model: useBuilderStore.getState().selectedModel,
           effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
+              runtime_target: effectiveRuntimeTarget(),
             })
           );
 
@@ -2627,6 +2667,7 @@ export function useWebSocket() {
               language: useBuilderStore.getState().language,
               model: useBuilderStore.getState().selectedModel,
           effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
+              runtime_target: effectiveRuntimeTarget(),
             })
           );
 

@@ -219,7 +219,7 @@ interface BuilderState {
   setSelectedEffort: (effortId: string) => void;
   setStartMode: (mode: StartMode) => void;
   setRuntimeTarget: (target: RuntimeTarget) => void;
-  setPendingRuntimeTarget: (target: RuntimeTarget) => void;
+  setPendingRuntimeTarget: (target: RuntimeTarget | null) => void;
   setSegment: (segment: SegmentType | null) => void;
   setScope: (scope: string[] | null) => void;
   setImportedAsset: (info: ImportedAssetInfo | null) => void;
