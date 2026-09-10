@@ -29,67 +29,46 @@ https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
 
 ---
 
-## What's New in v3.0
+## What's New in v3.0 — Amazon Connect Agentic CX Designer (ACXD) is now supported
 
-**Agentic CX Designer (ACXD) as a second runtime target.** The start screen now
-asks *where the agent will run*: **Classic** (Lex bot + Connect AI agent +
-AgentCore Gateway MCP tools) or **ACXD** (an Agentic CX Designer application
-that Amazon Connect hands the caller to through the **Agentic CX block**). ACXD
-is not a separate mode — it is the same pipeline with a different last mile.
+AICC Builder can now build your PoC for **Agentic CX Designer** as well as for
+the Classic stack. On the start screen, choose where your agent will run:
 
-- **One pipeline, two targets.** The same OperationSpec interview, the same hard
-  rules (one phase per turn, mandatory review, patch-only modification, never
-  auto-fix), the same UI and progress panel. For the ACXD target the *AI Prompt*
-  asset is replaced by an **ACXD application**: conversation flows, slot types,
-  data requests, guardrails, knowledge bases, context variables and secret
-  declarations, produced under `assets/acxd/` next to the Classic Lambda,
-  OpenAPI, CloudFormation, FAQ and Contact Flow assets.
-- **Deterministic where it can be, generative where it must be.** Slot types,
-  data requests (webhooks onto the generated Lambda/API), the knowledge base
-  wiring, the application manifest and the Contact Flow binding are built by
-  code straight from the OperationSpec, so they cannot drift from the backend.
-  Only the conversation flows are authored by a sub-agent (the new *ACXD Flow
-  Generator*), and every flow is validated against the service's JSON schemas
-  and repaired deterministically (UUID v4 ids, letters-only slot-type ids,
-  knowledge-base node contract, redirect/escalate shapes) before it is saved.
-- **Flow planning inside the interview.** Each operation gets an ACXD flow plan
-  the user confirms step by step — every step carries a *deterministic* or
-  *generative* label with a rationale, escalation conditions are explicit, and
-  system roles (welcome, fallback, escalation) exist exactly once.
-- **New validation gates (D9 series).** ACXD data requests are cross-checked
-  against the OpenAPI spec and Lambdas: request paths (with `servers.url`
-  prefixes and snake/kebab variants), field names, regex constraints
-  (`\d` ≡ `[0-9]`), slot types and webhook URLs — so the application the
-  runner deploys calls the API that was actually generated.
-- **The real Agentic CX block, not a placeholder.** The Contact Flow ships
-  `ConnectParticipantWithAgenticCX` (Flow Language verified from a Connect
-  console export and re-imported through `CreateContactFlow`) with **Default →
-  disconnect, Escalation → queue transfer, Error → fallback message, Idle chat
-  timeout → disconnect** already wired, `AMAZON_AGENTIC_VOICE` speech
-  recognition and audio filler configured. The Contact Flow linter, generator
-  prompt and RAG knowledge base learned the block too.
-- **One-shot deploy.** The bundled `./deploy.sh` detects the runtime target from
-  the bundle (`--target` overrides). For ACXD it runs the shared CloudFormation,
-  Lambda, OpenAPI and Connect-instance phases, then a Node runner
-  (`runner.js`, ACXD SDK) upserts secrets → slot types → context variables →
-  data requests → flows → knowledge bases → guardrails, composes, builds and
-  deploys the application to the *development* environment, and imports the
-  Contact Flow **published**, with the deployed `WorkspaceId`/`ApplicationId`
-  filled into the Agentic CX block. Idempotent re-runs, `status`, `cleanup`
-  and `--dry-run` included. The only manual step left is picking the
-  application **alias** in the block (or exporting `ACXD_ALIAS_ID`), because the
-  ACXD SDK does not expose aliases. Verified end to end in a real Connect
-  Customer account (see `docs/acxd-live-validation.md`).
-- **Builder hardening from the live runs.** The runtime-target choice applies to
-  the session that is already open (the right panel follows immediately); a
-  turn in flight holds ECS task scale-in protection so autoscaling and
-  deployments no longer cut interviews short; the ALB only routes to a task
-  whose storage root is ready; Bedrock message sanitizing survives dangling
-  tool calls and lone surrogates.
+- **Classic** — Lex bot + Amazon Connect AI agent + AgentCore Gateway MCP tools
+  (everything you had before).
+- **ACXD** — an Agentic CX Designer application that Amazon Connect hands the
+  caller to through the Agentic CX block (requires a Connect Customer instance).
 
-> 📖 Packaging contract and deploy phases: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
-> live validation record: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md) ·
-> design (Korean): [docs/acxd-redesign.md](./docs/acxd-redesign.md)
+Nothing else changes: the same ~1-hour interview, the same review, the same
+six-asset bundle. Only the last mile is different.
+
+With the ACXD target you get:
+
+- **A complete ACXD application from your interview.** Conversation flows, slot
+  types, data requests already pointed at your generated Lambda/API, guardrails,
+  knowledge bases and context variables — delivered under `assets/acxd/` next to
+  the Lambda, OpenAPI, CloudFormation, FAQ and Contact Flow assets. The AI Prompt
+  asset is replaced by the application.
+- **Conversation flows you approve as you go.** During the interview, every
+  operation gets a flow plan you confirm step by step, with escalation rules
+  spelled out before anything is generated.
+- **A Contact Flow that is ready to take calls.** The generated flow already
+  contains the Agentic CX block with its Default, Escalation, Error and Idle
+  chat timeout branches wired, so the caller reaches your application on the
+  first import.
+- **One-shot deploy.** Run the bundled `./deploy.sh`: it recognises the ACXD
+  bundle, deploys the backend (CloudFormation, Lambda, API), creates the
+  application and all of its resources in your ACXD workspace, builds and
+  deploys it, and imports the published Contact Flow with the deployed
+  workspace and application ids filled in. Re-runs are safe, and `status`,
+  `cleanup` and `--dry-run` are included. The one click left is choosing the
+  application alias in the block — or set `ACXD_ALIAS_ID` before you deploy.
+- **Consistency checks before you download.** The application's data requests
+  are verified against the generated OpenAPI spec and Lambdas (paths, fields,
+  formats, webhook URLs), so what you deploy matches the backend you received.
+
+> 📖 Bundle contents and deploy phases: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
+> what we validated in a real Connect Customer account: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
 
 ---
 
@@ -712,53 +691,42 @@ Contact Flow, CDK 인프라, FAQ)을 자동 생성합니다. 단일 오케스트
 
 ---
 
-## v3.0의 새 기능 — Agentic CX Designer(ACXD) 런타임 타깃
+## v3.0의 새 기능 — Amazon Connect Agentic CX Designer(ACXD)를 지원합니다
 
-시작 화면에서 **에이전트가 어디서 실행될지**를 고릅니다. **Classic**(Lex 봇 +
-Connect AI 에이전트 + AgentCore Gateway MCP 도구) 또는 **ACXD**(Amazon Connect가
-**Agentic CX 블록**으로 통화를 넘기는 Agentic CX Designer 애플리케이션). ACXD는
-별도 모드가 아니라 **같은 파이프라인의 마지막 구간만 다른 런타임 타깃**입니다.
+이제 AICC Builder로 Classic 스택뿐 아니라 **Agentic CX Designer**용 PoC도 만들 수
+있습니다. 시작 화면에서 에이전트가 실행될 곳을 고르세요.
 
-- **인터뷰·규칙·UI는 동일.** 같은 OperationSpec 인터뷰, 같은 하드 룰(턴당 한
-  단계, 필수 리뷰, 패치 전용 수정, 자동 수정 금지), 같은 진행 패널. ACXD 타깃에서는
-  *AI 프롬프트* 에셋 대신 **ACXD 애플리케이션**(대화 플로우, 슬롯 타입, 데이터
-  요청, 가드레일, 지식 베이스, 컨텍스트 변수, 시크릿 선언)이 `assets/acxd/` 아래에
-  생성되고, Lambda·OpenAPI·CloudFormation·FAQ·Contact Flow는 그대로 함께 나옵니다.
-- **결정론이 가능한 곳은 코드가, 생성이 필요한 곳만 LLM이.** 슬롯 타입, 데이터
-  요청(생성된 Lambda/API로 향하는 웹훅), 지식 베이스 연결, 애플리케이션 매니페스트,
-  Contact Flow 바인딩은 OperationSpec에서 코드로 만들어 백엔드와 어긋날 수 없습니다.
-  대화 플로우만 새 서브 에이전트(*ACXD Flow Generator*)가 작성하고, 모든 플로우는
-  서비스 JSON 스키마로 검증한 뒤 결정론적으로 보정(UUID v4 id, 문자만 허용되는
-  슬롯 타입 id, 지식 베이스 노드 계약, redirect/escalate 형태)합니다.
-- **인터뷰 안에서 플로우 설계.** 업무마다 ACXD 플로우 계획을 단계별로 확인받습니다
-  — 각 단계에 *결정론/생성형* 라벨과 근거가 붙고, 에스컬레이션 조건이 명시되며,
-  시스템 롤(환영·폴백·에스컬레이션) 플로우는 정확히 하나씩만 존재합니다.
-- **새 검증 게이트(D9 계열).** ACXD 데이터 요청을 OpenAPI 스펙·Lambda와 교차
-  검증합니다: 요청 경로(`servers.url` 접두사, snake/kebab 변형), 필드명, 정규식
-  제약(`\d` ≡ `[0-9]`), 슬롯 타입, 웹훅 URL.
-- **플레이스홀더가 아닌 실제 Agentic CX 블록.** Contact Flow에
-  `ConnectParticipantWithAgenticCX` 블록(콘솔 export로 확인하고 `CreateContactFlow`로
-  재검증한 Flow Language)이 **Default → 종료, Escalation → 큐 이관, Error → 안내
-  메시지, Idle chat timeout → 종료** 분기까지 배선된 채로 들어 있고,
-  `AMAZON_AGENTIC_VOICE` 음성 인식과 오디오 필러가 설정됩니다. 린터·생성기
-  프롬프트·RAG 지식 문서도 이 블록을 학습했습니다.
-- **원샷 배포.** 번들의 `./deploy.sh`가 런타임 타깃을 자동 감지합니다(`--target`으로
-  강제 가능). ACXD면 공용 CloudFormation·Lambda·OpenAPI·Connect 인스턴스 단계 뒤에
-  Node 러너(`runner.js`, ACXD SDK)가 시크릿 → 슬롯 타입 → 컨텍스트 변수 → 데이터
-  요청 → 플로우 → 지식 베이스 → 가드레일을 upsert하고, 애플리케이션을 compose·
-  build·*development* 환경에 deploy한 뒤 Contact Flow를 **PUBLISHED**로 import하며
-  배포된 `WorkspaceId`/`ApplicationId`를 블록에 채워 넣습니다. 멱등 재실행,
-  `status`, `cleanup`, `--dry-run` 지원. 남은 수동 단계는 블록의 애플리케이션
-  **alias** 선택 하나입니다(`ACXD_ALIAS_ID`로 미리 줄 수도 있음 — ACXD SDK가 alias를
-  노출하지 않기 때문). 실제 Connect Customer 계정에서 끝까지 검증했습니다
-  (`docs/acxd-live-validation.md`).
-- **라이브 검증에서 나온 빌더 보강.** 런타임 타깃 선택이 이미 열린 세션에 즉시
-  적용되고 오른쪽 패널이 바로 따라오며, 진행 중인 턴은 ECS 태스크 스케일인 보호를
-  잡아 오토스케일링·배포가 인터뷰를 끊지 못합니다.
+- **Classic** — Lex 봇 + Amazon Connect AI 에이전트 + AgentCore Gateway MCP 도구
+  (기존 그대로).
+- **ACXD** — Amazon Connect가 Agentic CX 블록으로 통화를 넘기는 Agentic CX Designer
+  애플리케이션(Connect Customer 인스턴스 필요).
 
-> 📖 패키징 계약과 배포 단계: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
-> 라이브 검증 기록: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md) ·
-> 설계 노트: [docs/acxd-redesign.md](./docs/acxd-redesign.md)
+나머지는 똑같습니다. 같은 약 1시간 인터뷰, 같은 리뷰, 같은 6종 에셋 번들. 마지막
+구간만 다릅니다.
+
+ACXD를 선택하면 다음을 받습니다.
+
+- **인터뷰에서 바로 나오는 완성된 ACXD 애플리케이션.** 대화 플로우, 슬롯 타입,
+  생성된 Lambda/API를 이미 가리키는 데이터 요청, 가드레일, 지식 베이스, 컨텍스트
+  변수가 `assets/acxd/` 아래에 Lambda·OpenAPI·CloudFormation·FAQ·Contact Flow와
+  함께 담깁니다. AI 프롬프트 에셋 자리를 애플리케이션이 대신합니다.
+- **진행하면서 승인하는 대화 플로우.** 인터뷰 중 업무마다 플로우 계획을 단계별로
+  확인하고, 상담원 연결 조건을 생성 전에 명확히 정합니다.
+- **바로 전화를 받을 수 있는 Contact Flow.** 생성된 플로우에 Agentic CX 블록과
+  Default·Escalation·Error·Idle chat timeout 분기가 이미 배선되어 있어, 첫 import
+  부터 통화가 애플리케이션에 도달합니다.
+- **원샷 배포.** 번들의 `./deploy.sh`를 실행하면 ACXD 번들을 알아보고 백엔드
+  (CloudFormation, Lambda, API)를 배포하고, ACXD 워크스페이스에 애플리케이션과 모든
+  리소스를 만들어 빌드·배포한 뒤, 배포된 워크스페이스/애플리케이션 id를 채운 Contact
+  Flow를 PUBLISHED로 import합니다. 재실행해도 안전하며 `status`, `cleanup`,
+  `--dry-run`을 지원합니다. 남는 클릭은 블록에서 애플리케이션 alias를 고르는 것
+  하나입니다(배포 전에 `ACXD_ALIAS_ID`를 지정해도 됩니다).
+- **다운로드 전 정합성 검사.** 애플리케이션의 데이터 요청을 생성된 OpenAPI 스펙·
+  Lambda와 대조(경로, 필드, 형식, 웹훅 URL)하므로, 배포하는 것이 받은 백엔드와
+  일치합니다.
+
+> 📖 번들 구성과 배포 단계: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
+> 실제 Connect Customer 계정 검증 기록: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
 
 ---
 
@@ -999,53 +967,44 @@ AICC Builder は、約 1 時間の対話で、Amazon Connect 用のカスタム�
 
 ---
 
-## v3.0 の新機能 — Agentic CX Designer（ACXD）ランタイムターゲット
+## v3.0 の新機能 — Amazon Connect Agentic CX Designer（ACXD）に対応しました
 
-開始画面で **エージェントをどこで動かすか** を選びます。**Classic**（Lex ボット +
-Connect AI エージェント + AgentCore Gateway の MCP ツール）か、**ACXD**（Amazon
-Connect が **Agentic CX ブロック** で通話を引き渡す Agentic CX Designer
-アプリケーション）です。ACXD は別モードではなく、**同じパイプラインの最終区間だけが
-異なるランタイムターゲット** です。
+AICC Builder で、Classic スタックに加えて **Agentic CX Designer** 向けの PoC も
+作れるようになりました。開始画面でエージェントを動かす場所を選びます。
 
-- **インタビュー・ルール・UI は共通。** 同じ OperationSpec インタビュー、同じ
-  ハードルール（1 ターン 1 フェーズ、必須レビュー、パッチのみの修正、自動修正禁止）、
-  同じ進行パネル。ACXD ターゲットでは *AI プロンプト* の代わりに **ACXD
-  アプリケーション**（会話フロー、スロットタイプ、データリクエスト、ガードレール、
-  ナレッジベース、コンテキスト変数、シークレット宣言）が `assets/acxd/` 配下に
-  生成され、Lambda・OpenAPI・CloudFormation・FAQ・Contact Flow はそのまま揃います。
-- **決定論的に作れるものはコードで、生成が必要なものだけ LLM で。** スロットタイプ、
-  データリクエスト（生成した Lambda/API へのウェブフック）、ナレッジベースの結線、
-  アプリケーションマニフェスト、Contact Flow のバインディングは OperationSpec から
-  コードで構築するため、バックエンドとずれません。会話フローだけを新しいサブ
-  エージェント（*ACXD Flow Generator*）が書き、すべてのフローをサービスの JSON
-  スキーマで検証し、決定論的に補正（UUID v4 の id、英字のみのスロットタイプ id、
-  ナレッジベースノードの契約、redirect/escalate の形）してから保存します。
-- **インタビューの中でフローを設計。** 業務ごとに ACXD フロー計画をステップ単位で
-  確認します — 各ステップに *決定論的 / 生成的* のラベルと根拠が付き、
-  エスカレーション条件が明示され、システムロール（ウェルカム・フォールバック・
-  エスカレーション）のフローはちょうど 1 つずつ存在します。
-- **新しい検証ゲート（D9 系）。** ACXD のデータリクエストを OpenAPI 仕様と Lambda と
-  照合します: リクエストパス（`servers.url` 接頭辞、snake/kebab の揺れ）、フィールド名、
-  正規表現制約（`\d` ≡ `[0-9]`）、スロットタイプ、ウェブフック URL。
-- **プレースホルダーではない本物の Agentic CX ブロック。** Contact Flow には
-  `ConnectParticipantWithAgenticCX` ブロック（コンソールのエクスポートで確認し
-  `CreateContactFlow` で再検証した Flow Language）が **Default → 切断、Escalation →
-  キュー転送、Error → 案内メッセージ、Idle chat timeout → 切断** の分岐まで結線済みで
-  含まれ、`AMAZON_AGENTIC_VOICE` 音声認識とオーディオフィラーが設定されます。
-- **ワンショットデプロイ。** バンドルの `./deploy.sh` がランタイムターゲットを自動
-  判定します（`--target` で上書き可）。ACXD では共通の CloudFormation・Lambda・
-  OpenAPI・Connect インスタンスの各フェーズの後、Node ランナー（`runner.js`、ACXD
-  SDK）がシークレット → スロットタイプ → コンテキスト変数 → データリクエスト →
-  フロー → ナレッジベース → ガードレールを upsert し、アプリケーションを compose・
-  build・*development* 環境へ deploy してから Contact Flow を **PUBLISHED** で
-  インポートし、デプロイ済みの `WorkspaceId`/`ApplicationId` をブロックに埋め込みます。
-  冪等な再実行、`status`、`cleanup`、`--dry-run` に対応。残る手作業はブロックの
-  アプリケーション **alias** の選択だけです（`ACXD_ALIAS_ID` で事前指定も可 — ACXD
-  SDK が alias を公開していないため）。実際の Connect Customer アカウントでエンド
-  ツーエンドに検証済みです（`docs/acxd-live-validation.md`）。
+- **Classic** — Lex ボット + Amazon Connect AI エージェント + AgentCore Gateway の
+  MCP ツール（従来どおり）。
+- **ACXD** — Amazon Connect が Agentic CX ブロックで通話を引き渡す Agentic CX
+  Designer アプリケーション（Connect Customer インスタンスが必要）。
 
-> 📖 パッケージ契約とデプロイフェーズ: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
-> ライブ検証記録: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
+それ以外は同じです。約 1 時間のインタビュー、レビュー、6 種のアセットバンドル。
+違うのは最後の区間だけです。
+
+ACXD を選ぶと次が得られます。
+
+- **インタビューからそのまま出来上がる ACXD アプリケーション。** 会話フロー、
+  スロットタイプ、生成した Lambda/API をすでに指しているデータリクエスト、
+  ガードレール、ナレッジベース、コンテキスト変数が `assets/acxd/` 配下に、
+  Lambda・OpenAPI・CloudFormation・FAQ・Contact Flow と一緒に揃います。AI
+  プロンプトの代わりにアプリケーションが入ります。
+- **進めながら承認する会話フロー。** インタビュー中に業務ごとのフロー計画を
+  ステップ単位で確認し、エスカレーション条件を生成前に確定します。
+- **すぐに着信を受けられる Contact Flow。** 生成されたフローには Agentic CX
+  ブロックと Default・Escalation・Error・Idle chat timeout の分岐が結線済みで、
+  最初のインポートから通話がアプリケーションに届きます。
+- **ワンショットデプロイ。** バンドルの `./deploy.sh` を実行すると、ACXD バンドルを
+  判別してバックエンド（CloudFormation、Lambda、API）をデプロイし、ACXD
+  ワークスペースにアプリケーションと全リソースを作成してビルド・デプロイし、
+  デプロイ済みのワークスペース / アプリケーション id を埋めた Contact Flow を
+  PUBLISHED でインポートします。再実行しても安全で、`status`、`cleanup`、
+  `--dry-run` に対応。残る操作はブロックでアプリケーションの alias を選ぶことだけです
+  （事前に `ACXD_ALIAS_ID` を指定することもできます）。
+- **ダウンロード前の整合性チェック。** アプリケーションのデータリクエストを生成した
+  OpenAPI 仕様・Lambda と照合（パス、フィールド、形式、ウェブフック URL）するため、
+  デプロイするものが受け取ったバックエンドと一致します。
+
+> 📖 バンドルの内容とデプロイフェーズ: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
+> 実際の Connect Customer アカウントでの検証記録: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
 
 ---
 
