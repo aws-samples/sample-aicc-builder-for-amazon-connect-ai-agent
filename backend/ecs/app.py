@@ -23,6 +23,7 @@ import re
 import sys
 import json
 import signal
+import threading
 import asyncio
 import logging
 import time
@@ -142,6 +143,7 @@ from context.s3files_store import S3FilesContextStore
 from context.bedrock_messages import fix_messages_for_bedrock
 from context.message_log import get_message_log
 from context.generation_progress import update_from_new_messages as _update_generation_progress
+from context import task_protection as _task_protection
 from context.generation_progress import read_progress as _read_generation_progress
 from context.generation_progress import record_tool_completion as _record_tool_completion
 from context.generation_progress import detect_phase as _detect_phase
@@ -510,8 +512,14 @@ async def _graceful_shutdown():
         except Exception as e:
             logger.error(f"Failed to flush session {session_id}: {e}")
 
+# Set on SIGTERM so a turn cancelled by the stop is reported as a server
+# restart rather than as the user's own cancel.
+_shutting_down = threading.Event()
+
+
 def _sigterm_handler(signum, frame):
     logger.info("SIGTERM received, initiating graceful shutdown")
+    _shutting_down.set()
     loop = asyncio.get_event_loop()
     loop.create_task(_graceful_shutdown())
 
@@ -1322,11 +1330,22 @@ def _read_interview_state(session_id: str) -> Optional[str]:
 # ========================================
 # Health Check
 # ========================================
+@app.get("/live")
+async def live():
+    """Process liveness for the container health check — independent of the mount."""
+    return {"status": "alive"}
+
+
 @app.get("/ping")
 async def ping():
-    # NFS mount diagnostics
+    # NFS mount diagnostics. With the s3files backend the ALB must not route
+    # traffic here until the volume is visible: a task that served requests
+    # before its mount appeared (observed ~2.5 min after start) answered with an
+    # empty workspace and saved a turn's specs where no other task could see them.
     s3files_mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
     mount_exists = os.path.isdir(s3files_mount)
+    mount_required = os.environ.get("SESSION_STORE_BACKEND", "").lower() == "s3files"
+    ready = mount_exists or not mount_required
     sessions_dir = os.path.join(s3files_mount, "sessions")
     sessions_exists = os.path.isdir(sessions_dir)
     session_count = 0
@@ -1338,7 +1357,7 @@ async def ping():
 
     return JSONResponse(
         content={
-            "status": "healthy",
+            "status": "healthy" if ready else "waiting_for_mount",
             "mode": "ecs",
             "active_sessions": len(session_store),
             "active_ws": len(_active_ws_connections),
@@ -1350,7 +1369,7 @@ async def ping():
                 "session_dirs_count": session_count,
             },
         },
-        status_code=200,
+        status_code=200 if ready else 503,
     )
 
 # ========================================
@@ -2521,6 +2540,8 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                         await safe_send_or_log({"type": "heartbeat", "seq": seq})
 
         heartbeat_task = asyncio.create_task(heartbeat_loop())
+        # Keep scale-in / rolling deploys from stopping this task mid-turn.
+        await asyncio.to_thread(_task_protection.turn_started)
 
         try:
             async for event in streaming_agent.stream_async(message_for_agent):
@@ -2726,12 +2747,31 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                     pass  # non-critical
 
         except asyncio.CancelledError:
-            # User cancelled generation (cancelGeneration action). Preserve any
-            # partial work, notify the client, then re-raise so the task is
-            # correctly marked cancelled. The finally block persists history.
-            logger.info(f"[BG] Generation cancelled by user for {session_id}")
+            # Either the user cancelled generation (cancelGeneration action) or
+            # the task is being stopped (SIGTERM from a scale-in / deployment).
+            # Preserve any partial work, notify the client, then re-raise so the
+            # task is correctly marked cancelled. The finally block persists history.
+            interrupted_by_shutdown = _shutting_down.is_set()
+            if interrupted_by_shutdown:
+                logger.warning(f"[BG] Turn interrupted by task shutdown for {session_id}")
+            else:
+                logger.info(f"[BG] Generation cancelled by user for {session_id}")
             try:
                 partial = _extract_new_messages(streaming_agent.messages, pre_stream_message_count)
+                if interrupted_by_shutdown:
+                    # Leave the same kind of breadcrumb the max_tokens path does,
+                    # so the next turn (on another task) knows the work after the
+                    # cut never ran instead of assuming it did.
+                    partial = list(partial or []) + [{
+                        "role": "user",
+                        "content": [{"text": (
+                            "[System] The previous assistant turn was interrupted by a server "
+                            "restart (deployment or scale-in). Tool calls that had not returned "
+                            "a result did NOT execute. Verify the current state with the "
+                            "workspace tools before continuing, and do NOT ask the user to "
+                            "re-confirm work that earlier turns already saved."
+                        )}],
+                    }]
                 if partial:
                     try:
                         _update_generation_progress(effective_session_id, partial)
@@ -2755,7 +2795,10 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             await safe_send_or_log({
                 "type": "generation_cancelled",
                 "sessionId": session_id,
-                "message": "생성이 취소됐어요.",
+                "message": (
+                    "서버가 교체되어 응답이 중단됐어요. 잠시 후 다시 연결되면 '계속'이라고 입력해 주세요."
+                    if interrupted_by_shutdown else "생성이 취소됐어요."
+                ),
             })
             raise
         except MaxTokensReachedException as e:
@@ -2859,6 +2902,10 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             # Remove from background tasks registry
             async with _background_tasks_lock:
                 _background_tasks.pop(session_id, None)
+            try:
+                await asyncio.to_thread(_task_protection.turn_finished)
+            except Exception as protect_err:  # never let this mask the turn's outcome
+                logger.warning(f"[BG] task protection release failed: {protect_err}")
             logger.info(f"[BG] Agent task finished for {session_id}")
 
     # Register and launch background task (fire-and-forget).
