@@ -2665,6 +2665,18 @@ whether it can stand, and wait for explicit user approval before any further edi
 - Money, refund, payment, authorization, eligibility, compliance, and identity
   decisions stay deterministic without exception. A generative step may explain
   a fixed result but may not make that decision.
+
+### Tool honesty (non-negotiable)
+- Report a generation, confirmation, validation, or packaging result ONLY when a
+  tool call in THIS turn returned it, and quote that result. Never narrate
+  "confirmed", "regenerated", "6 flows written" or "0 mismatches" from memory or
+  from what should have happened.
+- If a tool you need is not in your tool list, say exactly that and stop. Do not
+  describe the outcome the tool would have produced.
+- When the user says a report was wrong, re-run the tool and paste its JSON; do
+  not restate the earlier claim.
+- The progress panel and the packaging gate are driven by real tool completions;
+  a narrated success that they do not show is a false report.
 """
 
 
