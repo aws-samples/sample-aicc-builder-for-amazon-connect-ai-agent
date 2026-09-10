@@ -2588,9 +2588,16 @@ verify_acxd_connect_customer() {
     case "$normalized" in
         connect_customer|customer|customer_instance)
             ok "Verified Connect Customer instance: $CONNECT_INSTANCE_ID ($instance_type)" ;;
+        ""|none|null)
+            # Live (2026-09-10, us-east-1): describe-instance on a working Connect
+            # Customer instance returned no InstanceType at all, and the whole
+            # deploy stopped here after CloudFormation had already succeeded.
+            # The field is not a reliable signal — the Agentic CX block wiring
+            # step (WIRING-GUIDE.md) is where a non-customer instance shows up.
+            warn "describe-instance exposes no InstanceType for $CONNECT_INSTANCE_ID — cannot confirm it is a Connect Customer instance; continuing (the Agentic CX block needs one)." ;;
         *)
             echo "❌ ACXD requires a Connect Customer instance for the Agentic CX block." >&2
-            echo "   describe-instance reported InstanceType='${instance_type:-unknown}'." >&2
+            echo "   describe-instance reported InstanceType='${instance_type}'." >&2
             exit 1 ;;
     esac
 }

@@ -111,3 +111,38 @@ def test_normalizer_rewrites_known_attribute_after_connect_lint_pass():
 
     normalized = normalize_acxd_contact_flow(flow, spec, rewrite_attribute_context=True)
     assert normalized["Actions"][0]["Parameters"]["Text"] == "$.AgenticCX.ContextVariables.customerId"
+
+
+def test_placeholder_carries_no_conditions_and_wisdom_session_is_spliced_out():
+    """Live CreateContactFlow (2026-09-10): 'Action does not support conditions'
+    on the placeholder and 'Invalid Action property value ... WisdomAssistantArn'
+    on the Classic Q in Connect block that ACXD never provisions."""
+    flow = {
+        "Version": "2019-10-30",
+        "StartAction": "Logging",
+        "Metadata": {"ActionMetadata": {"Wisdom": {"position": {"x": 1, "y": 1}}}},
+        "Actions": [
+            {"Identifier": "Logging", "Type": "UpdateFlowLoggingBehavior",
+             "Parameters": {"FlowLoggingBehavior": "Enabled"}, "Transitions": {"NextAction": "Wisdom"}},
+            {"Identifier": "Wisdom", "Type": "CreateWisdomSession",
+             "Parameters": {"WisdomAssistantArn": "{{WISDOM_ASSISTANT_ARN}}"},
+             "Transitions": {"NextAction": "Lex", "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "Lex"}]}},
+            {"Identifier": "Lex", "Type": "ConnectParticipantWithLexBot",
+             "Parameters": {"Text": "Hi", "LexV2Bot": {"AliasArn": "{LEX_BOT_ALIAS_ARN}"}},
+             "Transitions": {"NextAction": "Disconnect"}},
+            {"Identifier": "Disconnect", "Type": "DisconnectParticipant", "Parameters": {}, "Transitions": {}},
+        ],
+    }
+    normalized = normalize_acxd_contact_flow(flow, _Model({"application": {}}))
+    actions = {action["Identifier"]: action for action in normalized["Actions"]}
+    assert "Wisdom" not in actions
+    assert "Wisdom" not in normalized["Metadata"].get("ActionMetadata", {})
+    assert actions["Logging"]["Transitions"]["NextAction"] == AGENTIC_CX_PLACEHOLDER_ID
+    placeholder = actions[AGENTIC_CX_PLACEHOLDER_ID]
+    assert "Conditions" not in placeholder["Transitions"]
+    branch = actions[placeholder["Transitions"]["NextAction"]]
+    assert branch["Type"] == "Compare"
+    assert branch["Parameters"] == {"ComparisonValue": "$.Attributes.AgenticCXBranch"}
+    assert [c["Condition"]["Operands"] for c in branch["Transitions"]["Conditions"]] == [["Escalation"], ["IdleChatTimeout"]]
+    assert branch["Transitions"]["Errors"][0]["ErrorType"] == "NoMatchingCondition"
+    assert not any("WisdomAssistantArn" in json.dumps(a) for a in normalized["Actions"])

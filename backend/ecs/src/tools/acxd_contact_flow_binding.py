@@ -93,6 +93,35 @@ def _rewrite_context_references(value: Any, context_names: set[str], *, rewrite_
     return result
 
 
+def _remove_actions(document: dict, action_types: set[str]) -> None:
+    """Splice every action of the given types out of the flow, re-pointing all
+    transitions (StartAction, NextAction, Errors, Conditions) at the removed
+    action's own successor, so the graph stays connected."""
+    actions = [item for item in document.get("Actions") or [] if isinstance(item, dict)]
+    doomed = [a for a in actions if _action_type(a) in action_types and _action_id(a)]
+    for action in doomed:
+        old = _action_id(action)
+        transitions = _transitions(action)
+        successor = transitions.get("NextAction") or next(
+            (item.get("NextAction") for item in transitions.get("Errors") or []
+             if isinstance(item, dict) and item.get("NextAction")), None)
+        actions = [a for a in actions if _action_id(a) != old]
+        if successor and successor != old:
+            if document.get("StartAction") == old:
+                document["StartAction"] = successor
+            for other in actions:
+                trans = _transitions(other)
+                if trans.get("NextAction") == old:
+                    trans["NextAction"] = successor
+                for item in list(trans.get("Errors") or []) + list(trans.get("Conditions") or []):
+                    if isinstance(item, dict) and item.get("NextAction") == old:
+                        item["NextAction"] = successor
+        action_metadata = (document.get("Metadata") or {}).get("ActionMetadata")
+        if isinstance(action_metadata, dict):
+            action_metadata.pop(old, None)
+    document["Actions"] = actions
+
+
 def _reachable_action_ids(document: dict) -> set[str]:
     by_id = {_action_id(action): action for action in document.get("Actions") or [] if _action_id(action)}
     reachable: set[str] = set()
@@ -167,6 +196,14 @@ def normalize_acxd_contact_flow(
     actions = [item for item in document.get("Actions") or [] if isinstance(item, dict)]
     document["Actions"] = actions
 
+    # ACXD answers FAQ from its own knowledge base, so the Classic Q in Connect
+    # session block has nothing to bind to — deploy.sh skips the assistant for
+    # this target and the unresolved {{WISDOM_ASSISTANT_ARN}} fails the import
+    # ("Invalid Action property value ... WisdomAssistantArn", live 2026-09-10).
+    # Splice such actions out, re-pointing every transition at their successor.
+    _remove_actions(document, {"CreateWisdomSession", "UpdateWisdomSession"})
+    actions = document["Actions"]
+
     disconnect_id = _find_or_add_action(
         actions,
         "DisconnectParticipant",
@@ -207,31 +244,43 @@ def normalize_acxd_contact_flow(
             None,
         )
 
+    # Live CreateContactFlow (2026-09-10): "Action does not support conditions"
+    # — MessageParticipant cannot carry Transitions.Conditions. The placeholder
+    # therefore hands off to a Compare block that owns the Escalation / idle
+    # timeout branches on a contact attribute; WIRING-GUIDE.md tells the
+    # operator to replace the placeholder + Compare pair with the Agentic CX
+    # block's own branch outputs.
+    branch_id = "AgenticCXBranch"
     agentic_action = {
         "Identifier": AGENTIC_CX_PLACEHOLDER_ID,
         "Type": AGENTIC_CX_ACTION_TYPE or "MessageParticipant",
         "Parameters": {"Text": AGENTIC_CX_PLACEHOLDER_TEXT},
         "Transitions": {
-            "NextAction": disconnect_id,
+            "NextAction": branch_id,
             "Errors": [{"ErrorType": "NoMatchingError", "NextAction": fallback_id}],
-            "Conditions": [
-                {
-                    "Condition": {
-                        "Operator": "Equals",
-                        "Operands": ["$.AgenticCX.Branch", "Escalation"],
-                    },
-                    "NextAction": queue_id,
-                },
-                {
-                    "Condition": {
-                        "Operator": "Equals",
-                        "Operands": ["$.AgenticCX.Branch", "IdleChatTimeout"],
-                    },
-                    "NextAction": disconnect_id,
-                },
-            ],
         },
     }
+    branch_action = {
+        "Identifier": branch_id,
+        "Type": "Compare",
+        "Parameters": {"ComparisonValue": "$.Attributes.AgenticCXBranch"},
+        "Transitions": {
+            "NextAction": disconnect_id,
+            "Conditions": [
+                {
+                    "NextAction": queue_id,
+                    "Condition": {"Operator": "Equals", "Operands": ["Escalation"]},
+                },
+                {
+                    "NextAction": disconnect_id,
+                    "Condition": {"Operator": "Equals", "Operands": ["IdleChatTimeout"]},
+                },
+            ],
+            "Errors": [{"ErrorType": "NoMatchingCondition", "NextAction": disconnect_id}],
+        },
+    }
+    actions[:] = [item for item in actions if _action_id(item) != branch_id]
+    actions.append(branch_action)
     if candidate_index is not None:
         old_identifier = _action_id(actions[candidate_index])
         actions[candidate_index] = agentic_action

@@ -425,9 +425,25 @@ const composeApplication = {
     }
     ctx.state.applicationId = appId;
     ctx.state.applicationName = doc.name;
+    // Remembered for deploy-application: a deployment requires at least one
+    // language code (live: UpdateApplicationDeployment refused without them).
+    ctx.state.applicationLanguageCodes = applicationLanguageCodes(doc);
     recordResource(ctx.state, 'application', appId, { name: doc.name });
   },
 };
+
+/** Language codes an application document declares, in every shape the builder emits. */
+function applicationLanguageCodes(doc) {
+  const s = (doc && doc.settings) || {};
+  const list = [
+    ...(Array.isArray(s.languageCodes) ? s.languageCodes : []),
+    ...(Array.isArray(s.languageSettings) ? s.languageSettings.map((x) => x && x.languageCode) : []),
+    s.languageCode,
+    ...(Array.isArray(doc && doc.languageCodes) ? doc.languageCodes : []),
+    doc && doc.mainLanguageCode,
+  ].filter(Boolean);
+  return [...new Set(list)];
+}
 
 const buildApplication = {
   plan(ctx, params) {
@@ -472,31 +488,64 @@ const deployApplication = {
     }
     const environment = params.environment || 'development';
 
-    // An environment holds ONE long-lived deployment record. Promoting a new
-    // build is an UPDATE of that record — POSTing a second deployment for an
-    // environment that already has one does not change what is live.
+    // A deployment requires at least one language code. The manifest may pin
+    // them; otherwise use the application's own languages (recorded at compose
+    // time, or read back for a state file written before that was recorded).
+    let languageCodes = Array.isArray(params.languageCodes) && params.languageCodes.length
+      ? params.languageCodes
+      : (ctx.state.applicationLanguageCodes || []);
+    if (!languageCodes.length) {
+      const app = await send(ctx, 'GetApplicationCommand', { applicationIdentifier: appId });
+      languageCodes = applicationLanguageCodes(app);
+    }
+    if (!languageCodes.length) {
+      ctx.log('  ! application declares no language code; deploying without languageCodes');
+    }
+    const langs = languageCodes.length ? { languageCodes } : {};
+
+    // An environment holds ONE deployment record (a second CreateApplicationDeployment
+    // for the same environment is refused: LimitExceededException). Promoting a new
+    // build is an UPDATE of that record; live (2026-09-10) the service answered
+    // UpdateApplicationDeployment with InternalServerException "Failed to update
+    // deployment." for every payload shape, so the fallback is delete + create —
+    // a brief gap on the development environment, not a failed deploy.
     const existing = await listAll(ctx, 'ListApplicationDeploymentsCommand',
       { applicationIdentifier: appId });
     const current = (existing || []).find((d) => d.environment === environment);
 
     let deploymentId;
     if (current) {
-      await send(ctx, 'UpdateApplicationDeploymentCommand', {
-        applicationIdentifier: appId,
-        deploymentIdentifier: current.deploymentId,
-        buildIdentifier: buildId,
-        environment,
-        languageCodes: params.languageCodes,
-        description: 'AICC Builder deploy',
-      });
-      deploymentId = current.deploymentId;
-      ctx.log(`  ~ promoted build on existing '${environment}' deployment`);
+      try {
+        await send(ctx, 'UpdateApplicationDeploymentCommand', {
+          applicationIdentifier: appId,
+          deploymentIdentifier: current.deploymentId,
+          buildIdentifier: buildId,
+          environment,
+          ...langs,
+          description: 'AICC Builder deploy',
+        });
+        deploymentId = current.deploymentId;
+        ctx.log(`  ~ promoted build on existing '${environment}' deployment`);
+      } catch (err) {
+        ctx.log(`  ! update of '${environment}' deployment refused (${err.name}: ${err.message}); replacing it`);
+        await send(ctx, 'DeleteApplicationDeploymentCommand',
+          { applicationIdentifier: appId, deploymentIdentifier: current.deploymentId });
+        const created = await send(ctx, 'CreateApplicationDeploymentCommand', {
+          applicationIdentifier: appId,
+          buildIdentifier: buildId,
+          environment,
+          ...langs,
+          description: 'AICC Builder deploy',
+        });
+        deploymentId = created.deploymentId;
+        ctx.log(`  + replaced '${environment}' deployment`);
+      }
     } else {
       const created = await send(ctx, 'CreateApplicationDeploymentCommand', {
         applicationIdentifier: appId,
         buildIdentifier: buildId,
         environment,
-        languageCodes: params.languageCodes,
+        ...langs,
         description: 'AICC Builder deploy',
       });
       deploymentId = created.deploymentId;
@@ -591,6 +640,7 @@ const importContactFlows = {
           '--content', JSON.stringify(content),
           '--region', ctx.region,
           '--output', 'json',
+          '--cli-error-format', 'json',
         ]);
         let createdId;
         try { createdId = JSON.parse(created || '{}').ContactFlowId; } catch (_) { /* best effort */ }
@@ -598,11 +648,29 @@ const importContactFlows = {
         recordResource(ctx.state, 'contact-flow', createdId || name, { name });
       } catch (e) {
         ctx.log(`  ! contact flow ${name} import failed (${e.message.split('\n')[0]}).`);
+        // The CLI's default error text hides the linter output ("problems:
+        // <complex value>"); with --cli-error-format json the problems are in
+        // the message body — surface them, they are the whole diagnosis.
+        for (const problem of contactFlowProblems(e)) ctx.log(`    - ${problem}`);
         ctx.log('    Import it manually and wire the Agentic CX block per WIRING-GUIDE.md.');
       }
     }
   },
 };
+
+/** Extract Connect's per-action problem messages from a failed aws-cli call. */
+function contactFlowProblems(err) {
+  const text = String((err && (err.stderr || err.message)) || '');
+  const start = text.indexOf('{');
+  if (start < 0) return [];
+  try {
+    const body = JSON.parse(text.slice(start, text.lastIndexOf('}') + 1));
+    const problems = body.problems || body.Problems || [];
+    return problems.map((p) => (typeof p === 'string' ? p : (p.message || JSON.stringify(p))));
+  } catch (_) {
+    return [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 
@@ -622,4 +690,4 @@ const STEPS = {
   'import-contact-flows': importContactFlows,
 };
 
-module.exports = { STEPS, listAll, send, normalizeFlowForService };
+module.exports = { STEPS, listAll, send, normalizeFlowForService, applicationLanguageCodes };
