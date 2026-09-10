@@ -385,6 +385,13 @@ def get_tools_for_phase(
     for tool in ACXD_INTERVIEW_TOOLS:
         if tool not in generation_tools:
             generation_tools.append(tool)
+    # D9-4 validates ACXD slot types AGAINST the OperationSpec, so a wrong
+    # FieldSpec constraint (live: a mangled regex) can only be corrected at the
+    # source — editing the asset to match a wrong spec is exactly what the gate
+    # forbids. Expose the spec editor; the ACXD overlay tells the orchestrator
+    # to regenerate the affected assets afterwards.
+    if update_operation_spec not in generation_tools:
+        generation_tools.append(update_operation_spec)
     return generation_tools
 
 

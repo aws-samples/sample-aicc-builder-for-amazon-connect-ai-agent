@@ -2666,6 +2666,14 @@ whether it can stand, and wait for explicit user approval before any further edi
   decisions stay deterministic without exception. A generative step may explain
   a fixed result but may not make that decision.
 
+### When the OperationSpec itself is wrong
+D9-4 compares slot types with the OperationSpec, so an asset can never be made
+"consistent" with a wrong FieldSpec (a mangled regex, a length that contradicts
+the customer's words). With the user's approval, correct the source with
+`update_operation_spec`, then regenerate the affected ACXD assets with
+`generate_acxd_application` and re-run the validation. Never edit an asset to
+match a spec you believe is wrong, and never call that a fix.
+
 ### Tool honesty (non-negotiable)
 - Report a generation, confirmation, validation, or packaging result ONLY when a
   tool call in THIS turn returned it, and quote that result. Never narrate
