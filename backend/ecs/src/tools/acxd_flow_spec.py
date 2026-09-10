@@ -549,6 +549,11 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
     for role in REQUIRED_SYSTEM_FLOW_ROLES:
         if role not in roles:
             problems.append(f"missing system flow with role '{role}'")
+    for role in SYSTEM_FLOW_ROLES:
+        holders = [f.flow_id for f in spec.flows if f.role == role]
+        if len(holders) > 1:
+            problems.append(f"system role '{role}' is planned by {len(holders)} flows {holders}: "
+                            f"keep one (remove_acxd_flow_plan) — duplicates ship as extra flows")
     if known_operation_ids is not None:
         covered = {f.operation_id for f in spec.operation_flows()}
         for op in sorted(known_operation_ids - covered):
@@ -692,6 +697,17 @@ def upsert_acxd_flow_plan(
 
             spec = _load_or_new()
             existing = spec.flow(flow_id)
+            # A system role belongs to exactly ONE flow. Live (Japanese run):
+            # the interview planned WelcomeFlow/FallbackFlow/EscalationFlow,
+            # then re-planned Welcome/Fallback/Escalation after a restart, and
+            # the application shipped nine flows with duplicate system roles.
+            if role != "operation":
+                holder = next((f for f in spec.flows if f.role == role and f.flow_id != flow_id), None)
+                if holder is not None:
+                    return {"success": False,
+                            "error": (f"role '{role}' is already planned as flow '{holder.flow_id}'. "
+                                      f"Upsert flow_id '{holder.flow_id}' to change it, or call "
+                                      f"remove_acxd_flow_plan('{holder.flow_id}') first — one flow per system role.")}
             prev_steps = {s.step: s for s in (existing.steps if existing else [])}
 
             notes: List[str] = []
@@ -882,7 +898,38 @@ def get_acxd_flow_spec_tool() -> dict:
     return {"success": True, "spec": spec.model_dump(), "ready": ready, "problems": problems}
 
 
+@tool
+def remove_acxd_flow_plan(flow_id: str) -> dict:
+    """
+    Remove ONE planned ACXD flow from the spec (runtime target acxd only).
+
+    Use it when a flow was planned under the wrong id or role — e.g. a system
+    role already held by another flow — before upserting the replacement. The
+    user must have agreed to drop the flow; this tool does not ask.
+
+    Args:
+        flow_id: The planned flow to remove.
+
+    Returns:
+        The remaining flow ids and the spec's readiness problems.
+    """
+    with _spec_lock(_current_session_id()):
+        try:
+            spec = _load_or_new()
+            if spec.flow(flow_id) is None:
+                return {"success": False, "error": f"no planned flow '{flow_id}'",
+                        "flows": [f.flow_id for f in spec.flows]}
+            spec.flows = [f for f in spec.flows if f.flow_id != flow_id]
+            save_acxd_flow_spec(spec)
+            ready, problems = acxd_flow_spec_ready()
+            return {"success": True, "removed": flow_id,
+                    "flows": [f.flow_id for f in spec.flows], "ready": ready, "problems": problems}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
 ACXD_INTERVIEW_TOOLS = [
+    remove_acxd_flow_plan,
     upsert_acxd_flow_plan,
     confirm_acxd_flow_steps,
     save_acxd_policies,

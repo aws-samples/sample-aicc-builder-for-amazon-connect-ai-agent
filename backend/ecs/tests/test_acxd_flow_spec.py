@@ -276,3 +276,29 @@ def test_every_operation_needs_a_flow_plan():
     spec = _full_spec()
     problems = afs.validate_acxd_flow_spec(spec, {"process_return", "track_order"})
     assert any("operation 'track_order' has no ACXD flow plan" in p for p in problems)
+
+
+# --- one flow per system role (live: WelcomeFlow + Welcome shipped 9 flows) ---
+
+def test_second_flow_for_a_system_role_is_refused_and_remove_frees_it():
+    assert _upsert(flow_id="WelcomeFlow", purpose="greet", role="welcome", operation_id=None)["success"]
+    dup = _upsert(flow_id="Welcome", purpose="greet", role="welcome", operation_id=None)
+    assert not dup["success"]
+    assert "WelcomeFlow" in dup["error"] and "remove_acxd_flow_plan" in dup["error"]
+    # re-upserting the SAME flow id is still allowed
+    assert _upsert(flow_id="WelcomeFlow", purpose="greet again", role="welcome", operation_id=None)["success"]
+
+    removed = afs.remove_acxd_flow_plan("WelcomeFlow")
+    assert removed["success"] and removed["removed"] == "WelcomeFlow"
+    assert "WelcomeFlow" not in removed["flows"]
+    assert _upsert(flow_id="Welcome", purpose="greet", role="welcome", operation_id=None)["success"]
+    assert not afs.remove_acxd_flow_plan("Nope")["success"]
+
+
+def test_validate_flags_duplicate_system_roles_in_a_loaded_spec():
+    spec = afs.ACXDFlowSpec.model_validate({"flows": [
+        {"flow_id": "WelcomeFlow", "purpose": "a", "role": "welcome", "confirmed": True, "steps": []},
+        {"flow_id": "Welcome", "purpose": "b", "role": "welcome", "confirmed": True, "steps": []},
+    ]})
+    problems = afs.validate_acxd_flow_spec(spec)
+    assert any("system role 'welcome' is planned by 2 flows" in p for p in problems)
