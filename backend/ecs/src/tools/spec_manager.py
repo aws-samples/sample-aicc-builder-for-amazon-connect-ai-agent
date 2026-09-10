@@ -1097,8 +1097,13 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
 _LEN_RANGE_RE = re.compile(r'(\d+)\s*[~\-–]\s*(\d+)\s*(?:자|글자|chars?|characters?)?')
 _LEN_MAX_RE = re.compile(r'(?:최대|max(?:imum)?|up to)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
 _LEN_MIN_RE = re.compile(r'(?:최소|min(?:imum)?|at least)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
-_LEN_EXACT_RE = re.compile(r'(\d+)\s*(?:자리|자|글자|桁|文字|digits?|chars?|characters?)')
+_LEN_EXACT_RE = re.compile(
+    r'(\d+)\s*(?:[A-Za-z\-]{3,}\s+){0,3}(?:자리|자|글자|桁|文字|digits?|chars?|characters?)',
+)
 _CJK_RE = re.compile(r'[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]')
+# A format mask is a short token like "010-XXXX-XXXX" or "AAA-000"; a phrase with
+# real words ("10 alphanumeric characters") is a description, never a mask.
+_LOOKS_LIKE_SENTENCE_RE = re.compile(r'[A-Za-z]{3,}\s+[A-Za-z]{3,}|[가-힣]{2,}\s|\s[가-힣]{2,}')
 _LOOKS_LIKE_DATEFMT_RE = re.compile(r'^\s*(?:[YyMmDdHhSs][\-/:. ]?){2,}\s*$|ISO\s*8601|ISO8601|RFC\s*3339', re.IGNORECASE)
 
 
@@ -1125,8 +1130,10 @@ def _normalize_field_constraints(data: dict) -> dict:
             # Not a length phrase — it's a FORMAT mask/pattern on a non-date
             # field (e.g. "010-XXXX-XXXX", "AAA-000"). Move it to `pattern` as a
             # best-effort regex (only if pattern is empty). Mask chars: X/0/9→\d,
-            # A/a→[A-Za-z]; keep literal separators escaped.
-            if data.get("pattern") is None:
+            # A/a→[A-Za-z]; keep literal separators escaped. A sentence is never a
+            # mask (live: "10 alphanumeric characters" became
+            # "^10\ [A-Za-z]{1}lph[A-Za-z]{1}numeric..." and rejected every input).
+            if data.get("pattern") is None and not _LOOKS_LIKE_SENTENCE_RE.search(df):
                 data["pattern"] = _mask_to_regex(df)
             moved = True
         if moved:

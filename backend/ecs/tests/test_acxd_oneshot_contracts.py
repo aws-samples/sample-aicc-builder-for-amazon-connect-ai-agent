@@ -95,3 +95,24 @@ def test_data_request_url_uses_the_resolved_tool_path():
     assert doc["webhook"]["url"] == "{WEBHOOK_URL}/tools/verify_and_get_balance"
     legacy = build_data_request({**plan, "path": None, "operation_ref": None})
     assert legacy["webhook"]["url"] == "{WEBHOOK_URL}/tools/checkBalance"
+
+
+# --- English descriptive length phrases are not format masks -----------------
+
+def test_english_phrase_with_modifier_is_a_length_not_a_mask():
+    from tools.spec_manager import _normalize_field_constraints
+    field = _normalize_field_constraints({"name": "bagTagNumber", "field_type": "string",
+                                          "date_format": "10 alphanumeric characters"})
+    assert field["pattern"] == r"^[A-Za-z0-9]{10}$"
+    assert field["min_length"] == 10 and field["max_length"] == 10
+    assert field.get("date_format") is None
+
+
+def test_real_masks_still_convert_and_sentences_are_left_alone():
+    from tools.spec_manager import _normalize_field_constraints
+    masked = _normalize_field_constraints({"name": "phone", "field_type": "string",
+                                           "date_format": "010-XXXX-XXXX"})
+    assert masked["pattern"] == r"^010\-\d{4}\-\d{4}$"
+    sentence = _normalize_field_constraints({"name": "note", "field_type": "string",
+                                             "date_format": "free text entered by the agent"})
+    assert sentence.get("pattern") is None
