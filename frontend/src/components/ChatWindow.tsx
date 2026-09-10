@@ -58,7 +58,7 @@ export function ChatWindow() {
   const setStartMode = useBuilderStore(s => s.setStartMode);
   const setSegment = useBuilderStore(s => s.setSegment);
 
-  const { currentSessionId, updateSessionTitle, updateSessionActivity, createNewSession, sessions } = useSessionStore();
+  const { currentSessionId, updateSessionTitle, updateSessionActivity, createNewSession, deleteSessionById, sessions } = useSessionStore();
   const { sendMessage, sendMessageWithAttachments, connect, switchSession, cancelGeneration, getCurrentSessionId } = useWebSocket();
 
   const handleResetSession = useCallback(() => {
@@ -424,6 +424,12 @@ export function ChatWindow() {
       const baseText = description.trim() || (defaultOpener[language] || defaultOpener['en-US']);
       const kickoff = `${baseText}${inlinedText}`;
 
+      // The session shown before Start is the one auto-created when the chat
+      // was opened; the conversation moves to `freshId`, so the sidebar must
+      // follow it (QA 2026-09-10: the kickoff title landed on the abandoned
+      // session and the real one surfaced later as "Untitled").
+      const previousId = currentSessionId;
+      const previousWasEmpty = messages.length === 0;
       const freshId = `session-${crypto.randomUUID()}`;
       await switchSession(freshId, true);
       setScope(scope.length > 0 ? scope : null);
@@ -456,13 +462,23 @@ export function ChatWindow() {
           const ok = sendMessage(kickoff);
           if (!ok) console.error('[ChatWindow] kickoff sendMessage returned false');
         }
-        if (currentSessionId) {
-          updateSessionTitle(currentSessionId, description.trim() || (files[0]?.name ?? kickoff));
-          updateSessionActivity(currentSessionId, 1);
-        }
+        const title = description.trim() || (files[0]?.name ?? kickoff);
+        void (async () => {
+          // Register + select the rotated session under the kickoff title …
+          if (!sessions.some((s) => s.sessionId === freshId)) {
+            await createNewSession(freshId, title);
+          } else {
+            await updateSessionTitle(freshId, title);
+          }
+          await updateSessionActivity(freshId, 1);
+          // … and drop the empty pre-rotation entry so it does not linger as a ghost.
+          if (previousId && previousId !== freshId && previousWasEmpty) {
+            await deleteSessionById(previousId);
+          }
+        })();
       }, freshId);
     },
-    [setScope, sendMessage, sendMessageWithAttachments, switchSession, currentSessionId, updateSessionTitle, updateSessionActivity, whenSessionReady, language]
+    [setScope, sendMessage, sendMessageWithAttachments, switchSession, currentSessionId, messages.length, sessions, createNewSession, deleteSessionById, updateSessionTitle, updateSessionActivity, whenSessionReady, language]
   );
 
   // Reset the start screen when a fresh, empty session is shown.
