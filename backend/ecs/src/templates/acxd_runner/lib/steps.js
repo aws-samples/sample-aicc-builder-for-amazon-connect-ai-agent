@@ -268,7 +268,12 @@ const upsertContextVariables = {
       for (const doc of docs) {
         const match = existing.find((v) => v.name === doc.name);
         if (match) {
-          await send(ctx, 'UpdateContextVariableCommand', { name: doc.name, ...doc });
+          // UpdateContextVariableRequest keys the variable by
+          // contextVariableIdentifier (its name); `name` is not an input.
+          // Live: the second run of a bundle failed here with "No value
+          // provided for input HTTP label: contextVariableIdentifier".
+          const { name, type, ...rest } = doc;
+          await send(ctx, 'UpdateContextVariableCommand', { contextVariableIdentifier: name, ...rest });
           ctx.log(`  ~ updated context variable ${doc.name}`);
         } else {
           await send(ctx, 'CreateContextVariableCommand', doc);

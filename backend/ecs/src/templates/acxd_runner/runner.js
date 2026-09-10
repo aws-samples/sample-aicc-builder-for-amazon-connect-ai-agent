@@ -44,11 +44,16 @@ function log(line) {
   console.log(maskSecret(line));
 }
 
-function makeCtx(manifest, bundleDir, { client, sdk } = {}) {
+function makeCtx(manifest, bundleDir, { client, sdk, acxdRegion } = {}) {
   return {
     bundleDir,
     project: manifest.project,
-    region: manifest.region || process.env.AWS_DEFAULT_REGION || 'ap-northeast-2',
+    // AWS region for CloudFormation / Connect calls. Live: with no manifest
+    // region and a Seoul default profile, the Connect import ran against
+    // ap-northeast-2 while the instance (and the ACXD workspace) lived in
+    // us-east-1 — fall back to the ACXD region, which follows the instance.
+    region: manifest.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION
+      || acxdRegion || 'us-east-1',
     log,
     client,
     sdk,
@@ -79,7 +84,7 @@ async function cmdDeploy(args, bundleDir) {
 
   const { client, sdk, region: acxdRegion } = await createClient();
   log(`ACXD API region: ${acxdRegion} · workspace: ${process.env.ACXD_WORKSPACE_ID}`);
-  const ctx = makeCtx(manifest, bundleDir, { client, sdk });
+  const ctx = makeCtx(manifest, bundleDir, { client, sdk, acxdRegion });
   // Keep only non-secret deploy state. Credentials and the workspace identifier
   // are prompted/exported at runtime and never written into the bundle.
   ctx.state.acxdRegion = acxdRegion;

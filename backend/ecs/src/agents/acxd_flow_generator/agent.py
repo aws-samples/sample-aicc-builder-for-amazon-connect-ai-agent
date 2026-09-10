@@ -688,12 +688,21 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
             flow.pop("contextVariables", None)
 
     # Remap non-UUID node ids (and every reference to them) to stable UUIDs.
+    # LIVE-VERIFIED (2026-09-10, CreateFlow): the service checks RFC-4122
+    # v4 SHAPE — version nibble 4 and variant nibble [89ab] (a "1111-1111-8111" id was
+    # accepted at CreateFlow but the stored flow had NO nodes and every update
+    # failed; v4-shaped ids round-trip). A model-written
+    # "22222222-2222-2222-2222-222222222222" (variant '2') is rejected with the
+    # unhelpful "nodes is not in the expected format", while
+    # "11111111-1111-1111-8111-111111111111" is accepted.
     _UUID_RE = re.compile(
-        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
     remap: dict[str, str] = {}
     for i, nid in enumerate(list(nodes.keys()), start=1):
-        if not _UUID_RE.match(str(nid)):
+        if not _UUID_RE.match(str(nid).lower()):
             remap[nid] = f"a0000000-0000-4000-8000-{i:012d}"
+        elif str(nid) != str(nid).lower():
+            remap[nid] = str(nid).lower()
     if remap:
         nodes = {remap.get(k, k): v for k, v in nodes.items()}
         flow["nodes"] = nodes
@@ -704,8 +713,53 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
             for child in node.get("childNodes") or []:
                 if isinstance(child, dict) and child.get("nodeId") in remap:
                     child["nodeId"] = remap[child["nodeId"]]
+            redirect_meta = (node.get("metadata") or {}).get("redirect") if isinstance(node.get("metadata"), dict) else None
+            if isinstance(redirect_meta, dict) and redirect_meta.get("nodeId") in remap:
+                redirect_meta["nodeId"] = remap[redirect_meta["nodeId"]]
+        if flow.get("startNodeId") in remap:
+            flow["startNodeId"] = remap[flow["startNodeId"]]
         logger.info("[ACXDFlowGen] repaired %s: remapped %d non-UUID node id(s)",
                     flow.get("flowId"), len(remap))
+
+    # LIVE-VERIFIED (2026-09-10, CreateFlow) node metadata contracts, from the
+    # SDK types (FlowNodeMetadata / RedirectConfig / DefineConfig / Operand):
+    #  - redirect: `metadata.redirect.type` is REQUIRED ('flow' | 'page' |
+    #    'parent_application'); the model writes only {flowId}.
+    #  - define:   `metadata.define.value` must be an Operand OBJECT
+    #    ({type:'constant', value:...}); the model writes a bare scalar.
+    #  - escalate: FlowNodeMetadata has NO `escalate` config. The queue is
+    #    chosen by the Contact Flow's Escalation branch, not here; any message
+    #    belongs in node-level `messages`, and the node is terminal.
+    for node in nodes.values():
+        if not isinstance(node, dict):
+            continue
+        meta = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        node["metadata"] = meta
+        ntype = node.get("type")
+        if ntype == "redirect":
+            rd = meta.get("redirect") if isinstance(meta.get("redirect"), dict) else {}
+            meta["redirect"] = rd
+            if not rd.get("type"):
+                rd["type"] = "page" if rd.get("pageName") else ("parent_application" if rd.get("parentApplication") else "flow")
+            if rd["type"] == "flow" and not rd.get("flowId") and meta.get("flowId"):
+                rd["flowId"] = meta["flowId"]
+        elif ntype == "define":
+            df = meta.get("define") if isinstance(meta.get("define"), dict) else {}
+            meta["define"] = df
+            val = df.get("value")
+            if val is not None and not (isinstance(val, dict) and "type" in val):
+                df["value"] = {"type": "constant", "value": val}
+        elif ntype == "escalate":
+            esc = meta.pop("escalate", None)
+            if isinstance(esc, dict):
+                msgs = esc.get("messages")
+                if isinstance(msgs, list) and msgs and not node.get("messages"):
+                    node["messages"] = [
+                        {"type": m.get("type", "text"), "body": m.get("body", "")}
+                        for m in msgs if isinstance(m, dict) and m.get("body")
+                    ]
+            # escalation hands control back to the Contact Flow — nothing follows it
+            node["childNodes"] = []
 
     # 2. Map map-key/nodeId disagreements onto the map key (the key wins).
     for nid, node in list(nodes.items()):
