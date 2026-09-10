@@ -35,6 +35,7 @@
 #   CONNECT_INSTANCE_ID  - Skip Connect instance selection
 #   AI_ASSISTANT_ID      - Skip Q in Connect assistant creation
 #   AUTO_CONFIRM=1       - Non-interactive: accept all defaults, skip phone
+#   ACXD_ALIAS_ID        - (acxd) application alias id for the Agentic CX block; else pick it in the console
 # =============================================================================
 
 set -euo pipefail
@@ -2665,6 +2666,13 @@ ensure_acxd_credentials() {
         read -r -s -p "   ACXD API key (input hidden): " ACXD_API_KEY
         echo ""
         export ACXD_API_KEY
+    fi
+    # Optional: the application alias id the Agentic CX block binds to. The ACXD
+    # SDK cannot list aliases, so it is asked for once; leaving it empty imports
+    # the block with a visible placeholder to pick in the Connect designer.
+    if [ -z "${ACXD_ALIAS_ID:-}" ] && [ "$IS_TTY" = "true" ] && [ "${AUTO_CONFIRM:-0}" != "1" ]; then
+        read -r -p "   ACXD application alias ID (Enter to pick it in the console later): " ACXD_ALIAS_ID
+        [ -n "$ACXD_ALIAS_ID" ] && export ACXD_ALIAS_ID
     fi
 }
 

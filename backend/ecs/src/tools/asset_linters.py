@@ -724,6 +724,10 @@ VALID_CONTACT_FLOW_ACTION_TYPES = frozenset({
     # Interact
     "MessageParticipant", "MessageParticipantIteratively", "GetParticipantInput",
     "ConnectParticipantWithLexBot", "RenderMessageTemplate",
+    # Agentic CX block (Connect Customer). VERIFIED 2026-09-10 against a console
+    # export and CreateContactFlow probes; reference:
+    # knowledge-base-docs/contact-flow/_reference-console-export-agentic-cx-block.json
+    "ConnectParticipantWithAgenticCX",
     # Set / update
     "UpdateContactAttributes", "UpdateContactData", "UpdateContactRecordingBehavior",
     "UpdateContactRecordingAndAnalyticsBehavior",
@@ -825,6 +829,10 @@ NO_TRANSITION_ACTION_TYPES = frozenset({
 REQUIRED_ERRORS_BY_TYPE = {
     "Compare": ["NoMatchingCondition"],
     "ConnectParticipantWithLexBot": ["NoMatchingError", "NoMatchingCondition"],
+    # Console export 2026-09-10: Error → NoMatchingError, no branch matched →
+    # NoMatchingCondition, idle chat timeout → InputTimeLimitExceeded; the
+    # Escalation output is a Conditions entry (Equals "Escalation").
+    "ConnectParticipantWithAgenticCX": ["NoMatchingError", "NoMatchingCondition", "InputTimeLimitExceeded"],
     "InvokeLambdaFunction": ["NoMatchingError"],
     "CreateWisdomSession": ["NoMatchingError"],
     "UpdateContactData": ["NoMatchingError"],

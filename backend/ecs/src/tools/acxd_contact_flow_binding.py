@@ -13,14 +13,15 @@ from typing import Any, Optional
 
 from tools.acxd_flow_spec import get_acxd_flow_spec
 
-#: Set when AWS publishes the Flow-Language action type and parameter shape.
-AGENTIC_CX_ACTION_TYPE: str | None = None
+#: Flow-Language action type of the Agentic CX block — taken from a Connect
+#: console export (2026-09-10) and verified to re-import via CreateContactFlow.
+#: Reference: knowledge-base-docs/contact-flow/_reference-console-export-agentic-cx-block.json
+AGENTIC_CX_ACTION_TYPE: str = "ConnectParticipantWithAgenticCX"
 
+#: Identifier of the generated block (kept for bundles that still carry the
+#: pre-2026-09-10 MessageParticipant placeholder under this id).
 AGENTIC_CX_PLACEHOLDER_ID = "AgenticCXPlaceholder"
-AGENTIC_CX_PLACEHOLDER_TEXT = (
-    ">>> AGENTIC CX PLACEHOLDER <<< Replace this action in the Connect flow "
-    "designer with the Agentic CX block and keep Metadata.acxdBinding branches."
-)
+AGENTIC_CX_ALIAS_PLACEHOLDER = "{ACXD_ALIAS_ID}"
 MAX_CONTEXT_VARIABLES = 10
 
 _LEX_SESSION_ATTRIBUTE = re.compile(r"\$\.Lex\.SessionAttributes\.([A-Za-z0-9_]+)")
@@ -234,6 +235,7 @@ def normalize_acxd_contact_flow(
         (
             index for index, action in enumerate(actions)
             if _action_id(action) in {AGENTIC_CX_PLACEHOLDER_ID, "AgenticCX"}
+            or _action_type(action) == AGENTIC_CX_ACTION_TYPE
         ),
         None,
     )
@@ -244,43 +246,59 @@ def normalize_acxd_contact_flow(
             None,
         )
 
-    # Live CreateContactFlow (2026-09-10): "Action does not support conditions"
-    # — MessageParticipant cannot carry Transitions.Conditions. The placeholder
-    # therefore hands off to a Compare block that owns the Escalation / idle
-    # timeout branches on a contact attribute; WIRING-GUIDE.md tells the
-    # operator to replace the placeholder + Compare pair with the Agentic CX
-    # block's own branch outputs.
-    branch_id = "AgenticCXBranch"
-    agentic_action = {
-        "Identifier": AGENTIC_CX_PLACEHOLDER_ID,
-        "Type": AGENTIC_CX_ACTION_TYPE or "MessageParticipant",
-        "Parameters": {"Text": AGENTIC_CX_PLACEHOLDER_TEXT},
-        "Transitions": {
-            "NextAction": branch_id,
-            "Errors": [{"ErrorType": "NoMatchingError", "NextAction": fallback_id}],
+    # The Agentic CX block, as exported from the Connect console (2026-09-10)
+    # and re-imported through CreateContactFlow: Type
+    # ConnectParticipantWithAgenticCX, AgentConfiguration {WorkspaceId,
+    # ApplicationId, Alias, ContextVariables}, speech engine + audio filler,
+    # Default on NextAction, Escalation as a Conditions entry, Error as
+    # NoMatchingError, idle chat timeout as InputTimeLimitExceeded. Connect does
+    # not validate the ids at import, so the runner substitutes the workspace and
+    # application ids it deployed; the alias (an opaque ACXD id the SDK does not
+    # expose) comes from ACXD_ALIAS_ID or stays a visible placeholder to pick in
+    # the block's dropdown.
+    context_variable_map = {
+        item["name"]: item.get("fromContactAttribute") or f"$.Attributes.{item['name']}"
+        for item in _context_variables(application)
+    }
+    speech_engine = str(application.get("speech_engine") or "agentic_voice").lower()
+    agent_parameters: dict = {
+        "AgentConfiguration": {
+            "WorkspaceId": "{ACXD_WORKSPACE_ID}",
+            "ApplicationId": "{ACXD_APPLICATION_ID}",
+            "Alias": "{ACXD_ALIAS_ID}",
+            "ContextVariables": context_variable_map,
+        },
+        "AudioFillerConfiguration": {
+            "Enabled": True,
+            "AudioType": "MELODY_CHIPPER_CHIME",
+            "StartDelayInMilliseconds": 2500,
+            "MinimumPlayDurationInMilliseconds": 3000,
+            "ResponseDeliveryDelayInMilliseconds": 500,
         },
     }
-    branch_action = {
-        "Identifier": branch_id,
-        "Type": "Compare",
-        "Parameters": {"ComparisonValue": "$.Attributes.AgenticCXBranch"},
+    if speech_engine in {"agentic_voice", "agentic", "amazon_agentic_voice"}:
+        agent_parameters["SpeechRecognitionConfiguration"] = {"SpeechRecognitionEngine": "AMAZON_AGENTIC_VOICE"}
+    agentic_action = {
+        "Identifier": AGENTIC_CX_PLACEHOLDER_ID,
+        "Type": AGENTIC_CX_ACTION_TYPE,
+        "Parameters": agent_parameters,
         "Transitions": {
             "NextAction": disconnect_id,
+            "Errors": [
+                {"ErrorType": "NoMatchingError", "NextAction": fallback_id},
+                {"ErrorType": "NoMatchingCondition", "NextAction": disconnect_id},
+                {"ErrorType": "InputTimeLimitExceeded", "NextAction": disconnect_id},
+            ],
             "Conditions": [
                 {
                     "NextAction": queue_id,
                     "Condition": {"Operator": "Equals", "Operands": ["Escalation"]},
                 },
-                {
-                    "NextAction": disconnect_id,
-                    "Condition": {"Operator": "Equals", "Operands": ["IdleChatTimeout"]},
-                },
             ],
-            "Errors": [{"ErrorType": "NoMatchingCondition", "NextAction": disconnect_id}],
         },
     }
-    actions[:] = [item for item in actions if _action_id(item) != branch_id]
-    actions.append(branch_action)
+    # Earlier bundles carried a Compare block for the branches; it is redundant now.
+    actions[:] = [item for item in actions if _action_id(item) != "AgenticCXBranch"]
     if candidate_index is not None:
         old_identifier = _action_id(actions[candidate_index])
         actions[candidate_index] = agentic_action
@@ -314,6 +332,17 @@ def normalize_acxd_contact_flow(
         context_names,
         rewrite_attributes=rewrite_attribute_context,
     )
+    # The block's ContextVariables map is INPUT to the agent: its values are the
+    # contact-side sources and must survive the rewrite above (which turns
+    # `$.Attributes.<name>` reads elsewhere into `$.AgenticCX.ContextVariables.<name>`).
+    for action in document.get("Actions") or []:
+        if _action_type(action) == AGENTIC_CX_ACTION_TYPE:
+            params = action.setdefault("Parameters", {})
+            agent_cfg = params.setdefault("AgentConfiguration", {})
+            agent_cfg["ContextVariables"] = {
+                name: (source if not str(source).startswith("$.AgenticCX.") else f"$.Attributes.{name}")
+                for name, source in context_variable_map.items()
+            }
 
     # The former Lex Compare path is no longer part of the ACXD target.  Drop
     # unreachable fragments so the existing Connect linter sees a clean graph.

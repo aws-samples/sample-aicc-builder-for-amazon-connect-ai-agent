@@ -609,7 +609,7 @@ const importContactFlows = {
     for (const file of listFiles(ctx, params)) {
       const doc = readJson(file);
       const name = contactFlowName(doc, file, ctx.project);
-      const content = doc.content || doc;
+      const content = bindAgenticCx(doc.content || doc, ctx);
       try {
         const existing = ctx.exec('aws', [
           'connect', 'list-contact-flows',
@@ -658,6 +658,33 @@ const importContactFlows = {
   },
 };
 
+/**
+ * Fill the Agentic CX block (Type ConnectParticipantWithAgenticCX) with the ids
+ * this deploy produced. The bundle carries {ACXD_WORKSPACE_ID} /
+ * {ACXD_APPLICATION_ID} / {ACXD_ALIAS_ID}; workspace and application are known
+ * here, the alias is an opaque ACXD id the SDK does not expose, so it comes from
+ * ACXD_ALIAS_ID or stays a visible placeholder (Connect accepts the import; the
+ * operator picks the alias in the block's dropdown).
+ */
+function bindAgenticCx(content, ctx) {
+  const env = ctx.env || process.env;
+  const values = {
+    '{ACXD_WORKSPACE_ID}': env.ACXD_WORKSPACE_ID || ctx.state.workspaceId || '',
+    '{ACXD_APPLICATION_ID}': ctx.state.applicationId || '',
+    '{ACXD_ALIAS_ID}': env.ACXD_ALIAS_ID || 'SELECT_ALIAS_IN_CONSOLE',
+  };
+  let text = JSON.stringify(content);
+  for (const [placeholder, value] of Object.entries(values)) {
+    if (value) text = text.split(placeholder).join(value);
+  }
+  const bound = JSON.parse(text);
+  const hasBlock = (bound.Actions || []).some((a) => a && a.Type === 'ConnectParticipantWithAgenticCX');
+  if (hasBlock && !env.ACXD_ALIAS_ID) {
+    ctx.log('  ! ACXD_ALIAS_ID not set — the Agentic CX block is imported with alias SELECT_ALIAS_IN_CONSOLE; pick the alias in the block (see WIRING-GUIDE.md).');
+  }
+  return bound;
+}
+
 /** Extract Connect's per-action problem messages from a failed aws-cli call. */
 function contactFlowProblems(err) {
   const text = String((err && (err.stderr || err.message)) || '');
@@ -690,4 +717,4 @@ const STEPS = {
   'import-contact-flows': importContactFlows,
 };
 
-module.exports = { STEPS, listAll, send, normalizeFlowForService, applicationLanguageCodes };
+module.exports = { STEPS, listAll, send, normalizeFlowForService, applicationLanguageCodes, bindAgenticCx };

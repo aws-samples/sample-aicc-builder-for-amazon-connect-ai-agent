@@ -1378,29 +1378,57 @@ Rules:
 
 ACXD_CONTACT_FLOW_ADDENDUM = """
 
-## ACXD runtime target — Agentic CX placeholder contract
+## ACXD runtime target — the Agentic CX block
 
 The caller has selected the ACXD runtime target. Do not generate a Lex bot
-block (`ConnectParticipantWithLexBot`) or a Lex/GetParticipantInput AI-dialogue
-pattern. Replace that hand-off with this importable placeholder until AWS
-publishes the Agentic CX Flow-Language action type:
+block (`ConnectParticipantWithLexBot`), a Lex/GetParticipantInput AI-dialogue
+pattern, or a Q in Connect session (`CreateWisdomSession`) — the ACXD
+application IS the conversation and answers FAQ from its own knowledge base.
+Hand the contact to it with the real block (Flow Language verified from a
+Connect console export and re-imported through CreateContactFlow, 2026-09-10):
 
 ```json
 {
-  "Identifier": "AgenticCXPlaceholder",
-  "Type": "MessageParticipant",
-  "Parameters": {"Text": ">>> AGENTIC CX PLACEHOLDER <<<"}
+  "Identifier": "AgenticCX",
+  "Type": "ConnectParticipantWithAgenticCX",
+  "Parameters": {
+    "AgentConfiguration": {
+      "WorkspaceId": "{ACXD_WORKSPACE_ID}",
+      "ApplicationId": "{ACXD_APPLICATION_ID}",
+      "Alias": "{ACXD_ALIAS_ID}",
+      "ContextVariables": {"customerPhone": "$.CustomerEndpoint.Address"}
+    },
+    "SpeechRecognitionConfiguration": {"SpeechRecognitionEngine": "AMAZON_AGENTIC_VOICE"},
+    "AudioFillerConfiguration": {"Enabled": true, "AudioType": "MELODY_CHIPPER_CHIME",
+      "StartDelayInMilliseconds": 2500, "MinimumPlayDurationInMilliseconds": 3000,
+      "ResponseDeliveryDelayInMilliseconds": 500}
+  },
+  "Transitions": {
+    "NextAction": "<disconnect>",
+    "Conditions": [
+      {"NextAction": "<transfer-to-queue>", "Condition": {"Operator": "Equals", "Operands": ["Escalation"]}}
+    ],
+    "Errors": [
+      {"NextAction": "<fallback-message>", "ErrorType": "NoMatchingError"},
+      {"NextAction": "<disconnect>", "ErrorType": "NoMatchingCondition"},
+      {"NextAction": "<disconnect>", "ErrorType": "InputTimeLimitExceeded"}
+    ]
+  }
 }
 ```
 
-The deterministic post-processor owns the final wiring. Keep the surrounding
-flow simple and include real actions for these targets: Default → disconnect,
-Escalation → `TransferContactToQueue`, Error → a fallback
-`MessageParticipant`, and IdleChatTimeout → disconnect. Any value formerly
-read from `$.Lex.SessionAttributes.<name>` must instead be read from
-`$.AgenticCX.ContextVariables.<name>`. The completed JSON carries
-`Metadata.acxdBinding` with `{ACXD_WORKSPACE_ID}`, `{ACXD_APPLICATION_ID}` and
-`{ACXD_ALIAS_ID}` placeholders; do not invent real identifiers.
+Branches: Default = `NextAction`; Escalation = the `Conditions` entry (route to
+`UpdateContactTargetQueue` + `TransferContactToQueue`); Error =
+`NoMatchingError` (apology `MessageParticipant` → disconnect); idle chat
+timeout = `InputTimeLimitExceeded`. All three error types are required.
+`ContextVariables` maps each ACXD context variable (at most 10) to its source
+JSONPath — the deterministic post-processor fills the map from the confirmed
+application settings, so list only the ones the flow really needs. Any value
+formerly read from `$.Lex.SessionAttributes.<name>` is read from
+`$.AgenticCX.ContextVariables.<name>` instead. Keep the `{ACXD_*}` placeholders
+verbatim — the bundled deploy runner substitutes the deployed workspace and
+application ids at import; the alias comes from `ACXD_ALIAS_ID` or is picked in
+the console. Do not invent real identifiers.
 """
 
 # Append CLUES response efficiency instructions

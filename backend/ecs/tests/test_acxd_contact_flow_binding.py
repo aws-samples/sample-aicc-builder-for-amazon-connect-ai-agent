@@ -67,9 +67,24 @@ def test_normalizer_replaces_lex_with_agentic_cx_binding_and_real_branches():
     actions = {action["Identifier"]: action for action in normalized["Actions"]}
     binding = normalized["Metadata"]["acxdBinding"]
 
-    assert AGENTIC_CX_ACTION_TYPE is None
+    assert AGENTIC_CX_ACTION_TYPE == "ConnectParticipantWithAgenticCX"
     assert AGENTIC_CX_PLACEHOLDER_ID in actions
-    assert actions[AGENTIC_CX_PLACEHOLDER_ID]["Type"] == "MessageParticipant"
+    block = actions[AGENTIC_CX_PLACEHOLDER_ID]
+    assert block["Type"] == "ConnectParticipantWithAgenticCX"
+    agent = block["Parameters"]["AgentConfiguration"]
+    assert agent["WorkspaceId"] == "{ACXD_WORKSPACE_ID}"
+    assert agent["ApplicationId"] == "{ACXD_APPLICATION_ID}"
+    assert agent["Alias"] == "{ACXD_ALIAS_ID}"
+    assert agent["ContextVariables"]["customerId"] == "$.Attributes.CustomerId"
+    assert len(agent["ContextVariables"]) == 10
+    assert block["Parameters"]["SpeechRecognitionConfiguration"] == {"SpeechRecognitionEngine": "AMAZON_AGENTIC_VOICE"}
+    errors = {e["ErrorType"]: e["NextAction"] for e in block["Transitions"]["Errors"]}
+    assert set(errors) == {"NoMatchingError", "NoMatchingCondition", "InputTimeLimitExceeded"}
+    assert errors["NoMatchingError"] == "AgenticCXFallbackMessage"
+    escalation = block["Transitions"]["Conditions"][0]
+    assert escalation["Condition"]["Operands"] == ["Escalation"]
+    assert actions[escalation["NextAction"]]["Type"] == "TransferContactToQueue"
+    assert actions[block["Transitions"]["NextAction"]]["Type"] == "DisconnectParticipant"
     assert "Lex" not in actions
     assert "LexResult" not in actions
     assert len(binding["contextVariables"]) == 10
@@ -113,10 +128,11 @@ def test_normalizer_rewrites_known_attribute_after_connect_lint_pass():
     assert normalized["Actions"][0]["Parameters"]["Text"] == "$.AgenticCX.ContextVariables.customerId"
 
 
-def test_placeholder_carries_no_conditions_and_wisdom_session_is_spliced_out():
-    """Live CreateContactFlow (2026-09-10): 'Action does not support conditions'
-    on the placeholder and 'Invalid Action property value ... WisdomAssistantArn'
-    on the Classic Q in Connect block that ACXD never provisions."""
+def test_real_agentic_cx_block_replaces_placeholder_and_wisdom_session_is_spliced_out():
+    """Live CreateContactFlow (2026-09-10): the Q in Connect block's unresolved
+    ARN failed the import; the block itself is the console-exported
+    ConnectParticipantWithAgenticCX (Escalation via Conditions, idle timeout via
+    InputTimeLimitExceeded), no Compare helper needed."""
     flow = {
         "Version": "2019-10-30",
         "StartAction": "Logging",
@@ -138,11 +154,11 @@ def test_placeholder_carries_no_conditions_and_wisdom_session_is_spliced_out():
     assert "Wisdom" not in actions
     assert "Wisdom" not in normalized["Metadata"].get("ActionMetadata", {})
     assert actions["Logging"]["Transitions"]["NextAction"] == AGENTIC_CX_PLACEHOLDER_ID
-    placeholder = actions[AGENTIC_CX_PLACEHOLDER_ID]
-    assert "Conditions" not in placeholder["Transitions"]
-    branch = actions[placeholder["Transitions"]["NextAction"]]
-    assert branch["Type"] == "Compare"
-    assert branch["Parameters"] == {"ComparisonValue": "$.Attributes.AgenticCXBranch"}
-    assert [c["Condition"]["Operands"] for c in branch["Transitions"]["Conditions"]] == [["Escalation"], ["IdleChatTimeout"]]
-    assert branch["Transitions"]["Errors"][0]["ErrorType"] == "NoMatchingCondition"
+    block = actions[AGENTIC_CX_PLACEHOLDER_ID]
+    assert block["Type"] == "ConnectParticipantWithAgenticCX"
+    assert "AgenticCXBranch" not in actions
+    assert [c["Condition"]["Operands"] for c in block["Transitions"]["Conditions"]] == [["Escalation"]]
+    assert {e["ErrorType"] for e in block["Transitions"]["Errors"]} == {"NoMatchingError", "NoMatchingCondition", "InputTimeLimitExceeded"}
+    # no speech engine declared → no SpeechRecognitionConfiguration is forced
+    assert "SpeechRecognitionConfiguration" not in block["Parameters"] or block["Parameters"]["SpeechRecognitionConfiguration"]
     assert not any("WisdomAssistantArn" in json.dumps(a) for a in normalized["Actions"])
