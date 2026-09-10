@@ -725,6 +725,15 @@ class SafeBedrockModel(BedrockModel):
                         fixed.pop()
                         logger.warning("[SafeBedrockModel] Removed trailing assistant with only toolUse blocks")
 
+        # 5. The request must end with a user message. A trailing assistant
+        #    message (e.g. the partial text of a turn cancelled by a restart)
+        #    is treated as prefill, which Opus 4.8 rejects with
+        #    "This model does not support assistant message prefill" — drop it
+        #    and let the model regenerate the turn.
+        if len(fixed) > 1 and fixed[-1].get("role") == "assistant":
+            fixed.pop()
+            logger.warning("[SafeBedrockModel] Dropped trailing assistant message (prefill not supported)")
+
         return fixed
 
 # ========================================
