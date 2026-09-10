@@ -225,6 +225,29 @@ def set_runtime_target(session_id: str, target: str) -> bool:
     return True  # the in-memory record alone is enough for this process
 
 
+def _infra_runtime_target(sid: str) -> Optional[str]:
+    """``InfrastructureSpec.runtime_target`` — but ONLY when the spec store's
+    current session is the one asked about.
+
+    ``get_infrastructure_spec()`` is scoped by the ``current_session_id``
+    ContextVar, not by an argument. The WebSocket connect handler asks about a
+    brand-new session while that ContextVar may still name the previous
+    session of the same connection loop; answering with that session's spec
+    echoed ``classic`` for a fresh session and the start screen's ACXD choice
+    was overwritten before it was sent (live on dev, 2026-09-10).
+    """
+    if sid != _current_session_id():
+        return None
+    try:
+        from tools.spec_manager import get_infrastructure_spec
+        infra = get_infrastructure_spec()
+        target = getattr(infra, "runtime_target", None) if infra else None
+        return target if target in RUNTIME_TARGETS else None
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("[ACXDFlowSpec] infra spec lookup failed: %s", e)
+        return None
+
+
 def get_runtime_target(session_id: Optional[str] = None) -> str:
     """Return ``classic`` or ``acxd`` for the session.
 
@@ -235,14 +258,9 @@ def get_runtime_target(session_id: Optional[str] = None) -> str:
     sid = session_id or _current_session_id()
     if not sid:
         return RUNTIME_TARGET_CLASSIC
-    try:
-        from tools.spec_manager import get_infrastructure_spec
-        infra = get_infrastructure_spec()
-        target = getattr(infra, "runtime_target", None) if infra else None
-        if target in RUNTIME_TARGETS:
-            return target
-    except Exception as e:  # pragma: no cover - defensive
-        logger.debug("[ACXDFlowSpec] infra spec lookup failed: %s", e)
+    infra_target = _infra_runtime_target(sid)
+    if infra_target:
+        return infra_target
     cached = _runtime_target_cache.get(sid)
     if cached in RUNTIME_TARGETS:
         return cached
@@ -272,14 +290,9 @@ def get_runtime_target_if_set(session_id: Optional[str] = None) -> Optional[str]
     sid = session_id or _current_session_id()
     if not sid:
         return None
-    try:
-        from tools.spec_manager import get_infrastructure_spec
-        infra = get_infrastructure_spec()
-        target = getattr(infra, "runtime_target", None) if infra else None
-        if target in RUNTIME_TARGETS:
-            return target
-    except Exception:  # pragma: no cover
-        pass
+    infra_target = _infra_runtime_target(sid)
+    if infra_target:
+        return infra_target
     if _runtime_target_cache.get(sid) in RUNTIME_TARGETS:
         return _runtime_target_cache[sid]
     state = _state_dir(sid)

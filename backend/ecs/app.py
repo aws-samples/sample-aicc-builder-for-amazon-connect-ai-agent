@@ -2205,10 +2205,17 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     # The target is fixed on the first user message. A createNewSession request
     # seeds it earlier for the acknowledgement, while this path also covers
     # direct WebSocket clients that send their first message without that action.
+    # A value already persisted for this session (by createNewSession, or by an
+    # earlier process before a restart) always wins over the connect-time default
+    # cached in `session` — re-deriving it here is what turned a start-screen
+    # ACXD choice back into Classic on the first message.
     if not session.get("_runtime_target_seeded"):
+        persisted_target = get_runtime_target_if_set(effective_session_id)
         requested_target = message.get("runtime_target", message.get("runtimeTarget"))
         runtime_target = _normalize_runtime_target(
-            requested_target if requested_target is not None else session.get("runtime_target")
+            persisted_target
+            if persisted_target is not None
+            else (requested_target if requested_target is not None else session.get("runtime_target"))
         )
         if not set_runtime_target(effective_session_id, runtime_target):
             logger.warning("[runtime_target] could not persist %s for %s", runtime_target, effective_session_id)
@@ -3296,6 +3303,14 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
             logger.warning(
                 "[createNewSession] set runtime target failed for %s", _eff_for_state
             )
+        else:
+            logger.info("[createNewSession] runtime_target=%s for %s", _runtime_target, _eff_for_state)
+        # The in-memory session was created at connect time with the default
+        # target; mark it seeded so the first message cannot re-derive Classic.
+        _live = session_store.get(session_id)
+        if isinstance(_live, dict):
+            _live["runtime_target"] = _runtime_target
+            _live["_runtime_target_seeded"] = True
     except Exception as _se:
         logger.warning(f"[createNewSession] set scope/runtime target failed: {_se}")
     try:

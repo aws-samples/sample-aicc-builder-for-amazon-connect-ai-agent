@@ -187,7 +187,9 @@ function createConversationStartPayload() {
     action: 'createNewSession',
     scope: state.scope ?? [],
     startMode: state.startMode,
-    runtime_target: state.runtimeTarget,
+    // The start-screen choice wins; the active session's echoed target is only
+    // the fallback when the user never touched the radio.
+    runtime_target: state.pendingRuntimeTarget ?? state.runtimeTarget,
     model: state.selectedModel,
     effort: state.selectedEffort === 'default' ? '' : state.selectedEffort,
   };

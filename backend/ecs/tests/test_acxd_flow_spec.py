@@ -302,3 +302,21 @@ def test_validate_flags_duplicate_system_roles_in_a_loaded_spec():
     ]})
     problems = afs.validate_acxd_flow_spec(spec)
     assert any("system role 'welcome' is planned by 2 flows" in p for p in problems)
+
+
+def test_other_sessions_infra_spec_never_answers_for_a_fresh_session():
+    """Live on dev: the connect handler asked about a brand-new session while the
+    ContextVar still named the previous (classic) session; the previous
+    session's InfrastructureSpec answered, `connected` echoed classic, and the
+    start screen's ACXD choice was overwritten before it was sent."""
+    from tools import spec_manager as sm
+    afs.set_runtime_target(SID, "classic")
+    res = sm.save_infrastructure_spec(project_name="acme", db_type="dynamodb")
+    assert res.get("success", True), res
+    fresh = "session-fresh-0000-4000-8000-000000000001"
+    assert afs.get_runtime_target_if_set(fresh) is None    # nothing persisted → no echo
+    assert afs.get_runtime_target(fresh) == "classic"      # default, not a leak
+    assert afs.set_runtime_target(fresh, "acxd")
+    assert afs.get_runtime_target_if_set(fresh) == "acxd"
+    assert afs.get_runtime_target(fresh) == "acxd"
+    afs.clear_runtime_target(fresh)

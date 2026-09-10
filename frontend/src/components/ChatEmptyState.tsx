@@ -157,8 +157,13 @@ export function ChatEmptyState({ language, onStart }: ChatEmptyStateProps) {
   const setStartMode = useBuilderStore((s) => s.setStartMode);
   const segment = useBuilderStore((s) => s.segment);
   const setSegment = useBuilderStore((s) => s.setSegment);
-  const runtimeTarget = useBuilderStore((s) => s.runtimeTarget);
-  const setRuntimeTarget = useBuilderStore((s) => s.setRuntimeTarget);
+  // The card edits the PENDING choice for the next session. Until the user
+  // picks, it mirrors the active session's target; after that, backend echoes
+  // for the current session cannot flip it (live bug: ACXD reverted to Classic
+  // before Start because `connected`/`session_created` echoed the auto-created
+  // classic session).
+  const runtimeTarget = useBuilderStore((s) => s.pendingRuntimeTarget ?? s.runtimeTarget);
+  const setRuntimeTarget = useBuilderStore((s) => s.setPendingRuntimeTarget);
 
   const [description, setDescription] = useState('');
   const [stagedFiles, setStagedFiles] = useState<AttachedFile[]>([]);

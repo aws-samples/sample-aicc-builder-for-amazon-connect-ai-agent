@@ -147,9 +147,15 @@ interface BuilderState {
 
   // Start-screen mode + active generation scope
   startMode: StartMode;
-  // Runtime target is selected only for Full Build and echoed by the backend
-  // when an existing session reconnects.
+  // Runtime target of the ACTIVE session, echoed by the backend (connected /
+  // session_created / history_injected). Drives the progress list.
   runtimeTarget: RuntimeTarget;
+  // The start-screen choice for the NEXT session. Kept apart from
+  // `runtimeTarget` because backend echoes for the current (auto-created,
+  // classic) session must never overwrite a choice the user has made but not
+  // yet sent — live on dev, ACXD flipped back to Classic before Start.
+  // null = no explicit choice yet (the card shows the active session's target).
+  pendingRuntimeTarget: RuntimeTarget | null;
   segment: SegmentType | null;
   // Active scope for this run (from session_created / asset_imported).
   // null = full build (all assets). A non-null list = scoped run.
@@ -213,6 +219,7 @@ interface BuilderState {
   setSelectedEffort: (effortId: string) => void;
   setStartMode: (mode: StartMode) => void;
   setRuntimeTarget: (target: RuntimeTarget) => void;
+  setPendingRuntimeTarget: (target: RuntimeTarget) => void;
   setSegment: (segment: SegmentType | null) => void;
   setScope: (scope: string[] | null) => void;
   setImportedAsset: (info: ImportedAssetInfo | null) => void;
@@ -427,6 +434,7 @@ export const useBuilderStore = create<BuilderState>((set) => ({
   selectedEffort: getInitialEffort(),
   startMode: 'full',
   runtimeTarget: 'classic',
+  pendingRuntimeTarget: null,
   segment: null,
   scope: null,
   importedAsset: null,
@@ -833,6 +841,8 @@ export const useBuilderStore = create<BuilderState>((set) => ({
     })),
 
   setRuntimeTarget: (target) => set({ runtimeTarget: target }),
+
+  setPendingRuntimeTarget: (target) => set({ pendingRuntimeTarget: target }),
 
   setSegment: (segment) => set({ segment }),
 
