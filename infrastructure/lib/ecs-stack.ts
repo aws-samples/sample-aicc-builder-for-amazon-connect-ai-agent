@@ -585,17 +585,18 @@ export class EcsStack extends cdk.Stack {
         s3FilesVolumeConfiguration: { fileSystemArn: s3FilesFsArn, rootDirectory: "/" },
       },
     ];
-    const cfnContainerDefs = cfnTaskDef.containerDefinitions as any[];
-    if (cfnContainerDefs?.length) {
-      const appContainerDef = cfnContainerDefs[0];
-      const existingMounts = appContainerDef.mountPoints || [];
-      if (!existingMounts.some((m: any) => m.sourceVolume === "s3files")) {
-        appContainerDef.mountPoints = [
-          ...existingMounts,
-          { sourceVolume: "s3files", containerPath: "/mnt/s3", readOnly: false },
-        ];
-      }
-    }
+    // Mount the volume into the APP container through the L2 API. The previous
+    // escape-hatch read `cfnTaskDef.containerDefinitions`, which is a lazy
+    // token at synth time (not an array), so the mount point was never added
+    // and every task ran with /mnt/s3 as a plain local directory — the volume
+    // above was declared but mounted nowhere (found on dev, 2026-09-10).
+    // CDK only validates volume/mount pairing for configuredAtLaunch volumes,
+    // so referencing the L1-declared volume by name is fine here.
+    appContainer.addMountPoints({
+      sourceVolume: "s3files",
+      containerPath: "/mnt/s3",
+      readOnly: false,
+    });
 
     // Note: the ALB DNS is published to the SSM parameter
     // `props!.albDnsSsmParamName` by deploy.sh after stack deployment,
