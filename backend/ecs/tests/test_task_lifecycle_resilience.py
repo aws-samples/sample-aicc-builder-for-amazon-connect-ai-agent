@@ -80,13 +80,26 @@ def app_client(tmp_path, monkeypatch):
     return app, TestClient(app.app), tmp_path / "mnt"
 
 
-def test_ping_is_unhealthy_until_the_mount_is_visible_and_live_is_not(app_client):
+def test_ping_creates_the_storage_root_and_is_healthy_right_away(app_client):
+    """A fresh task has no /mnt/s3 until something writes there; a readiness
+    gate that merely waited for the directory deadlocked the rollout (no
+    traffic → no write → never healthy). The root is created up front instead."""
     _app, client, mount = app_client
 
+    assert not mount.exists()
     assert client.get("/live").status_code == 200
-    assert client.get("/ping").status_code == 503        # volume not attached yet
+    assert client.get("/ping").status_code == 200
+    assert mount.is_dir()                                  # created by the probe
 
-    mount.mkdir(parents=True)
-    (mount / "sessions").mkdir()
-    assert client.get("/ping").status_code == 200        # ALB may route traffic now
+
+def test_ping_is_unhealthy_when_the_storage_root_cannot_be_created(tmp_path, monkeypatch):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(blocker / "mnt"))   # parent is a file → mkdir fails
+    monkeypatch.setenv("SESSION_STORE_BACKEND", "s3files")
+    import app
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app.app)
     assert client.get("/live").status_code == 200
+    assert client.get("/ping").status_code == 503

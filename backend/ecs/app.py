@@ -483,7 +483,17 @@ async def startup():
     _background_tasks_lock = asyncio.Lock()
     _metric_task = asyncio.create_task(_metric_publisher())
     _resolve_contact_flow_kb_id()
-    logger.info(f"AICC Builder ECS started. S3FILES_MOUNT={S3FILES_MOUNT}, REGION={AWS_REGION}")
+    storage_ok = _ensure_storage_root(S3FILES_MOUNT)
+    logger.info(
+        "AICC Builder ECS started. S3FILES_MOUNT=%s exists=%s is_mount=%s, REGION=%s",
+        S3FILES_MOUNT, storage_ok, os.path.ismount(S3FILES_MOUNT), AWS_REGION,
+    )
+    if storage_ok and not os.path.ismount(S3FILES_MOUNT):
+        logger.warning(
+            "[storage] %s is a plain directory, not a mounted volume — files written here are "
+            "local to this task; sessions rely on the S3 dual-write + hydration path.",
+            S3FILES_MOUNT,
+        )
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -1336,15 +1346,32 @@ async def live():
     return {"status": "alive"}
 
 
+def _ensure_storage_root(path: str) -> bool:
+    """Make sure the session storage root exists; False when it cannot be created.
+
+    With a real S3 Files volume the directory is mounted before the process
+    starts. Without one (observed on dev: the task definition carries the volume
+    but no mount point, so `/mnt/s3` is a plain directory) every path under it
+    used to be created lazily by the first write — a fresh task had no root at
+    all until a session touched it, which is also why a new task briefly
+    answered with an empty workspace. Creating it up front makes the root's
+    presence a real readiness signal instead of a race.
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+        return os.path.isdir(path)
+    except OSError as exc:
+        logger.error("[storage] cannot create storage root %s: %s", path, exc)
+        return False
+
+
 @app.get("/ping")
 async def ping():
-    # NFS mount diagnostics. With the s3files backend the ALB must not route
-    # traffic here until the volume is visible: a task that served requests
-    # before its mount appeared (observed ~2.5 min after start) answered with an
-    # empty workspace and saved a turn's specs where no other task could see them.
+    # ALB target health. The storage root must be usable before traffic is
+    # routed here; the diagnostics below are what /api/debug/nfs reports too.
     s3files_mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
-    mount_exists = os.path.isdir(s3files_mount)
     mount_required = os.environ.get("SESSION_STORE_BACKEND", "").lower() == "s3files"
+    mount_exists = _ensure_storage_root(s3files_mount) if mount_required else os.path.isdir(s3files_mount)
     ready = mount_exists or not mount_required
     sessions_dir = os.path.join(s3files_mount, "sessions")
     sessions_exists = os.path.isdir(sessions_dir)
