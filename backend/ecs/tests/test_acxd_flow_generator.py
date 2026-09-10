@@ -1113,3 +1113,19 @@ def test_knowledge_base_node_gets_required_name_and_only_sdk_keys():
     assert kb == {"knowledgeBaseId": "{KB:Product FAQ}", "name": "Product FAQ"}
     assert fixed["nodes"][gid]["metadata"]["maxRetries"] == 2
     assert validate_generated_flow(fixed, plan, spec) == []
+
+
+def test_repair_renames_digit_slot_type_ids_and_fills_generative_prompts():
+    """Live (Harbor Bank): 5 attempts lost to `cardLast4` as a slot type name
+    and a generative_text node the model left without a prompt."""
+    flow = copy.deepcopy(REFUND_FLOW)
+    flow["slotTypes"] = [{"name": "cardLast4", "type": "cardLast4"}]
+    uid = [k for k, v in flow["nodes"].items() if v["type"] == "user_input"][0]
+    flow["nodes"][uid]["slot"] = {"name": "cardLast4", "type": "cardLast4"}
+    gid = [k for k, v in flow["nodes"].items() if v["type"] == "generative_text"][0]
+    flow["nodes"][gid]["metadata"] = {"generativeText": {"prompt": ""}}
+    plan = copy.deepcopy(PLAN)
+    fixed = repair_generated_flow(flow, plan, SPEC)
+    assert fixed["slotTypes"][0] == {"name": "cardLast", "type": "cardLast"}
+    assert fixed["nodes"][uid]["slot"] == {"name": "cardLast", "type": "cardLast"}
+    assert fixed["nodes"][gid]["metadata"]["generativeText"]["prompt"].strip()

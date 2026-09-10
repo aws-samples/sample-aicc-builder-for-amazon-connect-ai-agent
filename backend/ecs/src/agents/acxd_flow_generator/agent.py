@@ -477,6 +477,72 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
     if not isinstance(nodes, dict):
         return flow
 
+    # LIVE (Harbor Bank, 5 wasted attempts): the model names the attached slot
+    # type after the FIELD (`cardLast4`), but slot type ids are letters only —
+    # the same _slot_type_id rule the resource builder applies. Rename the
+    # attachment and every node slot/reference that points at it.
+    def _letters_only_id(raw: str) -> str:
+        candidate = re.sub(r"[^A-Za-z]", "", str(raw or ""))
+        if len(candidate) < 3:
+            candidate = f"{candidate}Value" if candidate else "CustomValue"
+        return candidate[:100]
+
+    builtin_slot_types = {"text", "number", "boolean"}
+    renamed: dict[str, str] = {}
+    attached = flow.get("slotTypes")
+    if isinstance(attached, list):
+        for entry in attached:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("name", "type"):
+                value = str(entry.get(key) or "")
+                if not value or value.lower() in builtin_slot_types or value.startswith("NLX."):
+                    continue
+                fixed = _letters_only_id(value)
+                if fixed != value:
+                    renamed[value] = fixed
+                    entry[key] = fixed
+    if renamed:
+        for node in nodes.values():
+            if not isinstance(node, dict):
+                continue
+            slot = node.get("slot")
+            if isinstance(slot, dict):
+                for key in ("type", "name"):
+                    if slot.get(key) in renamed:
+                        slot[key] = renamed[slot[key]]
+            for key in ("slotType", "slotTypeId"):
+                if node.get(key) in renamed:
+                    node[key] = renamed[node[key]]
+        logger.info("[ACXDFlowGen] repaired %s: letters-only slot type ids %s",
+                    flow.get("flowId"), renamed)
+
+    # LIVE: a generative node without a prompt "generates nothing at runtime"
+    # (FLOW_GENERATIVE_NO_PROMPT) and the model keeps omitting it. Fill it from
+    # the confirmed plan step — the user approved that wording.
+    step_texts = [
+        str(step.get("description") or "").strip()
+        for step in (plan.get("steps") or []) if isinstance(step, dict)
+        and step.get("node_type") in ("generative_text", "generative_task", "generative_journey")
+    ]
+    cfg_keys = {"generative_text": "generativeText", "generative_task": "agenticTask",
+                "generative_journey": "generativeJourney"}
+    for node in nodes.values():
+        if not isinstance(node, dict) or node.get("type") not in cfg_keys:
+            continue
+        meta = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        node["metadata"] = meta
+        cfg_key = cfg_keys[node["type"]]
+        cfg = meta.get(cfg_key) if isinstance(meta.get(cfg_key), dict) else {}
+        meta[cfg_key] = cfg
+        if not str(cfg.get("prompt") or "").strip():
+            fallback = step_texts.pop(0) if step_texts else (
+                str(node.get("description") or plan.get("purpose") or "Respond helpfully to the customer.")
+            )
+            cfg["prompt"] = fallback
+            logger.info("[ACXDFlowGen] repaired %s: filled empty %s.prompt from the plan",
+                        flow.get("flowId"), cfg_key)
+
     # LIVE-VERIFIED (2026-09-08) journey/tool repairs:
     #  - `intent_capture` is not a real node (palette has none, metadata is
     #    dropped, and a deployed flow using it failed on the first utterance).
