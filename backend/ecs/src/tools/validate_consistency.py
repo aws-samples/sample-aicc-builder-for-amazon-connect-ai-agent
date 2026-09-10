@@ -1666,12 +1666,40 @@ def _d9_openapi_operations(documents: list[dict]) -> dict[str, dict]:
                     for media in (response.get("content") or {}).values():
                         if isinstance(media, dict):
                             response_fields.update(response_properties(doc, media.get("schema")))
-                operations[path] = {
+                entry = {
                     "request": request_fields,
                     "response": response_fields,
                     "operation_id": operation.get("operationId"),
                 }
+                # Register every spelling a Data Request may legitimately use for
+                # this operation. Live (4 sessions): the OpenAPI generator put the
+                # /tools prefix in servers[0].url and left the path key bare
+                # ("/check_balance"), or used kebab-case, while the Data Request
+                # builder targets {WEBHOOK_URL}/tools/<operation_id>. Same
+                # endpoint, so it must not be a D9-3 finding.
+                for alias in _d9_path_aliases(doc, path):
+                    operations.setdefault(alias, entry)
     return operations
+
+
+def _d9_path_aliases(document: dict, path: str) -> list[str]:
+    """Canonical spellings of an OpenAPI path: as written, with the servers[0].url
+    path prefix folded in, and snake_case/kebab-case variants of the last segment."""
+    aliases = [path]
+    servers = document.get("servers") or []
+    server_url = str((servers[0] or {}).get("url") or "") if servers and isinstance(servers[0], dict) else ""
+    prefix = re.sub(r"^https?://[^/]+", "", server_url).rstrip("/")
+    prefix = re.sub(r"\{[^}]*\}", "", prefix).rstrip("/")     # drop {stage}-style variables
+    if prefix and prefix != "/" and not path.startswith(prefix + "/"):
+        aliases.append(f"{prefix}{path}")
+    if "/tools/" not in path and not path.startswith("/tools"):
+        aliases.append(f"/tools{path}")
+    for candidate in list(aliases):
+        head, _, tail = candidate.rpartition("/")
+        for variant in (tail.replace("-", "_"), re.sub(r"(?<!^)([A-Z])", r"_\1", tail).lower()):
+            if variant and variant != tail:
+                aliases.append(f"{head}/{variant}")
+    return list(dict.fromkeys(aliases))
 
 
 def _d9_get(value: Any, *names: str, default: Any = None) -> Any:
@@ -1687,13 +1715,41 @@ def _d9_get(value: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
+def _d9_name_variants(name: Any) -> set[str]:
+    raw = str(name or "")
+    snake = re.sub(r"(?<!^)([A-Z])", r"_\1", raw).lower()
+    camel = re.sub(r"_+([a-zA-Z0-9])", lambda m: m.group(1).upper(), raw)
+    return {raw, raw.lower(), snake, camel, (camel[:1].lower() + camel[1:]) if camel else camel}
+
+
 def _d9_field_index(operation: Any) -> dict[str, Any]:
     fields = list(_d9_get(operation, "input_fields", "inputFields", default=[]) or [])
     fields.extend(_d9_get(operation, "output_fields", "outputFields", default=[]) or [])
-    return {
-        name: field for field in fields
-        if (name := _d9_get(field, "name", "field_name", "fieldName"))
-    }
+    index: dict[str, Any] = {}
+    for field in fields:
+        name = _d9_get(field, "name", "field_name", "fieldName")
+        if not name:
+            continue
+        index.setdefault(name, field)
+        # A flow slot `phonePin` for the FieldSpec `phone_pin` (or vice versa)
+        # is the same field — live runs failed D9-4 on the spelling alone.
+        for variant in _d9_name_variants(name):
+            index.setdefault(variant, field)
+    return index
+
+
+def _d9_regex_canonical(pattern: Any) -> str:
+    """Canonical form for comparing two regexes that mean the same thing:
+    `^\\d{8}$` (FieldSpec) vs `^[0-9]{8}$` (what the flow generator wrote)."""
+    text = str(pattern or "").strip()
+    text = re.sub(r"\s+", "", text)
+    text = text.replace("\\\\d", "\\d").replace("\\d", "[0-9]")
+    text = text.replace("[[:digit:]]", "[0-9]")
+    if text and not text.startswith("^"):
+        text = "^" + text
+    if text and not text.endswith("$"):
+        text = text + "$"
+    return text
 
 
 def _d9_constraint_metadata(slot_type: dict) -> dict:
@@ -1900,6 +1956,11 @@ def _d9_slot_type_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
             field_name = slot.get("field_name") or slot.get("fieldName") or slot.get("name")
             field = fields.get(field_name)
             if field is None:
+                for variant in _d9_name_variants(field_name) | _d9_name_variants(slot.get("name")):
+                    if variant in fields:
+                        field = fields[variant]
+                        break
+            if field is None:
                 issues.append(_d9_issue(
                     "D9-4", f"Flow {flow.get('flow_id')!r} slot {slot.get('name')!r} maps to unknown "
                     f"OperationSpec field {field_name!r}", asset_type="slot_type", field=field_name,
@@ -1931,7 +1992,9 @@ def _d9_slot_type_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
                 continue
             actual_enum = [entry.get("value") for entry in slot_type.get("values") or [] if isinstance(entry, dict)]
             metadata = _d9_constraint_metadata(slot_type)
-            actual_regex = slot.get("regex") or metadata.get("regex") or metadata.get("pattern")
+            # The shipped asset is what deploys — read its constraint first and fall
+            # back to the plan's slot spelling only when the asset carries none.
+            actual_regex = metadata.get("regex") or metadata.get("pattern") or slot.get("regex")
             actual_min = metadata.get("minLength", metadata.get("min_length"))
             actual_max = metadata.get("maxLength", metadata.get("max_length"))
             if expected_enum and actual_enum != expected_enum:
@@ -1940,7 +2003,7 @@ def _d9_slot_type_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
                     f"OperationSpec {field_name!r} enum {expected_enum!r}", asset_type="slot_type",
                     field=field_name, operation_id=operation_id,
                 ))
-            if expected_regex and actual_regex != expected_regex:
+            if expected_regex and _d9_regex_canonical(actual_regex) != _d9_regex_canonical(expected_regex):
                 issues.append(_d9_issue(
                     "D9-4", f"Slot type {type_id!r} regex {actual_regex!r} does not match "
                     f"OperationSpec {field_name!r} regex {expected_regex!r}", asset_type="slot_type",

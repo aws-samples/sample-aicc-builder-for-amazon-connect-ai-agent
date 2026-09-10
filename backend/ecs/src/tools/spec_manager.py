@@ -1097,7 +1097,8 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
 _LEN_RANGE_RE = re.compile(r'(\d+)\s*[~\-–]\s*(\d+)\s*(?:자|글자|chars?|characters?)?')
 _LEN_MAX_RE = re.compile(r'(?:최대|max(?:imum)?|up to)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
 _LEN_MIN_RE = re.compile(r'(?:최소|min(?:imum)?|at least)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
-_LEN_EXACT_RE = re.compile(r'(\d+)\s*(?:자리|자|글자|digits?|chars?|characters?)')
+_LEN_EXACT_RE = re.compile(r'(\d+)\s*(?:자리|자|글자|桁|文字|digits?|chars?|characters?)')
+_CJK_RE = re.compile(r'[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]')
 _LOOKS_LIKE_DATEFMT_RE = re.compile(r'^\s*(?:[YyMmDdHhSs][\-/:. ]?){2,}\s*$|ISO\s*8601|ISO8601|RFC\s*3339', re.IGNORECASE)
 
 
@@ -1216,9 +1217,10 @@ def _exact_length_pattern(text: str, n: int) -> Optional[str]:
     """Regex for an exact-length phrase: alphanumeric beats digits ("영숫자 12자리"
     contains the substring "숫자" but means letters AND digits)."""
     low = text.lower()
-    if "영숫자" in text or "alphanumeric" in low or "영문" in text or "letters" in low:
+    if ("영숫자" in text or "alphanumeric" in low or "영문" in text or "letters" in low
+            or "英数字" in text or "英字" in text):
         return r"^[A-Za-z0-9]{" + str(n) + r"}$"
-    if "숫자" in text or "digit" in low:
+    if "숫자" in text or "digit" in low or "数字" in text:
         return r"^\d{" + str(n) + r"}$"
     return None
 
@@ -1237,7 +1239,18 @@ def _enforce_exact_length_phrase(data: dict) -> dict:
     ftype = (data.get("field_type") or data.get("type") or "").lower()
     if ftype in ("date", "datetime", "time", "number", "integer", "boolean", "array", "object"):
         return data
+    # Live (Japanese run): the interviewer wrote the customer's phrase itself
+    # into `pattern` ("^数字10桁$"). A pattern containing CJK text is never a
+    # regex — read it as a phrase and derive the regex from it, or drop it.
+    pattern = data.get("pattern")
+    phrase_pattern = pattern if isinstance(pattern, str) and _CJK_RE.search(pattern) else None
+    if phrase_pattern is not None:
+        phrase = phrase_pattern.strip("^$ ")
+        ex_p = _LEN_EXACT_RE.search(phrase)
+        data["pattern"] = _exact_length_pattern(phrase, int(ex_p.group(1))) if ex_p else None
     text = " ".join(str(data.get(k) or "") for k in ("description", "validation", "constraints", "format_hint"))
+    if phrase_pattern is not None:
+        text = f"{text} {phrase_pattern}"
     ex = _LEN_EXACT_RE.search(text)
     if not ex or _LEN_RANGE_RE.search(text):
         return data

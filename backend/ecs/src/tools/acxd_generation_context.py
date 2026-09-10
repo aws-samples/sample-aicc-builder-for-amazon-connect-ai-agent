@@ -67,6 +67,7 @@ def _field_dict(field: Any) -> dict:
         ("example_value", "example"),
         ("example", "example"),
         ("is_pii", "sensitive"),
+        ("sensitive", "sensitive"),
     ):
         if raw.get(source) is not None:
             result[target] = raw[source]
@@ -275,25 +276,53 @@ def _slot_type_id(raw: str) -> str:
     return candidate[:100]
 
 
+def _name_variants(name: str) -> set[str]:
+    """camelCase / snake_case / lowercase spellings of a field or slot name."""
+    raw = str(name or "")
+    snake = re.sub(r"(?<!^)([A-Z])", r"_\1", raw).lower()
+    camel = re.sub(r"_+([a-zA-Z0-9])", lambda m: m.group(1).upper(), raw)
+    return {raw, raw.lower(), snake, camel, camel[:1].lower() + camel[1:] if camel else camel}
+
+
+def _field_constraint(field: dict, *keys: str):
+    for key in keys:
+        if field.get(key) is not None:
+            return field[key]
+    return None
+
+
 def _derive_slot_types(flow_plans: list[dict], operations: dict[str, Any]) -> list[dict]:
     """Derive custom ACXD slot types from flow slots and FieldSpec constraints."""
     output: dict[str, dict] = {}
     for plan in flow_plans:
         operation = operations.get(plan.get("operation_id"))
-        input_fields = {
-            field.get("name"): field
-            for field in (_field_dict(item) for item in (_model_dump(operation).get("input_fields") or []))
-            if field.get("name")
-        }
+        input_fields: dict[str, dict] = {}
+        for item in (_model_dump(operation).get("input_fields") or []):
+            field = _field_dict(item)
+            if field.get("name"):
+                # Live: the flow plan names a slot `phonePin` for the FieldSpec
+                # `phone_pin` (or the reverse); an exact-name miss silently
+                # produced no slot type and D9-4 refused the bundle.
+                for variant in _name_variants(field["name"]):
+                    input_fields.setdefault(variant, field)
         for slot in plan.get("slots") or []:
             if not isinstance(slot, dict) or not slot.get("name"):
                 continue
-            field = input_fields.get(slot.get("field_name") or slot["name"], {})
-            declared_type = str(slot.get("type") or field.get("type") or "text")
-            constrained = any(
-                field.get(key) is not None
-                for key in ("enum_values", "regex", "min_length", "max_length")
-            )
+            field = {}
+            for candidate in (slot.get("field_name"), slot["name"]):
+                for variant in _name_variants(candidate or ""):
+                    if variant in input_fields:
+                        field = input_fields[variant]
+                        break
+                if field:
+                    break
+            declared_type = str(slot.get("type") or field.get("type") or field.get("field_type") or "text")
+            # FieldSpec spells the regex `pattern`; older specs and plans say `regex`.
+            regex = _field_constraint(field, "regex", "pattern") or slot.get("regex")
+            enum_values = _field_constraint(field, "enum_values", "allowed_values", "enum") or []
+            min_length = _field_constraint(field, "min_length", "minLength")
+            max_length = _field_constraint(field, "max_length", "maxLength")
+            constrained = any(v not in (None, [], "") for v in (regex, enum_values, min_length, max_length))
             custom = declared_type.lower() not in _BUILTIN_SLOT_TYPES or constrained
             if not custom:
                 continue
@@ -301,15 +330,17 @@ def _derive_slot_types(flow_plans: list[dict], operations: dict[str, Any]) -> li
                 declared_type if declared_type.lower() not in _BUILTIN_SLOT_TYPES else slot["name"]
             )
             slot["type"] = slot_type_id
-            values = field.get("enum_values") or slot.get("examples") or []
+            if regex:
+                slot["regex"] = regex          # the plan mirrors the FieldSpec, not the model's respelling
+            values = list(enum_values) or slot.get("examples") or []
             if not values and field.get("example") is not None:
                 values = [field["example"]]
             if not values:
                 values = [slot["name"]]
             metadata = {
-                key: field[key]
-                for key in ("regex", "min_length", "max_length")
-                if field.get(key) is not None
+                key: value for key, value in (
+                    ("regex", regex), ("min_length", min_length), ("max_length", max_length))
+                if value is not None
             }
             current = output.setdefault(slot_type_id, {
                 "slotTypeId": slot_type_id,
