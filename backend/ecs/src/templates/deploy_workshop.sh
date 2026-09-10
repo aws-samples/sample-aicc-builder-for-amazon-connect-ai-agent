@@ -8,7 +8,8 @@
 # Every decision point is an interactive multiple-choice prompt.
 #
 # Commands:
-#   ./deploy.sh           Deploy all workshop assets (default)
+#   ./deploy.sh           Deploy all workshop assets (default; the runtime target —
+#                         classic or acxd — is read from the bundle, --target overrides)
 #   ./deploy.sh cleanup   Tear down ALL deployed resources (reverse order)
 #   ./deploy.sh status    Show current deployment status
 #
@@ -39,16 +40,22 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET="${DEPLOY_TARGET:-classic}"
+# Runtime target. Resolution order: --target flag → DEPLOY_TARGET env → the
+# bundle itself. An ACXD bundle always carries assets/acxd/application.json and
+# deploy-manifest.json (written by the packager), a Classic bundle never does —
+# so a plain `./deploy.sh` does the right thing without anyone remembering a flag.
+TARGET="${DEPLOY_TARGET:-}"
+TARGET_SOURCE="env"
+[ -n "$TARGET" ] || TARGET_SOURCE="auto"
 DRY_RUN=false
 COMMAND="deploy"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --target)
             [ "$#" -gt 1 ] || { echo "ERROR: --target requires classic or acxd" >&2; exit 2; }
-            TARGET="$2"; shift 2 ;;
+            TARGET="$2"; TARGET_SOURCE="flag"; shift 2 ;;
         --target=*)
-            TARGET="${1#--target=}"; shift ;;
+            TARGET="${1#--target=}"; TARGET_SOURCE="flag"; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
         deploy|cleanup|clean|destroy|delete|status)
@@ -58,10 +65,23 @@ while [ "$#" -gt 0 ]; do
             exit 2 ;;
     esac
 done
+detect_runtime_target() {
+    if [ -f "$SCRIPT_DIR/assets/acxd/application.json" ] || [ -f "$SCRIPT_DIR/deploy-manifest.json" ]; then
+        echo "acxd"
+    else
+        echo "classic"
+    fi
+}
+if [ -z "$TARGET" ]; then
+    TARGET="$(detect_runtime_target)"
+fi
 case "$TARGET" in
     classic|acxd) ;;
     *) echo "ERROR: --target must be classic or acxd (got '$TARGET')" >&2; exit 2 ;;
 esac
+if [ "$TARGET_SOURCE" != "auto" ] && [ "$TARGET" != "$(detect_runtime_target)" ]; then
+    echo "⚠️  --target $TARGET requested, but the bundle looks like a $(detect_runtime_target) bundle (assets/acxd/ $( [ -d "$SCRIPT_DIR/assets/acxd" ] && echo present || echo absent ))." >&2
+fi
 STATE_FILE="$SCRIPT_DIR/.aicc_deploy_state"
 RUNNER_STATE_FILE="$SCRIPT_DIR/.deploy-state.json"
 
@@ -325,6 +345,14 @@ do_preflight() {
     [ -n "$FLOW_JSON" ]     && echo "     ✅ Contact Flow:    ${FLOW_JSON#$SCRIPT_DIR/}"
     [ -n "$PROMPT_FILE" ]   && echo "     ✅ AI Prompt:       ${PROMPT_FILE#$SCRIPT_DIR/}"
     [ -d "$SCRIPT_DIR/faq" ] && echo "     ✅ FAQ:             faq/"
+    if [ "$TARGET" = "acxd" ]; then
+        echo "     ✅ ACXD assets:     assets/acxd/ ($(find "$SCRIPT_DIR/assets/acxd/flows" -name '*.json' 2>/dev/null | wc -l | tr -d ' ') flows) + deploy-manifest.json"
+    fi
+    case "$TARGET_SOURCE" in
+        auto) echo "     🎯 Runtime target:  $TARGET (auto-detected from the bundle; override with --target)" ;;
+        flag) echo "     🎯 Runtime target:  $TARGET (--target)" ;;
+        *)    echo "     🎯 Runtime target:  $TARGET (DEPLOY_TARGET)" ;;
+    esac
 
     # Detect language from contact flow set-voice metadata or flow_config
     DETECTED_LANG=""

@@ -15,8 +15,8 @@ The packager runs D9 before archive creation. Any D9 error, manifest-schema fail
 ## Deploy
 
 ```bash
-./deploy.sh --target acxd --dry-run
-./deploy.sh --target acxd
+./deploy.sh --dry-run          # runtime target is detected from the bundle; --target overrides
+./deploy.sh
 ./deploy.sh status --target acxd
 ./deploy.sh cleanup --target acxd
 ```

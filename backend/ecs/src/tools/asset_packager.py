@@ -331,11 +331,13 @@ CloudFormation, Lambda, OpenAPI, and Connect Contact Flow assets remain in the
 archive; ACXD replaces the Classic Lex, AI Prompt, and AgentCore Gateway phases.
 
 ```bash
-./deploy.sh --target acxd --dry-run
-./deploy.sh --target acxd
-./deploy.sh status --target acxd
-./deploy.sh cleanup --target acxd
+./deploy.sh --dry-run      # the script detects the ACXD bundle (assets/acxd/) by itself
+./deploy.sh                # non-interactive: AUTO_CONFIRM=1 CONNECT_INSTANCE_ID=... ./deploy.sh
+./deploy.sh status
+./deploy.sh cleanup
 ```
+
+`--target acxd|classic` is only needed to override the detection.
 
 The script prompts for `ACXD_WORKSPACE_ID` and `ACXD_API_KEY` when needed and
 never writes either into the bundle. For external Data Requests it passes the
@@ -361,7 +363,7 @@ def _generate_wiring_guide(bundle: dict) -> str:
         "Flow-Language action type. The generated contact flow therefore keeps a",
         "placeholder instead of guessing a non-portable JSON action.",
         "",
-        "1. Run `./deploy.sh --target acxd` and use a **Connect Customer** instance.",
+        "1. Run `./deploy.sh` (the ACXD bundle is detected automatically) against a **Connect Customer** instance.",
         "2. Open the imported contact flow and replace the action whose Identifier",
         "   starts with `AgenticCX` with an **Agentic CX** block.",
         f"3. Select the workspace, deployed application **{application.get('name', 'ACXD application')}**, and alias.",
