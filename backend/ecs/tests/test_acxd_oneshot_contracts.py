@@ -116,3 +116,16 @@ def test_real_masks_still_convert_and_sentences_are_left_alone():
     sentence = _normalize_field_constraints({"name": "note", "field_type": "string",
                                              "date_format": "free text entered by the agent"})
     assert sentence.get("pattern") is None
+
+
+# --- application name for a CJK company name comes from the project slug ------
+
+def test_application_name_falls_back_to_the_project_name():
+    from tools.acxd_resource_builders import build_application
+    spec = {"business_profile": {"company_name": "서울밝은안과"},
+            "infrastructure": {"project_name": "seoul-bright-eye"},
+            "flows": [{"flow_id": "Welcome", "role": "welcome", "language": "ko-KR"}]}
+    app = build_application(spec)
+    assert app["name"] == "Seoul Bright Eye Assistant"
+    bare = build_application({"business_profile": {"company_name": "서울밝은안과"}, "flows": []})
+    assert bare["name"] == "AICC Assistant"

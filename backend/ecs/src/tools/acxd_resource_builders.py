@@ -312,7 +312,19 @@ def build_application(spec: dict) -> dict:
     if any(ord(c) > 126 for c in name):
         ascii_words = re.findall(r"[\x20-\x7E]+", name)
         cleaned = " ".join(w.strip() for w in ascii_words if w.strip(" ()-_.")).strip()
-        name = cleaned if len(re.sub(r"[^A-Za-z]", "", cleaned)) >= 3 else "AICC Assistant"
+        core = re.sub(r"\bAssistant\b", "", cleaned, flags=re.IGNORECASE)
+        if len(re.sub(r"[^A-Za-z]", "", core)) >= 3:
+            name = cleaned
+        else:
+            # A Korean/Japanese company name has no ASCII to keep. The Classic
+            # infrastructure spec always carries an ASCII project name
+            # (seoul-bright-eye, sakura-insurance) — build the application name
+            # from it so two customers never both deploy as "AICC Assistant".
+            infra = spec.get("infrastructure") or {}
+            project = str(infra.get("project_name") or infra.get("projectName") or "").strip()
+            words = [w.capitalize() for w in re.split(r"[^A-Za-z0-9]+", project) if w]
+            name = (" ".join(words) + " Assistant").strip() if words and re.search(r"[A-Za-z]{3}", project) \
+                else "AICC Assistant"
     # The application's languages MUST match the flows'. Live defect: the app
     # was built with the en-US default while every flow was ko-KR, so the
     # deployment refused the language ("ko-KR is not included in this build")
