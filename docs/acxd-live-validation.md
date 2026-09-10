@@ -23,6 +23,20 @@ customer's bundle deploys one-shot through the bundled `deploy.sh`.
 | 2 | Sunny Hotel (en) | Same resource set; first attempt failed on `metadata.knowledgeBase.name`, fixed in the runner and generator, then completed |
 | 3 | Seoul Bright Eye Clinic (ko) | Packaged by the fixed backend and deployed **without any manual repair** |
 
+## Full `./deploy.sh --target acxd` run (2026-09-10, workshop account)
+
+With account credentials for the Connect Customer instance, the Harbor Bank
+bundle's own `deploy.sh` ran non-interactively (`AUTO_CONFIRM=1
+CONNECT_INSTANCE_ID=… ACXD_WORKSPACE_ID=… ACXD_API_KEY=…`):
+CloudFormation stack → Lambda code → OpenAPI host substitution → Connect
+instance attributes → ACXD resources with the stack's real API endpoint as the
+Data Request webhook → application build → live `development` deployment →
+Contact Flow imported and published. The deployed API answered the seeded
+identity (`verified: true`, balance) through the same URL the Data Requests
+call. Three blockers found on the way are listed under "Cross-asset contract
+facts" (InstanceType check, deployment language codes / update path, contact
+flow placeholder + Q in Connect block).
+
 ## Service contract facts (not in the SDK types, learned from the API)
 
 | Area | Fact | Where it is enforced now |
@@ -47,6 +61,9 @@ customer's bundle deploys one-shot through the bundled `deploy.sh`.
 | A system role planned twice (`WelcomeFlow` + `Welcome`) shipped nine flows | one flow per system role, `remove_acxd_flow_plan`, readiness check |
 | A slot type named after a field with digits (`cardLast4`) or a generative node without a prompt burned all LLM attempts | deterministic repairs |
 | A wrong FieldSpec could not be corrected after the interview | `update_operation_spec` is exposed to the ACXD orchestrator after the interview; the overlay says to regenerate afterwards |
+| `describe-instance` returns no `InstanceType` for a working Connect Customer instance; `deploy.sh` aborted after CloudFormation | warn and continue |
+| A deployment needs `languageCodes`; `UpdateApplicationDeployment` answers 500 for every payload; a second `CreateApplicationDeployment` per environment is refused | runner takes the languages from the application and promotes a build by delete + create |
+| `MessageParticipant` cannot carry `Transitions.Conditions`; the Classic `CreateWisdomSession` block has an ARN ACXD never provisions | placeholder → `Compare` on `$.Attributes.AgenticCXBranch`; Q in Connect block spliced out |
 
 ## Runtime / session facts
 
