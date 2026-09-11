@@ -109,7 +109,9 @@ def spec_completeness_problems(session_id: Optional[str] = None) -> list[str]:
     except Exception as exc:  # pragma: no cover
         return [f"OperationSpecs unavailable: {exc}"]
     if not specs:
-        return ["no OperationSpec saved yet"]
+        # Nothing to guess about operations (a scoped run — FAQ-only, Contact
+        # Flow-only — legitimately has none); other gates own that case.
+        return []
     for op_id, spec in specs.items():
         problems.extend(operation_spec_problems(op_id, spec))
     try:
