@@ -1173,6 +1173,15 @@ Phase 2b (if needed) — Next batch of up to 6 lambdas, proceed automatically.
 ⚠️ **IMPORTANT**: Each session_tool (e.g., log_call_result) also needs its own Lambda.
 Include every session_tool returned by get_all_tool_ids() in your lambda_generator_agent fan-out.
 
+🧪 **Save-time gate (fix before moving on)**: every lambda_generator_agent result
+carries `syntax_ok` and `spec_field_gaps` (spec input fields the handler never
+reads, spec output / envelope fields — `success`, `errorCode`, `message` — it
+never writes). If either is non-empty, call lambda_generator_agent again for
+THAT operation with a precise `modification_request` naming the fields, in the
+same phase, before the next batch. Do not carry these into the review: the
+review's blocking set is deterministic and will refuse packaging until they
+are gone.
+
 After ALL lambda batches complete:
 
 **Phone-based Customer Lookup Lambda (end of Phase 2) — MANDATORY when enabled**:

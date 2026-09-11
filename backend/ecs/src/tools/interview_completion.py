@@ -80,6 +80,25 @@ def complete_interview(session_id: str, summary: str = "") -> dict:
                 "problems": problems,
             }
 
+    # What generation would have to guess must be in the spec first: response
+    # fields with types, enum values, slots that name a real input field,
+    # escalation conditions and the agent's context payload. Each gap here was
+    # filled differently by each generator on live sessions.
+    try:
+        from tools.spec_completeness import spec_completeness_problems
+        gaps = spec_completeness_problems(session_id)
+    except Exception:
+        gaps = []
+    if gaps:
+        return {
+            "success": False,
+            "message": ("The spec still leaves things for generation to guess. Resolve each item "
+                        "(ask the customer, then save_operation_spec / upsert_acxd_flow_plan / "
+                        "upsert_acxd_application) and call complete_interview again."),
+            "problems": gaps[:40],
+            "problem_count": len(gaps),
+        }
+
     success = write_interview_handoff(session_id, summary)
 
     if success:
