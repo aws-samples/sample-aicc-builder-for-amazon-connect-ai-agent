@@ -49,6 +49,10 @@ flow placeholder + Q in Connect block).
 | Context variables | `UpdateContextVariable` keys by `contextVariableIdentifier` | runner |
 | Data Request webhook | The service checks that the URL is reachable at create time | documented; `deploy.sh` supplies the real API endpoint |
 | Application name | Must be ASCII; a CJK company name now derives it from the project slug | resource builder |
+| Secrets | `CreateSecret` / `UpdateSecret` take the value as **`secretValue`** (+ `isSensitive`); a `value` key is dropped by the SDK serializer and the service answers `InternalServerException: Failed to create secret` (2026-09-12) | runner |
+| Deployment language | `CreateApplicationDeployment` with `languageCodes: ["ko-KR"]` answered `InternalServerException: Failed to create deployment`; the same request without `languageCodes` was accepted and the deployment uses the application's language settings (`UpdateApplicationDeployment` without them answers `A deployment requires at least one language code`) (2026-09-12) | runner: send the codes, fall back without |
+| Backend API key | The generated API Gateway requires its key in the ACXD target; Data Requests send `x-api-key: {{secrets.BackendApiKey}}`; the runner fills the secret from the stack's `ApiKeyValue` output. Verified 2026-09-12: 403 without the key, 200 with it, Data Request stored with the secret reference | merge, Data Request builder, runner, D9-8 |
+| Lambda names | The template names functions `${ProjectName}-${Environment}-<op-with-hyphens>`; the runner resolves them from the stack's `AWS::Lambda::Function` resources instead of a naming convention | runner |
 
 ## Cross-asset contract facts
 
