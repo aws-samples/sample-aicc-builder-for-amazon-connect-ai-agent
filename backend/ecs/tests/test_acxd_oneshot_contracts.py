@@ -129,3 +129,36 @@ def test_application_name_falls_back_to_the_project_name():
     assert app["name"] == "Seoul Bright Eye Assistant"
     bare = build_application({"business_profile": {"company_name": "서울밝은안과"}, "flows": []})
     assert bare["name"] == "AICC Assistant"
+
+
+# --- slot types: one custom slot type per constrained field, never per type name ---
+
+def test_enum_slots_of_different_fields_get_their_own_slot_types():
+    """Live (SELC, 2026-09-11): productType / serviceType / installLocationType were
+    all declared `type: enum`, so they collapsed into ONE slot type 'enum' holding
+    every value of every field — and D9-4 rejected the bundle field by field."""
+    plans = [
+        {"operation_id": "get_cleaning_price",
+         "slots": [{"name": "productType", "type": "enum"}, {"name": "serviceType", "type": "enum"}]},
+        {"operation_id": "create_cleaning_reservation",
+         "slots": [{"name": "installLocationType", "type": "enum"}]},
+    ]
+    operations = {
+        "get_cleaning_price": {"input_fields": [
+            {"name": "productType", "enum_values": ["벽걸이실내기", "스탠드"]},
+            {"name": "serviceType", "enum_values": ["종합세척", "기본세척"]}]},
+        "create_cleaning_reservation": {"input_fields": [
+            {"name": "installLocationType", "enum_values": ["사업장", "가정"]}]},
+    }
+    types = {t["slotTypeId"]: [v["value"] for v in t["values"]] for t in _derive_slot_types(plans, operations)}
+    assert types == {
+        "productType": ["벽걸이실내기", "스탠드"],
+        "serviceType": ["종합세척", "기본세척"],
+        "installLocationType": ["사업장", "가정"],
+    }
+    # the plan now names the per-field slot type, and D9-4 resolves the same id
+    from tools.acxd_generation_context import slot_type_id_for
+    assert plans[0]["slots"][0]["type"] == "productType"
+    assert slot_type_id_for("productType", "enum") == "productType"
+    # a specific custom type name is still shared under the name it declares
+    assert slot_type_id_for("fromCity", "CityName") == "CityName"

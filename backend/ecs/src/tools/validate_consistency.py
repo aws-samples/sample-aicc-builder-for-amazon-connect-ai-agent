@@ -1944,7 +1944,6 @@ def _d9_slot_type_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
     }
     operation_specs = get_all_specs() or {}
     issues: list[dict] = []
-    builtin = {"text", "number", "boolean"}
     for flow in flow_spec.get("flows") or []:
         if not isinstance(flow, dict) or flow.get("role", "operation") != "operation":
             continue
@@ -1973,15 +1972,13 @@ def _d9_slot_type_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
             expected_max = _d9_get(field, "max_length", "maxLength")
             if not any(value is not None and value != [] for value in (expected_enum, expected_regex, expected_min, expected_max)):
                 continue
-            type_id = str(slot.get("type") or "")
-            # Task B derives a custom SlotType even for a built-in slot when
-            # FieldSpec adds enum/regex/length constraints. Mirror its
-            # _slot_type_id rule so D9 validates the emitted asset, not the
-            # pre-generation builtin spelling in ACXDFlowSpec.
-            if type_id.lower() in builtin:
-                seed = re.sub(r"[^A-Za-z]", "", str(slot.get("name") or ""))
-                type_id = (f"{seed}Value" if 0 < len(seed) < 3 else seed) or "CustomValue"
-                type_id = type_id[:100]
+            # Task B derives a custom SlotType for every constrained slot: named
+            # after the slot when the plan only declared a built-in or generic
+            # type ('text', 'enum', …), after the declared type otherwise. Resolve
+            # the id with the builder's own rule so D9 validates the emitted
+            # asset, not the plan's spelling.
+            from .acxd_generation_context import slot_type_id_for
+            type_id = slot_type_id_for(str(slot.get("name") or ""), str(slot.get("type") or ""))
             slot_type = slot_types.get(type_id)
             if slot_type is None:
                 issues.append(_d9_issue(

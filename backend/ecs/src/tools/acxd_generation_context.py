@@ -276,6 +276,31 @@ def _slot_type_id(raw: str) -> str:
     return candidate[:100]
 
 
+# Declared slot types that only name a *kind* of value, not one field's value
+# set. Deriving the slot type id from such a name shares one slot type between
+# every slot that declares it — live: three 'enum' slots (productType,
+# serviceType, installLocationType) collapsed into a single 'enum' slot type
+# holding all eight values, which D9-4 then rejected field by field.
+_GENERIC_SLOT_TYPES = {
+    "enum", "enumeration", "list", "choice", "choices", "option", "options",
+    "select", "selection", "category", "custom", "code", "value", "values",
+}
+
+
+def slot_type_id_for(slot_name: str, declared_type: str) -> str:
+    """Id of the custom slot type a flow slot deploys with.
+
+    A built-in or generic type name ('text', 'enum', 'choice', …) says nothing
+    about the field, so the id comes from the slot name — one slot type per
+    field. A specific custom type name ('OrderNumber') is kept as the shared id
+    it names. D9-4 uses the same rule to find the slot type it must validate.
+    """
+    kind = str(declared_type or "").strip().lower()
+    if not kind or kind in _BUILTIN_SLOT_TYPES or kind in _GENERIC_SLOT_TYPES:
+        return _slot_type_id(slot_name)
+    return _slot_type_id(declared_type)
+
+
 def _name_variants(name: str) -> set[str]:
     """camelCase / snake_case / lowercase spellings of a field or slot name."""
     raw = str(name or "")
@@ -326,9 +351,7 @@ def _derive_slot_types(flow_plans: list[dict], operations: dict[str, Any]) -> li
             custom = declared_type.lower() not in _BUILTIN_SLOT_TYPES or constrained
             if not custom:
                 continue
-            slot_type_id = _slot_type_id(
-                declared_type if declared_type.lower() not in _BUILTIN_SLOT_TYPES else slot["name"]
-            )
+            slot_type_id = slot_type_id_for(slot["name"], declared_type)
             slot["type"] = slot_type_id
             if regex:
                 slot["regex"] = regex          # the plan mirrors the FieldSpec, not the model's respelling
