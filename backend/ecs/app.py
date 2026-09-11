@@ -1974,6 +1974,18 @@ _REHYDRATE_FOLDER_TO_TYPE = {
     "faq": "faq",
     "knowledge-base": "faq",
     "knowledge_base": "faq",
+    # ACXD target: the application and its resources live in their own folders
+    # (same name as the frontend assetType). Without these, reopening an ACXD
+    # session showed every Classic asset but the ACXD Application entry vanished
+    # from the right pane whenever the browser's own autosave had missed it.
+    # acxd_secret holds placeholders the pane does not render — not replayed.
+    "acxd_application": "acxd_application",
+    "acxd_flow": "acxd_flow",
+    "acxd_slot_type": "acxd_slot_type",
+    "acxd_data_request": "acxd_data_request",
+    "acxd_guardrail": "acxd_guardrail",
+    "acxd_knowledge_base": "acxd_knowledge_base",
+    "acxd_context_variable": "acxd_context_variable",
     # NOTE: 'mermaid' is intentionally absent — the Contact Flow diagram is now
     # rendered from the JSON (React Flow), so legacy mermaid assets are not
     # rehydrated.
