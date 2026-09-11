@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { ContactFlowPreview } from './ContactFlowPreview';
+import { AcxdFlowPreview } from './AcxdFlowPreview';
 import { generatePresignedUrl } from '../services/sessions';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -88,6 +89,9 @@ export const AssetPreviewBubble = memo(function AssetPreviewBubble({ preview, la
   // Delegate to specialized components
   if (preview.assetType === 'contact_flow') {
     return <ContactFlowPreview preview={preview} language={language} />;
+  }
+  if (preview.assetType === 'acxd_flow') {
+    return <AcxdFlowPreview preview={preview} language={language} />;
   }
 
 

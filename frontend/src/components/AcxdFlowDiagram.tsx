@@ -32,7 +32,12 @@ const NODE_HEIGHT = 76;
 type FlowDirection = 'TB' | 'LR';
 
 interface AcxdNodeData {
-  label: string;
+  /** Human-readable headline (message text, data request id, branch names, …). */
+  title: string;
+  /** Secondary line — slot name, variable, target flow, … Empty when nothing useful. */
+  detail: string;
+  /** Localised node-type chip. */
+  badge: string;
   identifier: string;
   nodeType: string;
   generative: boolean;
@@ -66,22 +71,140 @@ function shortText(value: string, max = 56): string {
   return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized;
 }
 
-function nodeName(node: Record<string, unknown>): string {
-  const metadata = isRecord(node.metadata) ? node.metadata : {};
-  const messages = Array.isArray(node.messages) ? node.messages : [];
-  const firstMessage = messages.find(isRecord);
+const NODE_TYPE_LABELS: Record<string, { ko: string; en: string }> = {
+  start: { ko: '시작', en: 'Start' },
+  end: { ko: '종료', en: 'End' },
+  user_input: { ko: '입력 받기', en: 'User input' },
+  data_request: { ko: '데이터 요청', en: 'Data request' },
+  choice: { ko: '분기', en: 'Choice' },
+  define: { ko: '변수 설정', en: 'Set variable' },
+  basic: { ko: '메시지', en: 'Message' },
+  escalate: { ko: '상담원 연결', en: 'Escalate' },
+  redirect: { ko: '플로우 이동', en: 'Go to flow' },
+  loop: { ko: '반복', en: 'Loop' },
+  generative_text: { ko: '생성 응답', en: 'Generative text' },
+  generative_task: { ko: '생성 작업', en: 'Generative task' },
+  generative_journey: { ko: '생성 여정', en: 'Generative journey' },
+  knowledge_base: { ko: '지식 베이스', en: 'Knowledge base' },
+  intent_capture: { ko: '의도 파악', en: 'Intent capture' },
+};
 
-  return shortText(
-    firstString(
-      node.name,
-      node.displayName,
-      node.label,
-      metadata.name,
-      metadata.displayName,
-      firstMessage?.body,
-      firstMessage?.text,
-    ),
-  );
+function typeBadge(nodeType: string, ko: boolean): string {
+  const entry = NODE_TYPE_LABELS[nodeType];
+  if (entry) return ko ? entry.ko : entry.en;
+  return nodeType.replace(/_/g, ' ');
+}
+
+function firstMessageBody(...containers: unknown[]): string {
+  for (const container of containers) {
+    const messages = Array.isArray(container) ? container : isRecord(container) ? container.messages : undefined;
+    if (!Array.isArray(messages)) continue;
+    const first = messages.find(isRecord);
+    const body = firstString(first?.body, first?.text, first?.content);
+    if (body) return body;
+  }
+  return '';
+}
+
+function branchNames(node: Record<string, unknown>): string[] {
+  const names: string[] = [];
+  for (const field of ['childNodes', 'children', 'branches', 'transitions']) {
+    const value = node[field];
+    if (!Array.isArray(value)) continue;
+    for (const entry of value) {
+      if (!isRecord(entry)) continue;
+      const name = firstString(entry.name, entry.label, entry.condition);
+      if (name && !names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
+function constantText(value: unknown): string {
+  if (isRecord(value)) {
+    if ('value' in value && value.value !== undefined && value.value !== null) return String(value.value);
+    if (typeof value.name === 'string') return value.name;
+    return '';
+  }
+  if (value === undefined || value === null) return '';
+  return String(value);
+}
+
+/**
+ * Human-readable headline + detail for one flow node. The node ids are UUIDs
+ * by contract, so they are never shown as text — the label always comes from
+ * what the node does (message, slot, data request, branches, target flow).
+ */
+function describeNode(node: Record<string, unknown>, nodeType: string, ko: boolean): { title: string; detail: string } {
+  const metadata = isRecord(node.metadata) ? node.metadata : {};
+  const explicitName = firstString(node.name, node.displayName, node.label, metadata.name, metadata.displayName);
+  const branches = branchNames(node);
+  const branchSummary = branches.join(' / ');
+
+  switch (nodeType) {
+    case 'start':
+      return { title: explicitName || (ko ? '대화 시작' : 'Conversation starts'), detail: '' };
+    case 'end':
+      return { title: explicitName || (ko ? '대화 종료' : 'Conversation ends'), detail: '' };
+    case 'user_input': {
+      const userInput = isRecord(metadata.userInput) ? metadata.userInput : {};
+      const prompt = firstMessageBody(userInput, node);
+      const slot = firstString(userInput.slotName, userInput.slot);
+      return {
+        title: explicitName || prompt || (ko ? '고객 입력을 받습니다' : 'Collects customer input'),
+        detail: slot ? (ko ? `슬롯: ${slot}` : `slot: ${slot}`) : '',
+      };
+    }
+    case 'data_request': {
+      const dataRequest = isRecord(metadata.dataRequest) ? metadata.dataRequest : {};
+      const list = Array.isArray(node.dataRequests) ? node.dataRequests.filter((v) => typeof v === 'string') : [];
+      const id = firstString(dataRequest.dataRequestId, dataRequest.name, list[0]);
+      return { title: explicitName || id || (ko ? '백엔드 호출' : 'Backend call'), detail: branchSummary };
+    }
+    case 'choice':
+      return { title: explicitName || branchSummary || (ko ? '조건 분기' : 'Conditional branch'), detail: explicitName ? branchSummary : '' };
+    case 'define': {
+      const define = isRecord(metadata.define) ? metadata.define : {};
+      const variable = firstString(define.variableName, define.name);
+      const value = constantText(define.value);
+      const assignment = variable ? (value ? `${variable} = ${value}` : variable) : '';
+      return { title: explicitName || assignment || (ko ? '변수 설정' : 'Set variable'), detail: branchSummary };
+    }
+    case 'basic': {
+      const basic = isRecord(metadata.basic) ? metadata.basic : {};
+      return { title: explicitName || firstMessageBody(basic, node) || (ko ? '안내 메시지' : 'Message'), detail: '' };
+    }
+    case 'escalate':
+      return { title: explicitName || firstMessageBody(node, metadata) || (ko ? '상담원에게 연결' : 'Hand off to an agent'), detail: '' };
+    case 'redirect': {
+      const redirect = isRecord(metadata.redirect) ? metadata.redirect : {};
+      const target = firstString(redirect.flowName, redirect.flowId, redirect.target);
+      return { title: explicitName || (target ? `→ ${target}` : ko ? '다른 플로우로 이동' : 'Go to another flow'), detail: '' };
+    }
+    case 'loop': {
+      const counter = firstString(metadata.counterVariable);
+      const max = metadata.maxIterations;
+      const summary = counter && max !== undefined ? `${counter} < ${String(max)}` : counter || (max !== undefined ? `max ${String(max)}` : '');
+      return { title: explicitName || summary || (ko ? '재시도 반복' : 'Retry loop'), detail: branchSummary };
+    }
+    case 'knowledge_base': {
+      const kb = isRecord(metadata.knowledgeBase) ? metadata.knowledgeBase : {};
+      return { title: explicitName || firstString(kb.name, kb.knowledgeBaseId) || (ko ? '지식 베이스 답변' : 'Knowledge base answer'), detail: '' };
+    }
+    case 'generative_text':
+    case 'generative_task':
+    case 'generative_journey':
+    case 'intent_capture': {
+      const key = nodeType === 'generative_text' ? 'generativeText'
+        : nodeType === 'generative_task' ? 'generativeTask'
+          : nodeType === 'generative_journey' ? 'generativeJourney' : 'intentCapture';
+      const config = isRecord(metadata[key]) ? (metadata[key] as Record<string, unknown>) : {};
+      const prompt = firstString(config.prompt, config.instruction, config.description);
+      return { title: explicitName || prompt || (ko ? 'AI가 응답을 생성합니다' : 'AI generates the response'), detail: branchSummary };
+    }
+    default:
+      return { title: explicitName || firstMessageBody(node, metadata) || branchSummary, detail: '' };
+  }
 }
 
 function edgeCandidates(value: unknown, inheritedLabel = ''): EdgeCandidate[] {
@@ -118,7 +241,7 @@ function parseFlow(content: string): Record<string, unknown> | null {
   }
 }
 
-function deriveAcxdGraph(flowJson: string, direction: FlowDirection): AcxdGraph | null {
+function deriveAcxdGraph(flowJson: string, direction: FlowDirection, ko: boolean): AcxdGraph | null {
   const doc = parseFlow(flowJson);
   const rawNodes = doc?.nodes;
   if (!doc || !isRecord(rawNodes) || Object.keys(rawNodes).length === 0) return null;
@@ -165,7 +288,7 @@ function deriveAcxdGraph(flowJson: string, direction: FlowDirection): AcxdGraph 
   for (const [key, rawNode] of orderedNodes) {
     const id = idByReference.get(key)!;
     const nodeType = firstString(rawNode.type, 'node');
-    const name = nodeName(rawNode) || id;
+    const described = describeNode(rawNode, nodeType, ko);
     const generative = GENERATIVE_TYPES.has(nodeType);
 
     graph.setNode(id, { width: NODE_WIDTH, height: NODE_HEIGHT });
@@ -174,7 +297,9 @@ function deriveAcxdGraph(flowJson: string, direction: FlowDirection): AcxdGraph 
       type: 'acxdNode',
       position: { x: 0, y: 0 },
       data: {
-        label: `${nodeType}: ${name}`,
+        title: shortText(described.title, 72),
+        detail: shortText(described.detail, 48),
+        badge: typeBadge(nodeType, ko),
         identifier: id,
         nodeType,
         generative,
@@ -224,18 +349,34 @@ function AcxdNode({ data }: NodeProps<Node<AcxdNodeData>>) {
       )}
     >
       <Handle type="target" position={leftToRight ? Position.Left : Position.Top} className="!bg-surface-400 !w-1.5 !h-1.5" />
-      <div className="flex items-start gap-2">
-        <div className="min-w-0 flex-1 text-[11px] font-semibold text-surface-900 dark:text-surface-100 break-words">
-          {data.label}
-        </div>
+      <div className="flex items-center gap-1.5">
+        <span
+          className={cn(
+            'inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide',
+            data.generative
+              ? 'bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/60 dark:text-fuchsia-200'
+              : isStart
+                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-200'
+                : isTerminal
+                  ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/60 dark:text-rose-200'
+                  : 'bg-surface-100 text-surface-600 dark:bg-surface-700 dark:text-surface-300',
+          )}
+        >
+          {data.badge}
+        </span>
         {data.generative && (
-          <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-fuchsia-100 px-1.5 py-0.5 text-[9px] font-semibold text-fuchsia-700 dark:bg-fuchsia-900/60 dark:text-fuchsia-200">
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-[9px] font-semibold text-fuchsia-600 dark:text-fuchsia-300">
             <Sparkles className="h-2.5 w-2.5" />
             generative
           </span>
         )}
       </div>
-      <div className="mt-1 text-[9px] font-mono text-surface-400 dark:text-surface-500 truncate">{data.identifier}</div>
+      <div className="mt-1 text-[11px] font-medium leading-snug text-surface-900 dark:text-surface-100 break-words" title={data.identifier}>
+        {data.title}
+      </div>
+      {data.detail && (
+        <div className="mt-0.5 text-[9.5px] text-surface-500 dark:text-surface-400 truncate">{data.detail}</div>
+      )}
       <Handle type="source" position={leftToRight ? Position.Right : Position.Bottom} className="!bg-surface-400 !w-1.5 !h-1.5" />
     </div>
   );
@@ -261,13 +402,19 @@ interface AcxdFlowDiagramProps {
   flowJson: string;
   language?: string;
   className?: string;
+  /**
+   * 'fill' (default) stretches to the parent — the workspace pane and the
+   * fullscreen modal give it a definite height, so no white band is left
+   * under the canvas. Pass a pixel height where the parent has none (chat).
+   */
+  height?: 'fill' | number;
 }
 
 /**
  * Deterministically derives a React Flow graph from the persisted ACXD flow
  * JSON. Invalid or incomplete streamed JSON remains visible as source text.
  */
-export function AcxdFlowDiagram({ flowJson, language = 'ko-KR', className }: AcxdFlowDiagramProps) {
+export function AcxdFlowDiagram({ flowJson, language = 'ko-KR', className, height = 'fill' }: AcxdFlowDiagramProps) {
   const ko = language === 'ko-KR';
   const [dark, setDark] = useState(() =>
     typeof document !== 'undefined' && document.documentElement.classList.contains('dark'),
@@ -282,7 +429,7 @@ export function AcxdFlowDiagram({ flowJson, language = 'ko-KR', className }: Acx
     return () => observer.disconnect();
   }, []);
 
-  const graph = useMemo(() => deriveAcxdGraph(flowJson, direction), [flowJson, direction]);
+  const graph = useMemo(() => deriveAcxdGraph(flowJson, direction, ko), [flowJson, direction, ko]);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<AcxdNodeData>>(graph?.nodes ?? []);
 
   useEffect(() => {
@@ -313,7 +460,10 @@ export function AcxdFlowDiagram({ flowJson, language = 'ko-KR', className }: Acx
   }
 
   return (
-    <div className={cn('w-full', className)} style={{ height: '64vh', minHeight: 340 }}>
+    <div
+      className={cn('w-full', height === 'fill' && 'h-full', className)}
+      style={height === 'fill' ? { minHeight: 340 } : { height, minHeight: 280 }}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
