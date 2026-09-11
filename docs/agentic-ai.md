@@ -291,6 +291,62 @@ regeneration.
 > Source:
 > [`backend/ecs/src/agents/reviewer_agent/`](../backend/ecs/src/agents/reviewer_agent/)
 
+### 7.1 Blocking vs advisory (v3.1)
+
+The reviewer is an LLM, and each run surfaces a different list — a review→fix
+loop whose exit condition moves on every run never converges (a live session
+went 13 → 21 "critical" after fixing five). Since v3.1 the **blocking set is
+computed in code** from the deterministic gates (cross-asset consistency
+D1–D8 + IAM, spec↔OpenAPI shape parity, ACXD D9) with **stable ids**
+(`D:<asset>:<op>:<field>`, `PARITY:<path>:<reason>`, `D9-x:…`); the previous
+review's ids are kept so the result says what was *fixed* and what is *new*.
+`critical_issues` is that count and is what stops packaging. The reviewer's
+own ❌/⚠️ items are returned as *advisory* — offered to the user, never a gate.
+Blocking findings also have **deterministic repairs** the orchestrator runs
+before any hand patch: `enforce_openapi_contract_tool` re-projects
+`openapi.yaml` from the spec; `rebuild_acxd_slot_types_tool` derives the slot
+types again from the confirmed plans.
+
+> Source: [`backend/ecs/src/tools/review_gates.py`](../backend/ecs/src/tools/review_gates.py),
+> [`backend/ecs/src/tools/deterministic_repairs.py`](../backend/ecs/src/tools/deterministic_repairs.py)
+
+---
+
+## 7.5 Representation is decided by code, once (v3.1)
+
+The gates in §4 catch drift after the fact. v3.1 removes the *sources* of the
+drift that a live ACXD session exposed (21 critical findings, of which most
+were the same spec expressed three different ways):
+
+- **One response contract.** Every operation response is the shared envelope
+  (`success` / `errorCode` / `message`) plus the spec's `output_fields`;
+  request bodies are the spec's `input_fields`. The OpenAPI generator's
+  schemas are *replaced* by that projection at merge time (descriptions are
+  kept), the ACXD Data Requests are built from it, and the parity gate treats
+  the envelope as implicit — so parity holds by construction.
+  → [`tools/response_contract.py`](../backend/ecs/src/tools/response_contract.py)
+- **One flow encoding.** The ACXD flow generator's output is canonicalized onto
+  the SDK contract before validation, after every patch and on bundle load:
+  slot capture is a `user_choice` node with `metadata.choice`, messages live on
+  the node, `define` is `{name, value}`, placeholders are `{x:NLX.Slot}` /
+  `{x:NLX.Variable}`, booleans are booleans. The node schema is closed to the
+  SDK's members, because the SDK serializer silently drops anything else — a
+  GetFlow of a deployed flow had shown `user_input` nodes with no message and
+  no slot.
+  → [`tools/acxd_flow_canonicalizer.py`](../backend/ecs/src/tools/acxd_flow_canonicalizer.py)
+- **Gates at save time.** Each Lambda is checked against its spec (unread
+  inputs, unwritten outputs/envelope) the moment it is written and the
+  orchestrator fixes it before the next asset; flows are validated and
+  canonicalized before they are saved.
+- **One home per asset file.** A workspace write to `assets/<type>/<file>`
+  resolves to the single existing `assets/<type>/<op>/<file>`; bundles never
+  ship two copies of the same Contact Flow.
+- **Nothing left to guess.** `complete_interview` refuses the handoff while the
+  spec still has output fields without types, enum fields without values, ACXD
+  slots that name no input field, or escalations without a condition and an
+  agent payload — the orchestrator asks the customer instead.
+  → [`tools/spec_completeness.py`](../backend/ecs/src/tools/spec_completeness.py)
+
 ---
 
 ## 8. Context engineering: keeping agents cheap and coherent
