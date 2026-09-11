@@ -2404,17 +2404,30 @@ This allows the agent to verify block syntax and find examples from:
 reviewer_agent(session_id=session_id, review_scope="all", language=<language>)
 ```
 
-**Step 2: Present results and ASK user (same turn — then STOP).** Example copy (write in the user's language):
-```
-"검토 결과 {critical_issues}개의 심각한 문제와 {warnings}개의 경고가 발견됐어요.
+**Step 2: Present results and ASK user (same turn — then STOP).** The tool result
+has two kinds of findings — keep them apart in your copy:
+- `blocking` (deterministic gates: cross-asset consistency, spec↔OpenAPI parity,
+  ACXD D9; stable ids, `blocking_diff` says what was fixed / is new since the
+  last review). **These are what stops packaging.** `critical_issues` is their count.
+- the reviewer's own ❌/⚠️ items in `report` (`advisory_critical`, `warnings`):
+  real, worth offering, but advisory — the list changes between runs and never
+  blocks packaging on its own.
 
-주요 문제:
-1. Lambda에서 GSI 이름 `phone_index`를 사용했지만, CloudFormation에는 `phone-index`로 정의됨
-2. OpenAPI의 필드명 `phoneNumber`와 Lambda의 `phone_number`가 일치하지 않음
+Example copy (write in the user's language):
+```
+"검토 결과입니다.
+
+🚫 차단 항목 {critical_issues}건 (결정론 검사 — 0건이어야 패키징 가능, 지난 검토 이후 해결 {fixed}건 / 새로 {new}건):
+1. [PARITY] create_cleaning_reservation 응답에 스펙에 없는 `missingFields`
+2. [D9-4] 슬롯 `productType`에 필드별 슬롯 타입이 없음
+
+💡 리뷰어 권고 {advisory_critical}건 / 경고 {warnings}건 (선택):
+3. Lambda `customer_lookup`이 Contact Flow가 쓰는 `isExistingCustomer`를 반환하지 않음
+...
 
 (참고: ApiKeyRequired=false, IAM ARN 형식, Lambda 런타임 버전 차이는 정상입니다.)
 
-어떤 항목을 수정할까요? (번호로 답해주세요, 또는 '전부 수정' / '괜찮아요')"
+차단 항목을 먼저 고칠까요? 권고 중 반영할 번호도 알려주세요. ('차단만' / '전부' / '괜찮아요')"
 ```
 ⛔ **END YOUR RESPONSE HERE. Do NOT call any generator tools. Wait for user.**
 
