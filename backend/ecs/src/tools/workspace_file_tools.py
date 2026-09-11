@@ -169,6 +169,10 @@ def _mirror_asset_to_s3(session_id: str, path: str, content: str) -> None:
     guarantees parity.
     """
     try:
+        try:
+            path = _canonical_asset_path(_get_session_root(session_id), path)
+        except Exception:
+            pass
         parts = [p for p in path.split('/') if p]
         if len(parts) < 3 or parts[0] != "assets":
             return
@@ -222,6 +226,31 @@ def _get_session_root(session_id: str) -> Path:
     return Path(_S3FILES_MOUNT) / "sessions" / safe_id
 
 
+def _canonical_asset_path(session_root: Path, relative_path: str) -> str:
+    """Redirect `assets/<type>/<file>` to the one `assets/<type>/<op>/<file>` that exists.
+
+    Live (SELC): the Contact Flow was generated at
+    `assets/contact_flow/selc-inbound-main-flow/contact_flow.json`; the model
+    then wrote `assets/contact_flow/contact_flow.json` (the bundle's layout,
+    not the workspace's), so the session had two flows to keep in sync and the
+    bundle shipped both. An asset file has one home: when the root path does
+    not exist and exactly one operation folder holds that file name, the write
+    (or read) lands there instead of creating a sibling copy.
+    """
+    parts = [p for p in relative_path.split("/") if p]
+    if len(parts) != 3 or parts[0] != "assets":
+        return relative_path
+    asset_dir = session_root / "assets" / parts[1]
+    if (asset_dir / parts[2]).exists() or not asset_dir.is_dir():
+        return relative_path
+    candidates = sorted(p for p in asset_dir.glob(f"*/{parts[2]}") if p.is_file())
+    if len(candidates) == 1:
+        canonical = f"assets/{parts[1]}/{candidates[0].parent.name}/{parts[2]}"
+        logger.info("[workspace] %s → %s (single canonical copy)", relative_path, canonical)
+        return canonical
+    return relative_path
+
+
 def _resolve_safe_path(session_id: str, relative_path: str) -> Path:
     """
     Resolve a relative path within a session directory safely.
@@ -237,6 +266,7 @@ def _resolve_safe_path(session_id: str, relative_path: str) -> Path:
         raise ValueError(f"Path traversal not allowed: {relative_path}")
 
     session_root = _get_session_root(session_id)
+    relative_path = _canonical_asset_path(session_root, relative_path)
     target = (session_root / relative_path).resolve()
 
     # Ensure resolved path is within session root

@@ -202,6 +202,29 @@ def _backend_inventory(session_id: str) -> dict:
     }
 
 
+def _dedupe_contact_flows(docs: list[dict]) -> list[dict]:
+    """One Contact Flow per name.
+
+    A session can hold the same flow twice — the generator's copy under the
+    flow-name folder and a root-level copy the model wrote by hand (live:
+    SELC shipped `contact_flow.json` and `contact_flow-1.json`, and the deploy
+    imported two flows). Identical documents collapse; documents sharing a
+    flow name keep the last one read (sorted read order puts the operation
+    folder after the root file, i.e. the generator's copy wins).
+    """
+    by_key: dict[str, dict] = {}
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        name = (doc.get("Name") or doc.get("name")
+                or ((doc.get("Metadata") or {}).get("name") if isinstance(doc.get("Metadata"), dict) else None))
+        key = f"name:{name}" if name else "hash:" + json.dumps(doc, sort_keys=True, ensure_ascii=False)
+        if key in by_key and by_key[key] != doc:
+            logger.info("[ACXDBundle] duplicate Contact Flow %r collapsed (keeping the later copy)", name)
+        by_key[key] = doc
+    return list(by_key.values())
+
+
 def load_acxd_bundle(session_id: str) -> dict:
     """Load every generated asset the ACXD target needs into one dict.
 
@@ -228,7 +251,7 @@ def load_acxd_bundle(session_id: str) -> dict:
                        if isinstance(d, dict))
     bundle["context_variables"] = cvs
 
-    bundle["contact_flows"] = _read_json_docs(session_id, CLASSIC_CONTACT_FLOW_TYPE)
+    bundle["contact_flows"] = _dedupe_contact_flows(_read_json_docs(session_id, CLASSIC_CONTACT_FLOW_TYPE))
 
     inventory = _backend_inventory(session_id)
     bundle["infrastructure"] = inventory["infrastructure"]
