@@ -153,6 +153,76 @@ def _orphan_operation_findings(session_id: str) -> list[dict]:
     return findings
 
 
+def _missing_asset_findings(session_id: str) -> list[dict]:
+    """The mirror image of the orphan gate: a spec operation whose Lambda folder,
+    OpenAPI operationId or (ACXD) Data Request does not exist. Live (SELC,
+    2026-09-12): the orchestrator went from infrastructure to OpenAPI and on to
+    the ACXD application without ever calling the Lambda generator; the review
+    reported 0 blocking and only the packager refused ('manifest references
+    lambda dir ... but the bundle has no generated handler')."""
+    from tools.spec_manager import get_all_specs
+    specs = get_all_specs() or {}
+    if not specs:
+        return []
+    try:
+        from tools.acxd_flow_spec import is_acxd_target
+        acxd = bool(is_acxd_target(session_id))
+    except Exception:
+        acxd = False
+
+    lambda_folders: set[str] = set()
+    data_requests: set[str] = set()
+    try:
+        from tools.s3_asset_storage import list_session_assets
+        for key in list_session_assets(session_id) or []:
+            parts = [p for p in str(key).split("/") if p]
+            if len(parts) >= 5 and parts[2] == "lambda" and parts[-1] in ("handler.py", "index.py", "index.js"):
+                lambda_folders |= _spellings(parts[3])
+            elif len(parts) == 4 and parts[2] == "acxd_data_request" and parts[3].endswith(".json"):
+                data_requests |= _spellings(parts[3][:-5])
+    except Exception as exc:
+        logger.debug("[review_gates] missing-asset scan skipped: %s", exc)
+        return []
+
+    openapi_ops: set[str] = set()
+    openapi_seen = False
+    try:
+        import yaml
+        from tools.asset_loader import load_existing_asset
+        text = load_existing_asset("openapi", file_name="openapi.yaml")
+        if text:
+            openapi_seen = True
+            doc = yaml.safe_load(text) or {}
+            for item in (doc.get("paths") or {}).values():
+                if isinstance(item, dict):
+                    for op in item.values():
+                        if isinstance(op, dict) and op.get("operationId"):
+                            openapi_ops |= _spellings(str(op["operationId"]))
+    except Exception as exc:
+        logger.debug("[review_gates] missing-asset openapi scan skipped: %s", exc)
+
+    findings: list[dict] = []
+    for op_id in specs:
+        names = _spellings(op_id)
+        checks = [("lambda", not (names & lambda_folders), "Lambda handler",
+                   "run lambda_generator_agent for this operation")]
+        if openapi_seen:
+            checks.append(("openapi", not (names & openapi_ops), "OpenAPI path",
+                           "run openapi_generator_agent / merge_openapi_fragments"))
+        if acxd:
+            checks.append(("acxd_data_request", not (names & data_requests), "ACXD Data Request",
+                           "run rebuild_acxd_slot_types_tool (rebuilds the Data Requests from the spec)"))
+        for asset, missing, label, remedy in checks:
+            if missing:
+                findings.append({
+                    "id": _stable_id("MISSING", asset, op_id), "gate": "spec", "severity": "error",
+                    "asset_type": asset, "operation_id": op_id, "field": None,
+                    "message": f"Operation {op_id!r} has a spec but no {label} — {remedy}; "
+                               "a spec without its asset ships nothing for that operation",
+                })
+    return findings
+
+
 def _spellings(name: str) -> set[str]:
     raw = str(name or "")
     snake = re.sub(r"(?<!^)([A-Z])", r"_\1", raw).lower()
@@ -169,7 +239,7 @@ def collect_blocking_findings(session_id: str) -> dict:
              PARITY:<path>:<reason>, D9-x:<asset>:<op>:<field>.
     """
     findings: list[dict] = []
-    for collector in (_consistency_findings, _parity_findings, _orphan_operation_findings):
+    for collector in (_consistency_findings, _parity_findings, _orphan_operation_findings, _missing_asset_findings):
         try:
             findings.extend(collector(session_id))
         except Exception as exc:

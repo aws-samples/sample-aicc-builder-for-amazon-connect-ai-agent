@@ -1013,6 +1013,18 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
             if content:
                 lambda_code[op_id] = content
                 lambda_all_code[op_id] = content
+        elif asset_type == "lambda" and (key.endswith("index.py") or key.endswith("index.js")) \
+                and len(parts) > 4 and _is_spec_operation_folder(parts[3], specs):
+            # Live (SELC, 2026-09-12): the generator wrote index.py for the four
+            # business operations (matching the template's Handler: index.lambda_handler),
+            # and the field checks silently skipped them as "supporting" Lambdas.
+            # A folder named after a spec operation is a business Lambda whatever
+            # the file is called.
+            op_id = parts[3]
+            content = get_asset_from_s3(key)
+            if content:
+                lambda_code[op_id] = content
+                lambda_all_code[op_id] = content
         elif asset_type == "lambda" and (key.endswith("index.py") or key.endswith("index.js")):
             # supporting lambdas (update_q_session, customer_lookup, ...) — IAM check only
             op_id = parts[3] if len(parts) > 4 else "default"
@@ -1783,6 +1795,22 @@ def _d9_field_index(operation: Any) -> dict[str, Any]:
         for variant in _d9_name_variants(name):
             index.setdefault(variant, field)
     return index
+
+
+def _is_spec_operation_folder(folder: str, operation_specs: Any) -> bool:
+    """True when a Lambda folder name is one of the spec operations in any spelling."""
+    try:
+        names = set((operation_specs or {}).keys()) if hasattr(operation_specs, "keys") else set()
+    except Exception:
+        return False
+    folder_l = str(folder or "").lower()
+    for name in names:
+        raw = str(name)
+        snake = re.sub(r"(?<!^)([A-Z])", r"_\1", raw).lower()
+        camel = re.sub(r"_+([a-zA-Z0-9])", lambda m: m.group(1).upper(), raw)
+        if folder_l in {raw.lower(), snake, camel.lower(), snake.replace("_", "")}:
+            return True
+    return False
 
 
 def _d9_regex_canonical(pattern: Any) -> str:
