@@ -332,10 +332,12 @@ def _load_deterministic_repairs(is_acxd: bool) -> list:
         from tools.deterministic_repairs import (
             enforce_openapi_contract_tool,
             rebuild_acxd_slot_types_tool,
+            remove_duplicate_asset_copies_tool,
         )
         tools_out.append(enforce_openapi_contract_tool)
         if is_acxd:
             tools_out.append(rebuild_acxd_slot_types_tool)
+            tools_out.append(remove_duplicate_asset_copies_tool)
     except ImportError as exc:
         logger.warning("[repairs] deterministic repair tools unavailable: %s", exc)
     return tools_out

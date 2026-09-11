@@ -1787,16 +1787,49 @@ def _d9_field_index(operation: Any) -> dict[str, Any]:
 
 def _d9_regex_canonical(pattern: Any) -> str:
     """Canonical form for comparing two regexes that mean the same thing:
-    `^\\d{8}$` (FieldSpec) vs `^[0-9]{8}$` (what the flow generator wrote)."""
+    `^\\d{8}$` (FieldSpec) vs `^[0-9]{8}$` (what the flow generator wrote), and
+    `^010\\-\\d{4}$` vs `^010-[0-9]{4}$` — an escaped hyphen outside a character
+    class is the literal hyphen (a live spec carried both spellings and D9-4
+    blocked the bundle on the backslash alone)."""
     text = str(pattern or "").strip()
     text = re.sub(r"\s+", "", text)
     text = text.replace("\\\\d", "\\d").replace("\\d", "[0-9]")
     text = text.replace("[[:digit:]]", "[0-9]")
+    text = _d9_unescape_literals(text)
     if text and not text.startswith("^"):
         text = "^" + text
     if text and not text.endswith("$"):
         text = text + "$"
     return text
+
+
+# Punctuation that means the same escaped or not when it stands OUTSIDE a
+# character class. `.`, `*`, `+`, `?`, `(`, `)`, `[`, `{`, `|`, `^`, `$`, `\\`
+# change meaning and are deliberately absent.
+_D9_LITERAL_PUNCT = set("-/:,;_@#%&=<>!~'\"` ")
+
+
+def _d9_unescape_literals(text: str) -> str:
+    out: list[str] = []
+    in_class = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if not in_class and nxt in _D9_LITERAL_PUNCT:
+                out.append(nxt)
+            else:
+                out.append(ch + nxt)
+            i += 2
+            continue
+        if ch == "[":
+            in_class = True
+        elif ch == "]":
+            in_class = False
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _d9_constraint_metadata(slot_type: dict) -> dict:

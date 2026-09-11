@@ -2443,9 +2443,16 @@ Example copy (write in the user's language):
 **Step 3: Fix ONLY what the user confirmed (next turn)**
 - Blocking findings have deterministic repairs — use them BEFORE any LLM patch:
   `PARITY:*` → `enforce_openapi_contract_tool()` (re-projects openapi.yaml from
-  the spec); `D9-4 … requires a generated custom slot type` →
-  `rebuild_acxd_slot_types_tool()` then point the flow at the per-field slot
-  type id with `patch_acxd_asset`. Only what no repair covers is patched by hand.
+  the spec); `D9-3` / `D9-4` → `rebuild_acxd_slot_types_tool()` (rebuilds slot
+  types AND data requests from the spec); `D9-1 DUP_*_ID` (the same id twice) →
+  `remove_duplicate_asset_copies_tool()`. Only what no repair covers is patched
+  by hand.
+- Report a repair tool's `status` and `remaining_findings` VERBATIM. `updated`
+  means files changed; `unchanged` means the assets already matched the spec —
+  then the finding is NOT about the asset: a regex/enum mismatch means the
+  OperationSpec and the flow plan disagree (fix the spec with
+  `update_operation_spec` or the plan with `upsert_acxd_flow_plan`, then rebuild).
+  Never call a finding fixed until the tool's `remaining_findings` no longer lists it.
 - User says specific items → fix ONLY those items
 - User says "all" / "전부" / "fix everything" → fix all real issues
 - User says "it's fine" / "괜찮아요" / "skip" → skip fixes

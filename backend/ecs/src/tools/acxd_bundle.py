@@ -285,6 +285,34 @@ def _slot_for_choice(node: dict, candidates: set[str]) -> Optional[str]:
     return referenced.pop() if len(referenced) == 1 else None
 
 
+_DOC_ID_KEYS = ("flowId", "slotTypeId", "dataRequestId", "guardrailId", "knowledgeBaseId", "secretId", "name")
+
+
+def _collapse_identical_docs(docs: list, asset_type: str) -> list:
+    """Keep one copy of a document that exists twice with the same id AND the
+    same content (a tool once saved `<type>/<id>/<id>.json` beside
+    `<type>/<id>.json`). `rglob` sorts the flat file first, so the canonical
+    path wins. Two copies that DIFFER are both kept — D9-1 reports the
+    duplicate id, which is the right outcome for a real conflict."""
+    seen: dict[str, dict] = {}
+    out: list = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            out.append(doc)
+            continue
+        doc_id = next((str(doc[k]) for k in _DOC_ID_KEYS if doc.get(k)), None)
+        if doc_id is None:
+            out.append(doc)
+            continue
+        first = seen.get(doc_id)
+        if first is not None and first == doc:
+            logger.info("[ACXDBundle] %s %r: identical duplicate copy ignored", asset_type, doc_id)
+            continue
+        seen.setdefault(doc_id, doc)
+        out.append(doc)
+    return out
+
+
 def load_acxd_bundle(session_id: str) -> dict:
     """Load every generated asset the ACXD target needs into one dict.
 
@@ -296,7 +324,7 @@ def load_acxd_bundle(session_id: str) -> dict:
     """
     bundle: dict = {key: [] for key in ACXD_LIST_TYPES.values()}
     for asset_type, key in ACXD_LIST_TYPES.items():
-        bundle[key] = _read_json_docs(session_id, asset_type)
+        bundle[key] = _collapse_identical_docs(_read_json_docs(session_id, asset_type), asset_type)
     bundle["flows"] = [normalize_flow_for_service(f) for f in bundle["flows"]]
     bundle["flows"] = [_rebind_slot_types(f, bundle["slot_types"]) for f in bundle["flows"]]
 
