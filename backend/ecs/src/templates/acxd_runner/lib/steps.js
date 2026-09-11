@@ -574,15 +574,33 @@ const deployApplication = {
       { applicationIdentifier: appId });
     const current = (existing || []).find((d) => d.environment === environment);
 
+    // Live (2026-09-12, ko-KR application): CreateApplicationDeployment with
+    // languageCodes ['ko-KR'] answered InternalServerException "Failed to create
+    // deployment." while the same request without languageCodes was accepted —
+    // the deployment then uses the application's own language settings. Send
+    // the codes first (en-US deploys accepted them), fall back without them.
+    const withLangFallback = async (command, base) => {
+      try {
+        return await send(ctx, command, { ...base, ...langs });
+      } catch (err) {
+        if (!Object.keys(langs).length || (err && err.name !== 'InternalServerException'
+            && err.name !== 'ValidationException')) {
+          throw err;
+        }
+        ctx.log(`  ! ${command} refused languageCodes ${JSON.stringify(languageCodes)} (${err.name}); ` +
+          'retrying with the application\'s language settings');
+        return send(ctx, command, base);
+      }
+    };
+
     let deploymentId;
     if (current) {
       try {
-        await send(ctx, 'UpdateApplicationDeploymentCommand', {
+        await withLangFallback('UpdateApplicationDeploymentCommand', {
           applicationIdentifier: appId,
           deploymentIdentifier: current.deploymentId,
           buildIdentifier: buildId,
           environment,
-          ...langs,
           description: 'AICC Builder deploy',
         });
         deploymentId = current.deploymentId;
@@ -591,22 +609,20 @@ const deployApplication = {
         ctx.log(`  ! update of '${environment}' deployment refused (${err.name}: ${err.message}); replacing it`);
         await send(ctx, 'DeleteApplicationDeploymentCommand',
           { applicationIdentifier: appId, deploymentIdentifier: current.deploymentId });
-        const created = await send(ctx, 'CreateApplicationDeploymentCommand', {
+        const created = await withLangFallback('CreateApplicationDeploymentCommand', {
           applicationIdentifier: appId,
           buildIdentifier: buildId,
           environment,
-          ...langs,
           description: 'AICC Builder deploy',
         });
         deploymentId = created.deploymentId;
         ctx.log(`  + replaced '${environment}' deployment`);
       }
     } else {
-      const created = await send(ctx, 'CreateApplicationDeploymentCommand', {
+      const created = await withLangFallback('CreateApplicationDeploymentCommand', {
         applicationIdentifier: appId,
         buildIdentifier: buildId,
         environment,
-        ...langs,
         description: 'AICC Builder deploy',
       });
       deploymentId = created.deploymentId;
