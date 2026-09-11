@@ -123,7 +123,9 @@ def test_generation_context_adapts_classic_specs_openapi_and_faq(monkeypatch):
     assert integration["data_request_id"] == "lookupOrder"
     assert integration["http_method"] == "POST"
     assert integration["request_fields"][0]["name"] == "orderStatus"
-    assert integration["response_fields"] == [{"name": "trackingNumber", "type": "string", "required": False}]
+    # response = the shared envelope + the contract's fields (same projection as the OpenAPI)
+    assert [f["name"] for f in integration["response_fields"]] == ["success", "errorCode", "message", "trackingNumber"]
+    assert integration["response_fields"][-1] == {"name": "trackingNumber", "type": "string", "required": False}
     assert payload["flows"][0]["steps"][0]["data_request_id"] == "lookupOrder"
 
     data_request = build_data_request(integration)

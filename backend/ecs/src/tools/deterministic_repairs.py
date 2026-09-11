@@ -8,8 +8,9 @@ brought to zero blocking findings in one call each:
   schemas from the OperationSpecs (tools/response_contract.py). Clears every
   PARITY finding by construction.
 * `rebuild_acxd_slot_types_tool` — derive the custom slot types again from the
-  confirmed flow plans + FieldSpec constraints (one per field) and re-save them.
-  Clears the D9-4 "requires a generated custom slot type" findings.
+  confirmed flow plans + FieldSpec constraints (one per field) and re-save them,
+  and rebuild the Data Requests from the spec (envelope + output_fields).
+  Clears the D9-4 "requires a generated custom slot type" and D9-3 findings.
 """
 from __future__ import annotations
 
@@ -72,12 +73,12 @@ def enforce_openapi_contract_tool() -> dict:
 
 @tool
 def rebuild_acxd_slot_types_tool() -> dict:
-    """Rebuild the ACXD slot types from the confirmed flow plans + FieldSpecs (deterministic).
+    """Rebuild the ACXD slot types and Data Requests from the spec (deterministic).
 
     Use when the review's blocking findings include D9-4 "requires a generated
-    custom slot type" items: one slot type per constrained field, values from
-    the spec's enum_values, regex/length constraints carried over. Flows are
-    NOT regenerated; only slot type assets are re-saved.
+    custom slot type" or D9-3 (Data Request ↔ OpenAPI) items: one slot type per
+    constrained field (values from enum_values, regex/length carried over) and
+    Data Requests with the shared response envelope. Flows are NOT regenerated.
     """
     from tools.acxd_flow_spec import get_acxd_flow_spec, is_acxd_target
     from tools.acxd_generation_context import _derive_slot_types
@@ -97,6 +98,29 @@ def rebuild_acxd_slot_types_tool() -> dict:
                   for op_id, s in (get_all_specs() or {}).items()}
     derived = _derive_slot_types(plans, operations)
     documents, problems = build_slot_types({"slot_types": derived})
+    # Data Requests are deterministic too (spec → webhook/request/response
+    # schema, envelope included); rebuilding them realigns D9-3 with the
+    # re-projected OpenAPI without touching any LLM-authored flow.
+    data_request_ids: list[str] = []
+    try:
+        from tools.acxd_data_request_builder import build_all_data_requests
+        from tools.acxd_generation_context import get_acxd_spec
+        acxd_spec = get_acxd_spec().model_dump()
+        data_requests, dr_problems = build_all_data_requests(acxd_spec)
+        problems.extend(dr_problems)
+        for document in data_requests:
+            file_name = f"{document['dataRequestId']}.json"
+            content = json.dumps(document, ensure_ascii=False, indent=2)
+            save_asset_to_s3(session_id=session_id, asset_type="acxd_data_request", file_name=file_name, content=content)
+            try:
+                stream_asset("acxd_data_request", file_name, content, operation_id=document["dataRequestId"],
+                             is_complete=True, force_full=True)
+            except Exception as exc:
+                logger.debug("[repair] data request re-stream skipped: %s", exc)
+            data_request_ids.append(document["dataRequestId"])
+    except Exception as exc:
+        problems.append(f"data requests not rebuilt: {exc}")
+
     saved = []
     for document in documents:
         file_name = f"{document['slotTypeId']}.json"
@@ -108,7 +132,9 @@ def rebuild_acxd_slot_types_tool() -> dict:
         except Exception as exc:
             logger.debug("[repair] slot type re-stream skipped: %s", exc)
         saved.append(document["slotTypeId"])
-    return {"status": "updated" if saved else "unchanged", "slot_types": saved, "problems": problems,
-            "summary": f"rebuilt {len(saved)} slot type(s) from the flow plans: {', '.join(saved)}. "
-                       "Flows that still reference an old shared slot type id (e.g. 'enum') need "
-                       "patch_acxd_asset to point at the per-field id; then re-run the review."}
+    return {"status": "updated" if saved or data_request_ids else "unchanged", "slot_types": saved,
+            "data_requests": data_request_ids, "problems": problems,
+            "summary": f"rebuilt {len(saved)} slot type(s) ({', '.join(saved)}) and "
+                       f"{len(data_request_ids)} data request(s) from the spec. Flows that still reference "
+                       "an old shared slot type id (e.g. 'enum') need patch_acxd_asset to point at the "
+                       "per-field id; then re-run the review."}
