@@ -357,10 +357,28 @@ def helper_flow_data_request_ref(data_request_id: str) -> dict:
 # them from its headers. Emitting `headers: []` unconditionally made that
 # capability unreachable and left the runner's upsert-secrets step dead.
 
+#: The generated backend (CloudFormation API Gateway) requires its API key in
+#: the ACXD target — the merge sets ApiKeyRequired: true on every method — and
+#: the Data Requests send it from this secret. deploy.sh stores the stack's
+#: ApiKeyValue output in it (env ACXD_SECRET_BACKENDAPIKEY), so nothing is manual
+#: and no key ever enters the bundle.
+BACKEND_API_KEY_SECRET = "BackendApiKey"
+BACKEND_API_KEY_HEADER = "x-api-key"
+
+
+def _calls_generated_backend(plan: dict) -> bool:
+    """True when the integration targets the backend this bundle deploys
+    (the {WEBHOOK_URL} placeholder) rather than a customer-supplied URL."""
+    if str(plan.get("mode") or "external").lower() not in ("external", "sample"):
+        return False
+    url = str(plan.get("url") or plan.get("webhook_url") or "")
+    return not url or "{WEBHOOK_URL}" in url
+
+
 def auth_secret_name_for(plan: dict) -> Optional[str]:
     """Secret name for this integration's auth header, if any."""
     if not plan.get("auth_header"):
-        return None
+        return BACKEND_API_KEY_SECRET if _calls_generated_backend(plan) else None
     explicit = plan.get("auth_secret_name")
     if explicit:
         return re.sub(r"[^A-Za-z0-9_]", "", str(explicit)) or None
@@ -371,6 +389,8 @@ def auth_secret_name_for(plan: dict) -> Optional[str]:
 def auth_headers_for(plan: dict) -> list:
     """Header list for a webhook: a Secret reference, never a literal value."""
     header = str(plan.get("auth_header") or "").strip()
+    if not header and _calls_generated_backend(plan):
+        header = BACKEND_API_KEY_HEADER
     secret = auth_secret_name_for(plan)
     if not header or not secret:
         return []
@@ -391,6 +411,16 @@ def build_secret_assets(spec: dict) -> list:
         if not secret or secret in seen:
             continue
         seen.add(secret)
+        if secret == BACKEND_API_KEY_SECRET:
+            out.append({
+                "name": secret,
+                "description": (
+                    "API Gateway key of the generated backend, sent as x-api-key by the "
+                    "Data Requests. deploy.sh fills it from the CloudFormation ApiKeyValue "
+                    "output (env ACXD_SECRET_BACKENDAPIKEY)."),
+                "valueEnv": "ACXD_SECRET_BACKENDAPIKEY",
+            })
+            continue
         out.append({
             "name": secret,
             "description": (

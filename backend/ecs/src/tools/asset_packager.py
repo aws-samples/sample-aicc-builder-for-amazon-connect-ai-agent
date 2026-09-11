@@ -371,6 +371,19 @@ never writes either into the bundle. For external Data Requests it passes the
 CloudFormation API Gateway output as `WEBHOOK_URL`. Read `WIRING-GUIDE.md`
 after deployment: the Agentic CX block and channel attachment are manual until
 AWS publishes a Flow-Language representation for that block.
+
+### Backend contract and authentication (ACXD)
+
+There is no AgentCore Gateway / MCP layer in this target: the application's
+Data Requests call the API Gateway of the CloudFormation stack directly
+(`{WEBHOOK_URL}/tools/<operation>`). `openapi/openapi.yaml` is the **contract**
+those Data Requests and the Lambdas are validated against — it is not imported
+into any gateway. Every API method requires the stack's API key
+(`ApiKeyRequired: true`); the Data Requests send it as `x-api-key` from the ACXD
+secret `BackendApiKey`, which `deploy.sh` creates from the stack's `ApiKeyValue`
+output (`ACXD_SECRET_BACKENDAPIKEY`). Nothing is manual and the key is never
+written into the bundle. An integration the interview marked `mcp` keeps its own
+MCP URL instead.
 """
 
 

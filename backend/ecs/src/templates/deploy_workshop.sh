@@ -2683,6 +2683,18 @@ run_acxd_runner() {
         export AICC_CFN_ALREADY_DEPLOYED=1
         info "WEBHOOK_URL sourced from CloudFormation ApiEndpoint"
     fi
+    # The generated API Gateway requires its key in the ACXD target; the Data
+    # Requests send it as x-api-key from the BackendApiKey secret. Fill that
+    # secret from the stack output so the runner's upsert-secrets step creates
+    # it — the value never touches the bundle.
+    if [ -z "${ACXD_SECRET_BACKENDAPIKEY:-}" ]; then
+        if [ -n "${API_KEY:-}" ] && [ "$API_KEY" != "RETRIEVE_FAILED" ] && [ "$API_KEY" != "None" ]; then
+            export ACXD_SECRET_BACKENDAPIKEY="$API_KEY"
+            info "BackendApiKey secret sourced from CloudFormation ApiKeyValue"
+        else
+            warn "ApiKeyValue output missing — the BackendApiKey secret will be skipped and Data Requests to the API will get 403. Export ACXD_SECRET_BACKENDAPIKEY and re-run."
+        fi
+    fi
     ensure_acxd_credentials
     local args=(deploy --manifest deploy-manifest.json)
     [ "$DRY_RUN" = "true" ] && args+=(--dry-run)

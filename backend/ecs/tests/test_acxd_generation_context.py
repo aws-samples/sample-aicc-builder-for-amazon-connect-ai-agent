@@ -133,7 +133,9 @@ def test_generation_context_adapts_classic_specs_openapi_and_faq(monkeypatch):
         "implementation": "external",
         "method": "POST",
         "url": "{WEBHOOK_URL}/tools/lookup_order",
-        "headers": [],
+        # the generated backend requires its API key in the ACXD target; the
+        # value comes from the BackendApiKey secret deploy.sh fills — never inline
+        "headers": [{"key": "x-api-key", "value": "{{secrets.BackendApiKey}}"}],
         "sendContext": True,
     }
     assert data_request["requestSchema"]["properties"]["orderStatus"]["enum"] == ["pending", "shipped"]

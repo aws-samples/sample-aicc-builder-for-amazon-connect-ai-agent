@@ -160,7 +160,9 @@ def valid_bundle() -> dict:
             {
                 "dataRequestId": "lookupOrder",
                 "type": "object",
-                "webhook": {"implementation": "external", "method": "POST", "url": "{WEBHOOK_URL}/tools/lookup_order"},
+                "webhook": {"implementation": "external", "method": "POST", "url": "{WEBHOOK_URL}/tools/lookup_order",
+                            # the generated API requires its key: sent from the BackendApiKey secret
+                            "headers": [{"key": "x-api-key", "value": "{{secrets.BackendApiKey}}"}]},
                 "requestSchema": {"type": "object", "properties": {"orderNumber": {"type": "string"}}},
                 "responseSchema": {"type": "object", "properties": {"status": {"type": "string"}}},
             },
@@ -293,3 +295,42 @@ def test_validate_parameter_consistency_appends_d9_only_for_acxd(monkeypatch):
     classic = validator._validate_parameter_consistency_impl("classic-session")
     assert classic["success"] is True
     assert classic["mismatches"] == []
+
+
+def test_d9_8_backend_auth_requires_secret_header_and_api_key_on_methods(monkeypatch):
+    """ACXD Data Requests call the API Gateway directly (no AgentCore Gateway in
+    front): each one must send the key from a Secret and every non-OPTIONS
+    method must require it. OPTIONS (CORS preflight) is exempt."""
+    import tools.validate_consistency as vc
+    template = "\n".join([
+        "Resources:",
+        "  GetPriceMethod:",
+        "    Type: AWS::ApiGateway::Method",
+        "    Properties:",
+        "      HttpMethod: POST",
+        "      ApiKeyRequired: false",
+        "  GetPriceOptions:",
+        "    Type: AWS::ApiGateway::Method",
+        "    Properties:",
+        "      HttpMethod: OPTIONS",
+        "      ApiKeyRequired: false",
+        "  LookupMethod:",
+        "    Type: AWS::ApiGateway::Method",
+        "    Properties:",
+        "      HttpMethod: POST",
+        "      ApiKeyRequired: true",
+    ])
+    monkeypatch.setattr(vc, "_d9_load_infrastructure_yaml", lambda sid: template)
+    bundle = {"data_requests": [
+        {"dataRequestId": "getPrice", "webhook": {"implementation": "external", "url": "{WEBHOOK_URL}/tools/get_price", "headers": []}},
+        {"dataRequestId": "lookup", "webhook": {"implementation": "external", "url": "{WEBHOOK_URL}/tools/lookup",
+                                                "headers": [{"key": "x-api-key", "value": "{{secrets.BackendApiKey}}"}]}},
+        {"dataRequestId": "crm", "webhook": {"implementation": "external", "url": "https://crm.example.com/api", "headers": []}},
+    ]}
+    issues = vc._d9_backend_auth_checks(bundle, "s")
+    messages = [i["message"] for i in issues]
+    assert any("'getPrice'" in m and "auth header" in m for m in messages)
+    assert not any("'lookup'" in m for m in messages)
+    assert not any("'crm'" in m for m in messages)                 # customer endpoint: not ours to judge
+    assert any("'GetPriceMethod'" in m for m in messages)
+    assert not any("'GetPriceOptions'" in m or "'LookupMethod'" in m for m in messages)

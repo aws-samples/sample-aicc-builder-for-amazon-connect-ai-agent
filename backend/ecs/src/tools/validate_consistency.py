@@ -2426,7 +2426,97 @@ def run_d9_checks(session_id: str, *, classic_mismatches: Optional[list[dict]] =
     issues.extend(_d9_contact_flow_checks(bundle, flow_spec))     # D9-6
     issues.extend(_d9_identity_metadata_checks(bundle, flow_spec))  # D9-7
     issues.extend(_d9_external_backend_checks(bundle, classic_mismatches))  # D9-8
+    issues.extend(_d9_backend_auth_checks(bundle, session_id))    # D9-8 (auth)
     return _dedupe_d9_issues(issues)
+
+
+def _d9_backend_auth_checks(bundle: dict, session_id: str) -> list[dict]:
+    """The ACXD application calls the generated API Gateway directly — no
+    AgentCore Gateway in front — so the API must require its key and every Data
+    Request that calls it must send that key from a Secret. Live (2026-09-11):
+    ten methods with ApiKeyRequired: false / AuthorizationType: NONE and Data
+    Requests with `headers: []` — an anonymous public backend."""
+    issues: list[dict] = []
+    calls_backend = False
+    for data_request in bundle.get("data_requests") or []:
+        if not isinstance(data_request, dict):
+            continue
+        webhook = data_request.get("webhook") or {}
+        if webhook.get("implementation") != "external":
+            continue
+        url = str(webhook.get("url") or "")
+        if "{WEBHOOK_URL}" not in url:
+            continue                      # a customer-supplied endpoint: its auth is theirs
+        calls_backend = True
+        headers = webhook.get("headers") or []
+        has_secret_header = any(
+            isinstance(h, dict) and h.get("key") and "{{secrets." in str(h.get("value") or "")
+            for h in headers)
+        if not has_secret_header:
+            issues.append(_d9_issue(
+                "D9-8", f"Data Request {data_request.get('dataRequestId')!r} calls the generated API without an "
+                "auth header — add x-api-key from the BackendApiKey secret (rebuild_acxd_slot_types_tool "
+                "rebuilds the Data Requests)", asset_type="data_request",
+                operation_id=data_request.get("dataRequestId"),
+            ))
+    if not calls_backend:
+        return issues
+    template = _d9_load_infrastructure_yaml(session_id)
+    if not template:
+        return issues
+    for logical_id, http_method, required in _d9_api_methods(template):
+        if http_method == "OPTIONS":
+            continue
+        if required != "true":
+            issues.append(_d9_issue(
+                "D9-8", f"API Gateway method {logical_id!r} ({http_method}) does not require the API key "
+                "(ApiKeyRequired: true) — the ACXD Data Requests call it directly, so it must "
+                "(re-run merge_infrastructure_fragments or patch the template)", asset_type="infrastructure",
+                field=logical_id,
+            ))
+    return issues
+
+
+def _d9_load_infrastructure_yaml(session_id: str) -> Optional[str]:
+    try:
+        from tools.s3_asset_storage import list_session_assets, get_asset_from_s3
+        for key in list_session_assets(session_id) or []:
+            parts = [p for p in str(key).split("/") if p]
+            if len(parts) >= 4 and parts[2] in ("cloudformation", "infrastructure", "cdk") \
+                    and parts[-1].endswith((".yaml", ".yml")):
+                return get_asset_from_s3(key)
+    except Exception as exc:  # pragma: no cover
+        logger.debug("[D9-8] infrastructure template not readable: %s", exc)
+    return None
+
+
+def _d9_api_methods(template: str) -> list[tuple[str, str, str]]:
+    """(logical id, HttpMethod, ApiKeyRequired as text) for each API Gateway method."""
+    out: list[tuple[str, str, str]] = []
+    lines = template.split("\n")
+    for index, line in enumerate(lines):
+        if not re.match(r"^\s+Type:\s*AWS::ApiGateway::Method\s*$", line):
+            continue
+        indent = len(line) - len(line.lstrip())
+        logical_id = ""
+        for back in range(index - 1, -1, -1):
+            candidate = lines[back]
+            if candidate.strip() and (len(candidate) - len(candidate.lstrip())) == indent - 2:
+                logical_id = candidate.strip().rstrip(":")
+                break
+        http_method, required = "", "false"
+        for forward in range(index + 1, len(lines)):
+            nxt = lines[forward]
+            if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent - 2:
+                break
+            m = re.match(r"^\s+HttpMethod:\s*[\"']?(\w+)", nxt)
+            if m:
+                http_method = m.group(1).upper()
+            k = re.match(r"^\s+ApiKeyRequired:\s*(\w+)", nxt)
+            if k:
+                required = k.group(1).lower()
+        out.append((logical_id, http_method, required))
+    return out
 
 
 def _validate_parameter_consistency_impl(session_id: str) -> dict:

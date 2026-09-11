@@ -220,6 +220,76 @@ def _ensure_qsession_env_vars(yaml_str: str) -> str:
     return yaml_str.replace(block, new_block, 1)
 
 
+def _is_acxd_session() -> bool:
+    try:
+        from tools.acxd_flow_spec import is_acxd_target
+        return bool(is_acxd_target())
+    except Exception:
+        return False
+
+
+_METHOD_TYPE_RE = re.compile(r"^(\s+)Type:\s*AWS::ApiGateway::Method\s*$")
+
+
+def require_api_key_on_methods(yaml_str: str) -> str:
+    """ACXD target: every API Gateway method except CORS OPTIONS requires the
+    API key.
+
+    In the Classic target an AgentCore Gateway (Cognito JWT) fronts the API and
+    the workshop keeps `ApiKeyRequired: false` for simplicity. ACXD Data Requests
+    call the API Gateway directly, so without this the generated backend is an
+    anonymous public REST API. The template already creates the key, the usage
+    plan and the retriever that outputs `ApiKeyValue`; the Data Requests send it
+    as `x-api-key` from the `BackendApiKey` secret and deploy.sh creates that
+    secret from the output — nothing manual.
+    """
+    lines = yaml_str.split("\n")
+    out: list[str] = []
+    i = 0
+    changed = 0
+    while i < len(lines):
+        line = lines[i]
+        match = _METHOD_TYPE_RE.match(line)
+        if not match:
+            out.append(line)
+            i += 1
+            continue
+        type_indent = len(match.group(1))
+        # collect the resource block: lines indented deeper than the resource key
+        # (resource key indent = type_indent - 2), stopping at the next sibling
+        block = [line]
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= type_indent - 2:
+                break
+            block.append(nxt)
+            j += 1
+        http_method = next((re.sub(r"[\"']", "", l.split(":", 1)[1]).strip().upper()
+                            for l in block if re.match(r"^\s+HttpMethod:\s*\S", l)), "")
+        if http_method != "OPTIONS":
+            props_idx = next((k for k, l in enumerate(block) if re.match(r"^\s+Properties:\s*$", l)), None)
+            key_idx = next((k for k, l in enumerate(block) if re.match(r"^\s+ApiKeyRequired:\s*", l)), None)
+            if key_idx is not None:
+                indent = block[key_idx][:len(block[key_idx]) - len(block[key_idx].lstrip())]
+                if "true" not in block[key_idx].lower():
+                    block[key_idx] = f"{indent}ApiKeyRequired: true"
+                    changed += 1
+            elif props_idx is not None:
+                prop_indent = " " * (type_indent + 2)
+                block.insert(props_idx + 1, f"{prop_indent}ApiKeyRequired: true")
+                changed += 1
+        out.extend(block)
+        i = j
+    result = "\n".join(out)
+    result = result.replace(
+        "API key value (informational; methods do NOT require an API key)",
+        "API key value - the ACXD Data Requests send it as x-api-key (deploy.sh stores it in the BackendApiKey secret)")
+    if changed:
+        logger.info(f"[MERGE] ACXD target: ApiKeyRequired: true set on {changed} API Gateway method(s)")
+    return result
+
+
 def _fix_qconnect_namespace(yaml_str: str) -> str:
     """Rewrite `qconnect:Action` IAM actions to `wisdom:Action`.
 
@@ -708,6 +778,8 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     final_yaml = _deduplicate_resources(final_yaml)
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)
+    if _is_acxd_session():
+        final_yaml = require_api_key_on_methods(final_yaml)
 
     logger.info(f"[MERGE] Final template: {len(final_yaml)} chars")
 
