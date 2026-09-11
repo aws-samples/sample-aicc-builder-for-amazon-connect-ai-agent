@@ -237,6 +237,7 @@ export function ProgressSidebar() {
   const hasContactFlowAsset = !!(assetFlags & 8);
   const hasCdkAsset = !!(assetFlags & 16);
   const hasKnowledgeBaseAsset = !!(assetFlags & 32);
+  const hasAcxdAsset = !!(assetFlags & 64);
 
   const hasAnyAsset = assetFlags > 0;
 
@@ -495,6 +496,13 @@ export function ProgressSidebar() {
                 icon={<MessageSquare className="w-4 h-4" />}
                 label={language === 'ko-KR' ? 'AI 프롬프트' : 'AI Prompt'}
                 assetType="prompt"
+              />
+            )}
+            {hasAcxdAsset && (
+              <AssetDownloadButton
+                icon={<Boxes className="w-4 h-4" />}
+                label={language === 'ko-KR' ? 'ACXD 애플리케이션' : 'ACXD Application'}
+                assetType="acxd"
               />
             )}
             {hasOpenapiAsset && (
@@ -785,17 +793,20 @@ function AssetDownloadButton({ icon, label, assetType }: AssetDownloadButtonProp
   // Check if we have any content to download
   // For knowledge_base type, check both 'faq' and 'package' asset types
   // For cdk type, also check 'cloudformation' (new naming convention)
+  // For 'acxd' (the whole ACXD application), any completed acxd_* resource counts.
   const assetTypesToCheck = assetType === 'knowledge_base'
     ? ['faq', 'package']
     : assetType === 'cdk'
     ? ['cdk', 'cloudformation']
     : [assetType];
+  const matchesType = (type: string) =>
+    assetType === 'acxd' ? type.startsWith('acxd_') : assetTypesToCheck.includes(type);
   const hasContent = Object.values(assetPreviews).some(
-    (p) => assetTypesToCheck.includes(p.assetType) && p.isComplete
+    (p) => matchesType(p.assetType) && p.isComplete
   ) || (assets[assetType]?.files && Object.keys(assets[assetType].files).length > 0);
 
-  // Show ZIP indicator for Lambda and knowledge_base (includes package)
-  const isZipDownload = assetType === 'lambda' || assetType === 'knowledge_base' || assetType === 'package';
+  // Show ZIP indicator for multi-file downloads (Lambda, knowledge base, ACXD application)
+  const isZipDownload = assetType === 'lambda' || assetType === 'knowledge_base' || assetType === 'package' || assetType === 'acxd';
 
   return (
     <button

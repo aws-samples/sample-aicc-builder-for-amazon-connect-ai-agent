@@ -154,6 +154,33 @@ ACXD_STORAGE_TYPES = frozenset({
     "acxd_knowledge_base", "acxd_application", "acxd_context_variable",
     "acxd_secret", "acxd_deploy_manifest",
 })
+#: Per-asset download of the ACXD application: `asset_type=acxd` (the progress
+#: panel's "ACXD Application" button) selects every stored ACXD resource and
+#: lays it out exactly as the full bundle does under assets/acxd/.
+ACXD_DOWNLOAD_ALIASES = frozenset({"acxd", "acxd_application", "acxd_app"})
+_ACXD_TYPE_FOLDERS = {
+    "acxd_flow": "flows",
+    "acxd_slot_type": "slot-types",
+    "acxd_data_request": "data-requests",
+    "acxd_guardrail": "guardrails",
+    "acxd_knowledge_base": "knowledge-bases",
+    "acxd_secret": "secrets",
+}
+
+
+def _acxd_asset_zip_path(project_name: str, asset_type: str, file_name: str) -> str:
+    """Canonical bundle path for one stored ACXD resource (mirrors build_acxd_zip_entries)."""
+    kind = asset_type.lower()
+    if kind == "acxd_application":
+        return f"{project_name}/assets/acxd/application.json"
+    if kind == "acxd_context_variable":
+        return f"{project_name}/assets/acxd/context-variables.json"
+    if kind == "acxd_deploy_manifest":
+        return f"{project_name}/deploy-manifest.json"
+    folder = _ACXD_TYPE_FOLDERS.get(kind, kind.removeprefix("acxd_").replace("_", "-"))
+    return f"{project_name}/assets/acxd/{folder}/{file_name}"
+
+
 ACXD_RUNNER_FILES = (
     "runner.js", "package.json", "lib/manifest.js", "lib/client.js",
     "lib/state.js", "lib/steps.js",
@@ -465,11 +492,18 @@ def package_assets_impl(
         if asset_type_filter:
             needle = asset_type_filter.lower()
             target_folder = ASSET_TYPE_FOLDER_MAP.get(needle, needle)
-            parsed_assets = {
-                k: v for k, v in parsed_assets.items()
-                if v["asset_type"].lower() == needle
-                or ASSET_TYPE_FOLDER_MAP.get(v["asset_type"].lower(), v["asset_type"].lower()) == target_folder
-            }
+            if needle in ACXD_DOWNLOAD_ALIASES:
+                # The whole ACXD application (flows, slot types, data requests, …).
+                parsed_assets = {
+                    k: v for k, v in parsed_assets.items()
+                    if v["asset_type"].lower() in ACXD_STORAGE_TYPES
+                }
+            else:
+                parsed_assets = {
+                    k: v for k, v in parsed_assets.items()
+                    if v["asset_type"].lower() == needle
+                    or ASSET_TYPE_FOLDER_MAP.get(v["asset_type"].lower(), v["asset_type"].lower()) == target_folder
+                }
             if not parsed_assets:
                 return {
                     "success": False,
@@ -526,12 +560,17 @@ def package_assets_impl(
                     logger.warning(f"[packager] empty/unreadable S3 asset: {s3_key}")
                     continue
 
-                zip_path = _get_zip_path(
-                    project_name=project_name,
-                    asset_type=asset_type,
-                    file_name=file_name,
-                    operation_id=operation_id
-                )
+                if asset_type.lower() in ACXD_STORAGE_TYPES:
+                    # Filtered ACXD download: keep the deployment layout so the
+                    # folder can be dropped into a bundle as-is.
+                    zip_path = _acxd_asset_zip_path(project_name, asset_type, file_name)
+                else:
+                    zip_path = _get_zip_path(
+                        project_name=project_name,
+                        asset_type=asset_type,
+                        file_name=file_name,
+                        operation_id=operation_id
+                    )
 
                 if zip_path:
                     if acxd_plan and zip_path in zip_paths:

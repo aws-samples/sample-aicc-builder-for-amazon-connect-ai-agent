@@ -481,7 +481,8 @@ export function AcxdFlowDiagram({ flowJson, language = 'ko-KR', className, heigh
       >
         <Background gap={16} />
         <Controls showInteractive={false} />
-        <MiniMap pannable zoomable className="!bg-surface-100 dark:!bg-surface-800" />
+        {/* Top-left: flows grow downward, so the default bottom-right corner sat on the last nodes. */}
+        <MiniMap pannable zoomable position="top-left" className="!bg-surface-100 dark:!bg-surface-800" />
         <Panel position="top-right">
           <div className="flex overflow-hidden rounded-md border border-surface-300 text-[11px] font-medium shadow-sm dark:border-surface-600">
             <button

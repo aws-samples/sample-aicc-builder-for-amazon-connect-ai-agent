@@ -128,3 +128,39 @@ def test_manifest_coverage_requires_canonical_dependency_order():
         manifest["steps"][guardrail_index], manifest["steps"][flow_index])
     assert any("upsert-guardrails" in problem and "upsert-flows" in problem
                for problem in check_manifest_coverage(manifest, bundle))
+
+
+def test_acxd_filter_downloads_the_application_in_its_bundle_layout(monkeypatch):
+    """Progress panel 'ACXD Application' download (QA 2026-09-11): `asset_type=acxd`
+    used to match nothing (404). It must select every stored ACXD resource and
+    keep the assets/acxd/ layout of the full bundle, without Classic files."""
+    import tools.asset_packager as packager
+
+    session_id = "session-2"
+    contents = {
+        f"assets/{session_id}/lambda/get_order/index.py": "def handler(event, context): return {}\n",
+        f"assets/{session_id}/acxd_flow/MainFlow.json": '{"flowId":"MainFlow","nodes":{}}',
+        f"assets/{session_id}/acxd_slot_type/OrderStatus.json": '{"slotTypeId":"OrderStatus"}',
+        f"assets/{session_id}/acxd_data_request/getOrder.json": '{"dataRequestId":"getOrder"}',
+        f"assets/{session_id}/acxd_application/application.json": '{"name":"acme-refunds"}',
+        f"assets/{session_id}/acxd_context_variable/context-variables.json": '[]',
+    }
+    client = _FakeS3()
+    monkeypatch.setattr(packager, "_is_acxd_target", lambda _session: True)
+    monkeypatch.setattr(packager, "get_bucket_name", lambda: "test-bucket")
+    monkeypatch.setattr(packager, "get_s3_client", lambda: client)
+    monkeypatch.setattr(packager, "list_session_assets", lambda *_args, **_kwargs: list(contents))
+    monkeypatch.setattr(packager, "get_asset_from_s3", lambda key, **_kwargs: contents.get(key))
+
+    result = packager.package_assets_impl(session_id, "acme-refunds", asset_type_filter="acxd", include_readme=False)
+
+    assert result["success"], result
+    names = set(zipfile.ZipFile(io.BytesIO(client.payload)).namelist())
+    # deploy.sh rides along with every download (existing behaviour); nothing else may.
+    assert names - {"acme-refunds/deploy.sh"} == {
+        "acme-refunds/assets/acxd/flows/MainFlow.json",
+        "acme-refunds/assets/acxd/slot-types/OrderStatus.json",
+        "acme-refunds/assets/acxd/data-requests/getOrder.json",
+        "acme-refunds/assets/acxd/application.json",
+        "acme-refunds/assets/acxd/context-variables.json",
+    }
