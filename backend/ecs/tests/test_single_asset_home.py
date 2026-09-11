@@ -41,3 +41,24 @@ def test_bundle_keeps_one_contact_flow_per_name():
     other = {"Name": "outbound", "Version": "2019-10-30", "Actions": []}
     kept = _dedupe_contact_flows([older, newer, other, json.loads(json.dumps(other))])
     assert kept == [newer, other]
+
+
+def test_flow_slots_are_rebound_to_per_field_slot_types_on_load():
+    """SELC: slots attached as type 'enum' (one shared slot type); after the rebuild
+    the bundle holds productType / serviceType instead. The loader rebinds each
+    slot — and the user_choice node named after it — to the per-field type."""
+    from tools.acxd_bundle import _rebind_slot_types
+    flow = {"flowId": "PriceInquiry",
+            "slotTypes": [{"name": "productType", "type": "enum"}, {"name": "serviceType", "type": "enum"},
+                          {"name": "quantity", "type": "number"}],
+            "nodes": {
+                "n1": {"nodeId": "n1", "type": "user_choice", "metadata": {"name": "productType", "choice": {"source": "slotType", "slotTypeId": "enum"}}},
+                "n2": {"nodeId": "n2", "type": "user_choice", "metadata": {"name": "serviceType", "choice": {"source": "slotType", "slotTypeId": "enum"}}},
+                "n3": {"nodeId": "n3", "type": "user_choice", "metadata": {"choice": {"source": "slotType", "slotTypeId": "number"}}},
+            }}
+    slot_types = [{"slotTypeId": "productType"}, {"slotTypeId": "serviceType"}]
+    out = _rebind_slot_types(flow, slot_types)
+    assert [s["type"] for s in out["slotTypes"]] == ["productType", "serviceType", "number"]
+    assert out["nodes"]["n1"]["metadata"]["choice"]["slotTypeId"] == "productType"
+    assert out["nodes"]["n2"]["metadata"]["choice"]["slotTypeId"] == "serviceType"
+    assert out["nodes"]["n3"]["metadata"]["choice"]["slotTypeId"] == "number"  # builtin untouched

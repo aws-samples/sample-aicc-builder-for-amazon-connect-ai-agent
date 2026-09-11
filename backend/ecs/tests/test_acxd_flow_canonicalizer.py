@@ -48,7 +48,7 @@ def test_slot_capture_in_metadata_userinput_becomes_user_choice_with_choice_conf
     node = out.flow["nodes"][N[2]]
     assert node["type"] == "user_choice"
     assert node["messages"] == [{"type": "text", "body": "Last 4 digits?"}]
-    assert node["metadata"] == {"choice": {"source": "slotType", "slotTypeId": "cardLast"}}
+    assert node["metadata"] == {"choice": {"source": "slotType", "slotTypeId": "cardLast"}, "name": "cardLast"}
     _sdk_only(out.flow)
     assert validate_acxd_asset("flow", out.flow) == []
 

@@ -230,6 +230,11 @@ def canonicalize_flow(flow: Any) -> Canonicalization:
                 choice = {"source": "slotType", "slotTypeId": slot_type_id, **({"showChoices": True} if had_options else {})}
                 meta["choice"] = choice
                 result.changes.append(f"{label}: slot {slot_name!r} → metadata.choice(source=slotType, slotTypeId={slot_type_id!r})")
+            # The node's display name (an SDK field) records WHICH slot it captures:
+            # readable in the console, and what the bundle loader uses to rebind a
+            # slot type id that was later split per field.
+            if not meta.get("name"):
+                meta["name"] = slot_name
             if slot_name not in attached:
                 entry = {"name": slot_name, "type": slot_type_id}
                 slot_types.append(entry)

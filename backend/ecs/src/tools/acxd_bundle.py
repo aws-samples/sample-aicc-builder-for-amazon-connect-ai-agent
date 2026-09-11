@@ -225,6 +225,66 @@ def _dedupe_contact_flows(docs: list[dict]) -> list[dict]:
     return list(by_key.values())
 
 
+_BUILTIN_SLOT_TYPE_IDS = frozenset({
+    "text", "string", "number", "integer", "int", "boolean", "bool",
+    "date", "datetime", "time", "email", "phone",
+})
+
+
+def _rebind_slot_types(flow: Any, slot_types: list) -> Any:
+    """Point a flow's attached slots at the per-field slot type when the id it
+    names is not in the bundle.
+
+    Live (SELC): three slots were attached with `type: "enum"` — one shared
+    slot type that no longer exists once the slot types are rebuilt per field.
+    When the bundle holds a slot type whose id equals the slot's name, the slot
+    (and the user_choice node capturing it) is rebound to it; anything else is
+    left for D9-4 to report.
+    """
+    if not isinstance(flow, dict):
+        return flow
+    available = {str(st.get("slotTypeId")) for st in slot_types or [] if isinstance(st, dict) and st.get("slotTypeId")}
+    # old shared id → the per-field slot names that replaced it (several slots
+    # may have shared one id, e.g. 'enum')
+    renames: dict[str, list[str]] = {}
+    for slot in flow.get("slotTypes") or []:
+        if not isinstance(slot, dict):
+            continue
+        type_id, name = str(slot.get("type") or ""), str(slot.get("name") or "")
+        if type_id and type_id.lower() not in _BUILTIN_SLOT_TYPE_IDS and type_id not in available and name in available:
+            renames.setdefault(type_id, []).append(name)
+            slot["type"] = name
+            logger.info("[ACXDBundle] %s: slot %r rebound from missing slot type %r to %r",
+                        flow.get("flowId"), name, type_id, name)
+    if renames:
+        for node in (flow.get("nodes") or {}).values():
+            meta = (node or {}).get("metadata") if isinstance(node, dict) else None
+            choice = (meta or {}).get("choice") if isinstance(meta, dict) else None
+            if isinstance(choice, dict) and choice.get("slotTypeId") in renames:
+                candidates = renames[choice["slotTypeId"]]
+                target = _slot_for_choice(node, set(candidates))
+                if target:
+                    choice["slotTypeId"] = target
+                elif len(candidates) == 1:
+                    choice["slotTypeId"] = candidates[0]
+                # else: ambiguous — left for D9-4 to report against this node
+    return flow
+
+
+def _slot_for_choice(node: dict, candidates: set[str]) -> Optional[str]:
+    """Which rebound slot a user_choice node captures: its display name (the
+    canonicalizer sets metadata.name to the slot name), else a slot the node's
+    placeholders or branch conditions reference — only when unambiguous."""
+    import re
+    meta_name = str(((node.get("metadata") or {}).get("name")) or "")
+    if meta_name in candidates:
+        return meta_name
+    text = json.dumps(node, ensure_ascii=False)
+    referenced = {m for m in re.findall(r"\{([A-Za-z]{3,30}):NLX\.Slot\}", text) if m in candidates}
+    referenced |= {m for m in re.findall(r'"type":\s*"slot",\s*"name":\s*"([A-Za-z]{3,30})"', text) if m in candidates}
+    return referenced.pop() if len(referenced) == 1 else None
+
+
 def load_acxd_bundle(session_id: str) -> dict:
     """Load every generated asset the ACXD target needs into one dict.
 
@@ -238,6 +298,7 @@ def load_acxd_bundle(session_id: str) -> dict:
     for asset_type, key in ACXD_LIST_TYPES.items():
         bundle[key] = _read_json_docs(session_id, asset_type)
     bundle["flows"] = [normalize_flow_for_service(f) for f in bundle["flows"]]
+    bundle["flows"] = [_rebind_slot_types(f, bundle["slot_types"]) for f in bundle["flows"]]
 
     apps = _read_json_docs(session_id, ACXD_APPLICATION_TYPE)
     bundle["application"] = apps[0] if apps else None
