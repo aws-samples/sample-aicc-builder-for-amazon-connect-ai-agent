@@ -95,9 +95,12 @@ NODE_TYPE_ALIASES = {
     "generative_message": "generative_text", "generative_response": "generative_text",
     "generate_message": "generative_text", "llm_message": "generative_text",
     "ai_message": "generative_text", "generative": "generative_text",
-    "input": "user_input", "collect": "user_input", "slot": "user_input",
-    "collect_input": "user_input", "ask": "user_input", "dtmf": "user_input",
-    "menu": "user_choice", "options": "user_choice",
+    # Collecting a value is the SDK's user_choice node (slot / built-in type
+    # capture); user_input is open-ended intent capture. The planner's older
+    # words for "collect" therefore map to user_choice.
+    "input": "user_choice", "collect": "user_choice", "slot": "user_choice",
+    "collect_input": "user_choice", "ask": "user_choice", "dtmf": "user_choice",
+    "menu": "user_choice", "options": "user_choice", "intent": "user_input",
     "branch": "choice", "condition": "choice", "if": "choice", "decision": "choice",
     "route": "choice", "router": "choice", "switch": "choice", "compare": "choice",
     "api_call": "data_request", "api": "data_request", "lambda": "data_request",
@@ -660,8 +663,10 @@ def upsert_acxd_flow_plan(
     escalation, optionally unknown / frustration / help / repeat / resume).
 
     node_type MUST be one of the real ACXD node types (nothing else is accepted):
-      deterministic: start, end, basic (fixed message), user_input (collect a slot),
-        user_choice (menu), choice (rule branch — NOT 'split'), split (percentage A/B),
+      deterministic: start, end, basic (fixed message), user_choice (collect ONE value
+        into a slot — order number, name, yes/no, a menu pick; this is how ACXD captures
+        values), user_input (open-ended "what do you need?" intent capture only),
+        choice (rule branch — NOT 'split'), split (percentage A/B),
         data_request (call a Data Request / backend API), escalate (hand off to a
         human queue), redirect (jump to another flow), wait, note, define, transform, loop
       generative: generative_text (LLM-worded message), generative_task,

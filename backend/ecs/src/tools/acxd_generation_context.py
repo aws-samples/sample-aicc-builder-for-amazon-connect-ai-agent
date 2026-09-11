@@ -62,6 +62,7 @@ def _field_dict(field: Any) -> dict:
         ("enum_values", "enum_values"),
         ("enum", "enum_values"),
         ("pattern", "regex"),
+        ("regex", "regex"),          # specs edited live carry the constraint under `regex`; D9-4 reads both
         ("min_length", "min_length"),
         ("max_length", "max_length"),
         ("example_value", "example"),

@@ -47,6 +47,14 @@ BUILTIN_SLOT_PRIMITIVES = frozenset({"text", "number", "boolean"})
 BUILTIN_SLOT_NAMESPACE = "NLX."
 
 
+
+def _capture_family(node_type):
+    """Plan vocabulary vs SDK contract: a plan step 'user_input' (collect a slot)
+    is implemented by a `user_choice` node (the SDK's value-capture node) and the
+    canonicalizer converts slot-capturing user_input nodes accordingly, so the
+    determinism gate compares the capture family, not the spelling."""
+    return "user_capture" if node_type in ("user_input", "user_choice") else node_type
+
 def _is_builtin_slot_type(slot_type: str) -> bool:
     return (slot_type in BUILTIN_SLOT_PRIMITIVES
             or str(slot_type).startswith(BUILTIN_SLOT_NAMESPACE))
@@ -441,12 +449,13 @@ def validate_acxd_consistency(
                    f"were never confirmed by the user")
             node_types = {n.get("type") for n in (generated.get("nodes") or {}).values()
                           if isinstance(n, dict)}
+            node_families = {_capture_family(t) for t in node_types}
             confirmed_generative = {
                 s.get("node_type") for s in plan.get("steps") or []
                 if s.get("user_confirmed") and s.get("determinism") == "generative"
             }
             for s in plan.get("steps") or []:
-                if s.get("user_confirmed") and s.get("node_type") not in node_types:
+                if s.get("user_confirmed") and _capture_family(s.get("node_type")) not in node_families:
                     _v(out, "DETERMINISM_MISSING_NODE", f"flows[{flow_id}]",
                        f"confirmed step {s.get('step')} requires a "
                        f"{s.get('node_type')!r} node but none exists in the flow")
@@ -557,12 +566,12 @@ def _acxd_determinism_count_violations(bundle: dict, spec: Optional[dict]) -> li
         steps = [step for step in (plan.get("steps") or []) if isinstance(step, dict)]
         confirmed = [step for step in steps if step.get("user_confirmed")]
         node_counts = Counter(
-            node.get("type")
+            _capture_family(node.get("type"))
             for node in (generated.get("nodes") or {}).values()
             if isinstance(node, dict) and node.get("type")
         )
         required_counts = Counter(
-            step.get("node_type") for step in confirmed if step.get("node_type")
+            _capture_family(step.get("node_type")) for step in confirmed if step.get("node_type")
         )
         for node_type, required_count in required_counts.items():
             actual_count = node_counts.get(node_type, 0)

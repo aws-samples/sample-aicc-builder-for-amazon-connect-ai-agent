@@ -2441,6 +2441,11 @@ Example copy (write in the user's language):
 ⛔ **END YOUR RESPONSE HERE. Do NOT call any generator tools. Wait for user.**
 
 **Step 3: Fix ONLY what the user confirmed (next turn)**
+- Blocking findings have deterministic repairs — use them BEFORE any LLM patch:
+  `PARITY:*` → `enforce_openapi_contract_tool()` (re-projects openapi.yaml from
+  the spec); `D9-4 … requires a generated custom slot type` →
+  `rebuild_acxd_slot_types_tool()` then point the flow at the per-field slot
+  type id with `patch_acxd_asset`. Only what no repair covers is patched by hand.
 - User says specific items → fix ONLY those items
 - User says "all" / "전부" / "fix everything" → fix all real issues
 - User says "it's fine" / "괜찮아요" / "skip" → skip fixes

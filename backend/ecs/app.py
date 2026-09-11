@@ -324,6 +324,23 @@ def _load_acxd_kb_refresh_tool():
         return None
 
 
+def _load_deterministic_repairs(is_acxd: bool) -> list:
+    """Deterministic repairs for review findings (no LLM patching): OpenAPI
+    re-projection for both targets, slot type rebuild for ACXD."""
+    tools_out: list = []
+    try:
+        from tools.deterministic_repairs import (
+            enforce_openapi_contract_tool,
+            rebuild_acxd_slot_types_tool,
+        )
+        tools_out.append(enforce_openapi_contract_tool)
+        if is_acxd:
+            tools_out.append(rebuild_acxd_slot_types_tool)
+    except ImportError as exc:
+        logger.warning("[repairs] deterministic repair tools unavailable: %s", exc)
+    return tools_out
+
+
 def _load_acxd_asset_patcher():
     """Load the ACXD patch-only tool without making a missing optional module fatal."""
     try:
@@ -372,6 +389,7 @@ def get_tools_for_phase(
                 or _GENERATOR_TOOL_TO_ASSET[tool] in scope_set)
         ]
 
+    generation_tools = generation_tools + _load_deterministic_repairs(is_acxd)
     if not is_acxd:
         return generation_tools
 

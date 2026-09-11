@@ -546,7 +546,7 @@ Explain the recommendation in plain language and save the eventual decision with
 `save_acxd_application_settings`.
 
 ### Phase 2.5 — Advanced-requirement mapping
-- If a caller uses DTMF/keypad input, design it as a `user_input` node and define
+- If a caller uses DTMF/keypad input, design it as a `user_choice` node and define
   the corresponding slot type, including its field name, validation, examples,
   and sensitivity.
 - For every external integration, ask whether it is real or a simulation. A real
@@ -562,8 +562,9 @@ design the ACXD flows before moving to the analysis document.
    `node_type`, `determinism`, `determinism_rationale`, and
    `decision_category`.
    `node_type` must be a real ACXD node type — use exactly these names:
-   - deterministic: `start`, `end`, `basic` (fixed message), `user_input`
-     (collect one slot), `user_choice` (menu), `choice` (rule branch — never
+   - deterministic: `start`, `end`, `basic` (fixed message), `user_choice`
+     (collect ONE value into a slot — number, name, yes/no, menu pick),
+     `user_input` (open-ended intent capture only), `choice` (rule branch — never
      `split`, which is a percentage A/B test), `data_request` (call the
      operation's Data Request), `escalate` (hand off to a human queue),
      `redirect` (jump to another flow), `wait`, `define`, `transform`, `loop`
