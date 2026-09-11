@@ -74,7 +74,9 @@ function shortText(value: string, max = 56): string {
 const NODE_TYPE_LABELS: Record<string, { ko: string; en: string }> = {
   start: { ko: '시작', en: 'Start' },
   end: { ko: '종료', en: 'End' },
-  user_input: { ko: '입력 받기', en: 'User input' },
+  user_input: { ko: '의도 파악', en: 'User input' },
+  user_choice: { ko: '응답 받기', en: 'User choice' },
+  split: { ko: '분기', en: 'Split' },
   data_request: { ko: '데이터 요청', en: 'Data request' },
   choice: { ko: '분기', en: 'Choice' },
   define: { ko: '변수 설정', en: 'Set variable' },

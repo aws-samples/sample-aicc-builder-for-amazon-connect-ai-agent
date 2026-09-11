@@ -316,6 +316,17 @@ def _field_constraint(field: dict, *keys: str):
     return None
 
 
+def _response_fields_with_envelope(op: dict) -> list[dict]:
+    """Envelope (success / errorCode / message) + the operation's output_fields."""
+    from tools.response_contract import RESPONSE_ENVELOPE, ENVELOPE_FIELD_NAMES
+    out = [dict(f) for f in RESPONSE_ENVELOPE]
+    for field in op.get("output_fields") or []:
+        f = _field_dict(field)
+        if f.get("name") and f["name"] not in ENVELOPE_FIELD_NAMES:
+            out.append(f)
+    return out
+
+
 def _derive_slot_types(flow_plans: list[dict], operations: dict[str, Any]) -> list[dict]:
     """Derive custom ACXD slot types from flow slots and FieldSpec constraints."""
     output: dict[str, dict] = {}
@@ -435,8 +446,10 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
             or op.get("http_method") or "POST",
             "request_fields": contract.get("request_fields")
             or [_field_dict(field) for field in (op.get("input_fields") or [])],
+            # Same contract as the OpenAPI response: envelope + output_fields, so
+            # D9-3 (Data Request ↔ OpenAPI) holds by construction.
             "response_fields": contract.get("response_fields")
-            or [_field_dict(field) for field in (op.get("output_fields") or [])],
+            or _response_fields_with_envelope(op),
             "purpose": op.get("summary") or op.get("description") or raw_id,
         })
 

@@ -338,7 +338,7 @@ def _fields_to_synthetic_object(fields: list, object_name: str) -> dict:
 # ignore the gate. Treat them as implicitly declared at the response ROOT
 # only (never inside nested objects/arrays, where an undeclared property is
 # still a real mismatch).
-_IMPLICIT_RESPONSE_ENVELOPE_FIELDS = {"errorCode", "message"}
+from tools.response_contract import ENVELOPE_FIELD_NAMES as _IMPLICIT_RESPONSE_ENVELOPE_FIELDS  # noqa: E501
 
 
 def validate_shape_parity(spec: dict, openapi_doc: dict) -> list[ShapeMismatch]:
