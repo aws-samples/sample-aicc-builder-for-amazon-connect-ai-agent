@@ -1728,13 +1728,39 @@ async def download_assets(
     from tools.asset_packager import package_assets_impl
 
     filter_value = None if not asset_type or asset_type.lower() == "all" else asset_type
-    result = package_assets_impl(
-        session_id=session_id,
-        asset_type_filter=filter_value,
-        include_readme=filter_value is None,
-    )
+    # Bind the session like the WebSocket loop does. The D9 gate reads the
+    # OperationSpecs through the session ContextVar; unbound, it saw an empty
+    # spec set and flagged every flow slot as "unknown OperationSpec field"
+    # (13 false refusals on a live download).
+    from tools.session_context import current_session_id as _dl_sid
+    _dl_token = _dl_sid.set(session_id)
+    try:
+        try:
+            from tools.project_workspace import set_workspace_session_id
+            from tools.spec_manager import restore_specs_from_workspace
+            set_workspace_session_id(session_id)
+            restore_specs_from_workspace()
+        except Exception as bind_err:
+            logger.warning(f"[download] session bind failed for {session_id}: {bind_err}")
+        result = package_assets_impl(
+            session_id=session_id,
+            asset_type_filter=filter_value,
+            include_readme=filter_value is None,
+        )
+    finally:
+        _dl_sid.reset(_dl_token)
     if not result.get("success"):
-        raise HTTPException(status_code=404, detail=result.get("error", "No assets found"))
+        # 409, not 404: CloudFront rewrites 403/404 to the SPA's index.html, so a
+        # 404 reached the browser as an HTML page it could not parse. 409 keeps
+        # the JSON body (and the D9 problem list) intact for the download UI.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "error": result.get("error", "No assets found"),
+                "problems": result.get("problems") or [],
+            },
+        )
     return JSONResponse({
         "success": True,
         "downloadUrl": result["download_url"],
