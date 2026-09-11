@@ -25,8 +25,22 @@ Classic remains the default target. ACXD deployment runs the shared CloudFormati
 
 The deploy script prompts for `ACXD_WORKSPACE_ID` and `ACXD_API_KEY` unless they are already exported, and (interactively) offers to take `ACXD_ALIAS_ID` — the application alias the Agentic CX block binds to. None of these values is saved to the archive or either deployment state file.
 
+## Who speaks: the application, not the Contact Flow
+
+The application is the conversation — it greets (`welcome` flow), collects and
+confirms, answers FAQ, says "I will connect you to an agent" and says goodbye.
+The Contact Flow is telephony plumbing and stays silent, except for what only it
+can know: a recording/legal notice the customer requires before the block, the
+escalation-path announcements (outside business hours, queue full, transfer
+failed) and the "assistant unavailable" fallback, in the application's language.
+The binding pass enforces this deterministically (a pre-block greeting and any
+message on the Default path are removed; the fallback is localised) and the D9-6
+gate blocks a flow that still carries such speech. Live reason (2026-09-11): the
+flow greeted before the block and the application's welcome flow greeted again
+with the same sentence.
+
 ## Agentic CX block
 
-The generated Contact Flow carries the real block — `"Type": "ConnectParticipantWithAgenticCX"`, taken from an Amazon Connect console export and verified to re-import through `CreateContactFlow` (reference: `knowledge-base-docs/contact-flow/_reference-console-export-agentic-cx-block.json`). Its outputs are wired by the deterministic binding pass: **Default** (`NextAction`) → disconnect, **Escalation** (`Conditions` entry `Equals "Escalation"`) → queue transfer, **Error** (`NoMatchingError`) → fallback message, **Idle chat timeout** (`InputTimeLimitExceeded`) → disconnect. Speech recognition is `AMAZON_AGENTIC_VOICE` when the application uses agentic voice, and the audio filler is configured.
+The generated Contact Flow carries the real block — `"Type": "ConnectParticipantWithAgenticCX"`, taken from an Amazon Connect console export and verified to re-import through `CreateContactFlow` (reference: `knowledge-base-docs/contact-flow/_reference-console-export-agentic-cx-block.json`). Its outputs are wired by the deterministic binding pass. Targets the generator wired on the block itself are kept (**Default** → call-outcome logging → disconnect, **Escalation** → business-hours check → set queue → transfer); a branch left unwired gets the default: **Default** (`NextAction`) → disconnect, **Escalation** (`Conditions` entry `Equals "Escalation"`) → queue transfer, **Error** (`NoMatchingError`) → fallback message, **Idle chat timeout** (`InputTimeLimitExceeded`) → disconnect. Speech recognition is `AMAZON_AGENTIC_VOICE` when the application uses agentic voice, and the audio filler is configured.
 
 The bundle keeps `{ACXD_WORKSPACE_ID}`, `{ACXD_APPLICATION_ID}` and `{ACXD_ALIAS_ID}` placeholders in the block; `./deploy.sh` substitutes the workspace and the application it just deployed at import time. Connect does not validate these ids on import. The alias is an opaque ACXD identifier the SDK does not list: export `ACXD_ALIAS_ID` before deploying to have it written into the block, or pick it in the block's dropdown in the Connect designer afterwards and publish — that is the only manual step, as `WIRING-GUIDE.md` in the bundle explains. The Agentic CX block requires a Connect Customer instance.

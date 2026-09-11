@@ -590,6 +590,32 @@ design the ACXD flows before moving to the analysis document.
    capture application name, channels, locales, speech engine, chat idle timeout,
    and no more than ten context variables with `save_acxd_application_settings`.
 
+### Who speaks — the application, not the Contact Flow
+In the ACXD target the **application** is the conversation: it greets (the
+`welcome` flow), collects and confirms, answers FAQ, says "I will connect you to
+an agent" and says goodbye. The Contact Flow is telephony plumbing and stays
+**silent** except for what only it can know: a recording/legal notice the
+customer requires before any conversation, and the announcements on the
+escalation path (outside business hours, queue full, transfer failed) plus the
+"assistant unavailable" fallback. So:
+- Store the greeting and the closing in the `welcome` flow plan (and the
+  handoff sentence in the `escalation` plan) — NOT in `ContactFlowSpec.
+  welcome_message`. Leave `welcome_message` empty for ACXD; a Contact Flow
+  greeting is stripped by the binder and a greeting that survives is a blocking
+  D9-6 finding (the caller would hear the greeting twice, live 2026-09-11).
+- `after_hours_message` / `transfer_message` in ContactFlowSpec are the
+  telephony announcements — collect them in the customer's language.
+- No DTMF menus or `GetParticipantInput` before the block: intent capture is
+  the application's `generative_journey`; keypad values are `user_choice` slots.
+
+### Backend the Data Requests call
+ACXD Data Requests are HTTP webhooks: they call the generated API Gateway
+endpoint (`{WEBHOOK_URL}/tools/<operation>`) directly — there is no AgentCore
+Gateway / MCP layer in this target (the OpenAPI document is still generated as
+the contract the Data Requests and Lambdas are checked against, not as an MCP
+target). If the customer already runs an MCP server for these tools, ask and
+record the integration as `mcp` with its URL; otherwise `external` is right.
+
 ### Non-negotiable ACXD rules
 - Steps whose decision category is `money`, `refund`, `payment`,
   `authorization`, `eligibility`, `compliance`, or `identity` are always

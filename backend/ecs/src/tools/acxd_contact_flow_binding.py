@@ -123,6 +123,123 @@ def _remove_actions(document: dict, action_types: set[str]) -> None:
     document["Actions"] = actions
 
 
+_FALLBACK_TEXT_BY_LANGUAGE = {
+    "ko": "죄송합니다. 지금은 상담 시스템에 연결할 수 없습니다. 잠시 후 다시 전화해 주세요.",
+    "ja": "申し訳ありません。現在アシスタントに接続できません。しばらくしてからおかけ直しください。",
+    "en": "We are sorry, but the assistant is unavailable. Please call again later.",
+}
+
+
+def _application_language(application: dict) -> str:
+    locales = application.get("locales") or []
+    primary = application.get("primary_locale") or (locales[0] if locales else "") or application.get("language") or ""
+    return str(primary).split("-")[0].lower() or "en"
+
+
+def _fallback_text(application: dict) -> str:
+    return _FALLBACK_TEXT_BY_LANGUAGE.get(_application_language(application), _FALLBACK_TEXT_BY_LANGUAGE["en"])
+
+
+def _english_default_fallback(action: dict) -> bool:
+    text = str((action.get("Parameters") or {}).get("Text") or "")
+    return text.startswith("We are sorry, but the assistant is unavailable")
+
+
+_NOTICE_HINTS = ("record", "notice", "consent", "legal", "녹음", "고지")
+
+
+def _is_recording_notice(action: dict, plan_data: dict) -> bool:
+    """A pre-block announcement the spec asked for (recording/legal notice)."""
+    ident = _action_id(action).lower()
+    text = str((action.get("Parameters") or {}).get("Text") or "")
+    if any(hint in ident for hint in _NOTICE_HINTS) or any(hint in text for hint in ("녹음", "recorded", "録音")):
+        return True
+    for notice in _spec_notice_texts(plan_data):
+        if notice and notice in text:
+            return True
+    return False
+
+
+def _spec_notice_texts(plan_data: dict) -> list[str]:
+    """Recording/legal notice texts the specs asked the Contact Flow to play."""
+    behaviors = list((plan_data.get("contact_flow") or {}).get("behaviors") or [])
+    try:
+        from tools.spec_manager import get_contact_flow_spec
+        cf_spec = get_contact_flow_spec()
+        if cf_spec is not None:
+            behaviors += list(_model_dump(cf_spec).get("behaviors") or [])
+    except Exception:
+        pass
+    out: list[str] = []
+    for behavior in behaviors:
+        if not isinstance(behavior, dict) or str(behavior.get("behavior", "")).lower() != "recording":
+            continue
+        params = behavior.get("parameters") or {}
+        for key in ("message", "notice", "text", "recording_message"):
+            value = str(params.get(key) or "").strip()
+            if value:
+                out.append(value)
+    return out
+
+
+def _strip_owned_speech(document: dict, plan_data: dict) -> list[str]:
+    """Remove MessageParticipant actions the application owns: everything spoken
+    before the Agentic CX block except a recording notice, and everything on the
+    Default (conversation finished) path — the app already said goodbye.
+    Returns the removed identifiers."""
+    actions = [a for a in document.get("Actions") or [] if isinstance(a, dict)]
+    by_id = {_action_id(a): a for a in actions if _action_id(a)}
+    pre_block = _actions_before_block(document)
+    block = next((a for a in actions if _action_type(a) == AGENTIC_CX_ACTION_TYPE), None)
+    default_path: set[str] = set()
+    if block is not None:
+        ident = (_transitions(block)).get("NextAction")
+        while ident in by_id and ident not in default_path:
+            default_path.add(ident)
+            ident = _transitions(by_id[ident]).get("NextAction")
+    doomed: list[str] = []
+    for ident in list(pre_block) + sorted(default_path):
+        action = by_id.get(ident)
+        if action is None or _action_type(action) != "MessageParticipant":
+            continue
+        if ident in pre_block and _is_recording_notice(action, plan_data):
+            continue
+        if _action_id(action) == "AgenticCXFallbackMessage":
+            continue
+        doomed.append(ident)
+    for ident in doomed:
+        _remove_action_by_id(document, ident)
+    return doomed
+
+
+def _remove_action_by_id(document: dict, old: str) -> None:
+    """Splice one action out of the graph, re-pointing every transition at its
+    own successor (NextAction first, else its first error target)."""
+    actions = [a for a in document.get("Actions") or [] if isinstance(a, dict)]
+    action = next((a for a in actions if _action_id(a) == old), None)
+    if action is None:
+        return
+    transitions = _transitions(action)
+    successor = transitions.get("NextAction") or next(
+        (item.get("NextAction") for item in transitions.get("Errors") or []
+         if isinstance(item, dict) and item.get("NextAction")), None)
+    actions = [a for a in actions if _action_id(a) != old]
+    if successor and successor != old:
+        if document.get("StartAction") == old:
+            document["StartAction"] = successor
+        for other in actions:
+            trans = _transitions(other)
+            if trans.get("NextAction") == old:
+                trans["NextAction"] = successor
+            for item in list(trans.get("Errors") or []) + list(trans.get("Conditions") or []):
+                if isinstance(item, dict) and item.get("NextAction") == old:
+                    item["NextAction"] = successor
+    action_metadata = (document.get("Metadata") or {}).get("ActionMetadata")
+    if isinstance(action_metadata, dict):
+        action_metadata.pop(old, None)
+    document["Actions"] = actions
+
+
 def _authored_branches(candidate: Optional[dict], actions: list) -> dict[str, str]:
     """Branch targets the generator already wired on the block being replaced,
     when each names an existing action (other than the block itself)."""
@@ -265,13 +382,18 @@ def normalize_acxd_contact_flow(
         {"Type": "DisconnectParticipant", "Parameters": {}, "Transitions": {}},
     )
     fallback_id = "AgenticCXFallbackMessage"
-    if not any(_action_id(item) == fallback_id for item in actions):
+    fallback_text = _fallback_text(application)
+    existing_fallback = next((item for item in actions if _action_id(item) == fallback_id), None)
+    if existing_fallback is None:
         actions.append({
             "Identifier": fallback_id,
             "Type": "MessageParticipant",
-            "Parameters": {"Text": "We are sorry, but the assistant is unavailable."},
+            "Parameters": {"Text": fallback_text},
             "Transitions": {"NextAction": disconnect_id},
         })
+    elif _english_default_fallback(existing_fallback) and not fallback_text.startswith("We are sorry"):
+        # an earlier binding pass wrote the English default into a non-English flow
+        existing_fallback.setdefault("Parameters", {})["Text"] = fallback_text
 
     queue_id = _find_or_add_action(
         actions,
@@ -426,6 +548,14 @@ def normalize_acxd_contact_flow(
                 name: (source if not str(source).startswith("$.AgenticCX.") else f"$.Attributes.{name}")
                 for name, source in context_variable_map.items()
             }
+
+    # Speech ownership (ACXD target): the application speaks to the caller —
+    # greeting, closing, "connecting you to an agent". The Contact Flow only
+    # announces telephony states it alone knows (outside hours, queue full,
+    # transfer error, app unavailable) and a recording/legal notice the spec
+    # asked for. Live: the flow greeted before the block and the app's
+    # WelcomeFlow greeted again with the same sentence.
+    _strip_owned_speech(document, plan_data)
 
     # The former Lex Compare path is no longer part of the ACXD target.  Drop
     # unreachable fragments so the existing Connect linter sees a clean graph.

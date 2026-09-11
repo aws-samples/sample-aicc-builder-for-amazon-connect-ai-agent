@@ -101,8 +101,10 @@ def test_normalizer_replaces_lex_with_agentic_cx_binding_and_real_branches():
 
     serialized = json.dumps(normalized)
     assert "$.Lex.SessionAttributes." not in serialized
-    # Lex session-attribute reads become Agentic CX context-variable reads.
-    assert "$.AgenticCX.ContextVariables.customerId" in serialized
+    # The application owns the greeting: the Contact Flow's pre-block welcome
+    # message is stripped and the caller reaches the block directly.
+    assert "Greeting" not in actions
+    assert normalized["StartAction"] == AGENTIC_CX_PLACEHOLDER_ID
 
 
 def test_normalizer_rewrites_known_attribute_after_connect_lint_pass():
@@ -110,9 +112,10 @@ def test_normalizer_rewrites_known_attribute_after_connect_lint_pass():
         "Version": "2019-10-30",
         "StartAction": "Entry",
         "Actions": [{
+            # a NON-speech pre-block action (speech before the block is stripped)
             "Identifier": "Entry",
-            "Type": "MessageParticipant",
-            "Parameters": {"Text": "Hello"},
+            "Type": "UpdateContactAttributes",
+            "Parameters": {"Attributes": {"copy": "$.Attributes.customerId"}},
             "Transitions": {"NextAction": "Disconnect"},
         }, {
             "Identifier": "Disconnect",
@@ -122,7 +125,6 @@ def test_normalizer_rewrites_known_attribute_after_connect_lint_pass():
         }],
     }
     spec = _Model({"application": {"context_variables": [{"name": "customerId"}]}})
-    flow["Actions"][0]["Parameters"]["Text"] = "$.Attributes.customerId"
     # a read AFTER the block: the block's Default branch → this message → Disconnect
     flow["Actions"][0]["Transitions"]["NextAction"] = AGENTIC_CX_PLACEHOLDER_ID
     flow["Actions"].insert(1, {
@@ -131,8 +133,10 @@ def test_normalizer_rewrites_known_attribute_after_connect_lint_pass():
         "Transitions": {"NextAction": "AfterBlock", "Conditions": [], "Errors": []},
     })
     flow["Actions"].insert(2, {
-        "Identifier": "AfterBlock", "Type": "MessageParticipant",
-        "Parameters": {"Text": "$.Attributes.customerId"},
+        # a post-block NON-speech read (a message on the Default path would be
+        # stripped: the app already said goodbye)
+        "Identifier": "AfterBlock", "Type": "UpdateContactAttributes",
+        "Parameters": {"Attributes": {"seen": "$.Attributes.customerId"}},
         "Transitions": {"NextAction": "Disconnect"},
     })
 
@@ -141,8 +145,8 @@ def test_normalizer_rewrites_known_attribute_after_connect_lint_pass():
     # $.AgenticCX.* exists only once the block has returned: the pre-block read
     # keeps the contact attribute (live: a Compare + greeting before the block
     # read an empty value), the post-block read is rewritten.
-    assert by_id["Entry"]["Parameters"]["Text"] == "$.Attributes.customerId"
-    assert by_id["AfterBlock"]["Parameters"]["Text"] == "$.AgenticCX.ContextVariables.customerId"
+    assert by_id["Entry"]["Parameters"]["Attributes"]["copy"] == "$.Attributes.customerId"
+    assert by_id["AfterBlock"]["Parameters"]["Attributes"]["seen"] == "$.AgenticCX.ContextVariables.customerId"
 
 
 def test_real_agentic_cx_block_replaces_placeholder_and_wisdom_session_is_spliced_out():
@@ -223,3 +227,53 @@ def test_authored_agentic_cx_branches_are_preserved_not_bypassed():
     # the chain stays reachable and the post-block read is rewritten
     assert {"check-hours", "set-queue", "transfer-queue", "log-completed"} <= set(by_id)
     assert by_id["log-completed"]["Parameters"]["LambdaInvocationAttributes"]["intent"] == "$.AgenticCX.ContextVariables.intent"
+
+
+def test_speech_ownership_contact_flow_stays_silent_except_telephony_states():
+    """Live (SELC): the Contact Flow greeted before the block and the app's
+    WelcomeFlow greeted again with the same sentence; the fallback was English in
+    a Korean flow. The app owns greeting/closing; the flow keeps a recording
+    notice, the escalation-path announcements and the (localised) fallback."""
+    flow = {
+        "Version": "2019-10-30",
+        "StartAction": "recording-notice",
+        "Actions": [
+            {"Identifier": "recording-notice", "Type": "MessageParticipant",
+             "Parameters": {"Text": "서비스 품질 향상을 위해 통화가 녹음됩니다."},
+             "Transitions": {"NextAction": "welcome"}},
+            {"Identifier": "welcome", "Type": "MessageParticipant",
+             "Parameters": {"Text": "안녕하세요, 삼성전자로지텍입니다. 무엇을 도와드릴까요?"},
+             "Transitions": {"NextAction": AGENTIC_CX_PLACEHOLDER_ID}},
+            {"Identifier": AGENTIC_CX_PLACEHOLDER_ID, "Type": AGENTIC_CX_ACTION_TYPE,
+             "Parameters": {"AgentConfiguration": {}},
+             "Transitions": {
+                 "NextAction": "goodbye",
+                 "Conditions": [{"NextAction": "check-hours",
+                                 "Condition": {"Operator": "Equals", "Operands": ["Escalation"]}}],
+                 "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "AgenticCXFallbackMessage"}],
+             }},
+            {"Identifier": "goodbye", "Type": "MessageParticipant",
+             "Parameters": {"Text": "이용해 주셔서 감사합니다."}, "Transitions": {"NextAction": "log"}},
+            {"Identifier": "log", "Type": "InvokeLambdaFunction", "Parameters": {"LambdaFunctionARN": "{{LOG}}"},
+             "Transitions": {"NextAction": "disconnect"}},
+            {"Identifier": "check-hours", "Type": "CheckHoursOfOperation", "Parameters": {},
+             "Transitions": {"NextAction": "transfer-queue",
+                             "Conditions": [{"NextAction": "after-hours", "Condition": {"Operator": "Equals", "Operands": ["False"]}}]}},
+            {"Identifier": "after-hours", "Type": "MessageParticipant",
+             "Parameters": {"Text": "지금은 상담 시간이 아닙니다."}, "Transitions": {"NextAction": "disconnect"}},
+            {"Identifier": "transfer-queue", "Type": "TransferContactToQueue", "Parameters": {},
+             "Transitions": {"Errors": [{"ErrorType": "NoMatchingError", "NextAction": "disconnect"}]}},
+            {"Identifier": "disconnect", "Type": "DisconnectParticipant", "Parameters": {}, "Transitions": {}},
+        ],
+    }
+    spec = _Model({"application": {"locales": ["ko-KR"], "context_variables": []}})
+    normalized = normalize_acxd_contact_flow(flow, spec)
+    by_id = {a["Identifier"]: a for a in normalized["Actions"]}
+    assert "welcome" not in by_id                       # greeting: the app's
+    assert "goodbye" not in by_id                       # closing: the app's
+    assert "recording-notice" in by_id                  # legal notice: the flow's
+    assert normalized["StartAction"] == "recording-notice"
+    assert by_id["recording-notice"]["Transitions"]["NextAction"] == AGENTIC_CX_PLACEHOLDER_ID
+    assert by_id[AGENTIC_CX_PLACEHOLDER_ID]["Transitions"]["NextAction"] == "log"   # Default → logger, silent
+    assert "after-hours" in by_id                       # telephony state: the flow's
+    assert by_id["AgenticCXFallbackMessage"]["Parameters"]["Text"].startswith("죄송합니다")

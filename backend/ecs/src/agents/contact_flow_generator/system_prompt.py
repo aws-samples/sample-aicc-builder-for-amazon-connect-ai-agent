@@ -1429,6 +1429,26 @@ formerly read from `$.Lex.SessionAttributes.<name>` is read from
 verbatim — the bundled deploy runner substitutes the deployed workspace and
 application ids at import; the alias comes from `ACXD_ALIAS_ID` or is picked in
 the console. Do not invent real identifiers.
+
+### Who speaks — the application, not this flow
+The ACXD application greets, converses and says goodbye. This Contact Flow is
+telephony plumbing and is **silent** unless only the flow can know what to say:
+- BEFORE the block: no `MessageParticipant` (no greeting, no "무엇을 도와드릴까요?"),
+  no `GetParticipantInput` / DTMF menu. Allowed: recording/logging setup, voice
+  and language, customer lookup + `UpdateContactAttributes`, and ONE
+  recording/legal notice **only if** the ContactFlowSpec has a `recording`
+  behavior with a message (Identifier containing `recording-notice`).
+- Default branch (conversation finished): logging Lambda (if any) → disconnect.
+  No closing message — the application already said goodbye.
+- Escalation branch: business-hours check → queue → transfer. Announcements
+  only for telephony states, in the customer's language: outside hours
+  (`after_hours_message`), queue full, transfer failed. Do NOT add "상담원을
+  연결해 드리겠습니다" — the application says that before it escalates.
+- Error branch: one fallback message in the customer's language → disconnect.
+The deterministic binder strips a pre-block greeting and a Default-path message,
+and the D9-6 gate blocks any that survive — write the flow silent from the start.
+Attributes set before the block are read as `$.Attributes.<name>` before it and
+as `$.AgenticCX.ContextVariables.<name>` only after it.
 """
 
 # Append CLUES response efficiency instructions

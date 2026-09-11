@@ -2179,7 +2179,78 @@ def _d9_contact_flow_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dic
                 "($.Attributes.<name>) set before the block instead",
                 asset_type="contact_flow", field=action_id,
             ))
+        # Speech ownership: the application greets, converses and says goodbye.
+        # The Contact Flow speaks only for telephony states (outside hours, queue
+        # full, transfer error, app unavailable) and a recording/legal notice.
+        for action_id, reason in _d9_owned_speech(flow, actions).items():
+            issues.append(_d9_issue(
+                "D9-6", f"Action {action_id!r} {reason} — the ACXD application owns that speech; "
+                "remove the action (a recording/legal notice before the block is the one exception)",
+                asset_type="contact_flow", field=action_id,
+            ))
     return issues
+
+
+_D9_NOTICE_HINTS = ("record", "notice", "consent", "legal", "녹음", "고지", "recorded", "録音")
+
+
+def _d9_owned_speech(flow: dict, actions: list) -> dict[str, str]:
+    """{identifier: reason} for speech the Contact Flow must not carry in the ACXD
+    target: any MessageParticipant / GetParticipantInput reachable before the
+    block (except a recording notice), and any MessageParticipant on the Default
+    path (conversation finished → the app already closed)."""
+    by_id: dict[str, dict] = {}
+    for action in actions:
+        if isinstance(action, dict):
+            ident = action.get("Identifier") or action.get("identifier")
+            if ident:
+                by_id[str(ident)] = action
+    start = str((flow or {}).get("StartAction") or "")
+    if start not in by_id:
+        return {}
+
+    def _is_block(action: dict) -> bool:
+        ident = str(action.get("Identifier") or action.get("identifier") or "")
+        return ident.startswith("AgenticCX") or "AgentConfiguration" in (action.get("Parameters") or {})
+
+    def _next(action: dict) -> list[str]:
+        transitions = action.get("Transitions") or {}
+        out = [transitions.get("NextAction")]
+        out += [c.get("NextAction") for c in transitions.get("Conditions") or [] if isinstance(c, dict)]
+        out += [e.get("NextAction") for e in transitions.get("Errors") or [] if isinstance(e, dict)]
+        return [str(n) for n in out if n]
+
+    out: dict[str, str] = {}
+    seen: set[str] = set()
+    queue = [start]
+    block: Optional[dict] = None
+    while queue:
+        ident = queue.pop(0)
+        if ident in seen or ident not in by_id:
+            continue
+        seen.add(ident)
+        action = by_id[ident]
+        if _is_block(action):
+            block = action
+            continue
+        a_type = str(action.get("Type") or "")
+        text = str((action.get("Parameters") or {}).get("Text") or "")
+        if a_type == "GetParticipantInput":
+            out[ident] = "collects input before the Agentic CX block"
+        elif a_type == "MessageParticipant" and not (
+                any(h in ident.lower() for h in _D9_NOTICE_HINTS) or any(h in text for h in _D9_NOTICE_HINTS)):
+            out[ident] = "plays a message before the Agentic CX block"
+        queue.extend(_next(action))
+    if block is not None:
+        ident = str((block.get("Transitions") or {}).get("NextAction") or "")
+        path: set[str] = set()
+        while ident in by_id and ident not in path:
+            path.add(ident)
+            action = by_id[ident]
+            if str(action.get("Type") or "") == "MessageParticipant" and not ident.startswith("AgenticCX"):
+                out[ident] = "plays a message on the Default (conversation finished) branch"
+            ident = str((action.get("Transitions") or {}).get("NextAction") or "")
+    return out
 
 
 def _d9_agenticcx_refs_before_block(flow: dict, actions: list) -> dict[str, list[str]]:
