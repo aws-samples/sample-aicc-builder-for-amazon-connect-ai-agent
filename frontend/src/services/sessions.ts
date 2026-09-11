@@ -260,6 +260,8 @@ export interface MessageLogEntry {
 export interface MessageLogResponse {
   entries: MessageLogEntry[];
   isAgentActive: boolean;
+  /** Id of the turn the log currently holds; seq numbers restart every turn. */
+  turnId?: string;
 }
 
 /**
@@ -267,14 +269,18 @@ export interface MessageLogResponse {
  */
 export async function getMessageLog(
   sessionId: string,
-  afterSeq: number = 0
+  afterSeq: number = 0,
+  turnId?: string | null,
 ): Promise<MessageLogResponse> {
   // Use same-origin /api path (proxied by CloudFront to ALB)
   const baseUrl = `${window.location.origin}/api/message-log`;
   try {
     const headers = await getAuthHeaders();
+    // turn_id tells the backend which turn afterSeq belongs to; if the log has
+    // moved on to a newer turn it returns that turn from its first event.
+    const turnParam = turnId ? `&turn_id=${encodeURIComponent(turnId)}` : "";
     const response = await fetch(
-      `${baseUrl}/${encodeURIComponent(sessionId)}?after_seq=${afterSeq}`,
+      `${baseUrl}/${encodeURIComponent(sessionId)}?after_seq=${afterSeq}${turnParam}`,
       { method: "GET", headers }
     );
 

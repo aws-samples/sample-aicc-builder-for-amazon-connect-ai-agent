@@ -1746,6 +1746,7 @@ async def download_assets(
 async def get_message_log_endpoint(
     session_id: str,
     after_seq: int = Query(default=0),
+    turn_id: Optional[str] = Query(default=None, description="Turn the caller saw after_seq in; a different current turn returns the whole log"),
     _claims: dict = Depends(verify_token),
 ):
     """Return message log entries after the given sequence number.
@@ -1754,7 +1755,7 @@ async def get_message_log_endpoint(
     """
     try:
         msg_log = get_message_log(S3FILES_MOUNT, session_id)
-        entries = msg_log.read_after(after_seq)
+        entries = msg_log.read_after(after_seq, turn_id=turn_id)
 
         # Check if a background task is still running for this session
         is_active = False
@@ -1766,6 +1767,7 @@ async def get_message_log_endpoint(
         return JSONResponse({
             "entries": entries,
             "isAgentActive": is_active,
+            "turnId": msg_log.turn_id,
         })
     except Exception as e:
         logger.error(f"[message-log] Error reading log for {session_id}: {e}")
@@ -2530,12 +2532,16 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     ws_holder: Dict[str, Any] = {"ws": websocket}
 
     async def safe_send_or_log(data: dict) -> bool:
-        """Always log to NFS, best-effort send to WebSocket."""
-        msg_log.append(data)
+        """Always log to NFS, best-effort send to WebSocket.
+
+        The live copy carries its log position (logTurn/logSeq) so the client
+        can resume the log from exactly where its socket dropped.
+        """
+        seq = msg_log.append(data)
         ws = ws_holder.get("ws")
         if ws is not None:
             try:
-                return await safe_send_json(ws, data)
+                return await safe_send_json(ws, {**data, "logSeq": seq, "logTurn": msg_log.turn_id})
             except Exception:
                 return False
         return False  # no WebSocket attached

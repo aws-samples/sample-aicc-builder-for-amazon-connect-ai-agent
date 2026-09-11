@@ -209,6 +209,9 @@ export interface WebSocketMessage {
   content?: string;
   status?: string;
   message?: string;
+  // Position of this event in the backend's per-turn message log (live events only)
+  logSeq?: number;
+  logTurn?: string;
   // Session management
   sessionId?: string;
   // Phase tracking

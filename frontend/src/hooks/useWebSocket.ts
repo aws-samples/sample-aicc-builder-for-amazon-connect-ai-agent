@@ -11,7 +11,7 @@ import { useAuthStore } from "../stores/authStore";
 import { useSessionStore } from "../stores/sessionStore";
 import type { WebSocketMessage, SubagentActivity, SubagentToolCall, AttachedFile, MessageAttachment, AttachmentData, AssetPreview, BuilderPhase, RuntimeTarget } from "../types";
 import { PHASE_LABELS } from "../types";
-import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type ConversationMessage } from "../services/sessions";
+import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, type MessageLogEntry, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type ConversationMessage } from "../services/sessions";
 import { fetchNfsDiagnostics } from "../services/workspaceApi";
 
 // Streaming timeout configuration
@@ -233,6 +233,30 @@ function restoreRuntimeTarget(message: Pick<WebSocketMessage, 'runtime_target' |
 
 // localStorage key for tracking last received message log sequence
 const MSG_LOG_SEQ_KEY_PREFIX = "aicc-msg-log-seq-";
+
+/**
+ * Where this browser last stood in the backend's per-turn message log.
+ * Sequence numbers restart every turn, so the position is (turn, seq).
+ */
+interface MsgLogPointer { turn: string | null; seq: number }
+
+function readMsgLogPointer(sessionId: string): MsgLogPointer {
+  const raw = localStorage.getItem(`${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`);
+  if (!raw) return { turn: null, seq: 0 };
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      return { turn: typeof parsed.turn === "string" ? parsed.turn : null, seq: Number(parsed.seq) || 0 };
+    }
+  } catch {
+    /* legacy plain-integer pointer: no turn → unusable, treated as unknown */
+  }
+  return { turn: null, seq: 0 };
+}
+
+function writeMsgLogPointer(sessionId: string, turn: string | null | undefined, seq: number): void {
+  localStorage.setItem(`${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`, JSON.stringify({ turn: turn || null, seq }));
+}
 
 /**
  * Deserialize history messages from DynamoDB ConversationMessage[] format
@@ -789,46 +813,76 @@ export function useWebSocket() {
   // ── Message Log Catch-up (ref to break circular dep with handleMessage) ──
   const handleMessageRef = useRef<((data: WebSocketMessage) => void) | null>(null);
 
-  const catchUpFromMessageLog = useCallback(async (sessionId: string) => {
-    const seqKey = `${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`;
-    const storedSeq = parseInt(localStorage.getItem(seqKey) || "0", 10);
-    let afterSeq = storedSeq;
+  /**
+   * Re-dispatch logged events through the normal message handler.
+   * Heartbeats / typing indicators are transport noise and are skipped.
+   */
+  const replayLogEntries = useCallback((entries: MessageLogEntry[]): number => {
+    let maxSeq = 0;
+    for (const entry of entries) {
+      const event = entry.event as unknown as WebSocketMessage;
+      if (event.type !== "heartbeat" && event.type !== "pong" && event.type !== "typing" && handleMessageRef.current) {
+        handleMessageRef.current(event);
+      }
+      if (entry.seq > maxSeq) maxSeq = entry.seq;
+    }
+    return maxSeq;
+  }, []);
 
-    console.log("[useWebSocket] Starting message log catch-up from seq:", afterSeq);
+  /**
+   * Cut the chat back to the start of the last turn (its user message) so the
+   * turn can be rebuilt from the log without duplicating what was already shown.
+   * Returns false when there is no turn to cut back to.
+   */
+  const truncateToLastTurn = useCallback((): boolean => {
+    const messages = useBuilderStore.getState().messages;
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") { lastUserIdx = i; break; }
+    }
+    if (lastUserIdx < 0) return false;
+    useBuilderStore.getState().setMessages(messages.slice(0, lastUserIdx + 1));
+    streamingMessageIdRef.current = null;
+    streamTargetMsgIdRef.current = null;
+    return true;
+  }, []);
+
+  /**
+   * Catch up on a turn that is still running (backend said background_task_active).
+   * Resumes from this browser's last seen (turn, seq). If the log has moved on to
+   * a turn we never saw, the whole turn comes back — then the chat is cut back to
+   * that turn's user message first so nothing is shown twice.
+   */
+  const catchUpFromMessageLog = useCallback(async (sessionId: string) => {
+    const pointer = readMsgLogPointer(sessionId);
+    console.log("[useWebSocket] Starting message log catch-up from", pointer);
 
     try {
-      const response = await getMessageLog(sessionId, afterSeq);
-      const { entries, isAgentActive } = response;
+      const response = await getMessageLog(sessionId, pointer.seq, pointer.turn);
+      const { entries, isAgentActive, turnId } = response;
 
       if (entries.length > 0) {
-        console.log("[useWebSocket] Replaying", entries.length, "missed events from message log");
-        for (const entry of entries) {
-          const event = entry.event as unknown as WebSocketMessage;
-          // Don't re-dispatch heartbeats or typing indicators during catch-up
-          if (event.type !== 'heartbeat' && event.type !== 'pong' && event.type !== 'typing' && handleMessageRef.current) {
-            handleMessageRef.current(event);
-          }
-          if (entry.seq > afterSeq) {
-            afterSeq = entry.seq;
-          }
+        const wholeTurn = !pointer.turn || (turnId !== undefined && turnId !== pointer.turn);
+        if (wholeTurn && useBuilderStore.getState().messages.length > 0) {
+          truncateToLastTurn();
         }
-        // Persist the latest seq
-        localStorage.setItem(seqKey, String(afterSeq));
+        console.log("[useWebSocket] Replaying", entries.length, wholeTurn ? "events of a turn not seen before" : "missed events from message log");
+        const maxSeq = replayLogEntries(entries);
+        writeMsgLogPointer(sessionId, turnId ?? pointer.turn, maxSeq);
       }
 
       // After catch-up, the live WebSocket is already reattached by the backend.
       // New events will arrive via the WebSocket in real-time, so no polling needed.
-      // Just log whether agent is still active for diagnostic purposes.
       if (isAgentActive) {
         console.log("[useWebSocket] Agent still active after catch-up — live events via WebSocket");
         setTyping(true);
       } else {
-        console.log("[useWebSocket] Agent finished, catch-up complete at seq:", afterSeq);
+        console.log("[useWebSocket] Agent finished, catch-up complete");
       }
     } catch (error) {
       console.error("[useWebSocket] Message log catch-up error:", error);
     }
-  }, [setTyping]);
+  }, [setTyping, replayLogEntries, truncateToLastTurn]);
 
   /**
    * Reconcile a freshly loaded session with the backend's per-turn message log.
@@ -843,9 +897,8 @@ export function useWebSocket() {
    * progress id, so replaying those events is idempotent).
    */
   const reconcileWithMessageLog = useCallback(async (sessionId: string) => {
-    const seqKey = `${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`;
     try {
-      const { entries, isAgentActive } = await getMessageLog(sessionId, 0);
+      const { entries, isAgentActive, turnId } = await getMessageLog(sessionId, 0);
       if (entries.length === 0) return;
       const maxSeq = entries.reduce((m, e) => Math.max(m, e.seq), 0);
       const events = entries.map((e) => e.event as unknown as WebSocketMessage);
@@ -855,7 +908,7 @@ export function useWebSocket() {
         .join("");
       const norm = (t: string) => t.replace(/\s+/g, " ").trim();
 
-      // Stop this browser's session/still-current check from being confused later.
+      // The user may have switched sessions while the log was loading.
       if (useSessionStore.getState().currentSessionId !== sessionId) return;
 
       const messages = useBuilderStore.getState().messages;
@@ -865,7 +918,7 @@ export function useWebSocket() {
       }
       if (lastUserIdx < 0) {
         // Nothing conversational restored — leave it to the normal paths.
-        localStorage.setItem(seqKey, String(maxSeq));
+        writeMsgLogPointer(sessionId, turnId, maxSeq);
         return;
       }
       const savedReply = norm(
@@ -879,7 +932,7 @@ export function useWebSocket() {
       if (!fullReply || savedReply === fullReply || (!fullReply.startsWith(savedReply) && savedReply.length > 0)) {
         // Either the turn's reply is already in the history, or the log does not
         // describe this turn (never replay in that case — it would duplicate).
-        localStorage.setItem(seqKey, String(maxSeq));
+        writeMsgLogPointer(sessionId, turnId, maxSeq);
         return;
       }
 
@@ -888,15 +941,9 @@ export function useWebSocket() {
         `(saved ${savedReply.length} chars, log ${fullReply.length} chars, ${entries.length} events)`,
       );
       // Drop the partial output of that turn and replay the whole turn.
-      useBuilderStore.getState().setMessages(messages.slice(0, lastUserIdx + 1));
-      streamingMessageIdRef.current = null;
-      streamTargetMsgIdRef.current = null;
-      for (const event of events) {
-        if (event.type !== "heartbeat" && event.type !== "pong" && event.type !== "typing" && handleMessageRef.current) {
-          handleMessageRef.current(event);
-        }
-      }
-      localStorage.setItem(seqKey, String(maxSeq));
+      truncateToLastTurn();
+      replayLogEntries(entries);
+      writeMsgLogPointer(sessionId, turnId, maxSeq);
       if (isAgentActive) {
         // The backend re-attached the live socket on connect; newer events stream in.
         setTyping(true);
@@ -904,11 +951,16 @@ export function useWebSocket() {
     } catch (error) {
       console.warn("[useWebSocket] Message log reconcile failed:", error);
     }
-  }, [setTyping]);
+  }, [setTyping, replayLogEntries, truncateToLastTurn]);
 
   // Define handleMessage first so connect can reference it
   const handleMessage = useCallback(
     (data: WebSocketMessage) => {
+      // Live events carry their position in the backend's message log; remember
+      // it so a reconnect resumes the log exactly where this socket dropped.
+      if (typeof data.logSeq === "number" && typeof data.logTurn === "string" && globalCurrentSessionId) {
+        writeMsgLogPointer(globalCurrentSessionId, data.logTurn, data.logSeq);
+      }
       switch (data.type) {
         case "typing":
           setTyping(true);
@@ -2087,31 +2139,10 @@ export function useWebSocket() {
         // Wait for backend's "history_injected" response in handleMessage
         console.log("[useWebSocket] Waiting for history_injected response after reconnect...");
 
-        // Check message log for events missed while disconnected
-        try {
-          const seqKey = `${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`;
-          const lastSeq = parseInt(localStorage.getItem(seqKey) || "0", 10);
-          const logResponse = await getMessageLog(sessionId, lastSeq);
-          if (logResponse.entries.length > 0) {
-            console.log("[useWebSocket] Replaying", logResponse.entries.length, "missed events from message log on reconnect");
-            let maxSeq = lastSeq;
-            for (const entry of logResponse.entries) {
-              const event = entry.event as unknown as WebSocketMessage;
-              if (event.type !== 'heartbeat' && event.type !== 'pong' && event.type !== 'typing' && handleMessageRef.current) {
-                handleMessageRef.current(event);
-              }
-              if (entry.seq > maxSeq) maxSeq = entry.seq;
-            }
-            localStorage.setItem(seqKey, String(maxSeq));
-
-            // If agent is still active, start polling
-            if (logResponse.isAgentActive) {
-              catchUpFromMessageLog(sessionId);
-            }
-          }
-        } catch (logError) {
-          console.warn("[useWebSocket] Message log catch-up failed on reconnect:", logError);
-        }
+        // The chat was just reset to the DynamoDB copy (this browser's autosave,
+        // at most ~15s old). Rebuild the last turn from the backend's message
+        // log if the copy is missing it or cut it short.
+        await reconcileWithMessageLog(sessionId);
 
         // Also reload assets from S3 in case they were generated while disconnected
         try {
@@ -2185,7 +2216,7 @@ export function useWebSocket() {
         useBuilderStore.getState().setLoadingSession(false);
       }
     }
-  }, [updateAssetPreview, setMessages, catchUpFromMessageLog]);
+  }, [updateAssetPreview, setMessages, reconcileWithMessageLog]);
 
   const connect = useCallback(async () => {
     if (!isAuthenticated) {
