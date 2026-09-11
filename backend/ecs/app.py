@@ -148,6 +148,8 @@ from context.generation_progress import read_progress as _read_generation_progre
 from context.generation_progress import record_tool_completion as _record_tool_completion
 from context.generation_progress import detect_phase as _detect_phase
 from context.generation_progress import read_phase as _read_phase
+from context.generation_progress import interview_handoff_pending as _interview_handoff_pending
+from context.generation_progress import mark_handoff_processed as _mark_handoff_processed
 from context.generation_progress import update_phase as _update_phase
 from context.generation_progress import get_frontend_progress_state as _get_frontend_progress
 from context.generation_progress import (
@@ -2344,8 +2346,11 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     # Dynamic phase-based system prompt selection
     current_phase = _detect_phase(effective_session_id)
 
-    # Context boundary: interview → generation handoff
-    if current_phase != "interview" and not session.get("_handoff_processed"):
+    # Context boundary: interview → generation handoff. Runs exactly once, at
+    # the boundary: the in-memory flag alone was lost on every task replacement,
+    # so after a deploy the next turn of a review-phase session re-ran this —
+    # wiping its context and forcing the phase back to 'generation'.
+    if not session.get("_handoff_processed") and _interview_handoff_pending(effective_session_id, current_phase):
         handoff = check_interview_handoff(effective_session_id)
         if handoff:
             logger.info(f"[handoff] Interview→Generation context boundary for {effective_session_id}")
@@ -2363,6 +2368,7 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             session["conversation_history"] = []
             strands_messages = []
             session["_handoff_processed"] = True
+            _mark_handoff_processed(effective_session_id)
             # Persist phase transition to NFS (prevents duplicate phase_changed on first sub-agent completion)
             _update_phase(effective_session_id, "generation", "interview_complete_handoff")
             # Notify frontend

@@ -450,6 +450,58 @@ def update_phase(session_id: str, new_phase: str, trigger: str = "") -> tuple:
     return old_phase, True
 
 
+def mark_handoff_processed(session_id: str) -> None:
+    """Persist that the interview → generation context boundary already ran.
+
+    The boundary clears the conversation and re-bootstraps the agent for
+    generation, so it must run exactly once per session. Keeping the marker on
+    NFS (not only in the process) means a redeploy or task replacement cannot
+    make the next turn run it again.
+    """
+    state = _read_state(session_id)
+    if state.get("handoff_processed"):
+        return
+    state["handoff_processed"] = True
+    state["handoff_processed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    _write_state(session_id, state)
+
+
+def is_handoff_processed(session_id: str) -> bool:
+    """True once the interview → generation boundary ran for this session.
+
+    Sessions from before the marker existed are covered by their progress:
+    any recorded asset means generation already began, i.e. the boundary was
+    passed (a boundary re-run there would wipe the context, as seen when a
+    review-phase session was pushed back to generation after a deploy).
+    """
+    state = _read_state(session_id)
+    if state.get("handoff_processed") or state.get("assets"):
+        return True
+    # Progress state absent or unreadable (fresh task, NFS lag): fall back to
+    # the durable traces the boundary leaves behind — the archived interview
+    # history it writes, and any asset generation already stored.
+    archive = _progress_path(session_id).parent / "interview_history.json"
+    try:
+        if archive.exists():
+            return True
+    except Exception:
+        pass
+    return bool(_infer_assets_from_storage(session_id))
+
+
+def interview_handoff_pending(session_id: str, current_phase: str) -> bool:
+    """Should this turn run the interview → generation context boundary?
+
+    Only at the boundary itself: the detected phase is 'generation' (the
+    handoff marker exists and nothing has been generated yet) and the boundary
+    has not been processed before. 'review' / 'post_generation' sessions never
+    qualify, whatever the process remembers.
+    """
+    if current_phase != "generation":
+        return False
+    return not is_handoff_processed(session_id)
+
+
 def get_selected_model(session_id: str) -> Optional[str]:
     """Read the persisted Bedrock model id for this session (None if unset)."""
     state = _read_state(session_id)
