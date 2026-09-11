@@ -104,6 +104,16 @@ def normalize_flow_for_service(flow: Any) -> Any:
     """
     if not isinstance(flow, dict) or not isinstance(flow.get("nodes"), dict):
         return flow
+    # Encoding drift the SDK serializer would silently drop (slot capture in
+    # metadata.userInput, messages under metadata, define.assignments, `{{x}}`
+    # placeholders, text-typed booleans) is mapped onto the contract first, so
+    # bundles generated before the canonicalizer existed deploy correctly too.
+    from tools.acxd_flow_canonicalizer import canonicalize_flow
+    canonical = canonicalize_flow(flow)
+    if canonical.changes:
+        logger.info("[acxd_bundle] %s: canonicalized %d encoding(s) on load",
+                    flow.get("flowId"), len(canonical.changes))
+    flow = canonical.flow
     for node in flow["nodes"].values():
         if not isinstance(node, dict) or node.get("type") != "knowledge_base":
             continue

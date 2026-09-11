@@ -146,18 +146,29 @@ function describeNode(node: Record<string, unknown>, nodeType: string, ko: boole
       return { title: explicitName || (ko ? '대화 시작' : 'Conversation starts'), detail: '' };
     case 'end':
       return { title: explicitName || (ko ? '대화 종료' : 'Conversation ends'), detail: '' };
-    case 'user_input': {
-      const userInput = isRecord(metadata.userInput) ? metadata.userInput : {};
+    case 'user_input':
+    case 'user_choice': {
+      // Canonical (SDK): user_choice + metadata.choice{source: slotType, slotTypeId};
+      // legacy generator encodings (metadata.userInput / top-level slot) still read.
+      const userInput = isRecord(metadata.userInput) ? metadata.userInput
+        : isRecord(metadata.userChoice) ? metadata.userChoice : {};
+      const choice = isRecord(metadata.choice) ? metadata.choice : {};
+      const slotObj = isRecord(node.slot) ? node.slot : {};
       const prompt = firstMessageBody(userInput, node);
-      const slot = firstString(userInput.slotName, userInput.slot);
+      const slot = firstString(userInput.slotName, userInput.slot, slotObj.name, node.slot, choice.slotTypeId);
+      const fallback = nodeType === 'user_choice'
+        ? (ko ? '고객 응답을 받습니다' : 'Captures the customer\'s answer')
+        : (ko ? '고객 의도를 파악합니다' : 'Captures customer intent');
       return {
-        title: explicitName || prompt || (ko ? '고객 입력을 받습니다' : 'Collects customer input'),
+        title: explicitName || prompt || fallback,
         detail: slot ? (ko ? `슬롯: ${slot}` : `slot: ${slot}`) : '',
       };
     }
     case 'data_request': {
       const dataRequest = isRecord(metadata.dataRequest) ? metadata.dataRequest : {};
-      const list = Array.isArray(node.dataRequests) ? node.dataRequests.filter((v) => typeof v === 'string') : [];
+      const list = Array.isArray(node.dataRequests)
+        ? node.dataRequests.map((v) => (typeof v === 'string' ? v : isRecord(v) ? v.dataRequestId : undefined))
+        : [];
       const id = firstString(dataRequest.dataRequestId, dataRequest.name, list[0]);
       return { title: explicitName || id || (ko ? '백엔드 호출' : 'Backend call'), detail: branchSummary };
     }
@@ -165,8 +176,12 @@ function describeNode(node: Record<string, unknown>, nodeType: string, ko: boole
       return { title: explicitName || branchSummary || (ko ? '조건 분기' : 'Conditional branch'), detail: explicitName ? branchSummary : '' };
     case 'define': {
       const define = isRecord(metadata.define) ? metadata.define : {};
-      const variable = firstString(define.variableName, define.name);
-      const value = constantText(define.value);
+      const variable = firstString(define.name, define.variableName);
+      const operand = isRecord(define.value) ? define.value : {};
+      const modification = firstString(operand.modification);
+      const value = modification
+        ? `${firstString(operand.name) || variable} ${modification === 'increment' ? '+ 1' : modification === 'decrement' ? '- 1' : modification}`
+        : constantText(define.value);
       const assignment = variable ? (value ? `${variable} = ${value}` : variable) : '';
       return { title: explicitName || assignment || (ko ? '변수 설정' : 'Set variable'), detail: branchSummary };
     }

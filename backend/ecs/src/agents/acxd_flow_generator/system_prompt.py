@@ -72,6 +72,39 @@ Conditions are structured operands, NOT flat key/value pairs:
 
 <<JOURNEY>>
 
+## Canonical node shapes (SDK contract — code rewrites anything else)
+
+The service's SDK serializes only the fields below; every other key is
+dropped silently, so a flow that "looks right" deploys hollow. Use exactly:
+
+- **Messages** are always `node.messages: [{"type": "text", "body": "..."}]`
+  — never under `metadata`.
+- **Capturing a value** (order number, name, yes/no, a category…) is a
+  `user_choice` node: attach the slot in the flow's `slotTypes` and set
+  `"metadata": {"choice": {"source": "slotType", "slotTypeId": "<slot type>"}}`
+  (`slotTypeId` is the attached slot's `type`: a custom slot type id from the
+  plan, or a built-in such as `text` / `number`). Edges: `captured_flow exists`
+  / `not_exists`.
+- **`user_input`** is intent capture only ("what do you need?" → flow
+  recognized / not recognized). Never use it to collect a slot value.
+- **`define`** sets ONE variable: `"metadata": {"define": {"name": "attemptCount",
+  "value": {"type": "constant", "value": 1}}}`. Increment with
+  `{"type": "variable", "name": "attemptCount", "modification": "increment"}`.
+  Several assignments = several define nodes in a row.
+- **Handing values to the Contact Flow / agent** (escalate): 
+  `"metadata": {"stateModifications": [{"type": "context", "name": "failReason",
+  "modification": "set", "value": {"type": "constant", "value": "..."}}]}`.
+- **`data_request`** names the request in `node.dataRequests:
+  [{"dataRequestId": "getOrder"}]`; nothing about it goes in `metadata`.
+- **Placeholders in message bodies**: `{slotName:NLX.Slot}` for attached slots,
+  `{variableName:NLX.Variable}` for context variables and
+  `{dataRequestId.field:NLX.Variable}` for data request outputs. No `{{x}}`,
+  no bare `{x}` — the caller would hear the braces read aloud.
+- **Booleans are booleans**: declare `{"name": "found", "type": "boolean"}` and
+  compare with `{"type": "constant", "value": true}` (not the string "true").
+- Retry limits are not a node setting (`maxRetries` does not exist): model a
+  retry with a define counter + choice, or a `loop` node.
+
 ## Determinism contract (STRICT)
 
 The plan lists confirmed steps with node_type + determinism. Your flow:

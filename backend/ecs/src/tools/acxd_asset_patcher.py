@@ -219,6 +219,17 @@ def patch_acxd_asset(asset_type: str, file_name: str,
             problems.append(f"patched file is not valid JSON: {e}")
         else:
             kind = ASSET_KIND[asset_type]
+            if kind == "flow":
+                # A patch may (re)introduce an encoding the SDK drops; the stored
+                # document is always the canonical one.
+                from tools.acxd_flow_canonicalizer import canonicalize_flow
+                canonical = canonicalize_flow(doc)
+                if canonical.changes:
+                    doc = canonical.flow
+                    patched = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
+                    logger.info("[acxd_patch] %s: canonicalized %d encoding(s) after patch",
+                                file_name, len(canonical.changes))
+                problems += list(dict.fromkeys(canonical.problems))
             if kind in SCHEMA_FILES:
                 problems += validate_acxd_asset(kind, doc)
 

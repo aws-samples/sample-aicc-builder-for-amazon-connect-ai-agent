@@ -11,8 +11,9 @@ def test_kb_node_gets_name_from_placeholder_and_loses_unknown_keys():
     out = normalize_flow_for_service(flow)
     assert out["nodes"]["n1"]["metadata"]["knowledgeBase"] == {
         "knowledgeBaseId": "{KB:SunnyHotelFAQ}", "name": "SunnyHotelFAQ"}
-    assert out["nodes"]["n1"]["metadata"]["maxRetries"] == 2
-    assert out["nodes"]["n2"] == {"type": "end", "metadata": {}}
+    # non-SDK metadata (`maxRetries`) is dropped on load — the SDK would drop it anyway
+    assert "maxRetries" not in out["nodes"]["n1"]["metadata"]
+    assert out["nodes"]["n2"] == {"type": "end"}
 
 
 def test_explicit_name_is_kept_and_non_dicts_pass_through():

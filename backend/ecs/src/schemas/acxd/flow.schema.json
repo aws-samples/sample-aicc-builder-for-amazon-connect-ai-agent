@@ -266,30 +266,6 @@
             "$ref": "#/$defs/childNode"
           }
         },
-        "slot": {
-          "description": "Slot this node fills (user_input / user_choice). Either the attached slot name or an inline slot object.",
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "object"
-            }
-          ]
-        },
-        "slots": {
-          "type": "array",
-          "items": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "object"
-              }
-            ]
-          }
-        },
         "dataRequests": {
           "type": "array",
           "items": {
@@ -338,7 +314,7 @@
         },
         "metadata": {
           "type": "object",
-          "description": "Per-node-type configuration. generativeJourney is validated structurally; other keys pass through.",
+          "description": "FlowNodeMetadata (SDK). Keys the SDK does not know are dropped by its serializer and never reach the service, so nothing else is allowed here.",
           "properties": {
             "generativeJourney": {
               "$ref": "#/$defs/generativeJourney"
@@ -369,18 +345,22 @@
             },
             "define": {
               "type": "object",
+              "required": [
+                "name",
+                "value"
+              ],
               "properties": {
                 "name": {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1
                 },
                 "value": {
                   "$ref": "#/$defs/operand"
-                }
-              }
-            },
-            "escalate": {
-              "not": {},
-              "description": "not a FlowNodeMetadata field — escalation messages go in node.messages"
+                },
+                "schema": {},
+                "schemaId": {}
+              },
+              "description": "define node: sets ONE variable. Several assignments are several define nodes."
             },
             "knowledgeBase": {
               "type": "object",
@@ -419,8 +399,125 @@
                 "filters": {}
               },
               "additionalProperties": false
-            }
-          }
+            },
+            "payload": {},
+            "nodePayload": {},
+            "flowId": {},
+            "code": {},
+            "choice": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "context",
+                    "dataRequest",
+                    "local",
+                    "slotType"
+                  ]
+                },
+                "dataRequestId": {
+                  "type": "string"
+                },
+                "slotTypeId": {
+                  "type": "string"
+                },
+                "localId": {
+                  "type": "string"
+                },
+                "contextVariableKey": {
+                  "type": "string"
+                },
+                "selectedChoiceLabel": {
+                  "type": "string"
+                },
+                "showChoices": {
+                  "type": "boolean"
+                },
+                "disableSingleChoiceAutotraverse": {
+                  "type": "boolean"
+                },
+                "choiceDisplayFormat": {
+                  "type": "string",
+                  "enum": [
+                    "default",
+                    "dropdown"
+                  ]
+                },
+                "associatedSlotTypeIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "idField": {
+                  "type": "string"
+                },
+                "labelField": {
+                  "type": "string"
+                }
+              },
+              "description": "user_choice configuration: source=slotType + slotTypeId captures a value into the attached slot of that type."
+            },
+            "generativeText": {},
+            "agenticTask": {},
+            "loop": {},
+            "multimodal": {},
+            "note": {},
+            "transform": {},
+            "tags": {},
+            "name": {},
+            "interimMessages": {},
+            "voiceSettings": {},
+            "stateModifications": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "context",
+                      "local",
+                      "slot",
+                      "system",
+                      "variable",
+                      "variable_selection"
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "modification": {
+                    "type": "string",
+                    "enum": [
+                      "clear",
+                      "custom",
+                      "decrement",
+                      "increment",
+                      "pop",
+                      "push",
+                      "set",
+                      "shift"
+                    ]
+                  },
+                  "functionName": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "$ref": "#/$defs/operand"
+                  }
+                }
+              }
+            },
+            "sendContext": {},
+            "timeout": {}
+          },
+          "additionalProperties": false
         }
       },
       "allOf": [

@@ -293,14 +293,23 @@ def test_prompt_documents_the_two_failure_rules():
 # diagnosability fix): four independent defects blocked generation.
 # ---------------------------------------------------------------------------
 
-def test_node_slot_field_is_accepted():
-    """#1 The model emits `slot` on user_input nodes — a real ACXD field."""
+def test_node_slot_field_is_canonicalized_to_user_choice():
+    """#1 The model emits `slot` on user_input nodes. FlowNode (SDK) has no such
+    field — the serializer dropped it and the deployed node captured nothing.
+    The canonicalizer turns it into a user_choice with metadata.choice; the
+    strict schema rejects the raw form so nothing hollow can slip through."""
+    from tools.acxd_flow_canonicalizer import canonicalize_flow
+    from tools.validate_acxd_flow import validate_acxd_asset
     flow = copy.deepcopy(REFUND_FLOW)
     uid = [k for k, v in flow["nodes"].items() if v["type"] == "user_input"][0]
-    flow["nodes"][uid]["slot"] = "orderNumber"
-    assert validate_generated_flow(flow, PLAN, SPEC) == []
     flow["nodes"][uid]["slot"] = {"name": "orderNumber", "type": "text"}
-    assert validate_generated_flow(flow, PLAN, SPEC) == []
+    assert any("slot" in p for p in validate_acxd_asset("flow", flow))
+    fixed = canonicalize_flow(flow).flow
+    node = fixed["nodes"][uid]
+    assert node["type"] == "user_choice"
+    assert node["metadata"]["choice"] == {"source": "slotType", "slotTypeId": "text"}
+    assert {"name": "orderNumber", "type": "text"} in fixed["slotTypes"]
+    assert validate_acxd_asset("flow", fixed) == []
 
 
 def test_non_ascii_kb_name_is_sanitized_and_placeholder_resolves():
@@ -1111,8 +1120,13 @@ def test_knowledge_base_node_gets_required_name_and_only_sdk_keys():
     fixed = repair_generated_flow(normalize_generated_flow(flow, spec), plan, spec)
     kb = fixed["nodes"][gid]["metadata"]["knowledgeBase"]
     assert kb == {"knowledgeBaseId": "{KB:Product FAQ}", "name": "Product FAQ"}
-    assert fixed["nodes"][gid]["metadata"]["maxRetries"] == 2
-    assert validate_generated_flow(fixed, plan, spec) == []
+    # `maxRetries` is not a FlowNodeMetadata member: the canonicalizer drops it
+    # (and reports it) before the strict schema sees the document.
+    from tools.acxd_flow_canonicalizer import canonicalize_flow
+    canonical = canonicalize_flow(fixed)
+    assert "maxRetries" not in canonical.flow["nodes"][gid].get("metadata", {})
+    assert any("maxRetries" in p for p in canonical.problems)
+    assert validate_generated_flow(canonical.flow, plan, spec) == []
 
 
 def test_repair_renames_digit_slot_type_ids_and_fills_generative_prompts():

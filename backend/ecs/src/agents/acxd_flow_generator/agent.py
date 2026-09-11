@@ -26,6 +26,7 @@ from strands import tool
 
 from tools.acxd_generation_context import get_acxd_spec
 from tools.session_context import current_session_id
+from tools.acxd_flow_canonicalizer import canonicalize_flow
 from tools.validate_acxd_flow import GENERATIVE_NODE_TYPES, prune_to_schema
 from tools.validate_acxd_consistency import (
     BUILTIN_SLOT_PRIMITIVES,
@@ -514,6 +515,9 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
             for key in ("slotType", "slotTypeId"):
                 if node.get(key) in renamed:
                     node[key] = renamed[node[key]]
+            choice = (node.get("metadata") or {}).get("choice")
+            if isinstance(choice, dict) and choice.get("slotTypeId") in renamed:
+                choice["slotTypeId"] = renamed[choice["slotTypeId"]]
         logger.info("[ACXDFlowGen] repaired %s: letters-only slot type ids %s",
                     flow.get("flowId"), renamed)
 
@@ -1087,11 +1091,22 @@ def run_flow_generation(
         else:
             flow = normalize_generated_flow(flow, spec)
             flow = repair_generated_flow(flow, plan, spec)
+            # Representation is decided by code, not by the model: slot capture
+            # → user_choice + metadata.choice, messages on the node, define
+            # {name, value}, NLX placeholders, boolean typing. Whatever the model
+            # encoded is mapped onto the SDK contract here; only things that would
+            # change behaviour come back as problems.
+            canonical = canonicalize_flow(flow)
+            flow = canonical.flow
+            if canonical.changes:
+                logger.info("[ACXDFlowGen] %s attempt %d: canonicalized %d encoding(s): %s",
+                            flow_id, attempt, len(canonical.changes),
+                            "; ".join(canonical.changes[:6]))
             # Extra keys the model invents are the second most common failure
             # and carry no contract meaning, so drop them instead of spending an
             # attempt on them.
             flow = prune_to_schema(flow, "flow")
-            problems = validate_generated_flow(flow, plan, spec)
+            problems = validate_generated_flow(flow, plan, spec) + list(dict.fromkeys(canonical.problems))
         attempts.append({"attempt": attempt, "problems": list(problems)})
         if not problems:
             _acxd_progress("completed", f"{flow_id}: generated on attempt {attempt}",
