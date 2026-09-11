@@ -149,6 +149,9 @@ from context.generation_progress import record_tool_completion as _record_tool_c
 from context.generation_progress import detect_phase as _detect_phase
 from context.generation_progress import read_phase as _read_phase
 from context.generation_progress import interview_handoff_pending as _interview_handoff_pending
+
+# Forward-only phase order used when a sub-agent completion re-detects the phase.
+_PHASE_ORDER = {"interview": 0, "generation": 1, "review": 2, "post_generation": 3}
 from context.generation_progress import mark_handoff_processed as _mark_handoff_processed
 from context.generation_progress import update_phase as _update_phase
 from context.generation_progress import get_frontend_progress_state as _get_frontend_progress
@@ -2687,17 +2690,15 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                                 # Phase transition detection
                                 try:
                                     if progress_id:  # sub-agent completion
+                                        # Phases only move forward, to whatever the asset
+                                        # state says. Comparing against the detected phase
+                                        # (not a fixed old→new pair) also heals a stored
+                                        # phase that was pushed backwards.
                                         old_phase = _read_phase(effective_session_id)
                                         detected = _detect_phase(effective_session_id)
-                                        if old_phase == "interview" and detected != "interview":
-                                            _update_phase(effective_session_id, "generation", f"first_subagent:{tr_tool_name}")
-                                            await safe_send_or_log({"type": "phase_changed", "phase": "generation", "previousPhase": "interview"})
-                                        elif old_phase == "generation" and detected == "review":
-                                            _update_phase(effective_session_id, "review", "all_core_assets_completed")
-                                            await safe_send_or_log({"type": "phase_changed", "phase": "review", "previousPhase": "generation"})
-                                        elif old_phase == "review" and detected == "post_generation":
-                                            _update_phase(effective_session_id, "post_generation", f"post_review_fix:{tr_tool_name}")
-                                            await safe_send_or_log({"type": "phase_changed", "phase": "post_generation", "previousPhase": "review"})
+                                        if detected != old_phase and _PHASE_ORDER.get(detected, 0) > _PHASE_ORDER.get(old_phase, 0):
+                                            _update_phase(effective_session_id, detected, f"{detected}_detected:{tr_tool_name}")
+                                            await safe_send_or_log({"type": "phase_changed", "phase": detected, "previousPhase": old_phase})
                                     elif tr_tool_name == "save_operation_spec":
                                         new_phase = _read_phase(effective_session_id)
                                         if new_phase != current_phase:
