@@ -218,6 +218,53 @@ def _extract_lambda_fields(code: str) -> set:
     return fields
 
 
+def lambda_field_gaps(operation_id: str, code: str) -> dict:
+    """Save-time spec↔handler check for ONE Lambda (the D1 rule, per asset).
+
+    Run by the Lambda generator right after it writes the handler, so a spec
+    field the handler never reads, or a response field (spec output + the
+    shared envelope) it never writes, is fixed while that handler is the
+    thing being generated — not found weeks later by the reviewer.
+    Returns {"missing_inputs": [...], "missing_outputs": [...], "checked": bool}.
+    """
+    try:
+        from tools.spec_manager import get_all_specs, get_all_tools
+        from tools.response_contract import ENVELOPE_FIELD_NAMES
+    except Exception:
+        return {"missing_inputs": [], "missing_outputs": [], "checked": False}
+    specs = get_all_specs() or {}
+    spec = specs.get(operation_id)
+    inputs: set[str] = set()
+    outputs: set[str] = set()
+
+    def _name(f: Any) -> str:
+        return (f.get("name") if isinstance(f, dict) else getattr(f, "name", "")) or ""
+
+    if spec is not None:
+        inputs |= {_name(f) for f in (getattr(spec, "input_fields", None) or []) if _name(f)}
+        outputs |= {_name(f) for f in (getattr(spec, "output_fields", None) or []) if _name(f)}
+    try:
+        for tool in get_all_tools() or []:
+            t_id = tool.get("tool_id") if isinstance(tool, dict) else getattr(tool, "tool_id", "")
+            if t_id == operation_id:
+                t_in = tool.get("input_fields") if isinstance(tool, dict) else getattr(tool, "input_fields", None)
+                t_out = tool.get("output_fields") if isinstance(tool, dict) else getattr(tool, "output_fields", None)
+                inputs |= {_name(f) for f in (t_in or []) if _name(f)}
+                outputs |= {_name(f) for f in (t_out or []) if _name(f)}
+    except Exception:
+        pass
+    if not inputs and not outputs:
+        return {"missing_inputs": [], "missing_outputs": [], "checked": False}
+    read_fields = _extract_lambda_fields(code)
+    written_fields = set(re.findall(r'''['\"](\w+)['\"]\s*:''', code))
+    expected_outputs = outputs | set(ENVELOPE_FIELD_NAMES)
+    return {
+        "missing_inputs": sorted(f for f in inputs if f not in read_fields),
+        "missing_outputs": sorted(f for f in expected_outputs if f not in written_fields),
+        "checked": True,
+    }
+
+
 def _resolve_ref(spec: dict, ref: str) -> dict:
     """Resolve a $ref pointer like '#/components/schemas/Foo' to its schema dict."""
     if not ref.startswith("#/"):
