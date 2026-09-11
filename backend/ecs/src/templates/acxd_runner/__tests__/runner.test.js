@@ -543,3 +543,27 @@ test('upsert-secrets fills BackendApiKey from the CFN ApiKeyValue output when no
   // the value lives in memory only, never in the persisted state
   assert.equal(JSON.stringify(ctx.state).includes('k3y-from-cfn'), false);
 });
+
+
+test('deploy-cfn-backend resolves Lambda names from the stack resources, not a naming convention', async () => {
+  const dir = tmpBundle({
+    'cloudformation/infrastructure.yaml': 'Resources: {}',
+    'lambda/get_cleaning_price/index.py': 'def lambda_handler(e, c): return {}',
+  });
+  const execLog = [];
+  const ctx = makeCtx(dir, { execLog });
+  ctx.exec = (cmd, args) => {
+    execLog.push([cmd, ...args]);
+    if (args.includes('describe-stack-resources')) {
+      return 'selc-aicc-prod-get-cleaning-price selc-aicc-prod-customer-lookup\n';
+    }
+    return '';
+  };
+  await STEPS['deploy-cfn-backend'].run(ctx, {
+    templatePath: 'cloudformation/infrastructure.yaml', stackName: 'selc-stack',
+    lambdaDirs: ['lambda/get_cleaning_price'],
+  });
+  const update = execLog.find((a) => a.includes('update-function-code'));
+  assert.ok(update, 'update-function-code was called');
+  assert.equal(update[update.indexOf('--function-name') + 1], 'selc-aicc-prod-get-cleaning-price');
+});

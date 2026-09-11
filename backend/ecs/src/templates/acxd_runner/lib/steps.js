@@ -112,7 +112,7 @@ const deployCfnBackend = {
           'real handler code — the CloudFormation placeholder answers every ' +
           'tool call with HTTP 501 "Upload Lambda code from lambda/ folder".');
       }
-      const fnName = `${ctx.project}-${path.basename(dir)}-${params.environment || 'dev'}`;
+      const fnName = resolveLambdaName(ctx, stack, path.basename(dir), params.environment || 'dev');
       const zipPath = path.join(ctx.bundleDir, `${path.basename(dir)}.zip`);
       ctx.exec('sh', ['-c',
         `cd ${JSON.stringify(absDir)} && zip -qr ${JSON.stringify(zipPath)} .`]);
@@ -154,6 +154,32 @@ const wireWebhookUrls = {
     readBackendApiKey(ctx, stack);
   },
 };
+
+// The template names functions `${ProjectName}-${Environment}-<op-with-hyphens>`
+// while the bundle's lambda directories are `<op_with_underscores>`; deploy.sh
+// resolves the real names from the stack, so must the runner-only path. Match
+// the physical id of the stack's AWS::Lambda::Function resources on the
+// normalised operation name; fall back to the historical convention.
+function resolveLambdaName(ctx, stack, dirName, environment) {
+  const norm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const wanted = norm(dirName);
+  try {
+    const raw = ctx.exec('aws', [
+      'cloudformation', 'describe-stack-resources',
+      '--stack-name', stack,
+      '--query', "StackResources[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId",
+      '--output', 'text',
+      '--region', ctx.region,
+    ]).trim();
+    const names = raw ? raw.split(/\s+/).filter(Boolean) : [];
+    const hit = names.find((n) => norm(n).includes(wanted));
+    if (hit) return hit;
+    if (names.length) ctx.log(`  ! no stack Lambda matches '${dirName}' (have: ${names.join(', ')})`);
+  } catch (err) {
+    ctx.log(`  ! could not list stack Lambdas: ${err.message || err}`);
+  }
+  return `${ctx.project}-${dirName}-${environment}`;
+}
 
 function readCfnOutput(ctx, stack, key) {
   return ctx.exec('aws', [
