@@ -539,7 +539,8 @@ test('upsert-secrets fills BackendApiKey from the CFN ApiKeyValue output when no
   const created = ctx.client.calls('CreateSecretCommand');
   assert.equal(created.length, 1);
   assert.equal(created[0].input.name, 'BackendApiKey');
-  assert.equal(created[0].input.value, 'k3y-from-cfn');
+  assert.equal(created[0].input.secretValue, 'k3y-from-cfn');   // SDK member is secretValue, not value
+  assert.equal(created[0].input.isSensitive, true);
   // the value lives in memory only, never in the persisted state
   assert.equal(JSON.stringify(ctx.state).includes('k3y-from-cfn'), false);
 });

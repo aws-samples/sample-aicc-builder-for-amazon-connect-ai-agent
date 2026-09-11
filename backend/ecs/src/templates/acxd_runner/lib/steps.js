@@ -318,12 +318,22 @@ const upsertSecrets = {
         ctx.log(`  ! skipping secret '${doc.name}': env ${envVar} not set`);
         continue;
       }
+      // SDK contract (CreateSecretRequest / UpdateSecretRequest): the value member
+      // is `secretValue`, plus `isSensitive`. A `value` key is silently dropped by
+      // the SDK serializer and the service answers 500 "Failed to create secret"
+      // (live, 2026-09-12) — the same unknown-key failure mode as flow nodes.
       const match = existing.find((s) => s.name === doc.name);
       if (match) {
-        await send(ctx, 'UpdateSecretCommand', { secretIdentifier: match.secretId || doc.name, value });
+        await send(ctx, 'UpdateSecretCommand', {
+          secretIdentifier: match.secretId || doc.name, secretValue: value, isSensitive: true,
+          ...(doc.description ? { description: doc.description } : {}),
+        });
         ctx.log(`  ~ updated secret ${doc.name}`);
       } else {
-        await send(ctx, 'CreateSecretCommand', { name: doc.name, value, description: doc.description });
+        await send(ctx, 'CreateSecretCommand', {
+          name: doc.name, secretValue: value, isSensitive: true,
+          ...(doc.description ? { description: doc.description } : {}),
+        });
         ctx.log(`  + created secret ${doc.name}`);
       }
       recordResource(ctx.state, 'secret', doc.name);
