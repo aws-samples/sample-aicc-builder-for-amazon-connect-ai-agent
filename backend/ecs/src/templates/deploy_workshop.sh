@@ -2692,7 +2692,7 @@ run_acxd_runner() {
             export ACXD_SECRET_BACKENDAPIKEY="$API_KEY"
             info "BackendApiKey secret sourced from CloudFormation ApiKeyValue"
         else
-            warn "ApiKeyValue output missing — the BackendApiKey secret will be skipped and Data Requests to the API will get 403. Export ACXD_SECRET_BACKENDAPIKEY and re-run."
+            info "ApiKeyValue not known yet — the runner reads it from the stack output after deploy-cfn-backend (or export ACXD_SECRET_BACKENDAPIKEY to override)"
         fi
     fi
     ensure_acxd_credentials

@@ -145,20 +145,45 @@ const wireWebhookUrls = {
     if (!stack) {
       throw new Error('wire-webhook-urls requires deploy-cfn-backend to run first');
     }
-    const out = ctx.exec('aws', [
-      'cloudformation', 'describe-stacks',
-      '--stack-name', stack,
-      '--query', `Stacks[0].Outputs[?OutputKey=='${key}'].OutputValue`,
-      '--output', 'text',
-      '--region', ctx.region,
-    ]).trim();
+    const out = readCfnOutput(ctx, stack, key);
     if (!out || out === 'None') {
       throw new Error(`CFN stack '${stack}' has no output '${key}'`);
     }
     ctx.state.webhookUrl = out;
     ctx.log(`  = webhook base URL: ${out}`);
+    readBackendApiKey(ctx, stack);
   },
 };
+
+function readCfnOutput(ctx, stack, key) {
+  return ctx.exec('aws', [
+    'cloudformation', 'describe-stacks',
+    '--stack-name', stack,
+    '--query', `Stacks[0].Outputs[?OutputKey=='${key}'].OutputValue`,
+    '--output', 'text',
+    '--region', ctx.region,
+  ]).trim();
+}
+
+// The generated API Gateway requires its key (ACXD target); the Data Requests
+// send it from the BackendApiKey secret. When deploy.sh did not hand the value
+// over as ACXD_SECRET_BACKENDAPIKEY (runner-only deploys), take it from the
+// stack's ApiKeyValue output. Kept in memory only — never written to the state
+// file or the log.
+function readBackendApiKey(ctx, stack) {
+  if (ctx.env && ctx.env.ACXD_SECRET_BACKENDAPIKEY) return;
+  try {
+    const value = readCfnOutput(ctx, stack, 'ApiKeyValue');
+    if (value && value !== 'None' && value !== 'RETRIEVE_FAILED') {
+      ctx.backendApiKey = value;
+      ctx.log('  = BackendApiKey value taken from CFN output ApiKeyValue (not stored)');
+    } else {
+      ctx.log('  ! CFN output ApiKeyValue missing — the BackendApiKey secret will need ACXD_SECRET_BACKENDAPIKEY');
+    }
+  } catch (err) {
+    ctx.log(`  ! could not read ApiKeyValue: ${err.message || err}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // ACXD resource upserts
@@ -262,7 +287,7 @@ const upsertSecrets = {
       const doc = readJson(file);
       // Secret values are NEVER stored in the bundle: read from env.
       const envVar = doc.valueEnv || `ACXD_SECRET_${String(doc.name || '').toUpperCase()}`;
-      const value = ctx.env[envVar];
+      const value = ctx.env[envVar] || (doc.name === 'BackendApiKey' ? ctx.backendApiKey : undefined);
       if (!value) {
         ctx.log(`  ! skipping secret '${doc.name}': env ${envVar} not set`);
         continue;

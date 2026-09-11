@@ -517,3 +517,29 @@ test('deploy-cfn-backend reuses a shared CloudFormation output when deploy.sh ma
   assert.equal(ctx.state.cfnStackName, 'test-proj-stack');
   assert.equal(calls.length, 0);
 });
+
+
+test('upsert-secrets fills BackendApiKey from the CFN ApiKeyValue output when no env var is set', async () => {
+  const dir = tmpBundle({ 'secret.json': {
+    name: 'BackendApiKey', description: 'api key', valueEnv: 'ACXD_SECRET_BACKENDAPIKEY',
+  }});
+  const ctx = makeCtx(dir, { handlers: {
+    ListSecretsCommand: { secrets: [] },
+    CreateSecretCommand: {},
+  }});
+  ctx.state.cfnStackName = 'aicc-poc-stack';
+  ctx.exec = (cmd, args) => {
+    const q = args.join(' ');
+    if (q.includes("OutputKey=='ApiEndpoint'")) return 'https://api.example.com/prod\n';
+    if (q.includes("OutputKey=='ApiKeyValue'")) return 'k3y-from-cfn\n';
+    return '';
+  };
+  await STEPS['wire-webhook-urls'].run(ctx, {});
+  await STEPS['upsert-secrets'].run(ctx, { files: ['secret.json'] });
+  const created = ctx.client.calls('CreateSecretCommand');
+  assert.equal(created.length, 1);
+  assert.equal(created[0].input.name, 'BackendApiKey');
+  assert.equal(created[0].input.value, 'k3y-from-cfn');
+  // the value lives in memory only, never in the persisted state
+  assert.equal(JSON.stringify(ctx.state).includes('k3y-from-cfn'), false);
+});
