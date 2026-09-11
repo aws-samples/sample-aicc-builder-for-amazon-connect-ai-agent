@@ -392,6 +392,16 @@ def get_tools_for_phase(
         ]
 
     generation_tools = generation_tools + _load_deterministic_repairs(is_acxd)
+    # The gates validate assets AGAINST the OperationSpec (D1–D8, parity, D9-4),
+    # so a wrong FieldSpec (live: a mangled regex) can only be corrected at the
+    # source — editing the asset to match a wrong spec is exactly what the gates
+    # forbid. And a NEW operation discovered after the interview (live: a
+    # call-outcome logger the backend needed) must become a spec BEFORE any
+    # asset exists for it, otherwise no gate ever checks it (the SPEC:* gate now
+    # blocks such orphans). Both targets get the spec editor and the registrar.
+    for spec_tool in (update_operation_spec, save_operation_spec):
+        if spec_tool not in generation_tools:
+            generation_tools.append(spec_tool)
     if not is_acxd:
         return generation_tools
 
@@ -412,13 +422,6 @@ def get_tools_for_phase(
     for tool in ACXD_INTERVIEW_TOOLS:
         if tool not in generation_tools:
             generation_tools.append(tool)
-    # D9-4 validates ACXD slot types AGAINST the OperationSpec, so a wrong
-    # FieldSpec constraint (live: a mangled regex) can only be corrected at the
-    # source — editing the asset to match a wrong spec is exactly what the gate
-    # forbids. Expose the spec editor; the ACXD overlay tells the orchestrator
-    # to regenerate the affected assets afterwards.
-    if update_operation_spec not in generation_tools:
-        generation_tools.append(update_operation_spec)
     return generation_tools
 
 

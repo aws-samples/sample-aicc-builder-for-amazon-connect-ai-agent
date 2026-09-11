@@ -2167,7 +2167,62 @@ def _d9_contact_flow_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dic
         for variable_name in sorted(set(re.findall(r"\$\.AgenticCX\.ContextVariables\.([A-Za-z_][A-Za-z0-9_]*)", serialized))):
             if variable_name not in context_names:
                 issues.append(_d9_issue("D9-6", f"Contact Flow references $.AgenticCX.ContextVariables.{variable_name}, but application context variables do not define it", asset_type="contact_flow", field=variable_name))
+        # $.AgenticCX.* is populated when the Agentic CX block RETURNS. An action
+        # that can run before the caller reaches the block reads an empty value
+        # (live: a Compare on ...isKnownCustomer and a greeting with
+        # ...customerName sat before the block — the lookup attributes
+        # $.Attributes.* are what those actions must read).
+        for action_id, refs in _d9_agenticcx_refs_before_block(flow, actions).items():
+            issues.append(_d9_issue(
+                "D9-6", f"Action {action_id!r} runs before the Agentic CX block but reads "
+                f"{', '.join(refs)} — undefined at that point; read the contact attribute "
+                "($.Attributes.<name>) set before the block instead",
+                asset_type="contact_flow", field=action_id,
+            ))
     return issues
+
+
+def _d9_agenticcx_refs_before_block(flow: dict, actions: list) -> dict[str, list[str]]:
+    """Actions reachable from StartAction without passing the Agentic CX block
+    that reference `$.AgenticCX.*`, as {identifier: [refs]}."""
+    by_id: dict[str, dict] = {}
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        ident = action.get("Identifier") or action.get("identifier")
+        if ident:
+            by_id[str(ident)] = action
+    start = str((flow or {}).get("StartAction") or (flow or {}).get("startAction") or "")
+    if start not in by_id:
+        return {}
+
+    def _is_block(action: dict) -> bool:
+        ident = str(action.get("Identifier") or action.get("identifier") or "")
+        return ident.startswith("AgenticCX") or "AgentConfiguration" in (action.get("Parameters") or {})
+
+    def _next(action: dict) -> list[str]:
+        transitions = action.get("Transitions") or {}
+        out = [transitions.get("NextAction")]
+        out += [c.get("NextAction") for c in transitions.get("Conditions") or [] if isinstance(c, dict)]
+        out += [e.get("NextAction") for e in transitions.get("Errors") or [] if isinstance(e, dict)]
+        return [str(n) for n in out if n]
+
+    before: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    queue = [start]
+    while queue:
+        ident = queue.pop(0)
+        if ident in seen or ident not in by_id:
+            continue
+        seen.add(ident)
+        action = by_id[ident]
+        if _is_block(action):
+            continue
+        refs = sorted(set(re.findall(r"\$\.AgenticCX\.[A-Za-z_][A-Za-z0-9_.]*", json.dumps(action, ensure_ascii=False))))
+        if refs:
+            before[ident] = refs
+        queue.extend(_next(action))
+    return before
 
 
 def _d9_identity_metadata_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:

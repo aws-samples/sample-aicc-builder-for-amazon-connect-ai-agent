@@ -11,6 +11,7 @@ tell "fixed" from "new" between reviews without re-reading prose.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,83 @@ def _parity_findings(session_id: str) -> list[dict]:
     return findings
 
 
+def _orphan_operation_findings(session_id: str) -> list[dict]:
+    """An operation that has assets but no OperationSpec is outside every other
+    gate (consistency, parity and D9 iterate over the specs). Live: a fifth
+    operation `log_call_result` was hand-built during generation — Lambda, OpenAPI
+    path and Data Request — and none of the gates ever looked at it.
+
+    Reports one finding per (asset kind, operation) whose id matches no spec in
+    any spelling (snake / camel / lowercase). Stable id SPEC:<asset>:<op>."""
+    from tools.spec_manager import get_all_specs
+    specs = get_all_specs() or {}
+    if not specs:
+        return []          # scoped runs without operation specs are not judged here
+    known: set[str] = set()
+    for op_id in specs:
+        known |= _spellings(op_id)
+
+    findings: list[dict] = []
+
+    def _report(asset: str, op_id: str, where: str) -> None:
+        if not op_id or _spellings(op_id) & known:
+            return
+        findings.append({
+            "id": _stable_id("SPEC", asset, op_id), "gate": "spec", "severity": "error",
+            "asset_type": asset, "operation_id": op_id, "field": None,
+            "message": f"{where} {op_id!r} has no OperationSpec — register it with save_operation_spec "
+                       "(then regenerate its assets from the spec) or remove the asset; an operation "
+                       "without a spec is checked by no gate",
+        })
+
+    try:
+        from tools.s3_asset_storage import list_session_assets
+        seen: set[tuple[str, str]] = set()
+        supporting: set[str] = set()      # lambda folders that ship index.py/.js — not business operations
+        for key in list_session_assets(session_id) or []:
+            parts = [p for p in str(key).split("/") if p]
+            # assets/<session>/<type>/<op>/<file>
+            if len(parts) >= 5 and parts[2] == "lambda":
+                # Same convention as the consistency gates: a business operation
+                # is a `handler.py`; `index.py` / `index.js` are supporting
+                # Lambdas (customer_lookup, update_q_session, …) with no spec by design.
+                if parts[-1] == "handler.py":
+                    seen.add(("lambda", parts[3]))
+                elif parts[-1] in ("index.py", "index.js"):
+                    supporting.add(parts[3])
+            elif len(parts) == 4 and parts[2] == "acxd_data_request" and parts[3].endswith(".json"):
+                seen.add(("acxd_data_request", parts[3][:-5]))
+        for asset, op_id in sorted(seen):
+            if asset == "lambda" and op_id in supporting:
+                continue
+            _report(asset, op_id, "Lambda folder" if asset == "lambda" else "ACXD Data Request")
+    except Exception as exc:
+        logger.debug("[review_gates] orphan asset scan skipped: %s", exc)
+
+    try:
+        import yaml
+        from tools.asset_loader import load_existing_asset
+        text = load_existing_asset("openapi", file_name="openapi.yaml")
+        doc = yaml.safe_load(text) if text else None
+        for path, item in ((doc or {}).get("paths") or {}).items():
+            if not isinstance(item, dict):
+                continue
+            for method, op in item.items():
+                if isinstance(op, dict) and op.get("operationId"):
+                    _report("openapi", str(op["operationId"]), f"OpenAPI operation {method.upper()} {path}")
+    except Exception as exc:
+        logger.debug("[review_gates] orphan openapi scan skipped: %s", exc)
+    return findings
+
+
+def _spellings(name: str) -> set[str]:
+    raw = str(name or "")
+    snake = re.sub(r"(?<!^)([A-Z])", r"_\1", raw).lower()
+    camel = re.sub(r"_+([a-zA-Z0-9])", lambda m: m.group(1).upper(), raw)
+    lower_camel = camel[:1].lower() + camel[1:] if camel else camel
+    return {raw, raw.lower(), snake, camel, lower_camel, snake.replace("_", "")}
+
+
 def collect_blocking_findings(session_id: str) -> dict:
     """Run every deterministic gate and return the blocking set.
 
@@ -91,7 +169,7 @@ def collect_blocking_findings(session_id: str) -> dict:
              PARITY:<path>:<reason>, D9-x:<asset>:<op>:<field>.
     """
     findings: list[dict] = []
-    for collector in (_consistency_findings, _parity_findings):
+    for collector in (_consistency_findings, _parity_findings, _orphan_operation_findings):
         try:
             findings.extend(collector(session_id))
         except Exception as exc:

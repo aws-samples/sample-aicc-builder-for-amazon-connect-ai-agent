@@ -52,3 +52,45 @@ def test_consistency_findings_map_d1_d8_and_d9_shapes(monkeypatch):
 def test_summary_text_names_the_rule(monkeypatch):
     text = gates.format_blocking_summary({"count": 2, "gates": {"parity": 2}}, "ko")
     assert "차단 항목(결정론 검사) 2건" in text and "0건이어야" in text
+
+
+def test_orphan_operation_gate_flags_specless_assets_but_not_supporting_lambdas(monkeypatch):
+    """Live: log_call_result was hand-built during generation (Lambda + OpenAPI
+    path + Data Request) with no OperationSpec, so no gate ever checked it.
+    customer_lookup / update_q_session ship index.py and are supporting Lambdas."""
+    import tools.review_gates as rg
+    import tools.spec_manager as sm
+    import tools.s3_asset_storage as s3s
+    import tools.asset_loader as al
+
+    monkeypatch.setattr(sm, "get_all_specs", lambda: {"get_cleaning_price": object()})
+    monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
+        "assets/s/lambda/get_cleaning_price/handler.py",
+        "assets/s/lambda/log_call_result/index.py",         # supporting-style file, but…
+        "assets/s/lambda/customer_lookup/index.py",
+        "assets/s/lambda/update_q_session/index.js",
+        "assets/s/acxd_data_request/getCleaningPrice.json",
+        "assets/s/acxd_data_request/logCallResult.json",    # …its Data Request/OpenAPI need a spec
+    ])
+    monkeypatch.setattr(al, "load_existing_asset", lambda *a, **k: (
+        "openapi: 3.0.0\npaths:\n  /tools/get_cleaning_price:\n    post:\n      operationId: get_cleaning_price\n"
+        "  /tools/log_call_result:\n    post:\n      operationId: log_call_result\n"))
+    ids = sorted(f["id"] for f in rg._orphan_operation_findings("s"))
+    assert ids == ["SPEC:acxd_data_request:logCallResult", "SPEC:openapi:log_call_result"]
+
+
+def test_d9_flags_agenticcx_reads_before_the_block():
+    from tools.validate_consistency import _d9_agenticcx_refs_before_block
+    actions = [
+        {"Identifier": "lookup", "Type": "InvokeLambdaFunction", "Transitions": {"NextAction": "check"}},
+        {"Identifier": "check", "Type": "Compare",
+         "Parameters": {"ComparisonValue": "$.AgenticCX.ContextVariables.isKnownCustomer"},
+         "Transitions": {"NextAction": "AgenticCXPlaceholder"}},
+        {"Identifier": "AgenticCXPlaceholder", "Type": "InvokeFlowModule",
+         "Parameters": {"AgentConfiguration": {}}, "Transitions": {"NextAction": "log"}},
+        {"Identifier": "log", "Type": "InvokeLambdaFunction",
+         "Parameters": {"LambdaInvocationAttributes": {"intent": "$.AgenticCX.ContextVariables.intent"}},
+         "Transitions": {}},
+    ]
+    before = _d9_agenticcx_refs_before_block({"StartAction": "lookup"}, actions)
+    assert before == {"check": ["$.AgenticCX.ContextVariables.isKnownCustomer"]}   # 'log' is after the block

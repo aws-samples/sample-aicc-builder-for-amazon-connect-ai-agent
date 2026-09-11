@@ -2445,8 +2445,14 @@ Example copy (write in the user's language):
   `PARITY:*` → `enforce_openapi_contract_tool()` (re-projects openapi.yaml from
   the spec); `D9-3` / `D9-4` → `rebuild_acxd_slot_types_tool()` (rebuilds slot
   types AND data requests from the spec); `D9-1 DUP_*_ID` (the same id twice) →
-  `remove_duplicate_asset_copies_tool()`. Only what no repair covers is patched
-  by hand.
+  `remove_duplicate_asset_copies_tool()`; `SPEC:*` (an asset whose operation has
+  no OperationSpec) → `save_operation_spec` for that operation FIRST, then
+  regenerate its Lambda / OpenAPI / Data Request from the spec with the
+  generators. Only what no repair covers is patched by hand.
+- An operation you discover after the interview (a logger, a lookup the backend
+  needs) is registered with `save_operation_spec` BEFORE any asset exists for it.
+  Never hand-write a Lambda, an OpenAPI path or a Data Request for an operation
+  that has no spec — nothing validates it.
 - Report a repair tool's `status` and `remaining_findings` VERBATIM. `updated`
   means files changed; `unchanged` means the assets already matched the spec —
   then the finding is NOT about the asset: a regex/enum mismatch means the
