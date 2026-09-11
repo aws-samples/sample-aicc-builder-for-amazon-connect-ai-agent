@@ -20,6 +20,34 @@ import {
   type StoredSubagentToolCall,
   type SessionData,
 } from '../services/sessions';
+import type { Message } from '../types';
+
+/**
+ * A message is "persistable" when it is part of the saved history: user /
+ * assistant / system messages with content or attachments, and tool / subagent
+ * entries once they have finished. Thinking blocks, asset markers and
+ * still-running tool calls are transient. The sidebar's per-session count uses
+ * the same definition, so it matches the stored `messageCount` after a reload.
+ */
+export function isPersistableMessage(msg: Message): boolean {
+  if (msg.role === 'thinking' || msg.role === 'asset') return false;
+  if (msg.role === 'tool') {
+    return !!msg.toolCall && msg.toolCall.status !== 'running';
+  }
+  if (msg.role === 'subagent') {
+    if (!msg.subagentActivity) return false;
+    const st = msg.subagentActivity.status;
+    return st !== 'started' && st !== 'running';
+  }
+  // a user message sent with only files has empty text but must survive
+  return !!(msg.content && msg.content.trim() !== '') || !!(msg.attachments && msg.attachments.length > 0);
+}
+
+export function countPersistableMessages(messages: Message[]): number {
+  let n = 0;
+  for (const msg of messages) if (isPersistableMessage(msg)) n++;
+  return n;
+}
 
 export function useAutoSave() {
   const currentSessionId = useSessionStore(s => s.currentSessionId);
@@ -28,6 +56,7 @@ export function useAutoSave() {
   const saveAssetsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSessionDataTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamingSaveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const lastSavedMessagesRef = useRef<string>('');
   const lastSavedAssetsRef = useRef<string>('');
@@ -49,26 +78,7 @@ export function useAutoSave() {
     const { messages } = useBuilderStore.getState();
     if (!currentSessionId || messages.length === 0) return;
 
-    const persistableMessages = messages.filter(msg => {
-      // Always exclude thinking and asset markers
-      if (msg.role === 'thinking' || msg.role === 'asset') return false;
-      // Tool messages: exclude running (in-progress), keep completed/error
-      if (msg.role === 'tool') {
-        if (!msg.toolCall || msg.toolCall.status === 'running') return false;
-        return true;
-      }
-      // Subagent messages: exclude started/running, keep completed/error
-      if (msg.role === 'subagent') {
-        if (!msg.subagentActivity) return false;
-        const st = msg.subagentActivity.status;
-        if (st === 'started' || st === 'running') return false;
-        return true;
-      }
-      // user/assistant/system: must have content OR attachments
-      // (a user message sent with only files has empty text but must survive)
-      if ((!msg.content || msg.content.trim() === '') && !(msg.attachments && msg.attachments.length > 0)) return false;
-      return true;
-    });
+    const persistableMessages = messages.filter(isPersistableMessage);
     if (persistableMessages.length === 0) return;
 
     const history: ConversationMessage[] = persistableMessages.map(msg => {
@@ -229,6 +239,18 @@ export function useAutoSave() {
       // Two strategies: immediate save on transitions, periodic save during streaming
       if (state.messages !== prevMessages && state.messages.length > 0) {
         prevMessages = state.messages;
+
+        // Sidebar count: follow the live conversation (user, assistant, finished
+        // tool/subagent entries) while streaming, not only on the user's send.
+        // Local-only; the persisted value comes from the history save below.
+        if (countTimeoutRef.current) clearTimeout(countTimeoutRef.current);
+        countTimeoutRef.current = setTimeout(() => {
+          const sid = useSessionStore.getState().currentSessionId;
+          if (!sid) return;
+          const count = countPersistableMessages(useBuilderStore.getState().messages);
+          useSessionStore.getState().setSessionMessageCount(sid, count);
+        }, 300);
+
         if (!state.isTyping) {
           // Not streaming: save with short debounce (response complete or user message before streaming)
           if (saveHistoryTimeoutRef.current) clearTimeout(saveHistoryTimeoutRef.current);
@@ -282,6 +304,7 @@ export function useAutoSave() {
 
     return () => {
       unsub();
+      if (countTimeoutRef.current) clearTimeout(countTimeoutRef.current);
       if (saveHistoryTimeoutRef.current) clearTimeout(saveHistoryTimeoutRef.current);
       if (saveAssetsTimeoutRef.current) clearTimeout(saveAssetsTimeoutRef.current);
       if (saveSessionDataTimeoutRef.current) clearTimeout(saveSessionDataTimeoutRef.current);

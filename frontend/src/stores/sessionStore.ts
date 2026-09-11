@@ -30,6 +30,12 @@ interface SessionState {
   createNewSession: (sessionId: string, title?: string) => Promise<ChatSession | null>;
   updateSessionTitle: (sessionId: string, title: string) => Promise<void>;
   updateSessionActivity: (sessionId: string, messageCount?: number) => Promise<void>;
+  /**
+   * Local-only: mirror the live message count of a session into the sidebar.
+   * No API call — the persisted value is written by the history auto-save
+   * (`messageCount = len(history)`), this keeps the list in step while streaming.
+   */
+  setSessionMessageCount: (sessionId: string, messageCount: number) => void;
   deleteSessionById: (sessionId: string) => Promise<boolean>;
   deleteAllSessions: () => Promise<void>;
   getCurrentSession: () => ChatSession | undefined;
@@ -131,6 +137,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     } catch (error) {
       console.error("Failed to update session activity:", error);
     }
+  },
+
+  setSessionMessageCount: (sessionId: string, messageCount: number) => {
+    const target = get().sessions.find((s) => s.sessionId === sessionId);
+    if (!target || target.messageCount === messageCount) return;
+    const now = Date.now();
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.sessionId === sessionId ? { ...s, messageCount, lastMessageAt: now } : s
+      ),
+    }));
   },
 
   // Delete a session

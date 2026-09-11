@@ -316,7 +316,10 @@ export function ChatWindow() {
     }
 
     if (currentSessionId) {
-      updateSessionActivity(currentSessionId, userMessageCount + 1);
+      // lastMessageAt only — the sidebar count follows the live conversation
+      // (useAutoSave) and is persisted as len(history) by the history save, so
+      // writing the user-message tally here would pin it at the wrong number.
+      updateSessionActivity(currentSessionId);
     }
   };
 
