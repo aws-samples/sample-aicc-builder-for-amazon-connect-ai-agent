@@ -123,6 +123,59 @@ def _remove_actions(document: dict, action_types: set[str]) -> None:
     document["Actions"] = actions
 
 
+def _authored_branches(candidate: Optional[dict], actions: list) -> dict[str, str]:
+    """Branch targets the generator already wired on the block being replaced,
+    when each names an existing action (other than the block itself)."""
+    if not isinstance(candidate, dict):
+        return {}
+    ids = {_action_id(a) for a in actions if isinstance(a, dict)}
+    own = _action_id(candidate)
+    transitions = candidate.get("Transitions") or {}
+
+    def _ok(target: Any) -> Optional[str]:
+        return str(target) if target and str(target) in ids and str(target) != own else None
+
+    out: dict[str, str] = {}
+    if _ok(transitions.get("NextAction")):
+        out["Default"] = _ok(transitions.get("NextAction"))
+    for condition in transitions.get("Conditions") or []:
+        if not isinstance(condition, dict):
+            continue
+        operands = [str(o) for o in ((condition.get("Condition") or {}).get("Operands") or [])]
+        if any(o.lower() in {"escalation", "escalate"} for o in operands) and _ok(condition.get("NextAction")):
+            out["Escalation"] = _ok(condition.get("NextAction"))
+    for error in transitions.get("Errors") or []:
+        if not isinstance(error, dict):
+            continue
+        if error.get("ErrorType") == "NoMatchingError" and _ok(error.get("NextAction")):
+            out["Error"] = _ok(error.get("NextAction"))
+        if error.get("ErrorType") == "InputTimeLimitExceeded" and _ok(error.get("NextAction")):
+            out["IdleChatTimeout"] = _ok(error.get("NextAction"))
+    return out
+
+
+def _actions_before_block(document: dict) -> set[str]:
+    """Identifiers reachable from StartAction without passing the Agentic CX
+    block (the block itself excluded)."""
+    by_id = {_action_id(a): a for a in document.get("Actions") or [] if isinstance(a, dict) and _action_id(a)}
+    start = document.get("StartAction")
+    before: set[str] = set()
+    queue = [start] if start in by_id else []
+    while queue:
+        ident = queue.pop(0)
+        if ident in before or ident not in by_id:
+            continue
+        action = by_id[ident]
+        if _action_type(action) == AGENTIC_CX_ACTION_TYPE or str(ident).startswith("AgenticCX"):
+            continue
+        before.add(ident)
+        transitions = action.get("Transitions") or {}
+        queue.append(transitions.get("NextAction"))
+        queue.extend(c.get("NextAction") for c in transitions.get("Conditions") or [] if isinstance(c, dict))
+        queue.extend(e.get("NextAction") for e in transitions.get("Errors") or [] if isinstance(e, dict))
+    return before
+
+
 def _reachable_action_ids(document: dict) -> set[str]:
     by_id = {_action_id(action): action for action in document.get("Actions") or [] if _action_id(action)}
     reachable: set[str] = set()
@@ -278,20 +331,38 @@ def normalize_acxd_contact_flow(
     }
     if speech_engine in {"agentic_voice", "agentic", "amazon_agentic_voice"}:
         agent_parameters["SpeechRecognitionConfiguration"] = {"SpeechRecognitionEngine": "AMAZON_AGENTIC_VOICE"}
+    # The generator often wires the branches on purpose — Default → a
+    # call-outcome logger, Escalation → business-hours check → set queue →
+    # transfer. Keep such a target when it names an existing action and only
+    # fill the branches that are missing (live: the fixed disconnect/queue
+    # targets bypassed the logger and the hours check, leaving them
+    # unreachable — the review's "escalation unreachable" finding).
+    # Only an Agentic CX block the generator authored itself carries intended
+    # branches; a Lex block being converted trails the legacy Lex-result Compare,
+    # which the block's own Escalation branch makes redundant.
+    candidate = actions[candidate_index] if candidate_index is not None else None
+    authored_block = isinstance(candidate, dict) and (
+        _action_type(candidate) == AGENTIC_CX_ACTION_TYPE
+        or _action_id(candidate) in {AGENTIC_CX_PLACEHOLDER_ID, "AgenticCX"})
+    authored = _authored_branches(candidate, actions) if authored_block else {}
+    default_target = authored.get("Default") or disconnect_id
+    escalation_target = authored.get("Escalation") or queue_id
+    error_target = authored.get("Error") or fallback_id
+    idle_target = authored.get("IdleChatTimeout") or disconnect_id
     agentic_action = {
         "Identifier": AGENTIC_CX_PLACEHOLDER_ID,
         "Type": AGENTIC_CX_ACTION_TYPE,
         "Parameters": agent_parameters,
         "Transitions": {
-            "NextAction": disconnect_id,
+            "NextAction": default_target,
             "Errors": [
-                {"ErrorType": "NoMatchingError", "NextAction": fallback_id},
-                {"ErrorType": "NoMatchingCondition", "NextAction": disconnect_id},
-                {"ErrorType": "InputTimeLimitExceeded", "NextAction": disconnect_id},
+                {"ErrorType": "NoMatchingError", "NextAction": error_target},
+                {"ErrorType": "NoMatchingCondition", "NextAction": default_target},
+                {"ErrorType": "InputTimeLimitExceeded", "NextAction": idle_target},
             ],
             "Conditions": [
                 {
-                    "NextAction": queue_id,
+                    "NextAction": escalation_target,
                     "Condition": {"Operator": "Equals", "Operands": ["Escalation"]},
                 },
             ],
@@ -315,10 +386,10 @@ def normalize_acxd_contact_flow(
             document["StartAction"] = AGENTIC_CX_PLACEHOLDER_ID
 
     branches = {
-        "Default": disconnect_id,
-        "Escalation": queue_id,
-        "Error": fallback_id,
-        "IdleChatTimeout": disconnect_id,
+        "Default": default_target,
+        "Escalation": escalation_target,
+        "Error": error_target,
+        "IdleChatTimeout": idle_target,
     }
     metadata = document.get("Metadata")
     if not isinstance(metadata, dict):
@@ -327,11 +398,23 @@ def normalize_acxd_contact_flow(
     document["Metadata"] = metadata
 
     context_names = {item["name"] for item in metadata["acxdBinding"]["contextVariables"]}
-    document = _rewrite_context_references(
-        document,
-        context_names,
-        rewrite_attributes=rewrite_attribute_context,
-    )
+    # `$.AgenticCX.ContextVariables.<name>` only exists once the block has
+    # RETURNED. Rewrite `$.Attributes.<name>` reads in the actions that run after
+    # it; an action reachable from StartAction without passing the block (the
+    # customer-lookup Compare, the pre-block greeting) keeps reading the contact
+    # attribute — live, the whole-document rewrite left two such actions reading
+    # a value that is empty at that point. Metadata is descriptive and is left as is.
+    pre_block = _actions_before_block(document)
+    rewritten_actions = []
+    for action in document.get("Actions") or []:
+        if _action_id(action) in pre_block:
+            rewritten_actions.append(_rewrite_context_references(action, context_names, rewrite_attributes=False))
+        else:
+            rewritten_actions.append(_rewrite_context_references(
+                action, context_names, rewrite_attributes=rewrite_attribute_context))
+    document["Actions"] = rewritten_actions
+    document["StartAction"] = _rewrite_context_references(
+        document.get("StartAction"), context_names, rewrite_attributes=False)
     # The block's ContextVariables map is INPUT to the agent: its values are the
     # contact-side sources and must survive the rewrite above (which turns
     # `$.Attributes.<name>` reads elsewhere into `$.AgenticCX.ContextVariables.<name>`).

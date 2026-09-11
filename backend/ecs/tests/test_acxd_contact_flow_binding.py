@@ -123,9 +123,26 @@ def test_normalizer_rewrites_known_attribute_after_connect_lint_pass():
     }
     spec = _Model({"application": {"context_variables": [{"name": "customerId"}]}})
     flow["Actions"][0]["Parameters"]["Text"] = "$.Attributes.customerId"
+    # a read AFTER the block: the block's Default branch → this message → Disconnect
+    flow["Actions"][0]["Transitions"]["NextAction"] = AGENTIC_CX_PLACEHOLDER_ID
+    flow["Actions"].insert(1, {
+        "Identifier": AGENTIC_CX_PLACEHOLDER_ID, "Type": AGENTIC_CX_ACTION_TYPE,
+        "Parameters": {"AgentConfiguration": {}},
+        "Transitions": {"NextAction": "AfterBlock", "Conditions": [], "Errors": []},
+    })
+    flow["Actions"].insert(2, {
+        "Identifier": "AfterBlock", "Type": "MessageParticipant",
+        "Parameters": {"Text": "$.Attributes.customerId"},
+        "Transitions": {"NextAction": "Disconnect"},
+    })
 
     normalized = normalize_acxd_contact_flow(flow, spec, rewrite_attribute_context=True)
-    assert normalized["Actions"][0]["Parameters"]["Text"] == "$.AgenticCX.ContextVariables.customerId"
+    by_id = {a["Identifier"]: a for a in normalized["Actions"]}
+    # $.AgenticCX.* exists only once the block has returned: the pre-block read
+    # keeps the contact attribute (live: a Compare + greeting before the block
+    # read an empty value), the post-block read is rewritten.
+    assert by_id["Entry"]["Parameters"]["Text"] == "$.Attributes.customerId"
+    assert by_id["AfterBlock"]["Parameters"]["Text"] == "$.AgenticCX.ContextVariables.customerId"
 
 
 def test_real_agentic_cx_block_replaces_placeholder_and_wisdom_session_is_spliced_out():
@@ -162,3 +179,47 @@ def test_real_agentic_cx_block_replaces_placeholder_and_wisdom_session_is_splice
     # no speech engine declared → no SpeechRecognitionConfiguration is forced
     assert "SpeechRecognitionConfiguration" not in block["Parameters"] or block["Parameters"]["SpeechRecognitionConfiguration"]
     assert not any("WisdomAssistantArn" in json.dumps(a) for a in normalized["Actions"])
+
+
+def test_authored_agentic_cx_branches_are_preserved_not_bypassed():
+    """Live (SELC, 2026-09-11): the generator wired Default → call-outcome logger
+    and Escalation → business-hours check → set queue → transfer; the binder
+    replaced both with fixed disconnect / queue targets, so the logger and the
+    hours check became unreachable (review: 'escalation unreachable')."""
+    flow = {
+        "Version": "2019-10-30",
+        "StartAction": "Entry",
+        "Actions": [
+            {"Identifier": "Entry", "Type": "MessageParticipant", "Parameters": {"Text": "Hi"},
+             "Transitions": {"NextAction": AGENTIC_CX_PLACEHOLDER_ID}},
+            {"Identifier": AGENTIC_CX_PLACEHOLDER_ID, "Type": AGENTIC_CX_ACTION_TYPE,
+             "Parameters": {"AgentConfiguration": {}},
+             "Transitions": {
+                 "NextAction": "log-completed",
+                 "Conditions": [{"NextAction": "check-hours",
+                                 "Condition": {"Operator": "Equals", "Operands": ["Escalation"]}}],
+                 "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "AgenticCXFallbackMessage"}],
+             }},
+            {"Identifier": "log-completed", "Type": "InvokeLambdaFunction",
+             "Parameters": {"LambdaFunctionARN": "{{LOG}}", "LambdaInvocationAttributes": {"intent": "$.Attributes.intent"}},
+             "Transitions": {"NextAction": "disconnect"}},
+            {"Identifier": "check-hours", "Type": "CheckHoursOfOperation", "Parameters": {},
+             "Transitions": {"NextAction": "set-queue", "Conditions": [], "Errors": []}},
+            {"Identifier": "set-queue", "Type": "UpdateContactTargetQueue", "Parameters": {"QueueId": "{{QUEUE_ARN}}"},
+             "Transitions": {"NextAction": "transfer-queue"}},
+            {"Identifier": "transfer-queue", "Type": "TransferContactToQueue", "Parameters": {},
+             "Transitions": {"Errors": [{"ErrorType": "NoMatchingError", "NextAction": "disconnect"}]}},
+            {"Identifier": "disconnect", "Type": "DisconnectParticipant", "Parameters": {}, "Transitions": {}},
+        ],
+    }
+    spec = _Model({"application": {"context_variables": [{"name": "intent"}]}})
+    normalized = normalize_acxd_contact_flow(flow, spec, rewrite_attribute_context=True)
+    by_id = {a["Identifier"]: a for a in normalized["Actions"]}
+    block = by_id[AGENTIC_CX_PLACEHOLDER_ID]
+    assert block["Transitions"]["NextAction"] == "log-completed"
+    assert block["Transitions"]["Conditions"][0]["NextAction"] == "check-hours"
+    assert normalized["Metadata"]["acxdBinding"]["branches"]["Default"] == "log-completed"
+    assert normalized["Metadata"]["acxdBinding"]["branches"]["Escalation"] == "check-hours"
+    # the chain stays reachable and the post-block read is rewritten
+    assert {"check-hours", "set-queue", "transfer-queue", "log-completed"} <= set(by_id)
+    assert by_id["log-completed"]["Parameters"]["LambdaInvocationAttributes"]["intent"] == "$.AgenticCX.ContextVariables.intent"
