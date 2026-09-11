@@ -830,6 +830,82 @@ export function useWebSocket() {
     }
   }, [setTyping]);
 
+  /**
+   * Reconcile a freshly loaded session with the backend's per-turn message log.
+   *
+   * History comes from DynamoDB, which is written by THIS browser's autosave.
+   * If the tab was closed while the agent was still answering, the reply (and
+   * any asset/progress events) never reached the browser, so DynamoDB holds
+   * at most a partial assistant bubble — while the backend finished the turn
+   * and kept every event in the NFS message log (one log per turn). Compare
+   * the saved output of the last turn with the log and, when it is missing or
+   * cut short, rebuild that turn from the log (dedupe is by asset key /
+   * progress id, so replaying those events is idempotent).
+   */
+  const reconcileWithMessageLog = useCallback(async (sessionId: string) => {
+    const seqKey = `${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`;
+    try {
+      const { entries, isAgentActive } = await getMessageLog(sessionId, 0);
+      if (entries.length === 0) return;
+      const maxSeq = entries.reduce((m, e) => Math.max(m, e.seq), 0);
+      const events = entries.map((e) => e.event as unknown as WebSocketMessage);
+      const logText = events
+        .filter((e) => e.type === "stream" && typeof e.content === "string")
+        .map((e) => e.content as string)
+        .join("");
+      const norm = (t: string) => t.replace(/\s+/g, " ").trim();
+
+      // Stop this browser's session/still-current check from being confused later.
+      if (useSessionStore.getState().currentSessionId !== sessionId) return;
+
+      const messages = useBuilderStore.getState().messages;
+      let lastUserIdx = -1;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "user") { lastUserIdx = i; break; }
+      }
+      if (lastUserIdx < 0) {
+        // Nothing conversational restored — leave it to the normal paths.
+        localStorage.setItem(seqKey, String(maxSeq));
+        return;
+      }
+      const savedReply = norm(
+        messages
+          .slice(lastUserIdx + 1)
+          .filter((m) => m.role === "assistant")
+          .map((m) => m.content || "")
+          .join(" "),
+      );
+      const fullReply = norm(logText);
+      if (!fullReply || savedReply === fullReply || (!fullReply.startsWith(savedReply) && savedReply.length > 0)) {
+        // Either the turn's reply is already in the history, or the log does not
+        // describe this turn (never replay in that case — it would duplicate).
+        localStorage.setItem(seqKey, String(maxSeq));
+        return;
+      }
+
+      console.log(
+        "[useWebSocket] Last turn finished while the tab was away — rebuilding it from the message log",
+        `(saved ${savedReply.length} chars, log ${fullReply.length} chars, ${entries.length} events)`,
+      );
+      // Drop the partial output of that turn and replay the whole turn.
+      useBuilderStore.getState().setMessages(messages.slice(0, lastUserIdx + 1));
+      streamingMessageIdRef.current = null;
+      streamTargetMsgIdRef.current = null;
+      for (const event of events) {
+        if (event.type !== "heartbeat" && event.type !== "pong" && event.type !== "typing" && handleMessageRef.current) {
+          handleMessageRef.current(event);
+        }
+      }
+      localStorage.setItem(seqKey, String(maxSeq));
+      if (isAgentActive) {
+        // The backend re-attached the live socket on connect; newer events stream in.
+        setTyping(true);
+      }
+    } catch (error) {
+      console.warn("[useWebSocket] Message log reconcile failed:", error);
+    }
+  }, [setTyping]);
+
   // Define handleMessage first so connect can reference it
   const handleMessage = useCallback(
     (data: WebSocketMessage) => {
@@ -3112,6 +3188,11 @@ export function useWebSocket() {
             setMessages(restoredMessages);
             console.log("[useWebSocket] Restored", restoredMessages.length, "items (messages + asset markers)");
 
+            // The reply to the last message may have arrived while this tab was
+            // closed — DynamoDB only has what this browser saw. Rebuild it from
+            // the backend's message log if it is missing or cut short.
+            void reconcileWithMessageLog(newSessionId);
+
             // Inject history into the ECS session so the agent has context
             // (only inject user/assistant/system messages, not tool/subagent/asset markers)
             // Timeout configuration: 10 seconds max wait for WebSocket to be ready
@@ -3332,7 +3413,7 @@ export function useWebSocket() {
         }
       }
     },
-    [connect, getUserSub, setMessages, clearToolMessageIndexMap]
+    [connect, getUserSub, setMessages, clearToolMessageIndexMap, reconcileWithMessageLog]
   );
 
   // Expose switchSession via ref so the pre-send liveness probe inside
