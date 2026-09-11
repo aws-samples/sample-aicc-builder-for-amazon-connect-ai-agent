@@ -33,6 +33,25 @@ HEARTBEAT_INTERVAL_SECONDS = 5
 from tools.session_context import current_callback_handler
 
 
+def count_findings(report: str, marker: str) -> int:
+    """Number of distinct findings carrying ``marker`` (❌ / ⚠️) in a review report.
+
+    Findings are the bullet lines (``- ❌ …``) of the per-asset sections; the
+    action list repeats them as a numbered list (``1. ❌ …``). Section headers
+    and summary-table rows also carry the marker but are not findings. When
+    both list forms are present they describe the same set, so take the larger
+    rather than the sum; fall back to the raw count only for a report that
+    uses neither form.
+    """
+    import re as _re
+    esc = _re.escape(marker)
+    bullets = len(_re.findall(rf"^\s*[-*]\s*{esc}", report, _re.M))
+    numbered = len(_re.findall(rf"^\s*\d+[.)]\s*{esc}", report, _re.M))
+    if bullets or numbered:
+        return max(bullets, numbered)
+    return report.count(marker)
+
+
 def set_callback_handler(handler):
     current_callback_handler.set(handler)
 
@@ -805,9 +824,11 @@ Begin now."""
             "status": "completed"
         }
 
-        # Count issues from response
-        critical_count = full_response.count("❌")
-        warning_count = full_response.count("⚠️")
+        # Count findings, not emoji: the report repeats each finding in a section
+        # header, a summary-table row and the action list, so a raw count ran
+        # 2-3x high (live: header said 26/29 while the tables held 13/16).
+        critical_count = count_findings(full_response, "❌")
+        warning_count = count_findings(full_response, "⚠️")
 
         # Return the FULL report (capped) in the completion result, plus the
         # exact workspace path. This keeps the findings in the orchestrator's
