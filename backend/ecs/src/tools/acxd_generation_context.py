@@ -325,6 +325,23 @@ def _field_constraint(field: dict, *keys: str):
     return None
 
 
+def _merge_fields(primary: Optional[list], secondary: Optional[list]) -> list[dict]:
+    """``primary`` (the OpenAPI contract) first, then every ``secondary`` field
+    (the OperationSpec) whose name — in any camel/snake spelling — is not
+    already present. Never drops a field either side knows about."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for field in list(primary or []) + list(secondary or []):
+        if not isinstance(field, dict) or not field.get("name"):
+            continue
+        variants = _name_variants(field["name"])
+        if variants & seen:
+            continue
+        seen |= variants
+        out.append(dict(field))
+    return out
+
+
 def _with_envelope(fields: list) -> list[dict]:
     """Envelope (success / errorCode / message) + the given response fields."""
     from tools.response_contract import RESPONSE_ENVELOPE, ENVELOPE_FIELD_NAMES
@@ -508,13 +525,20 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
             "mode": "external",
             "http_method": contract.get("http_method") or primary_tool.get("http_method")
             or op.get("http_method") or "POST",
-            "request_fields": contract.get("request_fields")
-            or [_field_dict(field) for field in (op.get("input_fields") or [])],
+            # The OpenAPI contract carries the DEPLOYED spellings (camelCase),
+            # the OperationSpec is the source of truth for WHICH fields exist:
+            # merge them so a field the OpenAPI generator dropped (live: a CREATE
+            # operation's response schema shipped with only the envelope, and its
+            # request schema empty) still reaches the Data Request. The parity
+            # gate reports the OpenAPI defect itself at review time.
+            "request_fields": _merge_fields(
+                contract.get("request_fields"),
+                [_field_dict(field) for field in (op.get("input_fields") or [])]),
             # Same contract as the OpenAPI response: envelope + output_fields, so
             # D9-3 (Data Request ↔ OpenAPI) holds by construction.
-            "response_fields": _with_envelope(
-                contract.get("response_fields")
-                or [_field_dict(field) for field in (op.get("output_fields") or [])]),
+            "response_fields": _with_envelope(_merge_fields(
+                contract.get("response_fields"),
+                [_field_dict(field) for field in (op.get("output_fields") or [])])),
             "purpose": op.get("summary") or op.get("description") or raw_id,
         })
 

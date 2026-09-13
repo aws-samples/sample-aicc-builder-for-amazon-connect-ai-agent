@@ -189,7 +189,13 @@ def build_data_request(plan: dict) -> dict:
     }
     if request_fields:
         doc["requestSchema"] = fields_to_json_schema(request_fields)
-    return doc
+    # ACXD metadata (description fields) must be ASCII; the field descriptions
+    # come from the interview in the project language. Strip them here, at
+    # build time, so the document gates clean by construction instead of the
+    # orchestrator rewriting the customer's OpenAPI in English to satisfy the
+    # gate (observed live on every Korean session).
+    from tools.acxd_bundle import enforce_ascii_metadata
+    return enforce_ascii_metadata(doc)
 
 
 def build_all_data_requests(spec: dict) -> tuple[list[dict], list[str]]:

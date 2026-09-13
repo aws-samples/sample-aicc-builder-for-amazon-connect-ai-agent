@@ -283,3 +283,66 @@ def test_enum_slots_of_different_fields_get_their_own_slot_types():
     assert slot_type_id_for("productType", "enum") == "productType"
     # a specific custom type name is still shared under the name it declares
     assert slot_type_id_for("fromCity", "CityName") == "CityName"
+
+
+def test_data_request_fields_merge_openapi_contract_with_the_spec():
+    """Live: the OpenAPI generator shipped a CREATE operation whose response
+    schema carried only the envelope and whose request schema was empty, so the
+    Data Request built from that contract could not carry the collected slots
+    (D3) nor the reply placeholders (M1). The OperationSpec is the source of
+    truth for WHICH fields exist; the OpenAPI only contributes the deployed
+    spellings, so the two are merged (camel/snake-insensitive) instead of the
+    contract silently winning."""
+    from tools.acxd_generation_context import _merge_fields, _with_envelope
+
+    contract_response = [{"name": "success", "type": "boolean"},
+                         {"name": "errorCode", "type": "string"},
+                         {"name": "message", "type": "string"}]
+    spec_output = [{"name": "reservation_id", "type": "string"},
+                   {"name": "totalAmount", "type": "number"},
+                   {"name": "message", "type": "string"}]
+    merged = _with_envelope(_merge_fields(contract_response, spec_output))
+    names = [f["name"] for f in merged]
+    assert names[:3] == ["success", "errorCode", "message"]
+    assert "reservation_id" in names and "totalAmount" in names
+    assert names.count("message") == 1
+
+    # camelCase in the contract wins over the spec's snake_case twin
+    merged = _merge_fields([{"name": "orderNumber", "type": "string"}],
+                           [{"name": "order_number", "type": "string"},
+                            {"name": "address", "type": "string"}])
+    assert [f["name"] for f in merged] == ["orderNumber", "address"]
+
+
+def test_data_request_and_slot_type_descriptions_are_ascii_by_construction():
+    """ACXD metadata must be ASCII. Descriptions come from the interview in the
+    project language, so the builders strip them at build time — the D9 gate
+    then passes without the orchestrator rewriting the customer's OpenAPI."""
+    from tools.acxd_data_request_builder import build_data_request
+    from tools.acxd_resource_builders import build_slot_types
+
+    doc = build_data_request({
+        "data_request_id": "createCleaningReservation", "mode": "external",
+        "path": "/tools/create_cleaning_reservation", "purpose": "세척 예약 접수",
+        "request_fields": [{"name": "productType", "type": "text", "description": "제품 유형",
+                            "enum_values": ["벽걸이실내기", "스탠드"]}],
+        "response_fields": [{"name": "reservationId", "type": "text", "description": "예약 번호"}],
+    })
+    blob = json.dumps({k: v for k, v in doc.items() if k != "requestSchema"}, ensure_ascii=False)
+    assert all(ord(c) < 0x80 for c in (doc.get("description") or ""))
+    for schema_key in ("requestSchema", "responseSchema"):
+        for prop in doc[schema_key]["properties"].values():
+            assert all(ord(c) < 0x80 for c in prop.get("description", ""))
+    # enum VALUES are slot values, not metadata — they must survive verbatim
+    assert doc["requestSchema"]["properties"]["productType"]["enum"] == ["벽걸이실내기", "스탠드"]
+    assert "예약" not in blob
+
+    docs, problems = build_slot_types({
+        "slot_types": [{"slotTypeId": "productType", "description": "제품 유형",
+                        "values": [{"value": "벽걸이실내기", "synonyms": ["벽걸이"]}]}],
+        "application": {"locales": ["ko-KR"]},
+    })
+    assert not problems
+    product = next(d for d in docs if d["slotTypeId"] == "productType")
+    assert all(ord(c) < 0x80 for c in product.get("description", ""))
+    assert product["values"][0]["value"] == "벽걸이실내기"

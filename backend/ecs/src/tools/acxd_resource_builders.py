@@ -165,7 +165,10 @@ def build_slot_types(spec: dict) -> tuple[list[dict], list[str]]:
         if errors:
             problems.extend(f"slot_types[{index}] ({slot_type_id}): {error}" for error in errors)
             continue
-        docs.append(doc)
+        # Slot type `description` is ACXD metadata and must be ASCII; the values
+        # and synonyms themselves stay in the project language.
+        from tools.acxd_bundle import enforce_ascii_metadata
+        docs.append(enforce_ascii_metadata(doc))
 
     # Only for a real generation context: the deterministic-repair path passes a
     # bare {"slot_types": [...]} with no language, and guessing English there
