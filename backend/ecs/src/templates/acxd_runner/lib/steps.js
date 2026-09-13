@@ -523,12 +523,53 @@ const composeApplication = {
     }
     ctx.state.applicationId = appId;
     ctx.state.applicationName = doc.name;
+    await ensureApplicationLanguages(ctx, appId, doc);
     // Remembered for deploy-application: a deployment requires at least one
     // language code (live: UpdateApplicationDeployment refused without them).
     ctx.state.applicationLanguageCodes = applicationLanguageCodes(doc);
     recordResource(ctx.state, 'application', appId, { name: doc.name });
   },
 };
+
+// Live (2026-09-13): CreateApplication silently ignores settings.languageCode /
+// languageCodes / languageSettings and creates the application as en-US. The
+// build then snapshots en-US while every flow is ko-KR, and the Agentic CX
+// block fails with "NLX Chat Streaming Failed" on the first contact.
+// UpdateApplication does honour the fields, so re-read the application and
+// re-apply the document's languages when they differ.
+async function ensureApplicationLanguages(ctx, appId, doc) {
+  const wanted = applicationLanguageCodes(doc);
+  if (!wanted.length) return;
+  let live;
+  try {
+    live = await send(ctx, 'GetApplicationCommand', { applicationIdentifier: appId });
+  } catch (err) {
+    ctx.log(`  ! could not read back application languages (${err.name}); continuing`);
+    return;
+  }
+  const got = applicationLanguageCodes(live);
+  const same = got.length === wanted.length && wanted.every((c) => got.includes(c));
+  if (same) return;
+  const s = (doc && doc.settings) || {};
+  const settings = {
+    ...((live && live.settings) || {}),
+    ...(s.languageCode ? { languageCode: s.languageCode } : {}),
+    ...(Array.isArray(s.languageCodes) && s.languageCodes.length ? { languageCodes: s.languageCodes } : {}),
+    ...(Array.isArray(s.languageSettings) && s.languageSettings.length ? { languageSettings: s.languageSettings } : {}),
+  };
+  if (!s.languageCode && !s.languageCodes && !s.languageSettings) {
+    settings.languageCode = wanted[0];
+    settings.languageCodes = wanted;
+    settings.languageSettings = wanted.map((languageCode) => ({ languageCode }));
+  }
+  await send(ctx, 'UpdateApplicationCommand', {
+    applicationIdentifier: appId,
+    name: (live && live.name) || doc.name,
+    settings,
+  });
+  ctx.log(`  ~ application languages ${JSON.stringify(got)} → ${JSON.stringify(wanted)} ` +
+          '(CreateApplication ignores language settings; re-applied)');
+}
 
 /** Language codes an application document declares, in every shape the builder emits. */
 function applicationLanguageCodes(doc) {
