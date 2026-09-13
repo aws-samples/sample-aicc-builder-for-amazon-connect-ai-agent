@@ -90,6 +90,21 @@ def _autofix_cfn(yaml_str: str) -> tuple[str, list[str]]:
         fixes.append(f"Converted {changed} variable-free !Sub to literal string (W1020)")
         yaml_str = new_yaml
 
+    # 3. API Gateway rejects a Method whose IntegrationResponses map a header its
+    #    MethodResponses do not declare (live: a typo'd CORS header rolled a
+    #    whole stack back). Same fix the merge applies, so `lint_cloudformation`
+    #    can repair an already-generated template.
+    try:
+        from tools.merge_infrastructure import _fix_cors_response_headers
+        new_yaml = _fix_cors_response_headers(yaml_str)
+        if new_yaml != yaml_str:
+            fixes.append("Declared/renamed CORS method.response.header entries so every header an "
+                         "integration response maps is declared in MethodResponses (API Gateway "
+                         "'Invalid mapping expression parameter')")
+            yaml_str = new_yaml
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(f"[lint] CORS header fix skipped: {exc}")
+
     return yaml_str, fixes
 
 
