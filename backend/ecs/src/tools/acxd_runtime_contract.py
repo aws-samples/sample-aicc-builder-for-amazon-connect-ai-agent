@@ -1344,18 +1344,27 @@ class _RuntimeContract:
     # ==================================================================
 
     def prune_disconnected(self, before: set[str]) -> None:
-        """Drop nodes our own rewrites cut off (R7's orphaned `end`, folded retries)."""
+        """Drop every node the start node cannot reach.
+
+        Two sources: our own rewrites (R7's orphaned `end`, folded retries) and
+        nodes the model left dangling in the first place. Either way the node is
+        dead weight the runtime never executes and the flow gate would refuse
+        (FLOW_UNREACHABLE_NODE), so removing it cannot change behaviour — while
+        an edge that points at the wrong id still dangles and is still reported.
+        Nothing is pruned when there is no start node to reach from."""
         nodes = self.nodes
         after = _reachable(nodes, self.start_id())
-        orphans = sorted(before - after)
+        if not after:
+            return
+        orphans = sorted(node_id for node_id in nodes if node_id not in after)
         if not orphans:
             return
         for node_id in orphans:
             node = nodes.pop(node_id, None)
             if node is not None:
-                self.change(
-                    f"dropped {_label(node_id, node)} — unreachable after the "
-                    f"rewrites above (R7)")
+                why = ("unreachable after the rewrites above (R7)" if node_id in before
+                       else "never reachable from the start node (model left it dangling)")
+                self.change(f"dropped {_label(node_id, node)} — {why}")
         for node in nodes.values():
             if not isinstance(node, dict) or not isinstance(node.get("childNodes"), list):
                 continue

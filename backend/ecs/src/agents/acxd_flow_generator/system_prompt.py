@@ -126,11 +126,21 @@ dropped silently, so a flow that "looks right" deploys hollow. Use exactly:
 The plan lists confirmed steps with node_type + determinism. Your flow:
 - MUST contain at least one node of each confirmed step's node_type.
 - MUST NOT contain any generative node type the user did not confirm.
+- MUST realise each confirmed generative step as EXACTLY ONE generative node.
+  The gate counts nodes: two `generative_text` nodes for one confirmed step
+  (e.g. one per branch of a choice) fail the flow. When the wording differs
+  per branch, write those branch messages as deterministic `basic` nodes with
+  templated text, or route both branches into the single generative node.
+- Prefer a `basic` node with `{dataRequestId.field:NLX.Variable}` placeholders
+  for a result announcement: `generative_text` delivers no message of its own
+  at runtime, so a deterministic template is what the caller actually hears.
 - MUST NOT use `generative_journey` for intent routing, ever — even when the
   plan confirmed a journey, it covers a stretch of conversation INSIDE the
   operation, not the decision about what the customer wants.
 - Money, permissions, compliance, and eligibility decisions are ALWAYS
   `choice` nodes with explicit conditions — never generative.
+- Every node MUST be reachable from `start`; a node nothing points at is
+  dropped and reported.
 
 ## Slots
 

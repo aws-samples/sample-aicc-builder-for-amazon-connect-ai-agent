@@ -314,6 +314,11 @@ def test_s3_user_input_edges_keep_captured_flow():
              "conditions": [{"left": {"type": "slot", "name": "productType"},
                              "operator": "exists"}]}],
     }
+    # Wire it in behind the start node — an unreachable node is pruned.
+    start = next(n for n in flow["nodes"].values() if n["type"] == "start")
+    first = start["childNodes"][0]["nodeId"]
+    listen["childNodes"].append({"nodeId": first, "name": "next"})
+    start["childNodes"][0]["nodeId"] = listen["nodeId"]
     flow["nodes"][listen["nodeId"]] = listen
     out, _ = apply_runtime_contract(flow, **context("GetCleaningPrice"))
     condition = out["nodes"][listen["nodeId"]]["childNodes"][0]["conditions"][0]
@@ -875,3 +880,31 @@ def test_cross_scope_gate_is_wired_into_validate_acxd_consistency():
     bundle["flows"] = [fixed]
     assert not [v for v in validate_acxd_consistency(bundle)
                 if v.code == "RUNTIME_CONTRACT"]
+
+
+def test_nodes_the_model_left_dangling_are_pruned_not_reported():
+    """Live (GreenCart RequestReturn, five attempts): the model emitted two
+    nodes nothing pointed at; the flow gate refused the flow every time for
+    FLOW_UNREACHABLE_NODE and the attempts were spent on a repair the
+    normalizer can make safely — an unreachable node never executes. Edges that
+    point at a wrong id are a different defect and stay for the gate."""
+    flow = broken("GetCleaningPrice")
+    flow["nodes"]["dead0001-0000-4000-8000-000000000001"] = {
+        "nodeId": "dead0001-0000-4000-8000-000000000001", "type": "basic",
+        "messages": [{"body": "never shown"}],
+        "childNodes": [{"nodeId": "dead0002-0000-4000-8000-000000000002", "name": "next"}]}
+    flow["nodes"]["dead0002-0000-4000-8000-000000000002"] = {
+        "nodeId": "dead0002-0000-4000-8000-000000000002", "type": "end"}
+    fixed, notes = apply_runtime_contract(flow, **context("GetCleaningPrice"))
+    assert "dead0001-0000-4000-8000-000000000001" not in fixed["nodes"]
+    assert "dead0002-0000-4000-8000-000000000002" not in fixed["nodes"]
+    assert any("dangling" in n for n in notes)
+    assert validate_acxd_asset("flow", fixed) == []
+
+
+def test_nothing_is_pruned_without_a_start_node():
+    flow = broken("GetCleaningPrice")
+    start_id = next(i for i, n in flow["nodes"].items() if n["type"] == "start")
+    del flow["nodes"][start_id]
+    fixed, _ = apply_runtime_contract(flow, **context("GetCleaningPrice"))
+    assert set(flow["nodes"]) <= set(fixed["nodes"])
