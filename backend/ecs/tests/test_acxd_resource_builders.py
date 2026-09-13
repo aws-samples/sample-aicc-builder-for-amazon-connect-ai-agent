@@ -370,3 +370,29 @@ def test_lifecycle_hooks_pass_through():
                             "lifecycle_hooks": {"escalation": "MainFlow"}}}
     assert build_application(spec)["settings"]["lifecycleHooks"] == {
         "escalation": "MainFlow"}
+
+
+def test_guardrails_generalise_literal_regex_and_localise_the_modify_message():
+    """Live (Hanbit, 2026-09-13): a PII guardrail's 'regex' was the sample phone
+    number itself, and an llmJudge output rule replaced Korean bot messages with
+    the English 'I can't help with that.'"""
+    from tools.acxd_resource_builders import build_guardrails
+
+    spec = {"business_profile": {"language": "ko-KR"},
+            "flows": [{"flow_id": "Escalation", "role": "escalation"}],
+            "guardrails": [
+                {"name": "pii", "trigger": "output", "policy": "개인정보 노출 금지", "detection_method": "regex",
+                 "action": "mask", "examples": ["010-1111-2222"]},
+                {"name": "medical", "trigger": "output", "policy": "진단 금지", "detection_method": "llmJudge",
+                 "action": "modify", "examples": ["이 약 먹어도 되나요?"]},
+                {"name": "explicit", "trigger": "input", "policy": "x", "detection_method": "regex",
+                 "action": "flag", "pattern": r"^\d{10}$"},
+            ]}
+    docs, problems = build_guardrails(spec)
+    assert problems == []
+    by_name = {d["name"]: d["rules"][0] for d in docs}
+    assert by_name["pii"]["detection"]["pattern"] == r"\d{3}-\d{4}-\d{4}"
+    assert by_name["explicit"]["detection"]["pattern"] == r"^\d{10}$"      # a real regex is kept
+    message = by_name["medical"]["enforcement"]["behavior"]["message"]
+    assert message.startswith("죄송합니다") and "can't" not in message
+    assert "never violate" in by_name["medical"]["detection"]["prompt"]

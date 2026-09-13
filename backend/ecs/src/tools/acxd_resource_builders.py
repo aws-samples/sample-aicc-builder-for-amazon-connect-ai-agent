@@ -217,6 +217,12 @@ def _resolve_detection(plan: dict) -> dict:
     examples = [e for e in plan.get("examples") or [] if isinstance(e, str) and e]
     if method == "regex":
         pattern = (examples[0] if examples else plan.get("pattern")) or ""
+        # Live (Hanbit): the interview stored the SAMPLE phone number
+        # "010-1111-2222" as the "regex" of a PII guardrail, so only that one
+        # literal was ever masked. A literal (no regex metacharacters) is
+        # generalised: every digit run becomes a digit class of the same width.
+        if pattern and not re.search(r"[\\^$.*+?()\[\]{}|]", pattern):
+            pattern = re.sub(r"\d+", lambda m: "\\d{%d}" % len(m.group(0)), pattern)
         return {"method": "regex", "pattern": pattern[:200]}
     if method == "keyword" or (
         method == "auto" and examples and all(len(e) <= 50 for e in examples)
@@ -225,12 +231,26 @@ def _resolve_detection(plan: dict) -> dict:
         return {"method": "keyword", "keywords": keywords}
     prompt = (
         "Decide whether the following message violates this policy. "
-        f"Policy: {plan.get('policy', '')}"
+        f"Policy: {plan.get('policy', '')} "
+        "Judge only what the message itself does: it violates the policy only "
+        "when its own content does what the policy forbids. Greetings, questions "
+        "to the customer, confirmations, scheduling, look-up results and "
+        "hand-offs to a human never violate it."
     )
     return {"method": "llmJudge", "prompt": prompt[:4000], "threshold": 0.8}
 
 
-def _resolve_enforcement(plan: dict) -> dict:
+#: What the customer hears when an output guardrail replaces a message and the
+#: interview gave no wording. Live (Hanbit): the English default "I can't help
+#: with that." was spoken to Korean callers.
+_GUARDRAIL_MODIFY_MESSAGES = {
+    "ko": "죄송합니다. 해당 내용은 안내해 드릴 수 없습니다. 다른 도움이 필요하시면 말씀해 주세요.",
+    "ja": "申し訳ありません。その内容はご案内できません。他にご用件があればお知らせください。",
+    "en": "I'm sorry, I can't help with that. Let me know if there is anything else I can do.",
+}
+
+
+def _resolve_enforcement(plan: dict, spec: Optional[dict] = None) -> dict:
     action = plan.get("action", "flag")
     if action == "route":
         return {"action": "route",
@@ -238,9 +258,15 @@ def _resolve_enforcement(plan: dict) -> dict:
     if action == "mask":
         return {"action": "mask", "behavior": {"maskText": "[REDACTED]"}}
     if action == "modify":
-        return {"action": "modify",
-                "behavior": {"message": (plan.get("message")
-                                         or "I can't help with that.")[:500]}}
+        message = plan.get("message")
+        if not message or message.strip() == "I can't help with that.":
+            try:
+                from tools.acxd_system_flows import system_flow_language
+                language = system_flow_language(spec or {})
+            except Exception:  # pragma: no cover - defensive
+                language = "en-US"
+            message = _GUARDRAIL_MODIFY_MESSAGES.get(str(language)[:2].lower(), _GUARDRAIL_MODIFY_MESSAGES["en"])
+        return {"action": "modify", "behavior": {"message": message[:500]}}
     return {"action": "flag"}
 
 
@@ -326,7 +352,7 @@ def build_guardrails(spec: dict) -> tuple[list[dict], list[str]]:
             "rules": [{
                 "name": name,
                 "detection": _resolve_detection(plan),
-                "enforcement": _resolve_enforcement(plan),
+                "enforcement": _resolve_enforcement(plan, spec),
                 "active": True,
             }],
             "fallbackBehavior": {"type": "continue"},
