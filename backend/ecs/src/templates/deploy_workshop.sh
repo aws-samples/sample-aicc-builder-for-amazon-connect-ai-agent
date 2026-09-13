@@ -395,7 +395,8 @@ do_preflight() {
     [ -n "$OPENAPI_FILE" ]  && echo "     ✅ OpenAPI:         ${OPENAPI_FILE#$SCRIPT_DIR/}"
     [ -n "$FLOW_JSON" ]     && echo "     ✅ Contact Flow:    ${FLOW_JSON#$SCRIPT_DIR/}"
     [ -n "$PROMPT_FILE" ]   && echo "     ✅ AI Prompt:       ${PROMPT_FILE#$SCRIPT_DIR/}"
-    [ -d "$SCRIPT_DIR/faq" ] && echo "     ✅ FAQ:             faq/"
+    if [ -d "$SCRIPT_DIR/knowledge-base" ]; then echo "     ✅ FAQ:             knowledge-base/"
+    elif [ -d "$SCRIPT_DIR/faq" ]; then echo "     ✅ FAQ:             faq/"; fi
     if [ "$TARGET" = "acxd" ]; then
         echo "     ✅ ACXD assets:     assets/acxd/ ($(find "$SCRIPT_DIR/assets/acxd/flows" -name '*.json' 2>/dev/null | wc -l | tr -d ' ') flows) + deploy-manifest.json"
     fi
@@ -769,17 +770,90 @@ phase_openapi() {
 # =============================================================================
 # Phase 4: FAQ upload
 # =============================================================================
+# The packager writes the FAQ articles under knowledge-base/knowledge_base/
+# (older bundles used faq/). Resolve the directory once; empty when the bundle
+# ships no FAQ documents.
+resolve_faq_dir() {
+    FAQ_DIR=""
+    for candidate in "$SCRIPT_DIR/knowledge-base/knowledge_base" "$SCRIPT_DIR/knowledge-base" \
+                     "$SCRIPT_DIR/faq/knowledge_base" "$SCRIPT_DIR/faq"; do
+        if [ -d "$candidate" ] && [ -n "$(find "$candidate" -maxdepth 1 -type f \( -name '*.md' -o -name '*.txt' \) | head -1)" ]; then
+            FAQ_DIR="$candidate"; return 0
+        fi
+    done
+    return 1
+}
+
+# Load every FAQ document into a Q in Connect CUSTOM knowledge base. A CUSTOM
+# knowledge base has no data source of its own: an S3 copy alone is never
+# searched. Each document goes through StartContentUpload (a presigned PUT to
+# the service) and is registered with CreateContent; names are ASCII and
+# index-based so a re-run recognises what is already there. Markdown is
+# uploaded as text/plain.
+kb_upload_faq_documents() {
+    local kb_id="$1"
+    [ -n "${FAQ_DIR:-}" ] || return 0
+    local existing uploaded=0 skipped=0 failed=0 index=0
+    existing=$(aws qconnect list-contents --knowledge-base-id "$kb_id" --region "$REGION" --output json 2>/dev/null \
+        | python3 -c "import sys, json
+try:
+    print('\n'.join(c.get('name', '') for c in json.load(sys.stdin).get('contentSummaries', [])))
+except Exception:
+    pass" 2>/dev/null)
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        index=$((index+1))
+        local base name title upload url upload_id
+        base=$(basename "$f")
+        name=$(printf 'faq-%02d-%s.txt' "$index" "$(printf '%s' "${base%.*}" | python3 -c "import sys, re; s = re.sub(r'[^A-Za-z0-9._-]+', '-', sys.stdin.read()).strip('-.'); print(s[:40] or 'doc')")")
+        title=$(head -1 "$f" | sed 's/^#* *//' | cut -c1-200); [ -n "$title" ] || title="$base"
+        if printf '%s\n' "$existing" | grep -qx "$name"; then skipped=$((skipped+1)); continue; fi
+        upload=$(aws qconnect start-content-upload --knowledge-base-id "$kb_id" --content-type text/plain \
+            --region "$REGION" --output json 2>&1) || { warn "start-content-upload failed for $base"; failed=$((failed+1)); continue; }
+        url=$(jget "$upload" "url"); upload_id=$(jget "$upload" "uploadId")
+        # The presigned PUT must carry exactly the headers the service returned.
+        if ! J="$upload" F="$f" U="$url" python3 - <<'PY'
+import json, os, sys, urllib.request
+up = json.loads(os.environ["J"])
+with open(os.environ["F"], "rb") as handle:
+    body = handle.read()
+req = urllib.request.Request(os.environ["U"], data=body, method="PUT",
+                             headers=up.get("headersToInclude") or {})
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        sys.exit(0 if 200 <= resp.status < 300 else 1)
+except Exception as exc:  # noqa: BLE001
+    print(f"   upload error: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+        then
+            warn "upload failed for $base"; failed=$((failed+1)); continue
+        fi
+        if aws qconnect create-content --knowledge-base-id "$kb_id" --name "$name" --title "$title" \
+            --upload-id "$upload_id" --region "$REGION" >/dev/null 2>&1; then
+            uploaded=$((uploaded+1))
+        else
+            warn "create-content failed for $base"; failed=$((failed+1))
+        fi
+    done <<EOF_FAQ
+$(find "$FAQ_DIR" -maxdepth 1 -type f \( -name '*.md' -o -name '*.txt' \) | sort)
+EOF_FAQ
+    ok "Knowledge Base documents: $uploaded uploaded, $skipped already present, $failed failed"
+    [ "$failed" -eq 0 ]
+}
+
 phase_faq() {
     echo ""
     echo "📚 Phase 4: Uploading FAQ documents..."
-    FAQ_DIR="$SCRIPT_DIR/faq/knowledge_base"
-    [ -d "$FAQ_DIR" ] || FAQ_DIR="$SCRIPT_DIR/faq"
-    if [ -d "$FAQ_DIR" ] && [ -n "${KB_BUCKET:-}" ]; then
-        count=$(find "$FAQ_DIR" -name "*.txt" | wc -l | tr -d ' ')
-        aws s3 sync "$FAQ_DIR" "s3://$KB_BUCKET/faq/" --exclude "*.DS_Store" --region "$REGION" >/dev/null
+    resolve_faq_dir || true
+    if [ -n "$FAQ_DIR" ] && [ -n "${KB_BUCKET:-}" ]; then
+        count=$(find "$FAQ_DIR" -maxdepth 1 -type f \( -name '*.md' -o -name '*.txt' \) | wc -l | tr -d ' ')
+        aws s3 sync "$FAQ_DIR" "s3://$KB_BUCKET/faq/" --exclude "*.DS_Store" --exclude "*.json" --region "$REGION" >/dev/null
         ok "$count documents -> s3://$KB_BUCKET/faq/"
+    elif [ -z "${KB_BUCKET:-}" ]; then
+        info "No KB bucket in the stack outputs, skipping FAQ upload"
     else
-        info "No FAQ directory or KB bucket, skipping"
+        info "No FAQ documents in the bundle (knowledge-base/ or faq/), skipping"
     fi
 }
 
@@ -963,7 +1037,8 @@ phase_assistant() {
     ok "Assistant: $AI_ASSISTANT_ID"
 
     # Knowledge Base (only when FAQ assets exist)
-    if [ -d "$SCRIPT_DIR/faq" ] && [ -n "${AI_ASSISTANT_ID:-}" ]; then
+    resolve_faq_dir || true
+    if [ -n "$FAQ_DIR" ] && [ -n "${AI_ASSISTANT_ID:-}" ]; then
         info "Setting up FAQ Knowledge Base..."
         EXISTING_KB=$(aws qconnect list-knowledge-bases --region "$REGION" --output json 2>/dev/null || echo '{"knowledgeBaseSummaries":[]}')
         KB_ID=$(echo "$EXISTING_KB" | python3 -c "
@@ -988,6 +1063,7 @@ for kb in json.load(sys.stdin).get('knowledgeBaseSummaries', []):
                 --association "knowledgeBaseId=$KB_ID" \
                 --region "$REGION" >/dev/null 2>&1 || info "(KB already associated)"
             ok "Knowledge Base associated"
+            kb_upload_faq_documents "$KB_ID" || warn "Some FAQ documents did not load — the FAQ intent will answer without them"
         fi
     fi
 }
