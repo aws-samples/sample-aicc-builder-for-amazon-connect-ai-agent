@@ -581,3 +581,24 @@ Resources:
     assert names["hanbit-appointments"] == {"phone-index", "dept-date-index"}
     assert {"phone-birth-index"} in names.values()
     assert _cfn_gsi_names(None) == {} and _cfn_gsi_names("not: [valid") == {}
+
+
+def test_ai_prompt_unknown_variable_is_rewritten_to_a_custom_attribute():
+    """Live (Hanul, 2026-09-13): `{{$.channel}}` made CreateAIPrompt reject the
+    prompt ('Prompt contains unknown variable') and the deploy finished with no
+    AI agent. Known variables and $.Custom.* pass; a bare unknown name becomes a
+    custom attribute; a non-identifier loses its braces."""
+    from tools.asset_linters import lint_ai_prompt
+
+    text = ("채널은 {{$.channel}}입니다. 도구: {{$.toolConfigurationList}} "
+            "이름: {{$.Custom.firstName}} 이상: {{$.foo.bar}}")
+    result = lint_ai_prompt(text)
+    assert "{{$.Custom.channel}}" in result["fixed_text"]
+    assert "{{$.channel}}" not in result["fixed_text"]
+    assert "{{$.toolConfigurationList}}" in result["fixed_text"]
+    assert "{{$.Custom.firstName}}" in result["fixed_text"]
+    assert "$.foo.bar" in result["fixed_text"] and "{{$.foo.bar}}" not in result["fixed_text"]
+    assert result["unknown_variables"] == ["channel", "foo.bar"]
+    assert any("Custom.channel" in w for w in result["warnings"])
+    clean = lint_ai_prompt("{{$.toolConfigurationList}} and {{$.Custom.x}}")
+    assert clean["fixes_applied"] == [] and clean["unknown_variables"] == []

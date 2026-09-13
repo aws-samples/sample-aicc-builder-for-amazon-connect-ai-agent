@@ -2327,8 +2327,27 @@ PYEOF
         rm -f /tmp/_ai_prompt_req.json
         AI_PROMPT_ID=$(jget "$PROMPT_RESULT" "aiPrompt.aiPromptId" | cut -d: -f1)
         if [ -z "$AI_PROMPT_ID" ]; then
-            warn "AI Prompt creation failed: $(echo "$PROMPT_RESULT" | head -3)"
-            return 0
+            # Without the prompt there is no AI agent, and the Lex bot's
+            # AMAZON.QInConnectIntent falls back to whatever agent the shared
+            # assistant already has (live: another project's agent answered).
+            # Finishing with a green banner here hid that; fail loudly instead.
+            echo ""
+            echo "   ❌ AI Prompt creation failed:"
+            echo "$PROMPT_RESULT" | head -3 | sed 's/^/      /'
+            if echo "$PROMPT_RESULT" | grep -q "unknown variable"; then
+                echo "      The prompt uses a {{\$.name}} variable the AI prompt API does not know."
+                echo "      Known: \$.toolConfigurationList \$.conversationHistory \$.locale \$.contactId"
+                echo "             \$.sessionId \$.dateTime \$.instanceId and \$.Custom.<attribute>."
+                echo "      Offending variables:"
+                grep -o '{{\$\.[A-Za-z_.]*}}' "$PROMPT_FILE" | sort -u \
+                    | grep -v -E '^\{\{\$\.(toolConfigurationList|conversationHistory|locale|contactId|sessionId|dateTime|instanceId|Custom\.)' \
+                    | sed 's/^/         /' || true
+                echo "      Fix them in $PROMPT_FILE (e.g. {{\$.channel}} → {{\$.Custom.channel}} plus a"
+                echo "      'Set contact attributes' block in the flow, or state the condition in words) and re-run ./deploy.sh"
+            fi
+            echo ""
+            echo "   Deployment is INCOMPLETE: no AI agent was created for this project."
+            exit 1
         fi
     else
         info "Reusing existing AI Prompt: $PROMPT_NAME"

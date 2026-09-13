@@ -1596,6 +1596,14 @@ def lint_contact_flow_asset(session_id: str = "", flow_name: str = "", file_name
 # {{ foo }}. Captures the inner expression (trimmed) so we can detect duplicates.
 _AI_PROMPT_VAR_RE = re.compile(r"\{\{\s*(.*?)\s*\}\}")
 
+#: Variables the Amazon Connect AI prompt (qconnect CreateAIPrompt, ORCHESTRATION)
+#: resolves. Verified live: any other `$.name` is rejected with
+#: "Prompt contains unknown variable"; `$.Custom.<attribute>` is accepted by name.
+_AI_PROMPT_KNOWN_VARIABLES = frozenset({
+    "toolConfigurationList", "conversationHistory", "locale", "contactId",
+    "sessionId", "dateTime", "instanceId",
+})
+
 
 def lint_ai_prompt(prompt_text: str) -> dict:
     """Validate an Amazon Connect AI-agent prompt against the qconnect
@@ -1619,6 +1627,37 @@ def lint_ai_prompt(prompt_text: str) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     fixes_applied: list[str] = []
+
+    # Variables the qconnect ORCHESTRATION prompt actually knows. Live (Hanul,
+    # 2026-09-13): a model-added `{{$.channel}}` made CreateAIPrompt reject the
+    # whole prompt with "Prompt contains unknown variable", so the deploy ended
+    # with no AI agent at all. Anything under `$.Custom.` is a contact/session
+    # attribute the flow supplies and is accepted by name.
+    unknown_variables: list[str] = []
+
+    def _known(m: "re.Match") -> str:
+        inner = m.group(1).strip()
+        if not inner.startswith("$."):
+            return m.group(0)
+        path = inner[2:]
+        if path in _AI_PROMPT_KNOWN_VARIABLES or path.startswith("Custom."):
+            return m.group(0)
+        unknown_variables.append(path)
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path):
+            fixes_applied.append(
+                f"AI prompt: '{{{{{inner}}}}}' is not a variable the AI prompt API knows — "
+                f"rewritten to '{{{{$.Custom.{path}}}}}' (a contact attribute your Contact Flow "
+                f"must set; it resolves to empty text otherwise)")
+            warnings.append(
+                f"AI prompt: '{path}' is now read from the contact attribute $.Custom.{path}; "
+                f"set it in the Contact Flow (Set contact attributes) or reword the prompt")
+            return "{{$.Custom." + path + "}}"
+        fixes_applied.append(
+            f"AI prompt: '{{{{{inner}}}}}' is not a variable the AI prompt API knows — "
+            f"braces removed so the text imports as literal text")
+        return inner
+
+    prompt_text = _AI_PROMPT_VAR_RE.sub(_known, prompt_text)
 
     seen: set[str] = set()
 
@@ -1646,6 +1685,7 @@ def lint_ai_prompt(prompt_text: str) -> dict:
         "warnings": warnings,
         "fixes_applied": fixes_applied,
         "fixed_text": fixed_text,
+        "unknown_variables": unknown_variables,
     }
 
 

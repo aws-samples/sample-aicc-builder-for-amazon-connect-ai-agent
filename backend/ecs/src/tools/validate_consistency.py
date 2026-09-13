@@ -1518,6 +1518,29 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
                              f"one the prompt already defines.",
                 })
 
+    # D6b: AI prompt import safety. A prompt patched after generation (the
+    #     generator lints its own output, a workspace patch is not re-linted)
+    #     can carry a variable CreateAIPrompt rejects — live: `{{$.channel}}`,
+    #     "Prompt contains unknown variable", deploy finished with no AI agent.
+    if prompt_text:
+        try:
+            from tools.asset_linters import _AI_PROMPT_KNOWN_VARIABLES as _KNOWN_PROMPT_VARIABLES
+            from tools.asset_linters import lint_ai_prompt as _lint_prompt
+            _prompt_lint = _lint_prompt(prompt_text)
+            for _var in _prompt_lint.get("unknown_variables") or []:
+                mismatches.append({
+                    "operation_id": "__prompt__", "field": _var,
+                    "asset_type": "prompt_variable",
+                    "issue": f"AI prompt uses {{{{$.{_var}}}}}, which the Amazon Connect AI prompt API does not "
+                             f"know (CreateAIPrompt rejects the whole prompt: 'Prompt contains unknown "
+                             f"variable'). Known variables: {', '.join(sorted(_KNOWN_PROMPT_VARIABLES))}, plus "
+                             f"$.Custom.<attribute> for a contact attribute the Contact Flow sets. Rewrite it "
+                             f"(e.g. {{{{$.Custom.{_var}}}}} and set the attribute in the flow) or state the "
+                             f"condition in words.",
+                })
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug(f"[VALIDATE] prompt variable check skipped: {_exc}")
+
     # D7: update_q_session env-var contract
     #     The static handler throws on cold start without CONNECT_INSTANCE_ID /
     #     AI_ASSISTANT_ID env vars. deploy.sh backfills the VALUES, but the CFN
