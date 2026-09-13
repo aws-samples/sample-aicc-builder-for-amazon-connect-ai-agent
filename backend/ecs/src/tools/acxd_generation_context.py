@@ -103,6 +103,21 @@ def _business_profile(infrastructure: dict) -> dict:
         profile["company_name"] = profile["companyName"]
     if profile.get("primary_language") and not profile.get("language"):
         profile["language"] = profile["primary_language"]
+    # The greeting the customer approved in the interview, verbatim — the
+    # WelcomeFlow speaks it instead of composing one from the company name.
+    if not profile.get("greeting"):
+        try:
+            from tools.spec_manager import get_contact_flow_spec, get_session_flow_config
+            flow_config = get_session_flow_config()
+            greeting = str(getattr(flow_config, "common_greeting", "") or "").strip() if flow_config else ""
+            if not greeting:
+                contact_flow_spec = get_contact_flow_spec()
+                greeting = str(getattr(contact_flow_spec, "welcome_message", "") or "").strip() \
+                    if contact_flow_spec else ""
+            if greeting:
+                profile["greeting"] = greeting
+        except Exception as exc:  # pragma: no cover - spec store outage is non-fatal
+            logger.debug("[ACXDContext] approved greeting lookup skipped: %s", exc)
     return profile
 
 

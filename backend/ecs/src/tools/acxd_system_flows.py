@@ -221,10 +221,25 @@ def _ids(spec: dict, flow_ids: Optional[dict]) -> dict:
 
 def _company(spec: dict) -> str:
     profile = spec.get("business_profile") or {}
-    for key in ("company_name", "companyName", "project_name"):
+    for key in ("company_name", "companyName"):
         value = str(profile.get(key) or "").strip()
-        if value:
+        # A project slug ("selc-aicc") is not a name to greet a customer with.
+        if value and value != str(profile.get("project_name") or "").strip():
             return value
+    return ""
+
+
+def _approved_greeting(spec: dict) -> str:
+    """The greeting sentence the customer approved during the interview, when
+    the generation context carries one (business_profile.greeting, set from
+    SessionFlowConfig.common_greeting / ContactFlowSpec.welcome_message)."""
+    profile = spec.get("business_profile") or {}
+    application = spec.get("application") or {}
+    for source in (profile, application):
+        for key in ("greeting", "welcome_message", "welcomeMessage", "common_greeting"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     return ""
 
 
@@ -349,8 +364,13 @@ def build_welcome_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict:
     language = system_flow_language(spec)
     text = _texts(language)
     company = _company(spec)
-    greeting = (text["greeting"].format(company=company) if company
-                else text["greeting_no_company"])
+    # The interview records the greeting the customer approved verbatim
+    # (SessionFlowConfig.common_greeting / ContactFlowSpec.welcome_message).
+    # Live (SELC): composing one from the profile said "안녕하세요, selc-aicc입니다"
+    # — the project slug — because the profile had no company name.
+    greeting = _approved_greeting(spec) or (
+        text["greeting"].format(company=company) if company
+        else text["greeting_no_company"])
 
     start = _node_id(flow_id, "start")
     greet = _node_id(flow_id, "greeting")

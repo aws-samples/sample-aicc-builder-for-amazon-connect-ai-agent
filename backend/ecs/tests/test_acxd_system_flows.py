@@ -582,3 +582,19 @@ def test_generation_prompt_never_offers_bare_text_number_boolean():
     assert "NLX.AlphaNumeric" in prompt
     # ...and the model is told where a successful operation goes
     assert "FollowUpFlow" in prompt
+
+
+def test_welcome_flow_speaks_the_approved_greeting_and_never_the_project_slug():
+    """Live (SELC, 2026-09-13): 'selc-aicc' (the project slug) was greeted as the
+    company because the profile had no company name; the interview had
+    recorded the customer's greeting verbatim all along."""
+    import copy
+    spec = copy.deepcopy(KO_SPEC)
+    spec["business_profile"] = {"project_name": "selc-aicc", "company_name": "selc-aicc", "language": "ko-KR",
+                                "greeting": "안녕하세요, 삼성전자로지텍 고객센터입니다. 무엇을 도와드릴까요?"}
+    flow = build_welcome_flow(spec)
+    assert _node_of_type(flow, "basic")["messages"][0]["body"] == \
+        "안녕하세요, 삼성전자로지텍 고객센터입니다. 무엇을 도와드릴까요?"
+    spec["business_profile"].pop("greeting")
+    flow = build_welcome_flow(spec)
+    assert _node_of_type(flow, "basic")["messages"][0]["body"] == "안녕하세요. 무엇을 도와드릴까요?"
