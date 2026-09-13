@@ -834,6 +834,21 @@ export function useWebSocket() {
    * turn can be rebuilt from the log without duplicating what was already shown.
    * Returns false when there is no turn to cut back to.
    */
+  /**
+   * The agent is not running for this session, so nothing restored from history
+   * may still claim to be streaming: an `isStreaming` flag autosaved mid-turn by
+   * an earlier tab would otherwise leave a spinner under the last bubble for good.
+   */
+  const finishStaleStreaming = useCallback(() => {
+    const store = useBuilderStore.getState();
+    store.messages.forEach((m, i) => {
+      if (m.isStreaming) store.updateMessageAt(i, (msg) => ({ ...msg, isStreaming: false }));
+    });
+    setTyping(false);
+    streamingMessageIdRef.current = null;
+    streamTargetMsgIdRef.current = null;
+  }, [setTyping]);
+
   const truncateToLastTurn = useCallback((): boolean => {
     const messages = useBuilderStore.getState().messages;
     let lastUserIdx = -1;
@@ -906,7 +921,13 @@ export function useWebSocket() {
         .filter((e) => e.type === "stream" && typeof e.content === "string")
         .map((e) => e.content as string)
         .join("");
-      const norm = (t: string) => t.replace(/\s+/g, " ").trim();
+      // Compare with ALL whitespace removed: the log is a stream of chunks with
+      // nothing between the text before a tool card and the text after it,
+      // while the saved history holds separate bubbles. Any separator (or a
+      // stray newline at a chunk boundary) would otherwise defeat the prefix
+      // test below and a turn that finished while the tab was away would never
+      // be rebuilt — the chat then shows a stale spinner after the last bubble.
+      const norm = (t: string) => t.replace(/\s+/g, "");
 
       // The user may have switched sessions while the log was loading.
       if (useSessionStore.getState().currentSessionId !== sessionId) return;
@@ -926,13 +947,14 @@ export function useWebSocket() {
           .slice(lastUserIdx + 1)
           .filter((m) => m.role === "assistant")
           .map((m) => m.content || "")
-          .join(" "),
+          .join(""),
       );
       const fullReply = norm(logText);
       if (!fullReply || savedReply === fullReply || (!fullReply.startsWith(savedReply) && savedReply.length > 0)) {
         // Either the turn's reply is already in the history, or the log does not
         // describe this turn (never replay in that case — it would duplicate).
         writeMsgLogPointer(sessionId, turnId, maxSeq);
+        if (!isAgentActive) finishStaleStreaming();
         return;
       }
 
@@ -947,11 +969,13 @@ export function useWebSocket() {
       if (isAgentActive) {
         // The backend re-attached the live socket on connect; newer events stream in.
         setTyping(true);
+      } else {
+        finishStaleStreaming();
       }
     } catch (error) {
       console.warn("[useWebSocket] Message log reconcile failed:", error);
     }
-  }, [setTyping, replayLogEntries, truncateToLastTurn]);
+  }, [setTyping, replayLogEntries, truncateToLastTurn, finishStaleStreaming]);
 
   // Define handleMessage first so connect can reference it
   const handleMessage = useCallback(
