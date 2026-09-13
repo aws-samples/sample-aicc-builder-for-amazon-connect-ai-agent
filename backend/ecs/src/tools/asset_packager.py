@@ -25,6 +25,7 @@ packages them into a downloadable ZIP with the following structure:
         └── *.txt
 """
 
+import hashlib
 import io
 import json
 import logging
@@ -558,6 +559,12 @@ def package_assets_impl(
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             zip_paths: set[str] = set()
+            # archive path → sha256 of what was written there. The preview
+            # stream saves some documents twice (`<type>/<file>` and
+            # `<type>/<id>/<file>`, live: research/research.json); an identical
+            # second copy is the same file and is skipped — only a DIFFERENT
+            # document at the same path makes the bundle ambiguous.
+            zip_digests: dict[str, str] = {}
             for s3_key, asset_info in parsed_assets.items():
                 asset_type = asset_info["asset_type"]
                 operation_id = asset_info.get("operation_id")
@@ -587,11 +594,19 @@ def package_assets_impl(
                     )
 
                 if zip_path:
-                    if acxd_plan and zip_path in zip_paths:
-                        raise ACXDPackagingError(
-                            f"duplicate archive path {zip_path!r}; refusing an ambiguous ACXD bundle")
+                    digest = hashlib.sha256(
+                        content if isinstance(content, bytes) else str(content).encode("utf-8")).hexdigest()
+                    if zip_path in zip_paths:
+                        if zip_digests.get(zip_path) == digest:
+                            logger.info(f"[packager] identical duplicate copy skipped: {s3_key} -> {zip_path}")
+                            continue
+                        if acxd_plan:
+                            raise ACXDPackagingError(
+                                f"duplicate archive path {zip_path!r} with different content "
+                                f"({s3_key}); refusing an ambiguous ACXD bundle")
                     zf.writestr(zip_path, content)
                     zip_paths.add(zip_path)
+                    zip_digests[zip_path] = digest
                     file_list.append(zip_path)
 
                     if asset_type not in assets_found:
