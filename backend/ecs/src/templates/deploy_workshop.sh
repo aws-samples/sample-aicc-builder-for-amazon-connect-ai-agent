@@ -1165,6 +1165,36 @@ QPEOF
 #   whose omission made the old script's audience update always fail — the
 #   workshop's "Chapter 3 manual fix" is now automated correctly)
 # =============================================================================
+# Register every Lambda the Contact Flow invokes with the Connect instance.
+# Runs for BOTH runtime targets: the ACXD path used to skip Phase 9 where this
+# lived, and the flow's Lambda block (customer lookup / API key retriever)
+# answered 403 AccessDeniedException on every contact (live, 2026-09-13).
+associate_flow_lambdas() {
+    _load_stack_lambda_names
+    local flow_lambda_arns=""
+    if [ -n "$FLOW_JSON" ]; then
+        # functions referenced by the flow's {{X_LAMBDA_ARN}} placeholders
+        flow_lambda_arns=$(python3 - "$FLOW_JSON" <<'PYEOF' 2>/dev/null || true
+import sys, json, re
+tokens = set(re.findall(r'\{\{([A-Z_]+?)_LAMBDA(?:_ARN)?\}\}', open(sys.argv[1]).read()))
+for t in tokens: print(t.lower())
+PYEOF
+)
+    fi
+    ASSOCIATED=0
+    for stem in $flow_lambda_arns; do
+        fn=$(resolve_stack_function "$stem")
+        [ -z "$fn" ] && continue
+        fn_arn="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${fn}"
+        aws connect associate-lambda-function \
+            --instance-id "$CONNECT_INSTANCE_ID" \
+            --function-arn "$fn_arn" \
+            --region "$REGION" 2>/dev/null && info "Lambda associated: $fn" || info "Lambda already associated: $fn"
+        ASSOCIATED=$((ASSOCIATED+1))
+    done
+    [ "$ASSOCIATED" -gt 0 ] && ok "Associated $ASSOCIATED flow-referenced Lambda(s) with Connect" || info "No flow-referenced Lambdas"
+}
+
 phase_gateway() {
     echo ""
     echo "🌐 Phase 8: Setting up AgentCore Gateway (MCP Server)..."
@@ -1472,29 +1502,7 @@ for a in json.load(sys.stdin).get('Applications', []):
     fi
 
     # 9.2 Lambda associations (register flow-invoked functions with Connect)
-    _load_stack_lambda_names
-    local flow_lambda_arns=""
-    if [ -n "$FLOW_JSON" ]; then
-        # functions referenced by the flow's {{X_LAMBDA_ARN}} placeholders
-        flow_lambda_arns=$(python3 - "$FLOW_JSON" <<'PYEOF' 2>/dev/null || true
-import sys, json, re
-tokens = set(re.findall(r'\{\{([A-Z_]+?)_LAMBDA(?:_ARN)?\}\}', open(sys.argv[1]).read()))
-for t in tokens: print(t.lower())
-PYEOF
-)
-    fi
-    ASSOCIATED=0
-    for stem in $flow_lambda_arns; do
-        fn=$(resolve_stack_function "$stem")
-        [ -z "$fn" ] && continue
-        fn_arn="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${fn}"
-        aws connect associate-lambda-function \
-            --instance-id "$CONNECT_INSTANCE_ID" \
-            --function-arn "$fn_arn" \
-            --region "$REGION" 2>/dev/null && info "Lambda associated: $fn" || info "Lambda already associated: $fn"
-        ASSOCIATED=$((ASSOCIATED+1))
-    done
-    [ "$ASSOCIATED" -gt 0 ] && ok "Associated $ASSOCIATED flow-referenced Lambda(s) with Connect" || info "No flow-referenced Lambdas"
+    associate_flow_lambdas
 }
 
 # =============================================================================
@@ -2954,6 +2962,7 @@ do_acxd_deploy() {
     info "Phases 8–10: deploying ACXD resources with the static runner"
     run_acxd_runner
     phase_contact_flow
+    associate_flow_lambdas
     CONTACT_FLOW_ID="${CONTACT_FLOW_ID:-$(runner_contact_flow_id)}"
     [ -n "$CONTACT_FLOW_ID" ] && state_set CONTACT_FLOW_ID "$CONTACT_FLOW_ID"
     info "Phase 12 skipped for ACXD: AI Prompt, AI Agent, and security profile are not used"
