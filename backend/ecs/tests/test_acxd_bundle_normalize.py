@@ -21,3 +21,22 @@ def test_explicit_name_is_kept_and_non_dicts_pass_through():
         "knowledgeBase": {"knowledgeBaseId": "kb-1", "name": "Given"}}}}}
     assert normalize_flow_for_service(flow)["nodes"]["a"]["metadata"]["knowledgeBase"]["name"] == "Given"
     assert normalize_flow_for_service("not-a-flow") == "not-a-flow"
+
+
+def test_rebind_never_touches_an_nlx_builtin_slot():
+    """Live (SELC, 2026-09-13): the normalizer had turned the order-number slot
+    into NLX.AlphaNumeric + regex, but a stale one-item custom slot type named
+    'orderNumber' was still in the bundle and the loader rebound the slot back
+    to it — re-creating the auto-selecting one-item menu at packaging time."""
+    from tools.acxd_bundle import _rebind_slot_types
+
+    flow = {"flowId": "F", "slotTypes": [
+        {"name": "orderNumber", "type": "NLX.AlphaNumeric", "regex": "^[0-9]{10}$"},
+        {"name": "serviceType", "type": "enum"},
+    ], "nodes": {}}
+    slot_types = [{"slotTypeId": "orderNumber", "values": [{"value": "1234567890"}]},
+                  {"slotTypeId": "serviceType", "values": [{"value": "a"}, {"value": "b"}]}]
+    out = _rebind_slot_types(flow, slot_types)
+    assert out["slotTypes"][0]["type"] == "NLX.AlphaNumeric"
+    assert out["slotTypes"][0]["regex"] == "^[0-9]{10}$"
+    assert out["slotTypes"][1]["type"] == "serviceType"  # the legitimate rebind still happens

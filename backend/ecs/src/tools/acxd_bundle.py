@@ -251,6 +251,12 @@ def _rebind_slot_types(flow: Any, slot_types: list) -> Any:
         if not isinstance(slot, dict):
             continue
         type_id, name = str(slot.get("type") or ""), str(slot.get("name") or "")
+        if type_id.startswith("NLX."):
+            # A service built-in (the runtime contract's S1/S5 result, e.g.
+            # NLX.AlphaNumeric + regex for an order number). Live: this rebind
+            # pointed it back at a stale one-item custom slot type of the same
+            # name, re-creating the auto-selecting menu the normalizer removed.
+            continue
         if type_id and type_id.lower() not in _BUILTIN_SLOT_TYPE_IDS and type_id not in available and name in available:
             renames.setdefault(type_id, []).append(name)
             slot["type"] = name
