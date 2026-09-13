@@ -908,3 +908,39 @@ def test_nothing_is_pruned_without_a_start_node():
     del flow["nodes"][start_id]
     fixed, _ = apply_runtime_contract(flow, **context("GetCleaningPrice"))
     assert set(flow["nodes"]) <= set(fixed["nodes"])
+
+
+def test_s8_yes_no_constants_become_the_slot_types_values():
+    """Live (SELC, 2026-09-13): `privacyConsent eq "yes"` against the yesNo type
+    whose values are 예/아니요 — the customer's "네" was treated as a refusal."""
+    flow = broken("CreateCleaningReservation")
+    flow["slotTypes"] = [s for s in flow["slotTypes"] if s["name"] != "privacyConsent"] + [
+        {"name": "privacyConsent", "type": YES_NO_SLOT_TYPE}]
+    flow["nodes"]["gate"] = {"nodeId": "gate", "type": "choice", "childNodes": [
+        {"nodeId": "go", "name": "agreed", "conditions": [
+            {"left": {"type": "slot", "name": "privacyConsent"}, "operator": "eq",
+             "right": {"type": "constant", "value": "yes"}}]},
+        {"nodeId": "stop", "name": "declined", "conditions": [
+            {"left": {"type": "slot", "name": "privacyConsent"}, "operator": "neq",
+             "right": {"type": "constant", "value": "yes"}}]},
+        {"nodeId": "odd", "name": "odd", "conditions": [
+            {"left": {"type": "slot", "name": "privacyConsent"}, "operator": "eq",
+             "right": {"type": "constant", "value": "maybe"}}]},
+    ]}
+    flow["nodes"]["go"] = {"nodeId": "go", "type": "end"}
+    flow["nodes"]["stop"] = {"nodeId": "stop", "type": "end"}
+    flow["nodes"]["odd"] = {"nodeId": "odd", "type": "end"}
+    start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
+    start["childNodes"] = [{"nodeId": "gate", "name": "next"}]
+    ctx = context("CreateCleaningReservation")
+    yes_no = ctx["slot_type_docs"][YES_NO_SLOT_TYPE]
+    yes_value = yes_no["values"][0]["value"]
+    out, notes = apply_runtime_contract(flow, **ctx)
+    edges = {e["name"]: e for e in out["nodes"]["gate"]["childNodes"]}
+    assert edges["agreed"]["conditions"][0]["right"]["value"] == yes_value
+    assert edges["declined"]["conditions"][0]["right"]["value"] == yes_value
+    assert edges["odd"]["conditions"][0]["right"]["value"] == "maybe"  # unknown: reported, not guessed
+    assert any("(S8)" in n for n in notes)
+    from tools.acxd_runtime_contract import runtime_contract_violations
+    assert any(v.rule == "S8" if hasattr(v, "rule") else "S8" in str(v)
+               for v in runtime_contract_violations(out, **ctx))

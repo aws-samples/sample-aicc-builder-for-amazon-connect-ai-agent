@@ -67,6 +67,16 @@ NLX_BUILTIN_SLOT_TYPES = frozenset({
 #: There is no boolean built-in (S4): yes/no is a custom slot type.
 YES_NO_SLOT_TYPE = "yesNo"
 
+#: Spellings a model uses for the two yes/no outcomes in edge conditions (S8).
+_AFFIRMATIVE_CONSTANTS = frozenset({
+    "yes", "y", "true", "1", "agree", "agreed", "ok", "okay", "affirmative",
+    "예", "네", "응", "그래", "동의", "はい", "ええ", "うん",
+})
+_NEGATIVE_CONSTANTS = frozenset({
+    "no", "n", "false", "0", "disagree", "declined", "decline", "negative",
+    "아니요", "아니오", "아뇨", "아니", "いいえ", "いや",
+})
+
 #: Generator spellings → the built-in the service actually knows (S1).
 SLOT_TYPE_ALIASES = {
     "text": "NLX.Text",
@@ -132,7 +142,7 @@ NO_MATCH_EDGE_NAMES = frozenset({
 #: :func:`apply_runtime_contract` and their residue is reported only to a
 #: caller that asks for every scope — the generator's repair loop — so a
 #: minimal unit fixture is not failed by a rule about conversation shape.
-FLOW_SCOPE_RULES = frozenset({"S1", "S2", "S3", "R6", "R7", "D4", "J", "A2"})
+FLOW_SCOPE_RULES = frozenset({"S1", "S2", "S3", "S8", "R6", "R7", "D4", "J", "A2"})
 CROSS_SCOPE_RULES = frozenset({"S1", "S5", "D3", "M1", "RX"})
 NORMALIZER_SCOPE_RULES = frozenset({"M2", "R3", "S6"})
 ALL_SCOPES = ("flow", "cross", "normalizer")
@@ -690,6 +700,66 @@ class _RuntimeContract:
         for node_id, node in self.nodes_of_type("user_input"):
             for edge in _edges(node):
                 self._rewrite_capture_edge(node_id, node, edge, slot=None)
+
+    # ==================================================================
+    # S8 — a constant compared with a yes/no slot is one of ITS values
+    # ==================================================================
+
+    def rule_s8(self) -> None:
+        """Live (SELC, 2026-09-13): the model wrote `privacyConsent eq "yes"`
+        while the yesNo slot type's values are 예 / 아니요, so the customer's
+        "네" matched 예, failed the comparison and was treated as a refusal
+        (straight to escalation). Any yes/no-ish constant compared with a slot
+        attached as yesNo is rewritten to the slot type's own value."""
+        yes_no_slots = {
+            str(slot.get("name")) for slot in self.attached
+            if slot.get("type") == YES_NO_SLOT_TYPE and slot.get("name")}
+        if not yes_no_slots:
+            return
+        affirmative, negative = self._yes_no_pair()
+        if not affirmative or not negative:
+            return
+        for node_id, node in self.nodes.items():
+            if not isinstance(node, dict):
+                continue
+            for edge in _edges(node):
+                for condition in (edge.get("conditions") or []):
+                    if not isinstance(condition, dict):
+                        continue
+                    left, right = condition.get("left") or {}, condition.get("right") or {}
+                    if not (isinstance(left, dict) and left.get("type") == "slot"
+                            and str(left.get("name")) in yes_no_slots
+                            and condition.get("operator") in ("eq", "neq")
+                            and isinstance(right, dict) and right.get("type") == "constant"
+                            and isinstance(right.get("value"), str)):
+                        continue
+                    value = right["value"].strip()
+                    if value in (affirmative, negative):
+                        continue
+                    key = value.lower()
+                    target = (affirmative if key in _AFFIRMATIVE_CONSTANTS
+                              else negative if key in _NEGATIVE_CONSTANTS else None)
+                    if target is None:
+                        self.violation(
+                            "S8", "flow",
+                            f"{_label(node_id, node)} edge {edge.get('name')!r} compares yes/no slot "
+                            f"{left.get('name')!r} with {value!r}, which is not one of the yesNo slot "
+                            f"type's values ({affirmative!r} / {negative!r})")
+                        continue
+                    right["value"] = target
+                    self.change(
+                        f"{_label(node_id, node)} edge {edge.get('name')!r}: yes/no constant "
+                        f"{value!r} → {target!r} (the yesNo slot type's value) (S8)")
+
+    def _yes_no_pair(self) -> tuple[Optional[str], Optional[str]]:
+        document = self.slot_type_docs.get(YES_NO_SLOT_TYPE) or {}
+        values = [v.get("value").strip() if isinstance(v, dict) and isinstance(v.get("value"), str)
+                  else (v.strip() if isinstance(v, str) else None)
+                  for v in (document.get("values") or [])]
+        values = [v for v in values if v]
+        if len(values) >= 2:
+            return values[0], values[1]
+        return None, None
 
     def _rewrite_capture_edge(
         self, node_id: str, node: dict, edge: dict, *, slot: Optional[str],
@@ -1379,6 +1449,7 @@ class _RuntimeContract:
         self.rule_s5()
         self.rule_s2()
         self.rule_s3()
+        self.rule_s8()
         self.rule_m2()
         self.rule_r7()
         self.rule_r6()
