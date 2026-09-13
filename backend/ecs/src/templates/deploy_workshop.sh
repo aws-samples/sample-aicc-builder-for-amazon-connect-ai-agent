@@ -49,6 +49,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Per-run scratch directory. Fixed /tmp file names made two deploy.sh runs on
+# one machine overwrite each other's Lambda zip (live, 2026-09-13: project A's
+# function received project B's handler code). Cleaned up on exit.
+DEPLOY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/aicc_deploy.XXXXXX")"
+trap 'rm -rf "$DEPLOY_TMP"' EXIT
 # Runtime target. Resolution order: --target flag → DEPLOY_TARGET env → the
 # bundle itself. An ACXD bundle always carries assets/acxd/application.json and
 # deploy-manifest.json (written by the packager), a Classic bundle never does —
@@ -691,11 +696,11 @@ phase_lambda_code() {
         fi
 
         echo -n "   $aws_func <- $func_name/$entry_file ... "
-        (cd "$func_dir" && zip -qj /tmp/_deploy.zip "$entry_file")
+        (cd "$func_dir" && zip -qj $DEPLOY_TMP/_deploy.zip "$entry_file")
         retry=0
         while [ $retry -lt 3 ]; do
             if aws lambda update-function-code --function-name "$aws_func" \
-                --zip-file fileb:///tmp/_deploy.zip --region "$REGION" \
+                --zip-file fileb://$DEPLOY_TMP/_deploy.zip --region "$REGION" \
                 --output text --query 'FunctionName' &>/dev/null; then
                 aws lambda wait function-updated --function-name "$aws_func" --region "$REGION" 2>/dev/null || true
                 echo "✅"; break
@@ -704,7 +709,7 @@ phase_lambda_code() {
                 [ $retry -lt 3 ] && { echo -n "⏳ "; sleep 5; } || echo "⚠️ failed"
             fi
         done
-        rm -f /tmp/_deploy.zip
+        rm -f $DEPLOY_TMP/_deploy.zip
 
         # ── Reconcile the Handler config with the code's actual entry point ──
         #    The CFN placeholder may declare index.lambda_handler while the
@@ -1900,7 +1905,7 @@ phase_contact_flow() {
     echo "📋 Phase 11: Preparing & importing Contact Flow..."
     [ -z "$FLOW_JSON" ] && { info "No contact-flow/ directory, skipping"; return 0; }
 
-    local WORK_FLOW="/tmp/${PROJECT_NAME}_flow_resolved.json"
+    local WORK_FLOW="$DEPLOY_TMP/${PROJECT_NAME}_flow_resolved.json"
     cp "$FLOW_JSON" "$WORK_FLOW"
 
     # ── ACXD: bind the Agentic CX block to what the runner just deployed ─────
@@ -2327,12 +2332,12 @@ req = {
   "visibilityStatus": "PUBLISHED",
   "templateConfiguration": {"textFullAIPromptEditTemplateConfiguration": {"text": text}}
 }
-json.dump(req, open('/tmp/_ai_prompt_req.json', 'w'), ensure_ascii=False)
+json.dump(req, open('$DEPLOY_TMP/_ai_prompt_req.json', 'w'), ensure_ascii=False)
 PYEOF
         PROMPT_RESULT=$(aws qconnect create-ai-prompt \
-            --cli-input-json file:///tmp/_ai_prompt_req.json \
+            --cli-input-json file://$DEPLOY_TMP/_ai_prompt_req.json \
             --region "$REGION" --output json 2>&1) || true
-        rm -f /tmp/_ai_prompt_req.json
+        rm -f $DEPLOY_TMP/_ai_prompt_req.json
         AI_PROMPT_ID=$(jget "$PROMPT_RESULT" "aiPrompt.aiPromptId" | cut -d: -f1)
         if [ -z "$AI_PROMPT_ID" ]; then
             # Without the prompt there is no AI agent, and the Lex bot's
@@ -2414,10 +2419,10 @@ for a in json.load(sys.stdin).get('aiAgentSummaries', []):
     if [ -z "$AI_AGENT_ID" ]; then
         info "Creating AI Agent: $AGENT_NAME (base: $SYS_AGENT_NAME)"
         aws qconnect list-ai-agents --assistant-id "$AI_ASSISTANT_ID" \
-            --origin SYSTEM --region "$REGION" --output json > /tmp/_sys_agents.json
+            --origin SYSTEM --region "$REGION" --output json > $DEPLOY_TMP/_sys_agents.json
         python3 - <<PYEOF
 import json, re
-sys_agents = json.load(open('/tmp/_sys_agents.json'))['aiAgentSummaries']
+sys_agents = json.load(open('$DEPLOY_TMP/_sys_agents.json'))['aiAgentSummaries']
 base = next(a for a in sys_agents if a['name'] == '${SYS_AGENT_NAME}')
 cfg = base['configuration']['orchestrationAIAgentConfiguration']
 
@@ -2457,13 +2462,13 @@ req = {
   "visibilityStatus": "PUBLISHED",
   "configuration": {"orchestrationAIAgentConfiguration": cfg}
 }
-json.dump(req, open('/tmp/_ai_agent_req.json', 'w'), ensure_ascii=False)
+json.dump(req, open('$DEPLOY_TMP/_ai_agent_req.json', 'w'), ensure_ascii=False)
 PYEOF
         AGENT_RESULT=""
         # MCP tools may take a moment to propagate after integration registration
         for attempt in 1 2 3 4; do
             AGENT_RESULT=$(aws qconnect create-ai-agent \
-                --cli-input-json file:///tmp/_ai_agent_req.json \
+                --cli-input-json file://$DEPLOY_TMP/_ai_agent_req.json \
                 --region "$REGION" --output json 2>&1) || true
             if echo "$AGENT_RESULT" | grep -q '"aiAgentId"'; then
                 break
@@ -2474,7 +2479,7 @@ PYEOF
                 break
             fi
         done
-        rm -f /tmp/_ai_agent_req.json /tmp/_sys_agents.json
+        rm -f $DEPLOY_TMP/_ai_agent_req.json $DEPLOY_TMP/_sys_agents.json
         AI_AGENT_ID=$(jget "$AGENT_RESULT" "aiAgent.aiAgentId" | cut -d: -f1)
         AI_AGENT_ARN=$(jget "$AGENT_RESULT" "aiAgent.aiAgentArn")
         if [ -z "$AI_AGENT_ID" ]; then
@@ -2998,8 +3003,8 @@ do_acxd_rebind_alias() {
     info "Instance: $CONNECT_INSTANCE_ID | flow: $CONTACT_FLOW_ID | alias: $alias_value"
     info "Region: $REGION (from AWS_DEFAULT_REGION; export it if the instance lives elsewhere)"
 
-    local CUR_CONTENT="/tmp/${PROJECT_NAME}_rebind_current.json"
-    local NEW_CONTENT="/tmp/${PROJECT_NAME}_rebind_new.json"
+    local CUR_CONTENT="$DEPLOY_TMP/${PROJECT_NAME}_rebind_current.json"
+    local NEW_CONTENT="$DEPLOY_TMP/${PROJECT_NAME}_rebind_new.json"
     aws connect describe-contact-flow \
         --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$CONTACT_FLOW_ID" \
         --region "$REGION" --query 'ContactFlow.Content' --output text > "$CUR_CONTENT"
