@@ -40,3 +40,27 @@ def test_rebind_never_touches_an_nlx_builtin_slot():
     assert out["slotTypes"][0]["type"] == "NLX.AlphaNumeric"
     assert out["slotTypes"][0]["regex"] == "^[0-9]{10}$"
     assert out["slotTypes"][1]["type"] == "serviceType"  # the legitimate rebind still happens
+
+
+def test_load_acxd_bundle_leaves_out_slot_types_no_flow_attaches(monkeypatch):
+    """Live (SELC): one-item 'orderNumber'/'phoneNumber' slot types from an
+    earlier generation stayed on disk after the contract moved the slots to NLX
+    built-ins, and would have been deployed as stray resources."""
+    import tools.acxd_bundle as bundle_mod
+
+    docs = {
+        "acxd_flow": [{"flowId": "F", "slotTypes": [
+            {"name": "orderNumber", "type": "NLX.AlphaNumeric", "regex": "^[0-9]{10}$"},
+            {"name": "serviceType", "type": "serviceType"}], "nodes": {}}],
+        "acxd_slot_type": [
+            {"slotTypeId": "orderNumber", "values": [{"value": "1234567890"}]},
+            {"slotTypeId": "serviceType", "values": [{"value": "a"}, {"value": "b"}]},
+        ],
+    }
+    monkeypatch.setattr(bundle_mod, "_read_json_docs", lambda _sid, asset_type: list(docs.get(asset_type, [])))
+    monkeypatch.setattr(bundle_mod, "_backend_inventory",
+                        lambda _sid: {"infrastructure": None, "lambdas": [], "openapi": None})
+    monkeypatch.setattr(bundle_mod, "_collapse_identical_docs", lambda d, _t: d)
+    loaded = bundle_mod.load_acxd_bundle("session-x")
+    assert [st["slotTypeId"] for st in loaded["slot_types"]] == ["serviceType"]
+    assert loaded["dropped_slot_types"] == ["orderNumber"]

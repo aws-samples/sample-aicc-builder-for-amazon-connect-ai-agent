@@ -333,6 +333,24 @@ def load_acxd_bundle(session_id: str) -> dict:
         bundle[key] = _collapse_identical_docs(_read_json_docs(session_id, asset_type), asset_type)
     bundle["flows"] = [normalize_flow_for_service(f) for f in bundle["flows"]]
     bundle["flows"] = [_rebind_slot_types(f, bundle["slot_types"]) for f in bundle["flows"]]
+    # A slot type no flow attaches is a leftover of an earlier generation —
+    # live: the one-item 'orderNumber'/'phoneNumber' types the runtime contract
+    # replaced with NLX built-ins stayed on disk and would have been deployed
+    # as stray resources. Drop them from the bundle and say so.
+    referenced = {
+        str(slot.get("type"))
+        for flow in bundle["flows"] if isinstance(flow, dict)
+        for slot in (flow.get("slotTypes") or []) if isinstance(slot, dict) and slot.get("type")
+    }
+    kept, dropped = [], []
+    for slot_type in bundle["slot_types"]:
+        type_id = slot_type.get("slotTypeId") if isinstance(slot_type, dict) else None
+        (kept if not type_id or type_id in referenced or not bundle["flows"] else dropped).append(slot_type)
+    if dropped:
+        bundle["dropped_slot_types"] = [st.get("slotTypeId") for st in dropped]
+        logger.info("[ACXDBundle] %d slot type(s) no flow attaches left out of the bundle: %s",
+                    len(dropped), bundle["dropped_slot_types"])
+    bundle["slot_types"] = kept
     # D1/D2 (live 2026-09-13): a data request whose secret header still uses the
     # {{secrets.X}} spelling, or that carries no environment blocks, gets a 403
     # from the backend on every call. Repair on load so a session generated
