@@ -3,6 +3,8 @@
 Each of these refused a bundle at the D9 gate (or would have failed the live
 deploy) for a reason that is mechanical, not a real design mismatch.
 """
+import json
+
 from tools.acxd_generation_context import _derive_slot_types
 from tools.spec_manager import _enforce_exact_length_phrase
 from tools.validate_consistency import (
@@ -54,17 +56,42 @@ def test_regex_canonical_treats_digit_class_spellings_as_equal():
 
 # --- slot types: FieldSpec.pattern is the regex, names may differ in case ---
 
-def test_slot_type_is_derived_from_fieldspec_pattern_with_name_variants():
+def test_open_value_attaches_a_builtin_and_gets_no_custom_slot_type():
+    """S5 (live 2026-09-12): a custom slot type carries a VALUE SET, so one built
+    from a single sample deploys as a one-item menu the runtime auto-selects
+    without ever asking — the order-number question was skipped outright. An open
+    value therefore attaches an NLX built-in plus the regex, and no slot type is
+    emitted. The FieldSpec constraint must still reach the slot across a name
+    variant (plan `phonePin` <- FieldSpec `phone_pin`), and 'phonePin' is a PIN,
+    not a phone number, so it must not become NLX.PhoneNumber. A value WITH a
+    format is an identifier, not a quantity: it attaches NLX.AlphaNumeric and
+    keeps the regex (the live SELC order number), never NLX.Number, which would
+    drop leading zeros and ignore the exact length.
+    """
     plans = [{"operation_id": "check_balance",
               "slots": [{"name": "phonePin", "type": "text"}]}]
     operations = {"check_balance": {"input_fields": [
         {"name": "phone_pin", "field_type": "string", "pattern": r"^\d{6}$", "sensitive": True}]}}
     types = _derive_slot_types(plans, operations)
-    assert [t["slotTypeId"] for t in types] == ["phonePin"]
-    assert types[0]["metadata"]["constraints"]["regex"] == r"^\d{6}$"
-    assert types[0]["sensitive"] is True
-    assert plans[0]["slots"][0]["type"] == "phonePin"
-    assert plans[0]["slots"][0]["regex"] == r"^\d{6}$"
+    assert types == []
+    slot = plans[0]["slots"][0]
+    assert slot["type"] == "NLX.AlphaNumeric"
+    assert slot["regex"] == r"^\d{6}$"
+    assert slot["sensitive"] is True
+
+
+def test_enum_field_still_gets_a_custom_slot_type_with_its_constraints():
+    """The other half of the same rule: a value SET is a real custom slot type."""
+    plans = [{"operation_id": "check_balance",
+              "slots": [{"name": "accountType", "type": "enum"}]}]
+    operations = {"check_balance": {"input_fields": [
+        {"name": "account_type", "field_type": "string",
+         "enum_values": ["checking", "savings"], "max_length": 8}]}}
+    types = _derive_slot_types(plans, operations)
+    assert [t["slotTypeId"] for t in types] == ["accountType"]
+    assert [v["value"] for v in types[0]["values"]] == ["checking", "savings"]
+    assert types[0]["metadata"]["constraints"] == {"max_length": 8}
+    assert plans[0]["slots"][0]["type"] == "accountType"
 
 
 # --- Japanese exact-length phrases ------------------------------------------
@@ -95,6 +122,100 @@ def test_data_request_url_uses_the_resolved_tool_path():
     assert doc["webhook"]["url"] == "{WEBHOOK_URL}/tools/verify_and_get_balance"
     legacy = build_data_request({**plan, "path": None, "operation_ref": None})
     assert legacy["webhook"]["url"] == "{WEBHOOK_URL}/tools/checkBalance"
+
+
+# --- D1/D2: secret header shape and webhook environments (live 2026-09-13) -----
+
+_EXTERNAL_PLAN = {
+    "data_request_id": "get_cleaning_price", "mode": "external",
+    "path": "/tools/get_cleaning_price",
+    "request_fields": [{"name": "productType", "type": "text"}],
+    "response_fields": [{"name": "unitPrice", "type": "number"}],
+}
+
+
+def test_secret_header_uses_the_nlx_secret_reference_not_a_template_placeholder():
+    """`{{secrets.BackendApiKey}}` was sent to the backend VERBATIM → 403. The
+    runtime resolves `{BackendApiKey:NLX.Secret}`, and `dynamic` means "the
+    caller supplies the value per request", which for a secret sends nothing."""
+    from tools.acxd_data_request_builder import build_data_request
+    doc = build_data_request(dict(_EXTERNAL_PLAN))
+    assert doc["webhook"]["headers"] == [
+        {"key": "x-api-key", "value": "{BackendApiKey:NLX.Secret}", "sensitive": True}]
+    serialized = json.dumps(doc)
+    assert "{{secrets" not in serialized
+    assert "dynamic" not in serialized
+
+
+def test_external_webhook_carries_both_environment_blocks_with_the_same_url_and_headers():
+    """D2: the secret is resolved only from webhook.environments.<env>; a
+    top-level url/headers pair alone answered 403."""
+    from tools.acxd_data_request_builder import build_data_request
+    webhook = build_data_request(dict(_EXTERNAL_PLAN))["webhook"]
+    assert set(webhook["environments"]) == {"production", "development"}
+    for env in ("production", "development"):
+        assert webhook["environments"][env]["url"] == webhook["url"]
+        assert webhook["environments"][env]["headers"] == webhook["headers"]
+    # the environments are independent copies, so mutating one cannot leak
+    webhook["environments"]["production"]["headers"][0]["key"] = "x-other"
+    assert webhook["headers"][0]["key"] == "x-api-key"
+
+
+def test_a_customer_supplied_auth_header_becomes_its_own_secret_reference():
+    from tools.acxd_data_request_builder import build_data_request
+    doc = build_data_request({**_EXTERNAL_PLAN, "url": "https://crm.example.com/price",
+                              "auth_header": "Authorization",
+                              "auth_secret_name": "crmToken"})
+    assert doc["webhook"]["headers"] == [
+        {"key": "Authorization", "value": "{crmToken:NLX.Secret}", "sensitive": True}]
+
+
+def test_generated_data_requests_pass_their_own_schema():
+    from tools.acxd_data_request_builder import build_all_data_requests
+    docs, problems = build_all_data_requests({"data_integrations": [dict(_EXTERNAL_PLAN)]})
+    assert problems == []
+    assert [d["dataRequestId"] for d in docs] == ["getCleaningPrice"]
+
+
+def test_a_bundle_generated_before_the_contract_is_repaired_on_load():
+    """A session packaged earlier still holds {{secrets.X}} and no environments;
+    load-time repair keeps it deployable instead of 403-ing on every call."""
+    from tools.acxd_data_request_builder import repair_data_request_contract
+    stale = {"dataRequestId": "getOrder", "type": "object", "webhook": {
+        "implementation": "external", "method": "POST",
+        "url": "{WEBHOOK_URL}/tools/get_order",
+        "headers": [{"key": "x-api-key", "value": "{{secrets.BackendApiKey}}", "dynamic": True}],
+        "sendContext": True}}
+    webhook = repair_data_request_contract(stale)["webhook"]
+    assert webhook["headers"] == [
+        {"key": "x-api-key", "value": "{BackendApiKey:NLX.Secret}", "sensitive": True}]
+    assert webhook["environments"]["production"] == {
+        "url": "{WEBHOOK_URL}/tools/get_order", "headers": webhook["headers"]}
+    # repairs in place and is idempotent; a mock webhook is left alone
+    assert repair_data_request_contract(stale) is stale
+    assert stale["webhook"]["headers"] == webhook["headers"]
+    mock = {"dataRequestId": "x", "webhook": {"implementation": "inline-static", "code": "{}"}}
+    assert repair_data_request_contract(mock) == mock
+
+
+def test_the_manifest_still_schedules_upsert_secrets_for_the_new_reference_syntax():
+    from tools.acxd_manifest_builder import build_manifest
+    bundle = {"data_requests": [{"dataRequestId": "getOrder", "webhook": {
+        "implementation": "external", "url": "{WEBHOOK_URL}/tools/get_order",
+        "headers": [{"key": "x-api-key", "value": "{BackendApiKey:NLX.Secret}"}]}}]}
+    steps = [s["type"] for s in build_manifest(bundle, project_name="selc")["steps"]]
+    assert "upsert-secrets" in steps
+
+
+def test_the_d9_backend_auth_gate_accepts_the_live_secret_reference():
+    from tools.validate_consistency import _d9_backend_auth_checks
+    bundle = {"data_requests": [{"dataRequestId": "getOrder", "webhook": {
+        "implementation": "external", "url": "{WEBHOOK_URL}/tools/get_order",
+        "headers": [{"key": "x-api-key", "value": "{BackendApiKey:NLX.Secret}"}]}}]}
+    assert _d9_backend_auth_checks(bundle, "no-such-session") == []
+    naked = {"data_requests": [{"dataRequestId": "getOrder", "webhook": {
+        "implementation": "external", "url": "{WEBHOOK_URL}/tools/get_order", "headers": []}}]}
+    assert [i["id"] for i in _d9_backend_auth_checks(naked, "no-such-session")] == ["D9-8"]
 
 
 # --- English descriptive length phrases are not format masks -----------------

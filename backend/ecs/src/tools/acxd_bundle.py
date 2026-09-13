@@ -327,6 +327,13 @@ def load_acxd_bundle(session_id: str) -> dict:
         bundle[key] = _collapse_identical_docs(_read_json_docs(session_id, asset_type), asset_type)
     bundle["flows"] = [normalize_flow_for_service(f) for f in bundle["flows"]]
     bundle["flows"] = [_rebind_slot_types(f, bundle["slot_types"]) for f in bundle["flows"]]
+    # D1/D2 (live 2026-09-13): a data request whose secret header still uses the
+    # {{secrets.X}} spelling, or that carries no environment blocks, gets a 403
+    # from the backend on every call. Repair on load so a session generated
+    # before the contract was known still deploys.
+    from tools.acxd_data_request_builder import repair_data_request_contract
+    bundle["data_requests"] = [repair_data_request_contract(d)
+                               for d in bundle["data_requests"]]
 
     apps = _read_json_docs(session_id, ACXD_APPLICATION_TYPE)
     bundle["application"] = apps[0] if apps else None

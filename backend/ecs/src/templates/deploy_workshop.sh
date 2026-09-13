@@ -12,6 +12,11 @@
 #                         classic or acxd — is read from the bundle, --target overrides)
 #   ./deploy.sh cleanup   Tear down ALL deployed resources (reverse order)
 #   ./deploy.sh status    Show current deployment status
+#   ./deploy.sh --rebind-alias <deploymentKey>
+#                         (acxd) Re-point the published Contact Flow's Agentic CX
+#                         block at <deploymentKey> — needed after a deployment was
+#                         replaced, because that rotates the key while the old one
+#                         still resolves to the OLD build.
 #
 # Phases:
 #    1. CloudFormation stack (S3 upload for large templates)
@@ -36,6 +41,9 @@
 #   AI_ASSISTANT_ID      - Skip Q in Connect assistant creation
 #   AUTO_CONFIRM=1       - Non-interactive: accept all defaults, skip phone
 #   ACXD_ALIAS_ID        - (acxd) application alias id for the Agentic CX block; else pick it in the console
+#                          This is the ACXD *deploymentKey*, not the deployment id, and it is not
+#                          in the public SDK: read it from the console-internal endpoint
+#                          GET /acxd/api/cxn/flowResources?workspaceId=…&applicationId=…&type=deployments
 # =============================================================================
 
 set -euo pipefail
@@ -50,6 +58,7 @@ TARGET_SOURCE="env"
 [ -n "$TARGET" ] || TARGET_SOURCE="auto"
 DRY_RUN=false
 COMMAND="deploy"
+REBIND_ALIAS=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --target)
@@ -57,12 +66,18 @@ while [ "$#" -gt 0 ]; do
             TARGET="$2"; TARGET_SOURCE="flag"; shift 2 ;;
         --target=*)
             TARGET="${1#--target=}"; TARGET_SOURCE="flag"; shift ;;
+        --rebind-alias)
+            [ "$#" -gt 1 ] || { echo "ERROR: --rebind-alias requires a deploymentKey" >&2; exit 2; }
+            REBIND_ALIAS="$2"; COMMAND="rebind-alias"; shift 2 ;;
+        --rebind-alias=*)
+            REBIND_ALIAS="${1#--rebind-alias=}"; COMMAND="rebind-alias"; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
         deploy|cleanup|clean|destroy|delete|status)
             COMMAND="$1"; shift ;;
         *)
             echo "Usage: $0 [deploy|cleanup|status] [--target classic|acxd] [--dry-run]" >&2
+            echo "       $0 --rebind-alias <deploymentKey>   (acxd: re-point the Agentic CX block)" >&2
             exit 2 ;;
     esac
 done
@@ -85,6 +100,9 @@ if [ "$TARGET_SOURCE" != "auto" ] && [ "$TARGET" != "$(detect_runtime_target)" ]
 fi
 STATE_FILE="$SCRIPT_DIR/.aicc_deploy_state"
 RUNNER_STATE_FILE="$SCRIPT_DIR/.deploy-state.json"
+# Set from the runner's state when a deploy REPLACED the application deployment
+# (see runner_alias_rotated): the Agentic CX block's alias is then stale.
+ACXD_ALIAS_ROTATED=""
 
 # Auto-detect project name from CloudFormation template directory
 DETECTED_PROJECT_NAME=""
@@ -211,6 +229,38 @@ state_set() {
     grep -v "^$1=" "$STATE_FILE" > "$STATE_FILE.tmp" 2>/dev/null || true
     echo "$1=$2" >> "$STATE_FILE.tmp"
     mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
+
+runner_application_id() {
+    [ -f "$RUNNER_STATE_FILE" ] || return 0
+    python3 - "$RUNNER_STATE_FILE" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("applicationId", "") or "")
+except Exception:
+    pass
+PYEOF
+}
+
+# The runner sets aliasRotated when it had to REPLACE the application deployment
+# (UpdateApplicationDeployment fails server-side for some applications). Replacing
+# rotates the deploymentKey the Agentic CX block stores as its Alias, and the old
+# key still resolves — to the OLD build. Read the flag so Phase 11 and the summary
+# never claim the alias is bound when it is stale.
+runner_alias_rotated() {
+    [ -f "$RUNNER_STATE_FILE" ] || return 0
+    python3 - "$RUNNER_STATE_FILE" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    state = json.load(open(sys.argv[1]))
+    if state.get("aliasRotated"):
+        rotation = state.get("aliasRotation") or {}
+        print("%s %s %s" % (rotation.get("environment", "development"),
+                            rotation.get("previousDeploymentId", "?"),
+                            rotation.get("deploymentId", state.get("deploymentId", "?"))))
+except Exception:
+    pass
+PYEOF
 }
 
 runner_contact_flow_id() {
@@ -1764,15 +1814,52 @@ CONTACT_FLOW_ARN=""
 phase_contact_flow() {
     echo ""
     echo "📋 Phase 11: Preparing & importing Contact Flow..."
-    if [ "$TARGET" = "acxd" ]; then
-        info "The ACXD runner imported or updated contact-flow/contact_flow.json as its final manifest step"
-        info "Complete the Agentic CX placeholder wiring in WIRING-GUIDE.md before publishing"
-        return 0
-    fi
     [ -z "$FLOW_JSON" ] && { info "No contact-flow/ directory, skipping"; return 0; }
 
     local WORK_FLOW="/tmp/${PROJECT_NAME}_flow_resolved.json"
     cp "$FLOW_JSON" "$WORK_FLOW"
+
+    # ── ACXD: bind the Agentic CX block to what the runner just deployed ─────
+    #    The runner knows workspace/application ids but not Connect's queues,
+    #    hours of operation or Lambda ARNs, so the {{...}} placeholders below
+    #    (HOURS_ARN, QUEUE_ARN, *_LAMBDA_ARN) are resolved HERE, on the same
+    #    path the Classic target uses — a live 2026-09-12 import failed with
+    #    "Not a supported id format: {{HOURS_ARN}}" when the runner imported.
+    if [ "$TARGET" = "acxd" ]; then
+        local ACXD_APPLICATION_ID
+        ACXD_APPLICATION_ID=$(runner_application_id)
+        if [ -z "$ACXD_APPLICATION_ID" ]; then
+            warn "ACXD application id not found in $RUNNER_STATE_FILE — run the ACXD runner first; Contact Flow not imported"
+            return 0
+        fi
+        FLOW_LANG="${FLOW_LANG:-$DETECTED_LANG}"
+        ACXD_ALIAS_ROTATED="$(runner_alias_rotated)"
+        local ACXD_ALIAS_VALUE="${ACXD_ALIAS_ID:-SELECT_ALIAS_IN_CONSOLE}"
+        python3 - "$WORK_FLOW" "${ACXD_WORKSPACE_ID:-}" "$ACXD_APPLICATION_ID" "$ACXD_ALIAS_VALUE" <<'PYEOF'
+import sys
+path, ws, app, alias = sys.argv[1:5]
+s = open(path, encoding="utf-8").read()
+for token, value in (("{ACXD_WORKSPACE_ID}", ws), ("{ACXD_APPLICATION_ID}", app), ("{ACXD_ALIAS_ID}", alias)):
+    if value:
+        s = s.replace(token, value)
+open(path, "w", encoding="utf-8").write(s)
+PYEOF
+        info "Agentic CX block bound: workspace ${ACXD_WORKSPACE_ID:-?} / application $ACXD_APPLICATION_ID / alias $ACXD_ALIAS_VALUE"
+        if [ -z "${ACXD_ALIAS_ID:-}" ]; then
+            warn "ACXD_ALIAS_ID not set — the block is imported with alias SELECT_ALIAS_IN_CONSOLE; a contact reaching it takes the Error branch until the alias is picked in the flow designer (or re-run with ACXD_ALIAS_ID=...)."
+        elif [ -n "$ACXD_ALIAS_ROTATED" ]; then
+            # "<environment> <previousDeploymentId> <newDeploymentId>", from the
+            # runner's .deploy-state.json
+            local ROT_REST="${ACXD_ALIAS_ROTATED#* }"
+            local ROT_ENV="${ACXD_ALIAS_ROTATED%% *}"
+            local ROT_PREV="${ROT_REST%% *}"
+            local ROT_NEW="${ROT_REST##* }"
+            warn "This deploy REPLACED the '$ROT_ENV' deployment ($ROT_PREV → $ROT_NEW), which rotates the deploymentKey."
+            warn "ACXD_ALIAS_ID=$ACXD_ALIAS_ID is therefore the OLD key — it still resolves, to the OLD build."
+            warn "Re-select the alias in the block (flow designer → Agentic CX block → Alias → Save → Publish)"
+            warn "or run: ./deploy.sh --rebind-alias <new deploymentKey>"
+        fi
+    fi
 
     # ── Collect placeholders ────────────────────────────────────────────────
     local placeholders
@@ -1874,6 +1961,7 @@ for h in json.load(sys.stdin).get('HoursOfOperationSummaryList', []):
     #    controls are Lex session attributes on the Get customer input block.
     #    https://docs.aws.amazon.com/connect/latest/adminguide/agentic-voice-best-practices.html
     local ASR_CONFIDENCE="" ASR_TIMEOUT="" ALLOW_INTERRUPT=""
+    [ "$TARGET" = "acxd" ] && CHOICE=5 || \
     choose "Select a conversation tuning preset (ASR turn-taking & barge-in, applied to the Get customer input block)" 1 \
         "Natural conversation      (defaults: confidence 0.7 / 640ms, barge-in ON — recommended)" \
         "Pause-tolerant            (confidence 0.9 / 3000ms — for dictated digits, noisy or slow speakers)" \
@@ -1907,7 +1995,7 @@ meta = d.setdefault('Metadata', {}).setdefault('ActionMetadata', {})
 #    (printed in the summary). Converting/removing the block here would leave
 #    the flow without a proper voice configuration block, which is worse UX.
 for a in actions:
-    if a.get('Type') == 'UpdateContactTextToSpeechVoice':
+    if voice and a.get('Type') == 'UpdateContactTextToSpeechVoice':
         a['Parameters']['TextToSpeechVoice'] = voice
         a['Parameters']['TextToSpeechEngine'] = engine.capitalize()
         # also refresh the display language code in metadata
@@ -2696,6 +2784,15 @@ run_acxd_runner() {
         fi
     fi
     ensure_acxd_credentials
+    # deploy.sh imports the Contact Flow in Phase 11 (placeholders + Agentic CX
+    # binding); tell the runner to leave its import-contact-flows step alone.
+    export AICC_FLOW_IMPORT_BY_DEPLOY_SH=1
+    # One backend, one stack. Live (2026-09-13): the runner fell back to the
+    # manifest's default project and created a SECOND CloudFormation stack next
+    # to this script's, so the Data Requests called a different API than the one
+    # deployed here. Hand it the names this script actually used.
+    export PROJECT_NAME
+    export AICC_STACK_NAME="$STACK_NAME"
     local args=(deploy --manifest deploy-manifest.json)
     [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
     (cd "$SCRIPT_DIR" && node runner.js "${args[@]}")
@@ -2704,16 +2801,39 @@ run_acxd_runner() {
 do_acxd_summary() {
     echo ""
     hr
-    echo "  ✅ ACXD deployment complete"
+    if [ -n "${CONTACT_FLOW_ID:-}" ]; then
+        echo "  ✅ ACXD deployment complete"
+    else
+        echo "  ⚠️  ACXD deployment complete — Contact Flow NOT imported (see Phase 11 above)"
+    fi
     hr
     echo "  Project:          $PROJECT_NAME"
     echo "  Connect instance: ${CONNECT_INSTANCE_ID:-N/A}"
+    echo "  Stack:            $STACK_NAME"
     echo "  API endpoint:     ${API_ENDPOINT:-N/A}"
-    [ -n "${CONTACT_FLOW_ID:-}" ] && echo "  Contact flow:     $CONTACT_FLOW_ID"
+    echo "  Contact flow:     ${CONTACT_FLOW_ID:-NOT IMPORTED}"
     echo ""
     (cd "$SCRIPT_DIR" && node runner.js status) || true
     echo ""
-    echo "  Complete the Agentic CX block wiring and channel attachment in WIRING-GUIDE.md."
+    ACXD_ALIAS_ROTATED="${ACXD_ALIAS_ROTATED:-$(runner_alias_rotated)}"
+    if [ -n "$ACXD_ALIAS_ROTATED" ]; then
+        # The alias in the block — whatever it is — predates the deployment this
+        # run replaced, so it resolves to the OLD build. Do not claim it is bound.
+        echo "  ⚠️  ALIAS STALE — the application deployment was REPLACED during this run, which"
+        echo "      rotates its deploymentKey. The Agentic CX block still holds the previous key"
+        echo "      and it still resolves, so Connect will serve the PREVIOUS build."
+        echo "      Fix it before testing:"
+        echo "        1. Connect flow designer → open the flow → click the Agentic CX block"
+        echo "        2. Alias dropdown → re-select the environment alias → Save → Publish"
+        echo "      Or non-interactively, with the new key:"
+        echo "        ./deploy.sh --rebind-alias <deploymentKey>"
+        echo "      The deploymentKey is not in the public SDK — read it from the console-internal"
+        echo "      GET /acxd/api/cxn/flowResources?workspaceId=…&applicationId=…&type=deployments"
+    elif [ -n "${ACXD_ALIAS_ID:-}" ]; then
+        echo "  Agentic CX block bound to alias $ACXD_ALIAS_ID. Attach a phone number / chat widget to the flow (WIRING-GUIDE.md)."
+    else
+        echo "  Pick the application alias in the Agentic CX block (flow designer) or re-run with ACXD_ALIAS_ID=... — until then contacts take the block's Error branch. See WIRING-GUIDE.md."
+    fi
     hr
 }
 
@@ -2739,11 +2859,90 @@ do_acxd_deploy() {
     info "Phases 8–10: deploying ACXD resources with the static runner"
     run_acxd_runner
     phase_contact_flow
-    CONTACT_FLOW_ID=$(runner_contact_flow_id)
+    CONTACT_FLOW_ID="${CONTACT_FLOW_ID:-$(runner_contact_flow_id)}"
     [ -n "$CONTACT_FLOW_ID" ] && state_set CONTACT_FLOW_ID "$CONTACT_FLOW_ID"
     info "Phase 12 skipped for ACXD: AI Prompt, AI Agent, and security profile are not used"
     phase_phone_number
     do_acxd_summary
+}
+
+# Re-point the published Contact Flow's Agentic CX block at a deploymentKey.
+# Needed whenever the runner had to REPLACE the application deployment: that
+# rotates the key, the block keeps the previous one, and the previous one still
+# resolves — to the previous build. Patches AgentConfiguration.Alias in place
+# (aws connect update-contact-flow-content), then reads the flow back.
+do_acxd_rebind_alias() {
+    local alias_value="$1"
+    hr
+    echo "  AICC Builder - ACXD Agentic CX alias rebind"
+    hr
+    if [ -z "$alias_value" ]; then
+        echo "❌ --rebind-alias requires the deploymentKey to bind." >&2
+        exit 2
+    fi
+    CONNECT_INSTANCE_ID="${CONNECT_INSTANCE_ID:-$(state_get CONNECT_INSTANCE_ID)}"
+    if [ -z "$CONNECT_INSTANCE_ID" ]; then
+        echo "❌ CONNECT_INSTANCE_ID is unknown (not in $STATE_FILE) — export it and retry." >&2
+        exit 1
+    fi
+    CONTACT_FLOW_ID="${CONTACT_FLOW_ID:-$(state_get CONTACT_FLOW_ID)}"
+    [ -z "$CONTACT_FLOW_ID" ] && CONTACT_FLOW_ID="$(runner_contact_flow_id)"
+    if [ -z "$CONTACT_FLOW_ID" ]; then
+        echo "❌ No imported Contact Flow recorded — deploy first, or export CONTACT_FLOW_ID." >&2
+        exit 1
+    fi
+    info "Instance: $CONNECT_INSTANCE_ID | flow: $CONTACT_FLOW_ID | alias: $alias_value"
+    info "Region: $REGION (from AWS_DEFAULT_REGION; export it if the instance lives elsewhere)"
+
+    local CUR_CONTENT="/tmp/${PROJECT_NAME}_rebind_current.json"
+    local NEW_CONTENT="/tmp/${PROJECT_NAME}_rebind_new.json"
+    aws connect describe-contact-flow \
+        --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$CONTACT_FLOW_ID" \
+        --region "$REGION" --query 'ContactFlow.Content' --output text > "$CUR_CONTENT"
+    if ! python3 - "$CUR_CONTENT" "$NEW_CONTENT" "$alias_value" <<'PYEOF'; then
+import json, sys
+src, dst, alias = sys.argv[1:4]
+content = json.load(open(src, encoding="utf-8"))
+changed = []
+for action in content.get("Actions", []):
+    if action.get("Type") != "ConnectParticipantWithAgenticCX":
+        continue
+    cfg = action.setdefault("Parameters", {}).setdefault("AgentConfiguration", {})
+    changed.append(cfg.get("Alias"))
+    cfg["Alias"] = alias
+if not changed:
+    sys.stderr.write("no ConnectParticipantWithAgenticCX block in this flow\n")
+    raise SystemExit(3)
+json.dump(content, open(dst, "w", encoding="utf-8"), ensure_ascii=False)
+print("   previous alias: %s" % ", ".join(str(a) for a in changed))
+PYEOF
+        echo "❌ Could not patch the flow content (see above)." >&2
+        rm -f "$CUR_CONTENT" "$NEW_CONTENT"
+        exit 1
+    fi
+    aws connect update-contact-flow-content \
+        --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$CONTACT_FLOW_ID" \
+        --content "file://$NEW_CONTENT" --region "$REGION" >/dev/null
+    # Read back: a successful call is not evidence the value was stored.
+    aws connect describe-contact-flow \
+        --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$CONTACT_FLOW_ID" \
+        --region "$REGION" --query 'ContactFlow.Content' --output text > "$CUR_CONTENT"
+    python3 - "$CUR_CONTENT" "$alias_value" <<'PYEOF'
+import json, sys
+content = json.load(open(sys.argv[1], encoding="utf-8"))
+stored = [a.get("Parameters", {}).get("AgentConfiguration", {}).get("Alias")
+          for a in content.get("Actions", [])
+          if a.get("Type") == "ConnectParticipantWithAgenticCX"]
+print("   stored alias:   %s" % ", ".join(str(s) for s in stored))
+if any(s != sys.argv[2] for s in stored):
+    sys.stderr.write("   readback MISMATCH — the alias was not stored\n")
+    raise SystemExit(1)
+PYEOF
+    rm -f "$CUR_CONTENT" "$NEW_CONTENT"
+    ok "Agentic CX block rebound to $alias_value (published content updated)"
+    state_set ACXD_ALIAS_ID "$alias_value"
+    info "Place a test contact now; the flow serves the build behind this deploymentKey."
+    hr
 }
 
 do_acxd_status() {
@@ -3224,8 +3423,15 @@ case "$COMMAND" in
     deploy)                     do_deploy ;;
     cleanup|clean|destroy|delete) do_cleanup ;;
     status)                     do_status ;;
+    rebind-alias)
+        if [ "$TARGET" != "acxd" ]; then
+            echo "❌ --rebind-alias applies to the ACXD target only (the Agentic CX block)." >&2
+            exit 2
+        fi
+        do_acxd_rebind_alias "$REBIND_ALIAS"
+        ;;
     *)
-        echo "Usage: $0 {deploy|cleanup|status}"
+        echo "Usage: $0 {deploy|cleanup|status} | $0 --rebind-alias <deploymentKey>"
         exit 1
         ;;
 esac

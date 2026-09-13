@@ -61,13 +61,22 @@ _RUNTIME_TARGET_FILE = "runtime_target.json"
 _SPEC_FILE = "acxd_flow_spec.json"
 
 #: Flow roles. Exactly one ``operation`` flow per OperationSpec, plus the
-#: system-event flows ``Application.defaultFlows`` can reference.
+#: system-event flows ``Application.defaultFlows`` can reference and the two
+#: system flows that are NOT default-behaviour targets: ``followup`` (the
+#: "anything else?" flow every operation's success path redirects to, R3) and
+#: ``agent_request`` (the one ROUTABLE system flow, so "connect me to a human"
+#: has something to match — EscalationFlow is a default behaviour, not a
+#: routing target, R2).
 FLOW_ROLES = (
     "operation", "welcome", "fallback", "unknown", "escalation",
-    "frustration", "help", "repeat", "resume",
+    "frustration", "help", "repeat", "resume", "followup", "agent_request",
 )
 SYSTEM_FLOW_ROLES = tuple(r for r in FLOW_ROLES if r != "operation")
 #: System flows every ACXD application must have (validate_acxd_flow_spec).
+#: ``followup`` / ``agent_request`` are deliberately NOT required of the
+#: interview: the flow generator emits them deterministically whether or not
+#: they were planned, so a plan that predates them still generates a working
+#: application.
 REQUIRED_SYSTEM_FLOW_ROLES = ("welcome", "fallback", "escalation")
 
 DETERMINISM_LABELS = ("deterministic", "generative")
@@ -112,12 +121,15 @@ NODE_TYPE_ALIASES = {
     "agent_transfer": "escalate", "human": "escalate", "queue_transfer": "escalate",
     "end_call": "end", "end_conversation": "end", "hangup": "end", "complete": "end",
     "finish": "end", "disconnect": "end", "terminate": "end", "goodbye": "end",
-    # intent_capture is in the SDK enum but is not a deployable node (live: the
-    # palette has none, metadata is dropped, and the flow failed on the first
-    # utterance). Intent routing is the generative journey's job.
-    "intent_capture": "generative_journey", "intent": "generative_journey",
-    "intent_router": "generative_journey", "classify": "generative_journey",
-    "intent_routing": "generative_journey", "nlu": "generative_journey",
+    # Intent routing is `user_input` + a `redirect` to
+    # {System.capturedFlow:NLX.System} — proven live 2026-09-12. `intent_capture`
+    # is in the SDK enum but is not a deployable node (the palette has none and
+    # its metadata is dropped), so it maps to the node that DOES capture an
+    # intent. It is NOT a generative journey: an LLM-classifier welcome flow
+    # recognized nothing and the application never routed a single utterance.
+    "intent_capture": "user_input",
+    "intent_router": "user_input", "classify": "user_input",
+    "intent_routing": "user_input", "nlu": "user_input",
     "journey": "generative_journey", "agent": "generative_journey", "task": "generative_task",
     "jump": "redirect", "goto": "redirect", "subflow": "redirect", "call_flow": "redirect",
     "set": "define", "assign": "define", "variable": "define",
@@ -369,6 +381,11 @@ class ACXDFlowPlan(_Model):
 
     flow_id: str = Field(description="Letters only, 3-64 chars (ACXD constraint)")
     purpose: str
+    display_name: Optional[str] = Field(
+        default=None,
+        description="Short customer-facing name of the operation in the project language "
+                    "(2-4 words, e.g. '배송 조회'); spoken verbatim when the assistant lists "
+                    "what it can help with")
     role: str = Field(default="operation", description=f"One of {FLOW_ROLES}")
     operation_id: Optional[str] = Field(
         default=None, description="OperationSpec this flow implements (required when role='operation')")
@@ -654,27 +671,33 @@ def upsert_acxd_flow_plan(
     slots: Union[list[dict], str] = None,
     uses_knowledge_base: bool = False,
     escalation_conditions: str = None,
+    display_name: str = None,
 ) -> dict:
     """
     Propose or update the plan for ONE ACXD flow (runtime target acxd only).
 
     Call this in interview Phase 3 for each business operation (role='operation',
     one flow per OperationSpec) and for the system flows (role welcome / fallback /
-    escalation, optionally unknown / frustration / help / repeat / resume).
+    escalation, optionally unknown / frustration / help / repeat / resume). The
+    system flows are BUILT DETERMINISTICALLY from the live-verified routing
+    contract, so their step list is a description for the user, not a design the
+    generator follows; ``followup`` and ``agent_request`` are emitted whether or
+    not they are planned.
 
     node_type MUST be one of the real ACXD node types (nothing else is accepted):
       deterministic: start, end, basic (fixed message), user_choice (collect ONE value
         into a slot — order number, name, yes/no, a menu pick; this is how ACXD captures
-        values), user_input (open-ended "what do you need?" intent capture only),
-        choice (rule branch — NOT 'split'), split (percentage A/B),
+        values), user_input (open-ended "what do you need?" intent capture; pair it
+        with a redirect to '{System.capturedFlow:NLX.System}' — that IS intent
+        routing), choice (rule branch — NOT 'split'), split (percentage A/B),
         data_request (call a Data Request / backend API), escalate (hand off to a
         human queue), redirect (jump to another flow), wait, note, define, transform, loop
       generative: generative_text (LLM-worded message), generative_task,
-        generative_journey (LLM agent; also the ONLY way to route by customer intent —
-        'intent_capture' is not deployable and is mapped here), knowledge_base (answer from the KB)
+        generative_journey (LLM agent for a stretch of conversation that cannot be
+        drawn in advance — NEVER for intent routing), knowledge_base (answer from the KB)
     Common wrong names are auto-corrected (message→basic, generative_message→
-    generative_text, escalation→escalate, end_call→end, branch→choice); anything
-    else is rejected with this list.
+    generative_text, escalation→escalate, end_call→end, branch→choice,
+    intent_capture→user_input); anything else is rejected with this list.
 
     Each step carries the AI's recommendation: node_type, determinism
     ('deterministic' or 'generative') and a plain-language rationale. This tool
@@ -699,6 +722,10 @@ def upsert_acxd_flow_plan(
                  "examples":[...],"regex":"..."}]
         uses_knowledge_base: True when the flow answers from the FAQ knowledge base.
         escalation_conditions: When this flow hands off to a human, in plain language.
+        display_name: Short customer-facing name of the operation in the project
+            language (2-4 words, e.g. '배송 조회', 'Order status'). The assistant
+            says it verbatim when it lists what it can help with (fallback
+            re-guidance), so give one for every operation flow.
 
     Returns:
         The saved plan summary, coerced/normalized steps, and the step numbers awaiting confirmation.
@@ -760,6 +787,7 @@ def upsert_acxd_flow_plan(
             all_confirmed = bool(new_steps) and all(s.user_confirmed for s in new_steps)
             plan = ACXDFlowPlan(
                 flow_id=flow_id, purpose=purpose, role=role, operation_id=operation_id,
+                display_name=(display_name or "").strip() or (existing.display_name if existing else None),
                 steps=new_steps,
                 slots=[ACXDSlotPlan.model_validate(x) for x in _as_list(slots, 'slots')],
                 uses_knowledge_base=uses_knowledge_base,

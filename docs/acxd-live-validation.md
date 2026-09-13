@@ -1,4 +1,4 @@
-# ACXD runtime target — live validation log (2026-09-10)
+# ACXD runtime target — live validation log (2026-09-10, extended 2026-09-13)
 
 This log records what the first real deployments of generated ACXD bundles
 taught us. Every item below was found by deploying a bundle that had already
@@ -36,6 +36,83 @@ identity (`verified: true`, balance) through the same URL the Data Requests
 call. Three blockers found on the way are listed under "Cross-asset contract
 facts" (InstanceType check, deployment language codes / update path, contact
 flow placeholder + Q in Connect block).
+
+## 2026-09-13 — first end-to-end Connect chat, in a sandbox Connect Customer account
+
+Everything above was about getting a bundle to DEPLOY. This round drove the
+deployed application over real Connect chat, which is what surfaced the runtime
+contract: an application can deploy cleanly, build green, and still not recognise
+a single intent. Two scenarios were completed end to end (delivery lookup →
+follow-up → agent request → Escalation branch; cleaning price quote → follow-up →
+Success branch), and the facts below are what it took. They are recorded as the
+contract the generators target in
+[acxd-packaging.md](./acxd-packaging.md#runtime-contract-the-generators-target).
+
+### Data Requests: the secret is resolved per environment
+
+| Finding | Fix |
+|---------|-----|
+| A header value of `{{secrets.BackendApiKey}}` is sent to the backend VERBATIM — API Gateway answers 403. The runtime's own spelling is `{BackendApiKey:NLX.Secret}` | Data Request builder emits the reference syntax with `sensitive: true` |
+| `dynamic: true` on a secret header means "the caller supplies this value at request time", so the header goes out empty. It is not a "resolve this" flag | never set on a secret header |
+| A correct secret referenced only from the top-level `webhook.headers` is still 403. The runtime resolves it from `webhook.environments.{production,development}` | both environment blocks are emitted with the same URL and headers; the runner substitutes `{WEBHOOK_URL}` in all three places |
+| A `data_request` node without an explicit `dataRequests[].payload` mapping sends no fields at all | flow generator emits `{field: '{slot:NLX.Slot}'}` / `'{ctx:NLX.Context}'` |
+| A `data_request` edge condition of `node_status: error` is invalid — the turn produced NoMessages and fell into the fallback | edges use `success` / `failure` / `timeout` |
+
+`WebhookConfig` in the SDK models does carry `environments?: WebhookEnvironments`
+(`{production?, development?}`, each `{url, headers?}`), so the shape was
+available all along — nothing in the types says the secret is unreachable
+without it.
+
+### The Agentic CX block's Alias is a deploymentKey that rotates
+
+`AgentConfiguration.Alias` stores the ACXD **deploymentKey** — an opaque nanoid,
+not the environment name and not the deployment id. Nothing in the public SDK
+returns it. It comes from the console-internal endpoint, with a console session
+and its `cxn` bearer token:
+
+```
+GET /acxd/api/cxn/flowResources?workspaceId=<ws>&applicationId=<app>&type=deployments
+→ [{ deploymentId: "3f0c…", deploymentKey: "Kx9QmT2vR7pLw4Nc8Yb3D", alias: "Production" }]
+```
+
+`UpdateApplicationDeployment` fails server-side for a ko-KR application:
+`ValidationException: A deployment requires at least one language code` without
+`languageCodes`, and `InternalServerException: Failed to update deployment.` with
+`["ko-KR"]` — including when the update targets a different build. So the runner
+falls back to delete + create, and **that rotates the deploymentKey**. The old
+key still resolves, so the published Contact Flow silently keeps serving the
+previous build: no error in Connect, no error in ACXD, and a chat test that
+"passes" against stale behaviour. Every one of the nine deploy cycles in this
+session hit this path.
+
+Now: the runner still tries the update first; on a replacement it writes
+`aliasRotated: true` with the old and new deployment ids into
+`.deploy-state.json` and prints the exact rebind steps; `deploy.sh` repeats the
+warning in Phase 11 and in its summary and no longer claims the alias is bound;
+and `./deploy.sh --rebind-alias <deploymentKey>` patches
+`ConnectParticipantWithAgenticCX.Parameters.AgentConfiguration.Alias` on the
+published flow via `update-contact-flow-content`, then reads the flow back to
+confirm the value was stored.
+
+### Testing over chat requires the participant WebSocket
+
+A chat contact created with `StartChatContact` does not run the flow until the
+customer participant CONNECTS: call `CreateParticipantConnection` and open the
+returned WebSocket first. Without it the contact sits there and the transcript
+stays empty, which reads exactly like a broken flow or an unbound alias. Send
+messages with `SendMessage` on the participant connection and read the
+application's replies from the WebSocket (or `GetTranscript`).
+
+### One project name, one CloudFormation stack
+
+`node runner.js deploy` run on its own used the manifest's own `project`
+(`aicc-poc`) and created a second stack, `aicc-poc-stack`, beside the
+`selc-stack` that `deploy.sh` had deployed from the same bundle — with its own
+API Gateway. The Data Requests then pointed at a backend that was not the one
+under test. `deploy.sh` now exports `PROJECT_NAME` and `AICC_STACK_NAME` before
+invoking the runner, the runner honours them (and logs the stack it uses, plus a
+note when the manifest disagrees), and a runner-only deploy is told to export
+`PROJECT_NAME` to share the backend.
 
 ## Service contract facts (not in the SDK types, learned from the API)
 
@@ -87,6 +164,9 @@ flow placeholder + Q in Connect block).
 - Backend CloudFormation, Lambda code upload, contact-flow import and phone
   number claim run through the Classic phases of the bundled `deploy.sh` and
   need credentials for the Connect account.
-- The Agentic CX block's Flow Language type is undocumented; the imported flow
-  carries a placeholder block and `WIRING-GUIDE.md` explains the console step.
+- The Agentic CX block's alias (deploymentKey) cannot be read with the public
+  SDK, so binding it is either `ACXD_ALIAS_ID` / `--rebind-alias` with a key
+  taken from the console-internal `flowResources` endpoint, or a click in the
+  block's dropdown followed by Publish. `WIRING-GUIDE.md` explains the console
+  step.
 - Rotate any programmatic API key that was used from a shared machine.

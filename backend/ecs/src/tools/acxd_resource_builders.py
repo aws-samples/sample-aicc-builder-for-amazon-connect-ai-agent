@@ -110,8 +110,32 @@ def run_kb_article_generation(
 # Slot types and Contact Flow context variables
 # ---------------------------------------------------------------------------
 
+def _is_single_placeholder_slot_type(doc: dict) -> bool:
+    """True when this "slot type" holds no real value set.
+
+    S5 (live-verified): a custom slot type with ONE sample value deploys as a
+    one-item menu and is auto-selected without ever asking the customer — the
+    order-number question was skipped and the flow ran with a literal
+    ``orderNumber`` as the order number. The derivation no longer produces
+    these (open values become an ``NLX.*`` attached slot with a regex); this
+    guard catches hand-written or legacy specs that still carry one.
+    """
+    values = [str((v or {}).get("value") or "") for v in doc.get("values") or []
+              if isinstance(v, dict)]
+    if len(values) != 1:
+        return False
+    slot_type_id = str(doc.get("slotTypeId") or "")
+    only = values[0]
+    return only.lower() in {slot_type_id.lower(), "stub", "placeholder", ""}
+
+
 def build_slot_types(spec: dict) -> tuple[list[dict], list[str]]:
-    """Validate adapter-derived ACXD SlotType documents deterministically."""
+    """Validate adapter-derived ACXD SlotType documents deterministically.
+
+    Also emits the ``yesNo`` slot type: ACXD has no boolean built-in (S4) and
+    ``FollowUpFlow`` — which every operation's success path redirects to — needs
+    it for its "anything else?" question.
+    """
     docs: list[dict] = []
     problems: list[str] = []
     seen: set[str] = set()
@@ -129,11 +153,33 @@ def build_slot_types(spec: dict) -> tuple[list[dict], list[str]]:
             problems.append(f"slot_types[{index}]: missing or duplicate slotTypeId")
             continue
         seen.add(slot_type_id)
+        if _is_single_placeholder_slot_type(doc):
+            problems.append(
+                f"slot_types[{index}] ({slot_type_id}): a custom slot type with one "
+                "sample value deploys as a one-item menu and is auto-selected without "
+                "asking (S5) — the slot must attach a built-in "
+                "(NLX.AlphaNumeric / NLX.Number / NLX.PhoneNumber / NLX.Text) with a "
+                "regex instead; not emitted")
+            continue
         errors = validate_acxd_asset("slot_type", doc)
         if errors:
             problems.extend(f"slot_types[{index}] ({slot_type_id}): {error}" for error in errors)
             continue
         docs.append(doc)
+
+    # Only for a real generation context: the deterministic-repair path passes a
+    # bare {"slot_types": [...]} with no language, and guessing English there
+    # would overwrite a Korean project's yesNo values.
+    if any(spec.get(key) for key in ("flows", "application", "business_profile")):
+        from tools.acxd_system_flows import build_yes_no_slot_type
+
+        yes_no = build_yes_no_slot_type(spec)
+        if yes_no["slotTypeId"] not in seen:
+            errors = validate_acxd_asset("slot_type", yes_no)
+            if errors:  # pragma: no cover - deterministic document
+                problems.extend(f"slot_types[yesNo]: {error}" for error in errors)
+            else:
+                docs.append(yes_no)
     return docs, problems
 
 
@@ -296,6 +342,39 @@ def build_guardrails(spec: dict) -> tuple[list[dict], list[str]]:
 
 _LANG_DEFAULT = "en-US"
 
+#: The only ``settings.defaultFlows`` events the service (and the application
+#: schema) accepts. Anything else is a flow role, not a default behaviour.
+DEFAULT_FLOW_EVENTS = frozenset({
+    "welcome", "fallback", "unknown", "escalation",
+    "frustration", "help", "repeat", "resume",
+})
+
+
+def _attached_flows(flow_plans: list) -> list[dict]:
+    """Every flow the bundle ships, in plan order, system flows included.
+
+    A flow that is not attached to the application is not routable and cannot be
+    redirected to. The flow generator ALWAYS emits FollowUpFlow (R3, the
+    "anything else?" flow every operation's success path redirects to) and
+    RequestAgentFlow (R2, the routable "connect me to a human" entry) whether or
+    not the interview planned them, so the application must attach them too —
+    otherwise the deployment drops exactly the two flows that make the
+    conversation multi-turn.
+    """
+    from tools.acxd_system_flows import (
+        ALWAYS_GENERATED_SYSTEM_ROLES,
+        resolve_system_flow_ids,
+    )
+
+    attached = [p["flow_id"] for p in flow_plans if isinstance(p, dict) and p.get("flow_id")]
+    if attached:
+        resolved = resolve_system_flow_ids({"flows": flow_plans})
+        for role in ALWAYS_GENERATED_SYSTEM_ROLES:
+            flow_id = resolved.get(role)
+            if flow_id and flow_id not in attached:
+                attached.append(flow_id)
+    return [{"flowId": flow_id} for flow_id in attached]
+
 
 def build_application(spec: dict) -> dict:
     """Application document: flows attach, defaultFlows, guardrail refs."""
@@ -349,13 +428,17 @@ def build_application(spec: dict) -> dict:
     primary = app.get("primary_locale") or app.get("primary_language") or locales[0]
 
     # defaultFlows: explicit mapping first, then role-based flows fill gaps.
+    # ONLY these eight events exist (application schema, additionalProperties
+    # false). `followup` / `agent_request` are flow ROLES, not default
+    # behaviours — FollowUpFlow is reached by redirect and RequestAgentFlow by
+    # intent routing — so they must never be written here.
     default_flows: dict = {}
     for event, flow_id in (app.get("default_flows") or {}).items():
-        if flow_id:
+        if flow_id and event in DEFAULT_FLOW_EVENTS:
             default_flows[event] = {"flowId": flow_id}
     for plan in flow_plans:
         role = plan.get("role")
-        if role and role != "operation" and role not in default_flows:
+        if role in DEFAULT_FLOW_EVENTS and role not in default_flows:
             default_flows[role] = {"flowId": plan.get("flow_id")}
 
     # Every application must route all four system events. Fill any the
@@ -419,7 +502,7 @@ def build_application(spec: dict) -> dict:
         "name": name[:100],
         "description": (app.get("description")
                         or profile.get("description") or "")[:200],
-        "flows": [{"flowId": p["flow_id"]} for p in flow_plans if p.get("flow_id")],
+        "flows": _attached_flows(flow_plans),
         "settings": settings,
         "deploymentSettings": {
             "oneClickDeployEnabled": False,

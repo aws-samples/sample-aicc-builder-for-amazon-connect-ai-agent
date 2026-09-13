@@ -129,14 +129,21 @@ def test_generation_context_adapts_classic_specs_openapi_and_faq(monkeypatch):
     assert payload["flows"][0]["steps"][0]["data_request_id"] == "lookupOrder"
 
     data_request = build_data_request(integration)
+    # the generated backend requires its API key in the ACXD target; the value
+    # comes from the BackendApiKey secret deploy.sh fills — never inline. The
+    # runtime resolves `{Name:NLX.Secret}` (not `{{secrets.Name}}`, which is sent
+    # verbatim → 403) and only from the environment blocks (live 2026-09-13).
+    secret_header = {"key": "x-api-key", "value": "{BackendApiKey:NLX.Secret}", "sensitive": True}
     assert data_request["webhook"] == {
         "implementation": "external",
         "method": "POST",
         "url": "{WEBHOOK_URL}/tools/lookup_order",
-        # the generated backend requires its API key in the ACXD target; the
-        # value comes from the BackendApiKey secret deploy.sh fills — never inline
-        "headers": [{"key": "x-api-key", "value": "{{secrets.BackendApiKey}}"}],
+        "headers": [secret_header],
         "sendContext": True,
+        "environments": {
+            "production": {"url": "{WEBHOOK_URL}/tools/lookup_order", "headers": [secret_header]},
+            "development": {"url": "{WEBHOOK_URL}/tools/lookup_order", "headers": [secret_header]},
+        },
     }
     assert data_request["requestSchema"]["properties"]["orderStatus"]["enum"] == ["pending", "shipped"]
 

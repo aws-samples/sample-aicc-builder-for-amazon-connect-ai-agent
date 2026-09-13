@@ -558,22 +558,31 @@ After `save_contact_flow_spec` has captured the Connect Contact Flow requirement
 design the ACXD flows before moving to the analysis document.
 
 1. For **each saved business operation**, call `upsert_acxd_flow_plan` once to
-   propose exactly one operation flow. Include every ordered step with:
+   propose exactly one operation flow. Give it a `display_name`: the short
+   customer-facing name of the operation in the project language (2-4 words,
+   e.g. '배송 조회', 'Order status') — the assistant says it verbatim when it
+   lists what it can help with. Include every ordered step with:
    `node_type`, `determinism`, `determinism_rationale`, and
    `decision_category`.
    `node_type` must be a real ACXD node type — use exactly these names:
-   - deterministic: `start`, `end`, `basic` (fixed message), `user_choice`
+   - deterministic: `start`, `end` (exits the application — only after a
+     goodbye), `basic` (fixed message), `user_choice`
      (collect ONE value into a slot — number, name, yes/no, menu pick),
-     `user_input` (open-ended intent capture only), `choice` (rule branch — never
+     `user_input` (open-ended intent capture, paired with a `redirect` to the
+     recognized flow), `choice` (rule branch — never
      `split`, which is a percentage A/B test), `data_request` (call the
      operation's Data Request), `escalate` (hand off to a human queue),
      `redirect` (jump to another flow), `wait`, `define`, `transform`, `loop`
    - generative: `generative_text` (LLM-worded message), `generative_task`,
-     `generative_journey` (LLM agent with tools — also the only way to route by
-     customer intent; there is no separate intent-capture node), `knowledge_base`
-     (answer from the FAQ knowledge base)
+     `generative_journey` (LLM agent with tools, for a stretch of conversation
+     that cannot be drawn in advance — NEVER for intent routing),
+     `knowledge_base` (answer from the FAQ knowledge base)
    Do not invent names such as `message`, `generative_message` or `escalation`;
    the tool rejects unknown names.
+   Every operation flow's success step ends with a `redirect` to the follow-up
+   flow, not `end`: `end` exits the application and ends the customer's
+   conversation, and a live PoC that ended there answered exactly one question
+   per call.
 2. Explain each recommendation in plain language with an everyday analogy. A
    deterministic step is like an automatic door: the same rule produces the
    same result every time. A generative step is like a skilled staff member
@@ -585,10 +594,24 @@ design the ACXD flows before moving to the analysis document.
    not ask the user to repeat it.
 4. Also design the mandatory system flows with `upsert_acxd_flow_plan`:
    `welcome`, `fallback`, and `escalation`. Show and explicitly confirm these
-   plans in the same way.
+   plans in the same way. Their node graphs are BUILT DETERMINISTICALLY from
+   the live-verified routing contract (greet → listen → redirect to the
+   recognized flow; count failures and escalate on the third; terminal
+   escalate), so present them as behaviour the user is approving, not as a
+   design to invent. Two more system flows — the "anything else?" follow-up
+   flow and the "connect me to an agent" flow — are generated automatically;
+   mention them once and do not ask the user to design them.
 5. Capture guardrails and knowledge-base topics with `save_acxd_policies`, then
    capture application name, channels, locales, speech engine, chat idle timeout,
    and no more than ten context variables with `save_acxd_application_settings`.
+6. For every value a flow collects, capture the FieldSpec constraint that
+   decides how it is captured: a value with a fixed SET of options (product
+   type, service type) becomes a custom slot type built from that enum, while an
+   open value (order number, phone number, free text) becomes a built-in
+   `NLX.AlphaNumeric` / `NLX.Number` / `NLX.PhoneNumber` / `NLX.Text` slot with
+   the field's regex. A custom slot type built from a single example is a
+   one-item menu the runtime auto-selects without asking, so an open value must
+   never be given one.
 
 ### Who speaks — the application, not the Contact Flow
 In the ACXD target the **application** is the conversation: it greets (the
@@ -606,7 +629,8 @@ escalation path (outside business hours, queue full, transfer failed) plus the
 - `after_hours_message` / `transfer_message` in ContactFlowSpec are the
   telephony announcements — collect them in the customer's language.
 - No DTMF menus or `GetParticipantInput` before the block: intent capture is
-  the application's `generative_journey`; keypad values are `user_choice` slots.
+  the application's `welcome` flow (it listens and redirects to the flow the
+  application recognized); keypad values are `user_choice` slots.
 
 ### Backend the Data Requests call
 ACXD Data Requests are HTTP webhooks: they call the generated API Gateway
@@ -629,6 +653,14 @@ record the integration as `mcp` with its URL; otherwise `external` is right.
 - Every `flow_id` must contain letters only and be 3–64 characters long.
 - Use `choice` for conditional branching. Never use `split`: `split` is reserved
   for percentage A/B routing, not a business-rule decision.
+- Intent routing is never generative. The application matches an utterance
+  against each flow's routing description; the `welcome` flow just listens and
+  redirects. A `generative_journey` used as a classifier recognized nothing in a
+  live validation and the assistant never routed a single customer utterance.
+- A conversation does not end after one answer. Every completed operation offers
+  further help and keeps listening; only a goodbye exits the application.
+- "Connect me to an agent" is its own routable flow, because the escalation flow
+  is the application's default handoff behaviour and is not a routing target.
 
 ### Phase 4 — Confirmation and analysis document
 The analysis document must include an **ACXD flow design** section containing the

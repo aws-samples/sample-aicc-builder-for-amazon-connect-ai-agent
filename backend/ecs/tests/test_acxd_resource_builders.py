@@ -18,6 +18,7 @@ from tools.acxd_resource_builders import (  # noqa: E402
     build_guardrails,
     build_kb_article_prompt,
     build_knowledge_base,
+    build_slot_types,
     run_kb_article_generation,
 )
 from tools.validate_acxd_flow import validate_acxd_asset  # noqa: E402
@@ -186,8 +187,12 @@ def test_application_document():
     app = build_application(SPEC)
     assert validate_acxd_asset("application", app) == []
     assert app["name"] == "Acme Assistant"
+    # FollowUpFlow and RequestAgentFlow are emitted by the flow generator whether
+    # or not the interview planned them (R2/R3), so the application must attach
+    # them too — an unattached flow is neither routable nor redirectable.
     assert {f["flowId"] for f in app["flows"]} == {
-        "RefundFlow", "WelcomeFlow", "EscalationFlow", "FaqFlow"}
+        "RefundFlow", "WelcomeFlow", "EscalationFlow", "FaqFlow",
+        "FollowUpFlow", "RequestAgentFlow"}
 
     s = app["settings"]
     assert s["languageCode"] == "ko-KR"
@@ -225,6 +230,8 @@ def test_application_ttl_clamped_and_defaults():
 
 def test_full_generated_set_is_cross_consistent():
     guardrails, _ = build_guardrails(SPEC)
+    from tools.acxd_system_flows import build_follow_up_flow, build_request_agent_flow
+
     bundle = {
         "flows": [  # minimal generated flows standing in for Task 6 output
             {"flowId": p["flow_id"], "nodes": {
@@ -232,7 +239,10 @@ def test_full_generated_set_is_cross_consistent():
                             "childNodes": [{"nodeId": "a0000000-0000-4000-8000-000000000002"}]},
                 "a0000000-0000-4000-8000-000000000002": {"nodeId": "a0000000-0000-4000-8000-000000000002", "type": "end"},
             }} for p in SPEC["flows"]
-        ],
+        # ...plus the two system flows the generator always emits, which is why
+        # build_application attaches them.
+        ] + [build_follow_up_flow(SPEC), build_request_agent_flow(SPEC)],
+        "slot_types": build_slot_types(SPEC)[0],
         "guardrails": guardrails,
         "knowledge_bases": [build_knowledge_base(SPEC)],
         "application": build_application(SPEC),

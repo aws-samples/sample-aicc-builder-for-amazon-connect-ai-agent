@@ -121,8 +121,11 @@ def _needs_webhook_backend(bundle: dict) -> bool:
 
 
 def _needs_secrets(bundle: dict) -> bool:
-    return bool(re.search(r"\{\{secrets\.[A-Za-z0-9_]+\}\}",
-                          json.dumps(bundle.get("data_requests") or [])))
+    # Two spellings: the live contract `{Name:NLX.Secret}` (D1) and the legacy
+    # `{{secrets.Name}}` an older session may still carry.
+    serialized = json.dumps(bundle.get("data_requests") or [])
+    return bool(re.search(r"\{[A-Za-z0-9_]+:NLX\.Secret\}", serialized)
+                or re.search(r"\{\{secrets\.[A-Za-z0-9_]+\}\}", serialized))
 
 
 def build_manifest(

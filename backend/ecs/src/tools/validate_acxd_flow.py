@@ -48,6 +48,19 @@ except ImportError:  # pragma: no cover - depends on how the module was loaded
     _spec.loader.exec_module(_mod)
     NODE_TYPES = _mod.NODE_TYPES
 
+try:
+    from tools.acxd_runtime_contract import runtime_contract_violations
+except ImportError:  # pragma: no cover - depends on how the module was loaded
+    import importlib.util as _ilu2
+    from pathlib import Path as _Path2
+
+    _spec2 = _ilu2.spec_from_file_location(
+        "_acxd_runtime_contract",
+        _Path2(__file__).resolve().parent / "acxd_runtime_contract.py")
+    _mod2 = _ilu2.module_from_spec(_spec2)
+    _spec2.loader.exec_module(_mod2)
+    runtime_contract_violations = _mod2.runtime_contract_violations
+
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas" / "acxd"
 
 #: kind -> schema file
@@ -233,12 +246,19 @@ def validate_acxd_asset(
     document: Any,
     *,
     strict_subset: bool = True,
+    runtime_contract: bool = True,
 ) -> list[str]:
     """Validate a document against its contract schema.
 
     Returns a list of human-readable violation strings (empty = valid).
     For flows, ``strict_subset=True`` (default) also rejects node types
-    outside :data:`SUPPORTED_NODE_TYPES`.
+    outside :data:`SUPPORTED_NODE_TYPES`, and ``runtime_contract=True``
+    (default) adds the flow-scope half of the live-verified runtime contract
+    (:mod:`tools.acxd_runtime_contract`): the encodings the service accepts,
+    builds and then cannot execute. Only findings the normalizer refuses to
+    guess at are reported, so a flow through ``apply_runtime_contract`` gates
+    clean; the cross-asset half (S5/D3/M1/RX) runs in
+    ``validate_acxd_consistency``, which has the rest of the bundle.
     """
     schema = load_schema(kind)
     validator = jsonschema.Draft202012Validator(schema, registry=_registry())
@@ -262,6 +282,12 @@ def validate_acxd_asset(
                         f"{sorted(SUPPORTED_NODE_TYPES)} or document a "
                         f"manual step instead"
                     )
+
+    if kind == "flow" and runtime_contract and isinstance(document, dict):
+        errors += [
+            f"runtime contract: {problem}"
+            for problem in runtime_contract_violations(document, scope="flow")
+        ]
     return errors
 
 
@@ -283,6 +309,11 @@ def _main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="accept all 22 ACXD node types instead of the supported subset",
     )
+    parser.add_argument(
+        "--no-runtime-contract",
+        action="store_true",
+        help="skip the flow-scope runtime contract checks (schema only)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -292,7 +323,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 2
 
     errors = validate_acxd_asset(
-        args.kind, document, strict_subset=not args.no_strict_subset
+        args.kind, document, strict_subset=not args.no_strict_subset,
+        runtime_contract=not args.no_runtime_contract,
     )
     if errors:
         print(f"INVALID ({args.kind}): {len(errors)} violation(s)")

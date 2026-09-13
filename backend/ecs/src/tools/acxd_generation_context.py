@@ -29,6 +29,10 @@ _BUILTIN_SLOT_TYPES = {
     "date", "datetime", "email", "phone",
 }
 
+#: GA namespace for built-in slot types (NLX.AlphaNumeric, NLX.PhoneNumber, ...).
+#: These need no CreateSlotType call — they are the runtime's own types.
+_BUILTIN_SLOT_NAMESPACE = "NLX."
+
 
 def _session_id(session_id: Optional[str] = None) -> str:
     return session_id or current_session_id.get() or "default"
@@ -291,12 +295,16 @@ _GENERIC_SLOT_TYPES = {
 def slot_type_id_for(slot_name: str, declared_type: str) -> str:
     """Id of the custom slot type a flow slot deploys with.
 
-    A built-in or generic type name ('text', 'enum', 'choice', …) says nothing
-    about the field, so the id comes from the slot name — one slot type per
-    field. A specific custom type name ('OrderNumber') is kept as the shared id
-    it names. D9-4 uses the same rule to find the slot type it must validate.
+    A built-in or generic type name ('text', 'enum', 'choice', 'NLX.Number', …)
+    says nothing about the field, so the id comes from the slot name — one slot
+    type per field. A specific custom type name ('OrderNumber') is kept as the
+    shared id it names. D9-4 uses the same rule to find the slot type it must
+    validate.
     """
-    kind = str(declared_type or "").strip().lower()
+    kind = str(declared_type or "").strip()
+    if kind.startswith(_BUILTIN_SLOT_NAMESPACE):
+        return _slot_type_id(slot_name)
+    kind = kind.lower()
     if not kind or kind in _BUILTIN_SLOT_TYPES or kind in _GENERIC_SLOT_TYPES:
         return _slot_type_id(slot_name)
     return _slot_type_id(declared_type)
@@ -328,8 +336,56 @@ def _with_envelope(fields: list) -> list[dict]:
     return out
 
 
+#: Built-in ACXD slot types an open value attaches instead of a custom slot type.
+#: S5 (live-verified): a custom slot type carries a VALUE SET, so one built from
+#: a single example deploys as a one-item menu that is auto-selected without ever
+#: asking the customer. Order numbers, phone numbers and free text have no value
+#: set — they are a format, and a format is an ``NLX.*`` built-in plus a regex.
+NLX_ALPHANUMERIC = "NLX.AlphaNumeric"
+NLX_NUMBER = "NLX.Number"
+NLX_PHONE_NUMBER = "NLX.PhoneNumber"
+NLX_TEXT = "NLX.Text"
+
+#: A name is a phone NUMBER only when it ENDS in a phone-ish token: 'customerPhone'
+#: and 'phoneNumber' are phone numbers, 'phonePin' and 'phoneModel' are not — they
+#: merely mention a phone, and NLX.PhoneNumber would normalize them wrongly.
+_PHONE_NAME_RE = re.compile(
+    r"(?:phone|mobile|cell|cellular|tel|telephone|msisdn)(?:number|num|no)?$")
+_NUMERIC_TYPES = {"number", "integer", "int", "float", "decimal"}
+_DIGITS_ONLY_RE = re.compile(r"^\^?(?:\\d|\[0-9\])[^A-Za-z]*\$?$")
+
+
+def builtin_slot_type_for(slot_name: str, declared_type: str, regex: Optional[str]) -> str:
+    """The ``NLX.*`` built-in an open (non-enumerated) value should attach.
+
+    Order matters: a phone number is a phone number even when its regex is all
+    digits. Any value with an explicit format — an order number, a booking
+    reference, a 10-digit code — attaches ``NLX.AlphaNumeric`` and carries the
+    regex: that is the shape the live SELC bundle needed (``NLX.Number`` would
+    parse the value as a quantity, losing leading zeros and the exact length
+    the regex enforces). ``NLX.Number`` is for a quantity-like numeric field
+    with no format of its own.
+    """
+    name = re.sub(r"[^A-Za-z0-9]", "", str(slot_name or "")).lower()
+    kind = str(declared_type or "").strip().lower()
+    pattern = str(regex or "")
+    if _PHONE_NAME_RE.search(name) or kind in {"phone", "phonenumber", "phone_number"}:
+        return NLX_PHONE_NUMBER
+    if pattern:
+        return NLX_ALPHANUMERIC
+    if kind in _NUMERIC_TYPES:
+        return NLX_NUMBER
+    return NLX_TEXT
+
+
 def _derive_slot_types(flow_plans: list[dict], operations: dict[str, Any]) -> list[dict]:
-    """Derive custom ACXD slot types from flow slots and FieldSpec constraints."""
+    """Derive custom ACXD slot types from flow slots and FieldSpec constraints.
+
+    A field with an ``enum`` is a value set → one custom slot type per field.
+    A field with only format constraints (regex / length) is an OPEN value → no
+    custom slot type at all; the plan's slot is rewritten to attach an ``NLX.*``
+    built-in and carry the regex (S5).
+    """
     output: dict[str, dict] = {}
     for plan in flow_plans:
         operation = operations.get(plan.get("operation_id"))
@@ -359,19 +415,26 @@ def _derive_slot_types(flow_plans: list[dict], operations: dict[str, Any]) -> li
             enum_values = _field_constraint(field, "enum_values", "allowed_values", "enum") or []
             min_length = _field_constraint(field, "min_length", "minLength")
             max_length = _field_constraint(field, "max_length", "maxLength")
-            constrained = any(v not in (None, [], "") for v in (regex, enum_values, min_length, max_length))
-            custom = declared_type.lower() not in _BUILTIN_SLOT_TYPES or constrained
-            if not custom:
+            if not enum_values:
+                # An open value: keep the constraint, drop the would-be one-item
+                # menu. A declared custom type name with no values behind it is
+                # not a value set either, so it goes the same way.
+                if declared_type.startswith(_BUILTIN_SLOT_NAMESPACE):
+                    builtin = declared_type
+                else:
+                    builtin = builtin_slot_type_for(slot["name"], declared_type, regex)
+                slot["type"] = builtin
+                if regex:
+                    slot["regex"] = regex
+                if slot.get("sensitive") or field.get("sensitive"):
+                    # PII must be marked on the ATTACHED slot; without a custom
+                    # slot type this is the only place left to carry it.
+                    slot["sensitive"] = True
                 continue
             slot_type_id = slot_type_id_for(slot["name"], declared_type)
             slot["type"] = slot_type_id
             if regex:
                 slot["regex"] = regex          # the plan mirrors the FieldSpec, not the model's respelling
-            values = list(enum_values) or slot.get("examples") or []
-            if not values and field.get("example") is not None:
-                values = [field["example"]]
-            if not values:
-                values = [slot["name"]]
             metadata = {
                 key: value for key, value in (
                     ("regex", regex), ("min_length", min_length), ("max_length", max_length))
@@ -385,7 +448,7 @@ def _derive_slot_types(flow_plans: list[dict], operations: dict[str, Any]) -> li
                 "metadata": {"constraints": metadata} if metadata else {},
             })
             known = {str(item.get("value")) for item in current["values"]}
-            for value in values:
+            for value in enum_values:
                 text = str(value)
                 if text and text not in known:
                     current["values"].append({"value": text[:256]})

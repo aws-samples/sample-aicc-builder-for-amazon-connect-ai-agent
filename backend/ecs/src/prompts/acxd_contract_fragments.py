@@ -24,11 +24,16 @@ from tools.validate_acxd_flow import (
 #: the prompt cannot advertise something the validator rejects.
 _NODE_PURPOSE = {
     "start": "entry point — exactly one per flow",
-    "end": "terminal. Returns control to the caller (the Amazon Connect "
-           "contact flow), it does not hang up by itself",
+    "end": "terminal. Exits the application and returns control to the Amazon "
+           "Connect contact flow, which ENDS the conversation — only use it "
+           "after a goodbye, never after answering a question",
     "basic": "say something and move on (fixed wording)",
-    "user_input": "ask for a value and capture it into a slot",
-    "user_choice": "offer a fixed set of options and capture the pick",
+    "user_input": "listen for what the customer wants and let the application "
+                  "recognize which attached flow matches. Pair it with a "
+                  "`redirect` to `{System.capturedFlow:NLX.System}` on the "
+                  "`captured_flow exists` edge — that IS intent routing",
+    "user_choice": "ask for ONE value and capture it into an attached slot "
+                   "(order number, a category, yes/no)",
     "choice": "branch on data already captured. Every branch MUST carry "
               "`conditions` — the platform accepts and BUILDS a conditionless "
               "choice (verified live) and then cannot route",
@@ -38,23 +43,26 @@ _NODE_PURPOSE = {
     "generative_text": "one LLM-written reply, still inside a fixed structure",
     "generative_task": "LLM completes a bounded task, then returns to the flow",
     "generative_journey": "an LLM-run conversation loop with tool access "
-                          "(knowledge bases, data requests, other flows). This "
-                          "is the agentic node: use it when the path cannot be "
-                          "drawn in advance",
-    "escalate": "hand off to a human agent",
+                          "(knowledge bases, data requests, other flows). Use it "
+                          "only for a confirmed stretch of conversation that "
+                          "cannot be drawn in advance — NEVER for intent routing",
+    "escalate": "hand off to a human agent. TERMINAL: it must have no outgoing "
+                "edge (an `end` after it made Connect report Success instead of "
+                "Escalation, so the caller was never transferred)",
     "redirect": "jump to another flow",
     "wait": "pause for a set duration",
     "note": "designer annotation, no runtime effect",
     "define": "set a context variable",
     "transform": "compute a new value from existing ones",
     # DO NOT USE. Verified live 2026-09-08: the canvas palette has no
-    # intent-capture node, the server silently DROPS metadata.intentCapture
-    # (there is no config object), and a deployed flow using
+    # intent-capture node and the server silently DROPS metadata.intentCapture
+    # (there is no config object), so a deployed flow using
     # intent_capture + choice failed on the FIRST customer utterance with
-    # "We encountered an issue. Please try again soon.". Intent routing is the
-    # generative_journey's job — that is the product's model.
+    # "We encountered an issue. Please try again soon.". Intent routing is
+    # `user_input` + `redirect` (verified live 2026-09-12).
     "intent_capture": "DO NOT USE — not a real node; route intents with "
-                      "generative_journey instead",
+                      "`user_input` + a `redirect` to "
+                      "`{System.capturedFlow:NLX.System}` instead",
     "loop": "repeat a section a bounded number of times (e.g. retry twice)",
 }
 
@@ -138,17 +146,106 @@ def generative_journey_guidance() -> str:
         "an `mcpFlow` tool (runtime: \"Unknown tool type\"). Every id MUST be "
         "one this bundle actually creates.\n"
         "- `exitConditions`: named prompts describing when the loop is done, "
-        "so the conversation returns to the deterministic flow.\n"
+        "so the conversation returns to the deterministic flow. Every exit edge "
+        "MUST carry conditions (`System.gjConditionIndex eq <i>`, or "
+        "`node_status` timeout / failure) or it is disconnected.\n"
         "- `maxSteps` bounds the loop. Keep it modest (5-10) for a PoC.\n"
-        "ROUTING IS THE JOURNEY'S JOB. The product's model is one agentic "
-        "node that decides which tool answers the customer — not a classifier "
-        "node followed by branches. A normal operation flow is: `start` -> "
-        "`basic` greeting -> `generative_journey` (tools attached, with a "
-        "`humanHandoff` exit condition) -> `escalate` on that exit / `end` "
-        "otherwise. Use deterministic nodes for the stretches where a rule "
-        "must hold exactly (identity checks, consent, money gates), and give "
-        "the journey a prompt that NAMES each attached tool and says when to "
-        "use it — attaching a tool is necessary but not sufficient.\n"
+        "A JOURNEY DOES NOT ROUTE INTENTS. Intent routing is `user_input` + a "
+        "`redirect` to `{System.capturedFlow:NLX.System}`; a welcome flow that "
+        "classified intent with a journey recognized nothing and the application "
+        "never routed a single customer utterance (live, 2026-09-12). Use a "
+        "journey ONLY for a stretch of conversation the user confirmed as "
+        "generative, inside an operation flow, and give its prompt the NAME of "
+        "each attached tool and when to use it — attaching a tool is necessary "
+        "but not sufficient.\n"
         "Do not add `modelType` to any node other than a generative one; "
         "`generative_text` has no `modelType` field."
+    )
+
+
+def runtime_contract_rules() -> str:
+    """The live-verified runtime contract, in the order a flow is authored.
+
+    Every line here was measured against a deployed application over Connect
+    chat (a sandbox Connect Customer account, 2026-09-12), not read from documentation: the
+    platform BUILDS the wrong shapes without complaint and then answers nothing,
+    so these are not style preferences.
+    """
+    return (
+        "### 1. Routing descriptor (how a customer reaches this flow)\n"
+        "An operation flow is `untrained: false` and its `aiDescription` is the "
+        "ONLY thing the application matches an utterance against — there are no "
+        "training utterances. Write it as \"Use this flow when the user wants "
+        "to <do the thing>...\", ASCII, from the CUSTOMER's point of view, "
+        "listing the words a caller would actually say. It must be clearly "
+        "distinct from every other flow's, and must NOT describe mechanics "
+        "(nodes, data requests, slots) — a mechanical description matches "
+        "nothing. System flows are `untrained: true` and say they are not "
+        "routing targets.\n"
+        "\n"
+        "### 2. Attached slots\n"
+        "`slotTypes: [{\"name\": \"orderNumber\", \"type\": \"<slot type>\", "
+        "\"sensitive\": false, \"regex\": \"...\"}]`. `type` is EITHER a custom "
+        "slot type id this bundle creates OR an `NLX.` built-in "
+        "(`NLX.AlphaNumeric`, `NLX.Number`, `NLX.PhoneNumber`, `NLX.Text`, "
+        "`NLX.Date`, `NLX.Time`, `NLX.Email`, `NLX.Name`, `NLX.Url`, "
+        "`NLX.Ordinal`, `NLX.Duration`). NEVER `text` / `number` / `boolean`: "
+        "those silently disable flow recognition for the WHOLE application, so "
+        "one wrong slot stops every flow from being matched. A value set "
+        "(product categories, service types) is a custom slot type; an open "
+        "value (order number, phone number, free text) is a built-in plus "
+        "`regex` — a custom slot type built from ONE sample value deploys as a "
+        "one-item menu and is auto-selected without asking the customer. There "
+        "is no boolean built-in: yes/no uses the bundled `yesNo` slot type.\n"
+        "\n"
+        "### 3. Capturing a value\n"
+        "`user_choice` with `metadata.choice = {\"source\": \"slotType\", "
+        "\"slotTypeId\": \"<the ATTACHED SLOT'S NAME>\"}`. The value is stored "
+        "verbatim as the internal slot id, so it must be the slot NAME "
+        "(`moreHelp`), not the slot type id (`yesNo`). Its edges are "
+        "`slot <name> exists` / `not_exists`, never `captured_flow`.\n"
+        "\n"
+        "### 4. Retry after a no-match\n"
+        "Point the `not_exists` edge at a short recovery `basic` node that "
+        "carries `metadata.stateModifications: [{\"type\": \"slot\", \"name\": "
+        "\"<slot>\", \"modification\": \"clear\"}]` and loops BACK to the same "
+        "`user_choice`. Slot values persist for the session, so revisiting the "
+        "capture node without clearing falls through to Fallback, and a SECOND "
+        "capture node for the same slot fails immediately with slot_no_match.\n"
+        "\n"
+        "### 5. Data requests\n"
+        "`node.dataRequests: [{\"dataRequestId\": \"getOrder\", \"payload\": "
+        "{\"orderNumber\": \"{orderNumber:NLX.Slot}\"}}]` — without `payload` "
+        "the webhook receives no fields at all. Map every request field from a "
+        "slot (`{name:NLX.Slot}`) or a context variable (`{name:NLX.Context}`). "
+        "Its edges are `node_status eq success` | `failure` | `timeout` — "
+        "`error` is invalid and produces an unroutable NoMessages branch.\n"
+        "\n"
+        "### 6. Answering with the result\n"
+        "The answer is a deterministic `basic` message with placeholders: "
+        "`{<dataRequestId>.<field>:NLX.Variable}`. Every placeholder field MUST "
+        "exist in that data request's `responseSchema` with EXACTLY that name "
+        "(`price` and `unitPrice` are different fields; a placeholder that does "
+        "not resolve is read out literally). Do NOT use `generative_text` to "
+        "state a looked-up value: it emits no message at runtime, so the caller "
+        "hears nothing, and a generated number is not the number the backend "
+        "returned.\n"
+        "\n"
+        "### 7. Where a flow ENDS\n"
+        "A successful operation redirects to `FollowUpFlow` "
+        "(`metadata.redirect = {\"type\": \"flow\", \"flowId\": "
+        "\"FollowUpFlow\"}`), which asks \"anything else?\" and keeps the "
+        "session alive. `end` EXITS the application and ends the customer's "
+        "conversation — using it after an answer is what made a live assistant "
+        "hang up after one question. A flow that gives up hands over with a "
+        "redirect to `EscalationFlow`. Clear the slots you captured on the "
+        "node that LEAVES the flow, not at its start (a start-of-flow clear "
+        "erases the value the routing utterance already filled).\n"
+        "\n"
+        "### 8. Escalation\n"
+        "An `escalate` node is TERMINAL: no `childNodes`. Give it its "
+        "\"connecting you now\" `messages` and, when the contact flow needs the "
+        "reason, `metadata.stateModifications` setting a context variable. An "
+        "`end` after `escalate` made Connect take the Success branch and the "
+        "caller was never transferred.\n"
     )

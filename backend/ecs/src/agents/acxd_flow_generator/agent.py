@@ -29,6 +29,7 @@ from tools.session_context import current_session_id
 from tools.acxd_flow_canonicalizer import canonicalize_flow
 from tools.validate_acxd_flow import GENERATIVE_NODE_TYPES, prune_to_schema
 from tools.validate_acxd_consistency import (
+    BUILTIN_SLOT_NAMESPACE,
     BUILTIN_SLOT_PRIMITIVES,
     format_report,
     validate_acxd_consistency,
@@ -105,6 +106,21 @@ def _build_initial_prompt(plan: dict, spec: dict) -> str:
     known_data_requests = [di.get("data_request_id")
                            for di in spec.get("data_integrations") or []
                            if isinstance(di, dict) and di.get("data_request_id")]
+    from tools.acxd_system_flows import resolve_system_flow_ids
+
+    system_ids = resolve_system_flow_ids(spec)
+    # NEVER offer text/number/boolean as an attached slot type: live, they
+    # disabled flow recognition for the WHOLE application (S1).
+    slot_type_hint = (
+        f"{known_slot_types} — for a value NOT in that list attach an NLX "
+        "built-in (NLX.AlphaNumeric / NLX.Number / NLX.PhoneNumber / NLX.Text / "
+        "NLX.Date / NLX.Email) plus a regex. NEVER 'text', 'number' or "
+        "'boolean' — they disable flow recognition for the whole application."
+        if known_slot_types else
+        "(none) — attach NLX built-ins only (NLX.AlphaNumeric / NLX.Number / "
+        "NLX.PhoneNumber / NLX.Text) plus a regex. NEVER 'text', 'number' or "
+        "'boolean' — they disable flow recognition for the whole application."
+    )
 
     parts = [
         "Generate the ACXD flow document for this confirmed plan.",
@@ -118,7 +134,10 @@ def _build_initial_prompt(plan: dict, spec: dict) -> str:
         f"## flowId MUST be exactly: {plan.get('flow_id')!r}",
         f"## Available data request IDs (use these EXACT ids, no others): "
         f"{known_data_requests or '(none — do not use data_request nodes)'}",
-        f"## Available custom slot type IDs: {known_slot_types or '(none — use text/number/boolean)'}",
+        f"## Available custom slot type IDs: {slot_type_hint}",
+        f"## When this flow's work SUCCEEDS, redirect to {system_ids['followup']!r} "
+        f"— NOT `end`, which exits the application and ends the conversation. "
+        f"When it cannot continue, redirect to {system_ids['escalation']!r}.",
         f"## Knowledge base placeholder — copy VERBATIM: {{KB:{kb_name}}}"
         if kb_name_raw else
         "## No knowledge base in this project — do NOT emit knowledge_base nodes",
@@ -161,6 +180,18 @@ def extract_flow_json(text: str) -> Optional[dict]:
     return doc
 
 
+def _needs_slot_type_stub(slot_type) -> bool:
+    """True only for a CUSTOM slot type id.
+
+    ``NLX.*`` built-ins (NLX.AlphaNumeric, NLX.PhoneNumber, …) are the runtime's
+    own types: there is no CreateSlotType for them, and stubbing one produced a
+    slot type document whose id fails the letters-only id rule, so every
+    generation attempt failed on a slot the flow was right to attach.
+    """
+    return bool(slot_type) and slot_type not in BUILTIN_SLOT_PRIMITIVES \
+        and not str(slot_type).startswith(BUILTIN_SLOT_NAMESPACE)
+
+
 def stub_bundle_for_validation(spec: dict, flow: dict) -> dict:
     """Single-flow pseudo-bundle so cross-reference checks can run.
 
@@ -179,24 +210,41 @@ def stub_bundle_for_validation(spec: dict, flow: dict) -> dict:
     for plan in spec.get("flows") or []:
         for slot in plan.get("slots") or []:
             st = (slot or {}).get("type")
-            if st and st not in BUILTIN_SLOT_PRIMITIVES:
+            if _needs_slot_type_stub(st):
                 planned.add(st)
     # ...and any custom type the generated flow itself attaches.
     for slot in flow.get("slotTypes") or []:
         st = (slot or {}).get("type")
-        if st and st not in BUILTIN_SLOT_PRIMITIVES:
+        if _needs_slot_type_stub(st):
             planned.add(st)
 
-    slot_types = [
-        {"slotTypeId": st, "values": [{"value": "stub"}]}
-        for st in sorted(declared | planned)
-    ]
-    data_requests = [
-        {"dataRequestId": di["data_request_id"], "type": "object",
-         "webhook": {"implementation": "inline-static", "code": "{}"}}
-        for di in spec.get("data_integrations") or []
-        if isinstance(di, dict) and di.get("data_request_id")
-    ]
+    from tools.acxd_system_flows import YES_NO_SLOT_TYPE_ID, build_yes_no_slot_type
+
+    slot_types = []
+    for st in sorted(declared | planned):
+        if st == YES_NO_SLOT_TYPE_ID:
+            # Not a stub: the contract compares a yes/no branch against this
+            # document's own values, so a placeholder value would make a correct
+            # comparison look wrong.
+            slot_types.append(build_yes_no_slot_type(spec))
+        else:
+            slot_types.append({"slotTypeId": st, "values": [{"value": "stub"}]})
+    # Real documents, not placeholders: build_data_request is deterministic and
+    # its requestSchema / responseSchema are what the runtime contract checks a
+    # flow against (D3 payload coverage, M1 message placeholders). With a
+    # schema-less stub those findings only surfaced at review time, after the
+    # generation loop that could have fixed them had already returned.
+    data_requests = []
+    for di in spec.get("data_integrations") or []:
+        if not isinstance(di, dict) or not di.get("data_request_id"):
+            continue
+        try:
+            from tools.acxd_data_request_builder import build_data_request
+            data_requests.append(build_data_request(di))
+        except Exception:  # pragma: no cover - fall back to the reference-only stub
+            data_requests.append(
+                {"dataRequestId": di["data_request_id"], "type": "object",
+                 "webhook": {"implementation": "inline-static", "code": "{}"}})
     kbs = []
     kb_name = (spec.get("knowledge_base") or {}).get("name")
     if kb_name:
@@ -207,11 +255,41 @@ def stub_bundle_for_validation(spec: dict, flow: dict) -> dict:
         from tools.acxd_resource_builders import sanitize_kb_name
         kbs.append({"name": sanitize_kb_name(kb_name), "type": "articles"})
     return {
-        "flows": [flow],
+        "flows": [flow] + _sibling_flow_stubs(spec, flow),
         "slot_types": slot_types,
         "data_requests": data_requests,
         "knowledge_bases": kbs,
     }
+
+
+def _sibling_flow_stubs(spec: dict, flow: dict) -> list[dict]:
+    """`start -> end` placeholders for every OTHER flow this project ships.
+
+    A flow's redirect targets are checked against the flow ids the bundle
+    carries, and a single-flow bundle knows none of them — so the contract's RX
+    rule flagged the very redirects the contract requires (an operation's
+    success path to FollowUpFlow, a system flow's fallback path). These stubs
+    are deliberately the emptiest legal flow: they resolve the reference without
+    contributing rules of their own.
+    """
+    from tools.acxd_system_flows import resolve_system_flow_ids
+
+    known = {str(flow.get("flowId") or "")}
+    siblings: list[dict] = []
+    candidates = [p.get("flow_id") for p in spec.get("flows") or [] if isinstance(p, dict)]
+    candidates += list(resolve_system_flow_ids(spec).values())
+    for flow_id in candidates:
+        if not flow_id or flow_id in known:
+            continue
+        known.add(flow_id)
+        start = f"{abs(hash(('stub-start', flow_id))) % 10**8:08d}-0000-4000-8000-000000000001"
+        end = f"{abs(hash(('stub-end', flow_id))) % 10**8:08d}-0000-4000-8000-000000000002"
+        siblings.append({"flowId": flow_id, "nodes": {
+            start: {"nodeId": start, "type": "start",
+                    "childNodes": [{"nodeId": end, "name": "next"}]},
+            end: {"nodeId": end, "type": "end"},
+        }})
+    return siblings
 
 
 def normalize_generated_flow(flow: dict, spec: dict) -> dict:
@@ -973,6 +1051,93 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
     return flow
 
 
+def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
+    """Keyword arguments for ``apply_runtime_contract``.
+
+    The normalizer wants MAPPINGS keyed by id (slot type / data request
+    documents) and a set of context-variable NAMES, so the spec's list-shaped
+    views are indexed here. Data request documents are built on the spot —
+    ``build_data_request`` is deterministic and the real documents are what carry
+    the requestSchema / responseSchema the payload (D3) and placeholder (M1)
+    rules are checked against.
+    """
+    from tools.acxd_system_flows import (
+        YES_NO_SLOT_TYPE_ID,
+        resolve_system_flow_ids,
+    )
+
+    slot_type_docs = {st["slotTypeId"]: st for st in spec.get("slot_types") or []
+                      if isinstance(st, dict) and st.get("slotTypeId")}
+    if YES_NO_SLOT_TYPE_ID not in slot_type_docs:
+        # build_slot_types always emits it, so the normalizer may rely on it.
+        from tools.acxd_system_flows import build_yes_no_slot_type
+        slot_type_docs[YES_NO_SLOT_TYPE_ID] = build_yes_no_slot_type(spec)
+
+    data_requests: dict = {}
+    for integration in spec.get("data_integrations") or []:
+        if not isinstance(integration, dict) or not integration.get("data_request_id"):
+            continue
+        try:
+            from tools.acxd_data_request_builder import build_data_request
+            document = build_data_request(integration)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("[ACXDFlowGen] data request %s not previewable: %s",
+                         integration.get("data_request_id"), exc)
+            continue
+        data_requests[document.get("dataRequestId") or integration["data_request_id"]] = document
+
+    system_ids = resolve_system_flow_ids(spec)
+    flow_ids = [p["flow_id"] for p in spec.get("flows") or []
+                if isinstance(p, dict) and p.get("flow_id")]
+    for flow_id in system_ids.values():
+        if flow_id not in flow_ids:
+            flow_ids.append(flow_id)
+    context_variables = [var["name"] for var
+                         in ((spec.get("application") or {}).get("context_variables") or [])
+                         if isinstance(var, dict) and var.get("name")]
+    return {
+        "role": plan.get("role") or "operation",
+        "slot_type_ids": sorted(slot_type_docs),
+        "slot_type_docs": slot_type_docs,
+        "data_requests": data_requests,
+        "flow_ids": flow_ids,
+        "context_variables": context_variables,
+        "follow_up_flow_id": system_ids["followup"],
+        "escalation_flow_id": system_ids["escalation"],
+        # The interview's slot plans carry the FieldSpec constraints (regex,
+        # lengths) an open-value slot needs as an NLX built-in + regex (S1/S5).
+        "slot_plans": {
+            str(s["name"]): s for s in (plan.get("slots") or [])
+            if isinstance(s, dict) and s.get("name")
+        },
+    }
+
+
+def apply_runtime_contract_if_available(flow: dict, plan: dict, spec: dict) -> tuple[dict, list[str]]:
+    """Run the live-verified runtime-contract normalizer when it is installed.
+
+    The module is imported lazily and defensively: it is an optional module,
+    and a generator that cannot import it must still produce flows (the schema,
+    graph and determinism gates below are unchanged). When it IS present, this is
+    where an LLM-authored operation flow gets the contract the live validation
+    proved — attached slot types that are real slot types (S1), user_choice
+    slotTypeId = the attached slot NAME (S2), success → FollowUpFlow (R3),
+    terminal escalate (R7), data-request payload mapping (D3).
+    """
+    try:
+        from tools.acxd_runtime_contract import apply_runtime_contract
+    except ImportError:
+        return flow, []
+    try:
+        contracted, notes = apply_runtime_contract(
+            flow, **_runtime_contract_arguments(plan, spec))
+    except Exception as exc:  # pragma: no cover - depends on the normalizer's signature
+        logger.warning("[ACXDFlowGen] %s: runtime contract not applied (%s: %s)",
+                       plan.get("flow_id"), type(exc).__name__, exc)
+        return flow, []
+    return (contracted if isinstance(contracted, dict) else flow), list(notes or [])
+
+
 def validate_generated_flow(flow: dict, plan: dict, spec: dict) -> list[str]:
     """Full deterministic validation of one generated flow."""
     problems: list[str] = []
@@ -1102,6 +1267,14 @@ def run_flow_generation(
                 logger.info("[ACXDFlowGen] %s attempt %d: canonicalized %d encoding(s): %s",
                             flow_id, attempt, len(canonical.changes),
                             "; ".join(canonical.changes[:6]))
+            # The live-verified runtime contract runs AFTER canonicalization
+            # — it reasons about the canonical shapes — and BEFORE validation, so
+            # anything it repairs is not reported back to the model as a failure.
+            flow, contract_notes = apply_runtime_contract_if_available(flow, plan, spec)
+            if contract_notes:
+                logger.info("[ACXDFlowGen] %s attempt %d: runtime contract applied "
+                            "%d change(s): %s", flow_id, attempt, len(contract_notes),
+                            "; ".join(str(n) for n in contract_notes[:6]))
             # Extra keys the model invents are the second most common failure
             # and carry no contract meaning, so drop them instead of spending an
             # attempt on them.
@@ -1179,38 +1352,113 @@ def _store_flow(session_id: str, flow: dict) -> None:
     )
 
 
+def _system_flow_plan(role: str, flow_id: str) -> dict:
+    """A minimal plan record for a system flow the interview never planned."""
+    return {"flow_id": flow_id, "role": role, "purpose": f"system {role} flow",
+            "steps": [], "slots": []}
+
+
+def _system_flow_jobs(spec: dict, plans: list, flow_ids: Optional[list]) -> list[tuple[str, dict]]:
+    """(role, plan) for every system flow this run must build deterministically.
+
+    Includes the roles the interview planned AND ``followup`` / ``agent_request``,
+    which are required by the runtime contract whether or not they were planned:
+    without FollowUpFlow an operation's success path has nowhere to go but `end`
+    (the session died after one answer, live), and without RequestAgentFlow
+    "connect me to a human" matches nothing, because EscalationFlow is a default
+    behaviour rather than a routing target.
+    """
+    from tools.acxd_system_flows import (
+        ALWAYS_GENERATED_SYSTEM_ROLES,
+        is_system_flow_role,
+        resolve_system_flow_ids,
+    )
+
+    resolved = resolve_system_flow_ids(spec)
+    jobs: list[tuple[str, dict]] = []
+    seen_roles: set[str] = set()
+    for plan in plans:
+        role = plan.get("role")
+        if is_system_flow_role(role):
+            jobs.append((role, plan))
+            seen_roles.add(role)
+    for role in ALWAYS_GENERATED_SYSTEM_ROLES:
+        if role in seen_roles:
+            continue
+        flow_id = resolved[role]
+        # An explicit flow_ids subset means "regenerate exactly these"; only
+        # honour the always-on roles when the caller asked for them (or for all).
+        if flow_ids is not None and flow_id not in flow_ids:
+            continue
+        jobs.append((role, _system_flow_plan(role, flow_id)))
+    return jobs
+
+
 @tool
 def generate_acxd_flows(flow_ids: list = None) -> dict:
     """Generate ACXD flow documents from the interview's confirmed flow plans.
 
     Call in interview phase ⑥ (review/generation) after every flow plan is
-    confirmed. Generates, validates (schema + graph + cross-refs +
-    determinism contract), self-corrects, and stores each JSON flow asset.
+    confirmed. Operation flows are generated by the LLM, then validated (schema +
+    graph + cross-refs + determinism contract) and self-corrected. The system
+    flows (welcome / fallback / escalation / followup / agent_request) are NOT
+    generated: they are built deterministically from the live-verified routing
+    contract, because an LLM-authored welcome flow routed nothing.
 
     Args:
         flow_ids: optional subset of plan flow_ids (default: all confirmed)
     """
+    from tools.acxd_system_flows import build_system_flow, is_system_flow_role
+
     session_id = current_session_id.get() or "default"
     spec = get_acxd_spec().model_dump()
     plans = [p for p in spec.get("flows") or []
              if (flow_ids is None or p.get("flow_id") in flow_ids)]
-    if not plans:
+    system_jobs = _system_flow_jobs(spec, plans, flow_ids)
+    llm_plans = [p for p in plans if not is_system_flow_role(p.get("role"))]
+    if not plans and not system_jobs:
         return {"status": "error",
                 "message": "no flow plans in the ACXD spec — run the interview first"}
 
-    unconfirmed = [p["flow_id"] for p in plans
+    # Only the LLM-generated flows honour the plan's steps, so only their
+    # determinism decisions have to be confirmed. A system flow's steps are a
+    # description shown to the user, not the design the builder follows.
+    unconfirmed = [p["flow_id"] for p in llm_plans
                    if any(not s.get("user_confirmed") for s in p.get("steps") or [])]
     if unconfirmed:
         return {"status": "error",
                 "message": f"flows have unconfirmed determinism decisions: {unconfirmed}. "
                            "Confirm every step with the user first (D6)."}
 
-    invoke = _make_llm_invoke()
     results = []
+
+    for role, plan in system_jobs:
+        flow_id = plan.get("flow_id")
+        _acxd_progress("running", f"{flow_id}: building the {role} flow deterministically",
+                       flow_id)
+        flow = build_system_flow(role, spec)
+        # The determinism contract compares a flow against the steps the LLM was
+        # told to honour. A deterministic builder does not read them — the plan's
+        # steps are what the user was SHOWN — so validate against an empty step
+        # list rather than reporting a mismatch nobody can act on.
+        problems = validate_generated_flow(flow, {**plan, "steps": []}, spec)
+        if problems:
+            # A deterministic builder producing an invalid flow is a code defect,
+            # not something a retry can fix — report it rather than loop.
+            logger.error("[ACXDFlowGen] deterministic %s flow %s failed validation: %s",
+                         role, flow_id, " | ".join(problems[:5]))
+            results.append({"flow_id": flow_id, "status": "failed",
+                            "problems": problems, "attempts": 0})
+            continue
+        _store_flow(session_id, flow)
+        results.append({"flow_id": flow_id, "status": "generated", "source": "deterministic",
+                        "nodes": len(flow.get("nodes") or {}), "attempts": 0})
+
+    invoke = _make_llm_invoke() if llm_plans else None
 
     # SlotType documents are derived from ACXDFlowSpec slots plus FieldSpec
     # constraints by tools.acxd_generation_context before this generator runs.
-    for plan in plans:
+    for plan in llm_plans:
         flow, problems, attempts = run_flow_generation(plan, spec, invoke)
         if flow is None:
             results.append({"flow_id": plan["flow_id"], "status": "failed",

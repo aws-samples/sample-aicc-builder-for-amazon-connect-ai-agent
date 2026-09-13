@@ -52,6 +52,18 @@ With the ACXD target you get:
 - **Conversation flows you approve as you go.** During the interview, every
   operation gets a flow plan you confirm step by step, with escalation rules
   spelled out before anything is generated.
+- **A conversation that holds together — by construction.** The application
+  greets the caller, listens, hands the utterance to the recognised flow, and
+  after each answer asks whether it can help with anything else, so one call
+  can cover several requests. Unrecognised answers are re-asked, a third miss
+  or an explicit "connect me to an agent" hands off to a human, and the hand-off
+  reaches your Contact Flow's Escalation branch. These system flows are built
+  deterministically from a contract verified on the live service, not written
+  by a model, so they behave the same in every project.
+- **Data requests that reach your API.** Every data request calls the
+  generated API Gateway with the API key held as an ACXD Secret, in both the
+  development and production environments, and posts the slots it collected as
+  the request body.
 - **A Contact Flow that is ready to take calls.** The generated flow already
   contains the Agentic CX block with its Default, Escalation, Error and Idle
   chat timeout branches wired, so the caller reaches your application on the
@@ -63,9 +75,16 @@ With the ACXD target you get:
   workspace and application ids filled in. Re-runs are safe, and `status`,
   `cleanup` and `--dry-run` are included. The one click left is choosing the
   application alias in the block — or set `ACXD_ALIAS_ID` before you deploy.
+  When a re-deploy has to replace the application deployment, the alias key
+  changes; the script tells you, and `./deploy.sh --rebind-alias <key>`
+  re-points the flow without opening the console.
 - **Consistency checks before you download.** The application's data requests
   are verified against the generated OpenAPI spec and Lambdas (paths, fields,
-  formats, webhook URLs), so what you deploy matches the backend you received.
+  formats, webhook URLs), and every flow against the runtime contract the live
+  service enforces but does not document — slot types it can actually
+  recognise, request bodies that carry the collected values, reply templates
+  that only name fields the API returns — so what you deploy matches the
+  backend you received and behaves as designed.
 
 > 📖 Bundle contents and deploy phases: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
 > what we validated in a real Connect Customer account: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
@@ -712,6 +731,15 @@ ACXD를 선택하면 다음을 받습니다.
   함께 담깁니다. AI 프롬프트 에셋 자리를 애플리케이션이 대신합니다.
 - **진행하면서 승인하는 대화 플로우.** 인터뷰 중 업무마다 플로우 계획을 단계별로
   확인하고, 상담원 연결 조건을 생성 전에 명확히 정합니다.
+- **처음부터 끝까지 이어지는 대화.** 애플리케이션이 인사하고, 고객의 말을 듣고,
+  인식된 플로우로 넘긴 뒤, 답변마다 "더 도와드릴 일이 있을까요?"를 물어 한 통화에서
+  여러 요청을 처리합니다. 알아듣지 못한 답변은 다시 묻고, 세 번째 실패나 "상담원
+  연결해 주세요"는 상담원으로 넘기며, 이 연결은 Contact Flow의 Escalation 분기에
+  도달합니다. 이 시스템 플로우들은 모델이 쓰는 것이 아니라 실제 서비스에서 검증한
+  계약으로 결정론적으로 만들어지므로 어떤 프로젝트에서도 같은 방식으로 동작합니다.
+- **API에 실제로 도달하는 데이터 요청.** 모든 데이터 요청은 ACXD Secret에 담긴 API
+  키로 생성된 API Gateway를 호출하며(development·production 환경 모두), 수집한
+  슬롯 값을 요청 본문으로 보냅니다.
 - **바로 전화를 받을 수 있는 Contact Flow.** 생성된 플로우에 Agentic CX 블록과
   Default·Escalation·Error·Idle chat timeout 분기가 이미 배선되어 있어, 첫 import
   부터 통화가 애플리케이션에 도달합니다.
@@ -720,10 +748,14 @@ ACXD를 선택하면 다음을 받습니다.
   리소스를 만들어 빌드·배포한 뒤, 배포된 워크스페이스/애플리케이션 id를 채운 Contact
   Flow를 PUBLISHED로 import합니다. 재실행해도 안전하며 `status`, `cleanup`,
   `--dry-run`을 지원합니다. 남는 클릭은 블록에서 애플리케이션 alias를 고르는 것
-  하나입니다(배포 전에 `ACXD_ALIAS_ID`를 지정해도 됩니다).
+  하나입니다(배포 전에 `ACXD_ALIAS_ID`를 지정해도 됩니다). 재배포 시 애플리케이션
+  배포를 교체해야 하면 alias 키가 바뀌는데, 스크립트가 이를 알려 주고
+  `./deploy.sh --rebind-alias <key>`로 콘솔 없이 플로우를 다시 연결합니다.
 - **다운로드 전 정합성 검사.** 애플리케이션의 데이터 요청을 생성된 OpenAPI 스펙·
-  Lambda와 대조(경로, 필드, 형식, 웹훅 URL)하므로, 배포하는 것이 받은 백엔드와
-  일치합니다.
+  Lambda와 대조(경로, 필드, 형식, 웹훅 URL)하고, 모든 플로우를 서비스가 문서화하지
+  않은 채 강제하는 런타임 계약(실제로 인식 가능한 슬롯 타입, 수집한 값을 담는 요청
+  본문, API가 반환하는 필드만 쓰는 응답 템플릿)과 대조하므로, 배포하는 것이 받은
+  백엔드와 일치하고 설계대로 동작합니다.
 
 > 📖 번들 구성과 배포 단계: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
 > 실제 Connect Customer 계정 검증 기록: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
@@ -989,6 +1021,16 @@ ACXD を選ぶと次が得られます。
   プロンプトの代わりにアプリケーションが入ります。
 - **進めながら承認する会話フロー。** インタビュー中に業務ごとのフロー計画を
   ステップ単位で確認し、エスカレーション条件を生成前に確定します。
+- **最初から最後までつながる会話。** アプリケーションが挨拶し、お客様の発話を聞き、
+  認識したフローに引き渡し、回答のたびに「他にお手伝いできることはありますか」と
+  尋ねるので、1 回の通話で複数の依頼を処理できます。聞き取れなかった回答は聞き直し、
+  3 回目の失敗や「オペレーターにつないで」は担当者へ引き継ぎ、その引き継ぎは
+  Contact Flow の Escalation 分岐に届きます。これらのシステムフローはモデルが書くの
+  ではなく、実サービスで検証した契約から決定論的に生成されるため、どのプロジェクト
+  でも同じように動作します。
+- **API に実際に届くデータリクエスト。** すべてのデータリクエストは ACXD Secret に
+  保持した API キーで生成済みの API Gateway を呼び出し（development・production の
+  両環境）、収集したスロット値をリクエスト本文として送ります。
 - **すぐに着信を受けられる Contact Flow。** 生成されたフローには Agentic CX
   ブロックと Default・Escalation・Error・Idle chat timeout の分岐が結線済みで、
   最初のインポートから通話がアプリケーションに届きます。
@@ -998,10 +1040,16 @@ ACXD を選ぶと次が得られます。
   デプロイ済みのワークスペース / アプリケーション id を埋めた Contact Flow を
   PUBLISHED でインポートします。再実行しても安全で、`status`、`cleanup`、
   `--dry-run` に対応。残る操作はブロックでアプリケーションの alias を選ぶことだけです
-  （事前に `ACXD_ALIAS_ID` を指定することもできます）。
+  （事前に `ACXD_ALIAS_ID` を指定することもできます）。再デプロイでアプリケーションの
+  デプロイメントを置き換える必要がある場合は alias キーが変わります。スクリプトが
+  それを知らせ、`./deploy.sh --rebind-alias <key>` でコンソールを開かずにフローを
+  つなぎ直せます。
 - **ダウンロード前の整合性チェック。** アプリケーションのデータリクエストを生成した
-  OpenAPI 仕様・Lambda と照合（パス、フィールド、形式、ウェブフック URL）するため、
-  デプロイするものが受け取ったバックエンドと一致します。
+  OpenAPI 仕様・Lambda と照合（パス、フィールド、形式、ウェブフック URL）し、さらに
+  すべてのフローを、サービスが文書化せずに強制するランタイム契約（実際に認識できる
+  スロットタイプ、収集した値を運ぶリクエスト本文、API が返すフィールドだけを使う
+  応答テンプレート）と照合するため、デプロイするものが受け取ったバックエンドと一致し、
+  設計どおりに動作します。
 
 > 📖 バンドルの内容とデプロイフェーズ: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
 > 実際の Connect Customer アカウントでの検証記録: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)

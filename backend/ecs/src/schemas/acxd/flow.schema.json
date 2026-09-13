@@ -119,10 +119,11 @@
         "name": {
           "type": "string",
           "pattern": "^[A-Za-z]{3,30}$",
-          "description": "Alphabetic only, 3-30 chars"
+          "description": "Alphabetic only, 3-30 chars. This name is the slot id at runtime: a user_choice's metadata.choice.slotTypeId must be this NAME, and messages reference it as {name:NLX.Slot}."
         },
         "type": {
-          "type": "string"
+          "type": "string",
+          "description": "A custom slotTypeId, or an NLX built-in: NLX.Text, NLX.Number, NLX.Date, NLX.Time, NLX.Email, NLX.Name, NLX.PhoneNumber, NLX.Url, NLX.Ordinal, NLX.AlphaNumeric, NLX.Duration. NEVER 'text' / 'number' / 'boolean': one invalid type silently disables flow recognition for the WHOLE application (live-verified 2026-09-13). There is no boolean built-in - yes/no is a custom slot type ('yesNo'). Use a custom slot type only for a real enumerated menu; an open value (order number, phone, free text) must be a built-in plus regex, because a slot type with one sample value is a one-item menu that auto-selects without asking."
         },
         "sensitive": {
           "type": "boolean"
@@ -135,11 +136,13 @@
         },
         "aiDescription": {
           "type": "string",
-          "maxLength": 1000
+          "maxLength": 1000,
+          "description": "ASCII only - ACXD metadata is not localized. Describe the value for the model; customer-facing wording belongs in messages[]."
         },
         "regex": {
           "type": "string",
-          "maxLength": 300
+          "maxLength": 300,
+          "description": "Format constraint for a built-in type, e.g. ^[0-9]{10}$ on NLX.AlphaNumeric for a 10-digit order number. This is how an open value is constrained without a custom slot type."
         }
       }
     },

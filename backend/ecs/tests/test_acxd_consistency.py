@@ -284,6 +284,48 @@ def test_determinism_missing_confirmed_node():
     assert "DETERMINISM_MISSING_NODE" in codes(violations)
 
 
+def test_determinism_accepts_a_templated_basic_for_a_generative_text_step():
+    """M2 (live): a generative_text node sends nothing, so the runtime contract
+    realises a confirmed 'generative_text' result message as a deterministic
+    templated basic. A node MORE deterministic than planned is not a missing
+    node — while a generative node nobody confirmed is still unauthorized."""
+    bundle = coherent_bundle()
+    bundle["flows"][0]["nodes"][G]["type"] = "basic"
+    bundle["flows"][0]["nodes"][G]["messages"] = [{"body": "Refund: {refund.amount:NLX.Variable}"}]
+    bundle["flows"][0]["nodes"][G].pop("metadata", None)
+    violations = validate_acxd_consistency(bundle, spec=matching_spec())
+    assert "DETERMINISM_MISSING_NODE" not in codes(violations)
+    assert "DETERMINISM_UNAUTHORIZED_GENERATIVE" not in codes(violations)
+
+
+def test_determinism_does_not_hold_builder_owned_system_flows_to_their_plan_steps():
+    """System flows are built deterministically from the routing contract; the
+    interview's step list for them (an old plan even said 'generative_journey'
+    for intent routing) describes behaviour to the user and is not a design the
+    generator follows, so it must not fail the flow the builder produced."""
+    from tools.acxd_system_flows import build_system_flow
+
+    spec = matching_spec()
+    spec["flows"].append({
+        "flow_id": "WelcomeFlow", "role": "welcome", "purpose": "greet",
+        "steps": [
+            {"step": 1, "description": "greet", "node_type": "basic",
+             "determinism": "deterministic", "user_confirmed": True},
+            {"step": 2, "description": "route", "node_type": "generative_journey",
+             "determinism": "generative", "user_confirmed": True},
+            {"step": 3, "description": "later", "node_type": "generative_text",
+             "determinism": "generative", "user_confirmed": False},
+        ],
+    })
+    bundle = coherent_bundle()
+    bundle["flows"].append(build_system_flow("welcome", {
+        "application": {"locales": ["en-US"]}, "flows": spec["flows"]}))
+    found = {v.code for v in validate_acxd_consistency(bundle, spec=spec)
+             if "WelcomeFlow" in v.path}
+    assert not found & {"DETERMINISM_MISSING_NODE", "DETERMINISM_UNCONFIRMED",
+                        "DETERMINISM_UNAUTHORIZED_GENERATIVE"}
+
+
 def test_determinism_unauthorized_generative_node():
     bundle = coherent_bundle()
     spec = matching_spec()

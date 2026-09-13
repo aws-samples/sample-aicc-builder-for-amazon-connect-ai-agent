@@ -121,7 +121,10 @@ def test_unknown_node_type_is_rejected_with_catalogue():
     ("message", "basic"), ("generative_message", "generative_text"),
     ("escalation(native)", "escalate"), ("end_call", "end"), ("branch", "choice"),
     ("Data Request", "data_request"), ("kb", "knowledge_base"), ("user_input", "user_input"),
-    ("intent_capture", "generative_journey"), ("nonsense", None),
+    # intent_capture is not a deployable node, and intent routing is user_input +
+    # a redirect to {System.capturedFlow:NLX.System} — NOT a generative journey
+    # (live 2026-09-12: an LLM-classifier welcome flow routed nothing).
+    ("intent_capture", "user_input"), ("nonsense", None),
 ])
 def test_canonical_node_type(raw, expected):
     assert afs.canonical_node_type(raw) == expected

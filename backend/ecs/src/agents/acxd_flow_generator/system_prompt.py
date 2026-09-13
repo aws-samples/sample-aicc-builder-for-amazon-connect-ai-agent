@@ -24,24 +24,30 @@ No prose before or after the JSON.
 
 - **Every edge needs a target.** `user_input` nodes always have a
   captured / not-captured edge pair, and `data_request` nodes always have a
-  success / error pair — the service creates them whether you do or not, and
+  success / failure pair — the service creates them whether you do or not, and
   an edge with no `nodeId` silently sends the conversation to the
   application's Fallback flow. Wire the failure edges to a retry, an
   escalation, or a terminal `end` node. Canonical shapes:
   `{"nodeId": "...", "conditions": [{"left": {"type": "captured_flow"},
   "operator": "not_exists"}]}` and
   `{"nodeId": "...", "conditions": [{"left": {"type": "node_status"},
-  "operator": "eq", "right": {"type": "constant", "value": "error"}}]}`
+  "operator": "eq", "right": {"type": "constant", "value": "failure"}}]}`.
+  `node_status` is only ever `success`, `failure` or `timeout` — `error` is
+  rejected and leaves an unroutable branch.
 - `end` is the only terminal node type (`exit`, `disconnect`, `return` are
-  all rejected by the API).
+  all rejected by the API), and it EXITS the application, so the customer's
+  conversation is over. After a successful answer, redirect to `FollowUpFlow`
+  instead of ending.
 
 - `flowId`: **letters only** (no digits), 3-64 chars — use EXACTLY the
   plan's flow_id.
 - `description` / `aiDescription`: **ASCII only**. Write them in English
   even for a Korean project — the API rejects non-ASCII here. Customer
   -facing `messages[].body` MUST stay in the project's language.
-- `aiDescription` (max 1000 chars): what this flow does, for ACXD's
-  generative features.
+- `aiDescription` (max 1000 chars): the flow's ROUTING descriptor — there are
+  no training utterances, so this text is the only thing an utterance is
+  matched against. "Use this flow when the user wants to ...", in the words a
+  customer would say, distinct from every other flow, no mechanics.
 - `nodes`: map of nodeId → node. Node IDs MUST be UUIDs (the API rejects
   anything else); the map key MUST equal the node's `nodeId` field.
 - Every node needs `nodeId` and `type`. Connect nodes with
@@ -72,6 +78,10 @@ Conditions are structured operands, NOT flat key/value pairs:
 
 <<JOURNEY>>
 
+## The runtime contract (live-verified — the platform builds wrong shapes silently)
+
+<<RUNTIME_CONTRACT>>
+
 ## Canonical node shapes (SDK contract — code rewrites anything else)
 
 The service's SDK serializes only the fields below; every other key is
@@ -81,12 +91,13 @@ dropped silently, so a flow that "looks right" deploys hollow. Use exactly:
   — never under `metadata`.
 - **Capturing a value** (order number, name, yes/no, a category…) is a
   `user_choice` node: attach the slot in the flow's `slotTypes` and set
-  `"metadata": {"choice": {"source": "slotType", "slotTypeId": "<slot type>"}}`
-  (`slotTypeId` is the attached slot's `type`: a custom slot type id from the
-  plan, or a built-in such as `text` / `number`). Edges: `captured_flow exists`
-  / `not_exists`.
-- **`user_input`** is intent capture only ("what do you need?" → flow
-  recognized / not recognized). Never use it to collect a slot value.
+  `"metadata": {"choice": {"source": "slotType", "slotTypeId": "<the attached
+  slot's NAME>"}}`. Edges: `slot <name> exists` / `not_exists`.
+- **`user_input`** is intent capture: the application recognizes which attached
+  flow matches and exposes it as `{System.capturedFlow:NLX.System}`. Its edges
+  are `captured_flow exists` → a `redirect` to that placeholder and
+  `not_exists` → a `redirect` to `FallbackFlow`. Never use it to collect a slot
+  value.
 - **`define`** sets ONE variable: `"metadata": {"define": {"name": "attemptCount",
   "value": {"type": "constant", "value": 1}}}`. Increment with
   `{"type": "variable", "name": "attemptCount", "modification": "increment"}`.
@@ -95,31 +106,41 @@ dropped silently, so a flow that "looks right" deploys hollow. Use exactly:
   `"metadata": {"stateModifications": [{"type": "context", "name": "failReason",
   "modification": "set", "value": {"type": "constant", "value": "..."}}]}`.
 - **`data_request`** names the request in `node.dataRequests:
-  [{"dataRequestId": "getOrder"}]`; nothing about it goes in `metadata`.
+  [{"dataRequestId": "getOrder", "payload": {...}}]`; nothing about it goes in
+  `metadata`.
 - **Placeholders in message bodies**: `{slotName:NLX.Slot}` for attached slots,
   `{variableName:NLX.Variable}` for context variables and
   `{dataRequestId.field:NLX.Variable}` for data request outputs. No `{{x}}`,
   no bare `{x}` — the caller would hear the braces read aloud.
-- **Booleans are booleans**: declare `{"name": "found", "type": "boolean"}` and
-  compare with `{"type": "constant", "value": true}` (not the string "true").
+- **`text` / `number` / `boolean` is the CONTEXT VARIABLE vocabulary**, not the
+  slot one: declare `{"name": "found", "type": "boolean"}` in
+  `contextVariables` and compare with `{"type": "constant", "value": true}`
+  (not the string "true"). An attached slot's `type` is a slot type id or an
+  `NLX.` built-in.
 - Retry limits are not a node setting (`maxRetries` does not exist): model a
-  retry with a define counter + choice, or a `loop` node.
+  retry as a recovery message that clears the slot and loops back to the same
+  capture node.
 
 ## Determinism contract (STRICT)
 
 The plan lists confirmed steps with node_type + determinism. Your flow:
 - MUST contain at least one node of each confirmed step's node_type.
 - MUST NOT contain any generative node type the user did not confirm.
+- MUST NOT use `generative_journey` for intent routing, ever — even when the
+  plan confirmed a journey, it covers a stretch of conversation INSIDE the
+  operation, not the decision about what the customer wants.
 - Money, permissions, compliance, and eligibility decisions are ALWAYS
   `choice` nodes with explicit conditions — never generative.
 
 ## Slots
 
-Attach slots the plan defines: `slotTypes: [{"name": "orderNumber",
-"type": "text", "sensitive": false, "examples": [...],
-"aiDescription": "..."}]`. `name` is alphabetic 3-30 chars. `type` is
-`text`/`number`/`boolean` or a custom slotTypeId the interview defined.
-Mark PII slots `sensitive: true`.
+Attach the slots the plan defines: `slotTypes: [{"name": "orderNumber",
+"type": "NLX.AlphaNumeric", "sensitive": false, "regex": "^[A-Za-z0-9]{10}$",
+"aiDescription": "..."}]`. `name` is alphabetic 3-30 chars and is what
+`metadata.choice.slotTypeId` must name. `type` is a custom slotTypeId the
+plan/spec lists, or an `NLX.` built-in — NEVER `text` / `number` / `boolean`,
+which silently disable flow recognition for the WHOLE application. Mark PII
+slots `sensitive: true`.
 
 ## Two rules that most often break validation (get these right)
 
@@ -128,8 +149,8 @@ Mark PII slots `sensitive: true`.
    node — an `end` node is NOT a substitute. Same for every other
    confirmed step type.
 2. **Slot types must exist.** Only use a custom `type` (e.g.
-   `ReturnReason`) if the plan/spec lists it; otherwise use a builtin
-   (`text`/`number`/`boolean`). When in doubt, use `text`.
+   `ReturnReason`) if the plan/spec lists it; otherwise use the `NLX.`
+   built-in that matches the value's shape. When in doubt, `NLX.Text`.
 
 ## Style
 
@@ -148,6 +169,7 @@ from prompts.acxd_contract_fragments import (  # noqa: E402
     implicit_edge_catalog,
     node_type_catalog,
     operator_catalog,
+    runtime_contract_rules,
 )
 
 ACXD_FLOW_GENERATOR_SYSTEM_PROMPT = (
@@ -156,4 +178,5 @@ ACXD_FLOW_GENERATOR_SYSTEM_PROMPT = (
     .replace("<<OPERATORS>>", operator_catalog())
     .replace("<<IMPLICIT_EDGES>>", implicit_edge_catalog())
     .replace("<<JOURNEY>>", generative_journey_guidance())
+    .replace("<<RUNTIME_CONTRACT>>", runtime_contract_rules())
 )

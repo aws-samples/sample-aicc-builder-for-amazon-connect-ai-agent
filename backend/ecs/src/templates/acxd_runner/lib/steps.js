@@ -54,7 +54,15 @@ async function listAll(ctx, CommandName, input = {}) {
   return items;
 }
 
-/** Resolve bundle placeholders, preferring a WEBHOOK_URL supplied by deploy.sh. */
+/** Resolve bundle placeholders, preferring a WEBHOOK_URL supplied by deploy.sh.
+ *
+ * The walk is deep, so `{WEBHOOK_URL}` is substituted inside nested webhook
+ * structures as well — notably `webhook.environments.{production,development}.url`,
+ * which is where the runtime actually reads the URL and resolves the
+ * `{Name:NLX.Secret}` header (live 2026-09-13; a top-level url/headers pair
+ * alone answered 403). Locked by a test so a future refactor cannot make the
+ * resolution shallow again.
+ */
 function resolveAssetPlaceholders(doc, ctx) {
   const webhookUrl = ctx.state.webhookUrl || (ctx.env && ctx.env.WEBHOOK_URL);
   const state = webhookUrl === ctx.state.webhookUrl
@@ -67,9 +75,37 @@ function resolveAssetPlaceholders(doc, ctx) {
 // Backend (CloudFormation) steps — reuse the Classic aws-cli approach (D8)
 // ---------------------------------------------------------------------------
 
+/**
+ * The CloudFormation stack this deploy targets.
+ *
+ * deploy.sh names it `${PROJECT_NAME}-stack` and exports PROJECT_NAME plus
+ * AICC_STACK_NAME before invoking the runner, so both entry points converge on
+ * ONE stack. Live (2026-09-13): a bare `node runner.js deploy` used the
+ * manifest's default project and created a SECOND stack (`aicc-poc-stack`)
+ * beside deploy.sh's `selc-stack` — the Data Requests then called a different
+ * backend than the one deploy.sh had deployed. A runner-only deploy must pass
+ * PROJECT_NAME (or AICC_STACK_NAME) to reuse the stack.
+ */
+function resolveStackName(ctx, params) {
+  const env = ctx.env || {};
+  if (env.AICC_STACK_NAME) return env.AICC_STACK_NAME;
+  if (env.PROJECT_NAME) return `${env.PROJECT_NAME}-stack`;
+  return (params && params.stackName) || `${ctx.project}-acxd-backend`;
+}
+
+/** Log the stack in use, and say so when it is not the manifest's own name. */
+function logStackChoice(ctx, params, stack) {
+  ctx.log(`  = CloudFormation stack: ${stack}`);
+  const manifestStack = params && params.stackName;
+  if (manifestStack && manifestStack !== stack) {
+    ctx.log(`  ! manifest names '${manifestStack}'; using '${stack}' ` +
+      '(PROJECT_NAME / AICC_STACK_NAME from deploy.sh wins so both share one stack)');
+  }
+}
+
 const deployCfnBackend = {
   plan(ctx, params) {
-    const stack = params.stackName || `${ctx.project}-acxd-backend`;
+    const stack = resolveStackName(ctx, params);
     const lines = [`deploy CloudFormation stack '${stack}' from ${params.templatePath}`];
     for (const dir of params.lambdaDirs || []) {
       lines.push(`update Lambda code from ${dir}`);
@@ -77,7 +113,8 @@ const deployCfnBackend = {
     return lines;
   },
   async run(ctx, params) {
-    const stack = params.stackName || `${ctx.project}-acxd-backend`;
+    const stack = resolveStackName(ctx, params);
+    logStackChoice(ctx, params, stack);
     if (ctx.env && ctx.env.AICC_CFN_ALREADY_DEPLOYED === '1') {
       if (!ctx.env.WEBHOOK_URL) {
         throw new Error(
@@ -594,6 +631,7 @@ const deployApplication = {
     };
 
     let deploymentId;
+    let aliasRotation = null;
     if (current) {
       try {
         await withLangFallback('UpdateApplicationDeploymentCommand', {
@@ -617,6 +655,13 @@ const deployApplication = {
         });
         deploymentId = created.deploymentId;
         ctx.log(`  + replaced '${environment}' deployment`);
+        aliasRotation = {
+          environment,
+          previousDeploymentId: current.deploymentId,
+          deploymentId,
+          buildId,
+          at: new Date().toISOString(),
+        };
       }
     } else {
       const created = await withLangFallback('CreateApplicationDeploymentCommand', {
@@ -648,8 +693,45 @@ const deployApplication = {
     ctx.state.deploymentId = deploymentId;
     recordResource(ctx.state, 'deployment', deploymentId, { environment });
     ctx.log(`  = deployment ${deploymentId} live (${environment})`);
+    recordAliasRotation(ctx, aliasRotation);
   },
 };
+
+/**
+ * A replaced deployment issues a NEW deployment key, and the Agentic CX block in
+ * the published Connect flow stores that key as `AgentConfiguration.Alias` — the
+ * OLD key still resolves, so Connect silently keeps serving the previous build.
+ * Nothing in the public SDK exposes the key, so the operator has to re-select the
+ * alias (or pass it in). Record it in .deploy-state.json and say it loudly;
+ * deploy.sh reads the same flag in Phase 11 and in its summary.
+ */
+function recordAliasRotation(ctx, rotation) {
+  if (!rotation) {
+    // An in-place promotion keeps the key: clear a flag left by an earlier run.
+    ctx.state.aliasRotated = false;
+    delete ctx.state.aliasRotation;
+    return;
+  }
+  ctx.state.aliasRotated = true;
+  ctx.state.aliasRotation = rotation;
+  const bar = '  ' + '!'.repeat(72);
+  ctx.log(bar);
+  ctx.log('  !! ALIAS ROTATED — the published Contact Flow now points at the OLD build.');
+  ctx.log(`  !! The '${rotation.environment}' deployment could not be updated in place, so it was`);
+  ctx.log(`  !! replaced (${rotation.previousDeploymentId} -> ${rotation.deploymentId}). Replacing a`);
+  ctx.log('  !! deployment issues a new deployment key, and the Agentic CX block still holds');
+  ctx.log('  !! the previous one — which still resolves, to the previous build.');
+  ctx.log('  !! Fix it in the Connect flow designer, exactly:');
+  ctx.log('  !!   1. Open the contact flow that carries the Agentic CX block');
+  ctx.log('  !!   2. Click the block -> Alias dropdown');
+  ctx.log(`  !!   3. Re-select the environment alias (the '${rotation.environment}' entry)`);
+  ctx.log('  !!   4. Save -> Publish');
+  ctx.log('  !! Or non-interactively: ./deploy.sh --rebind-alias <deploymentKey>');
+  ctx.log('  !! (or re-run the deploy with ACXD_ALIAS_ID=<deploymentKey>). The deploymentKey');
+  ctx.log('  !! is NOT in the SDK — read it from the console-internal endpoint');
+  ctx.log('  !! GET /acxd/api/cxn/flowResources?workspaceId=...&applicationId=...&type=deployments');
+  ctx.log(bar);
+}
 
 // ---------------------------------------------------------------------------
 // Connect contact flow import (Classic-style aws cli; D7/D11)
@@ -677,6 +759,12 @@ const importContactFlows = {
       '(requires CONNECT_INSTANCE_ID; Agentic CX block wired manually per WIRING-GUIDE.md)');
   },
   async run(ctx, params) {
+    if (ctx.env.AICC_FLOW_IMPORT_BY_DEPLOY_SH === '1') {
+      // deploy.sh resolves {{HOURS_ARN}} / {{QUEUE_ARN}} / {{*_LAMBDA_ARN}} against
+      // the Connect instance and binds the Agentic CX block itself (Phase 11).
+      ctx.log('  = contact flow import handed to deploy.sh (Phase 11)');
+      return;
+    }
     const instanceId = ctx.env.CONNECT_INSTANCE_ID;
     if (!instanceId) {
       ctx.log('  ! CONNECT_INSTANCE_ID not set — skipping contact flow import.');
@@ -758,6 +846,12 @@ function bindAgenticCx(content, ctx) {
   const hasBlock = (bound.Actions || []).some((a) => a && a.Type === 'ConnectParticipantWithAgenticCX');
   if (hasBlock && !env.ACXD_ALIAS_ID) {
     ctx.log('  ! ACXD_ALIAS_ID not set — the Agentic CX block is imported with alias SELECT_ALIAS_IN_CONSOLE; pick the alias in the block (see WIRING-GUIDE.md).');
+  } else if (hasBlock && ctx.state.aliasRotated) {
+    // The value was read from the console BEFORE this deploy replaced the
+    // deployment, so it is the old key: the flow would resolve to the old build.
+    ctx.log('  ! ACXD_ALIAS_ID was supplied but this deploy REPLACED the deployment — that ' +
+      'value is the OLD deployment key. Re-select the alias in the block (or ' +
+      './deploy.sh --rebind-alias <deploymentKey>) before testing.');
   }
   return bound;
 }
@@ -794,4 +888,5 @@ const STEPS = {
   'import-contact-flows': importContactFlows,
 };
 
-module.exports = { STEPS, listAll, send, normalizeFlowForService, applicationLanguageCodes, bindAgenticCx };
+module.exports = { STEPS, listAll, send, normalizeFlowForService, applicationLanguageCodes,
+                   bindAgenticCx, resolveStackName, resolveAssetPlaceholders };

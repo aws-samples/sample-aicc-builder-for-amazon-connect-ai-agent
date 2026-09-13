@@ -34,6 +34,7 @@ from tools.validate_acxd_flow import (
     GENERATIVE_NODE_TYPES,
     validate_acxd_asset,
 )
+from tools.acxd_runtime_contract import runtime_contract_violations
 from tools.acxd_bundle import ASCII_ONLY_METADATA_FIELDS, load_acxd_bundle
 from tools.acxd_flow_spec import get_acxd_flow_spec
 
@@ -54,6 +55,33 @@ def _capture_family(node_type):
     canonicalizer converts slot-capturing user_input nodes accordingly, so the
     determinism gate compares the capture family, not the spelling."""
     return "user_capture" if node_type in ("user_input", "user_choice") else node_type
+
+
+def _requirement_family(node_type):
+    """The node family that SATISFIES a confirmed plan step.
+
+    On top of the capture family, a message step is satisfied by either
+    ``basic`` or ``generative_text``: the runtime contract realises a generative
+    result message as a templated ``basic`` (generative_text sends nothing on
+    its own — M2), and a node MORE deterministic than planned is never a defect.
+    The reverse — a generative node the user never confirmed — is still caught
+    by DETERMINISM_UNAUTHORIZED_GENERATIVE, which compares raw node types."""
+    family = _capture_family(node_type)
+    return "message" if family in ("basic", "generative_text") else family
+
+
+def _is_builder_owned_plan(plan: dict) -> bool:
+    """System flows (welcome / fallback / follow-up / agent request /
+    escalation …) are built deterministically from the live-verified routing
+    contract; the interview's step list for them describes the behaviour to the
+    user and is not a design the generator follows, so the step-level
+    determinism comparison does not apply."""
+    role = str(plan.get("role") or "operation").strip().lower()
+    try:
+        from tools.acxd_system_flows import is_system_flow_role
+        return bool(is_system_flow_role(role))
+    except Exception:  # pragma: no cover - module optional in isolated tests
+        return role != "operation"
 
 def _is_builtin_slot_type(slot_type: str) -> bool:
     return (slot_type in BUILTIN_SLOT_PRIMITIVES
@@ -441,6 +469,8 @@ def validate_acxd_consistency(
             generated = flows_by_id.get(flow_id)
             if generated is None:
                 continue  # not generated yet — coverage is Task 10's concern
+            if _is_builder_owned_plan(plan):
+                continue  # deterministic system flow: the builder is the contract
             unconfirmed = [s.get("step") for s in plan.get("steps") or []
                            if not s.get("user_confirmed")]
             if unconfirmed:
@@ -449,13 +479,13 @@ def validate_acxd_consistency(
                    f"were never confirmed by the user")
             node_types = {n.get("type") for n in (generated.get("nodes") or {}).values()
                           if isinstance(n, dict)}
-            node_families = {_capture_family(t) for t in node_types}
+            node_families = {_requirement_family(t) for t in node_types}
             confirmed_generative = {
                 s.get("node_type") for s in plan.get("steps") or []
                 if s.get("user_confirmed") and s.get("determinism") == "generative"
             }
             for s in plan.get("steps") or []:
-                if s.get("user_confirmed") and _capture_family(s.get("node_type")) not in node_families:
+                if s.get("user_confirmed") and _requirement_family(s.get("node_type")) not in node_families:
                     _v(out, "DETERMINISM_MISSING_NODE", f"flows[{flow_id}]",
                        f"confirmed step {s.get('step')} requires a "
                        f"{s.get('node_type')!r} node but none exists in the flow")
@@ -466,8 +496,90 @@ def validate_acxd_consistency(
                        f"never confirmed in the interview")
 
     _check_backend_for_live_data_requests(bundle, spec, out)
+    _check_runtime_contract(bundle, out)
 
     return out
+
+
+#: Flow roles the application's system events imply (R2/R3). Anything else is
+#: an operation flow, and operation flows are the ones that must hand back to
+#: the follow-up flow instead of ending the session.
+_SYSTEM_FLOW_EVENTS = ("welcome", "fallback", "unknown", "escalation", "followUp",
+                       "follow_up", "followup")
+
+
+def _flow_roles(bundle: dict, follow_up_flow_id: str) -> dict[str, str]:
+    """flowId -> role, derived from the application's system-event wiring."""
+    roles: dict[str, str] = {}
+    application = bundle.get("application")
+    settings = (application or {}).get("settings") or {} if isinstance(application, dict) else {}
+    for event, ref in (settings.get("defaultFlows") or {}).items():
+        flow_id = ref.get("flowId") if isinstance(ref, dict) else ref
+        if isinstance(flow_id, str):
+            roles[flow_id] = str(event)
+    for event, flow_id in (settings.get("lifecycleHooks") or {}).items():
+        if isinstance(flow_id, str) and flow_id not in roles:
+            roles[flow_id] = str(event)
+    roles.setdefault(follow_up_flow_id, "follow_up")
+    return roles
+
+
+def _check_runtime_contract(bundle: dict, out: list) -> None:
+    """The cross-asset half of the live runtime contract (S5, D3, M1, RX).
+
+    The flow-scope half (S1 vocabulary, S2/S3, R6/R7, D4, A2) already ran per
+    flow inside ``validate_acxd_asset``; these rules need the slot type
+    documents, the data requests, the bundle's flow ids and the workspace
+    context variables, which only exist here.
+    """
+    flows = [f for f in (bundle.get("flows") or []) if isinstance(f, dict)]
+    if not flows:
+        return
+    slot_type_docs = {
+        str(doc["slotTypeId"]): doc
+        for doc in (bundle.get("slot_types") or [])
+        if isinstance(doc, dict) and doc.get("slotTypeId")
+    }
+    data_requests = {
+        str(doc["dataRequestId"]): doc
+        for doc in (bundle.get("data_requests") or [])
+        if isinstance(doc, dict) and doc.get("dataRequestId")
+    }
+    context_variables = {
+        str(doc["name"]) for doc in (bundle.get("context_variables") or [])
+        if isinstance(doc, dict) and doc.get("name")
+    }
+    flow_ids = {str(f["flowId"]) for f in flows if f.get("flowId")}
+    roles = _flow_roles(bundle, "FollowUpFlow")
+    # A flow may legitimately redirect to a system flow the bundle does not
+    # carry: Welcome / Fallback / Escalation are workspace default-behaviour
+    # flows, wired by the application rather than generated here. A default
+    # flow that is missing altogether is already reported as
+    # APP_DEFAULT_FLOW_MISSING, so counting them as known targets keeps RX
+    # pointed at what it was built for — a near-miss on an operation flow id.
+    known_targets = flow_ids | set(roles)
+    follow_up_flow_id = next(
+        (fid for fid in sorted(known_targets) if fid.lower().startswith("followup")),
+        "FollowUpFlow")
+    escalation_flow_id = next(
+        (fid for fid in sorted(known_targets) if fid.lower().startswith("escalation")),
+        "EscalationFlow")
+
+    for index, flow in enumerate(flows):
+        flow_id = str(flow.get("flowId") or "")
+        for problem in runtime_contract_violations(
+            flow,
+            role=roles.get(flow_id, "operation"),
+            slot_type_ids=set(slot_type_docs),
+            slot_type_docs=slot_type_docs,
+            data_requests=data_requests,
+            flow_ids=known_targets,
+            context_variables=context_variables,
+            follow_up_flow_id=follow_up_flow_id,
+            escalation_flow_id=escalation_flow_id,
+            scope="cross",
+        ):
+            _v(out, "RUNTIME_CONTRACT", f"flows[{index}]", problem)
 
 
 def format_report(violations: list[Violation]) -> str:
@@ -563,15 +675,22 @@ def _acxd_determinism_count_violations(bundle: dict, spec: Optional[dict]) -> li
         generated = flows_by_id.get(flow_id)
         if generated is None:
             continue
+        if _is_builder_owned_plan(plan):
+            continue  # deterministic system flow: the builder is the contract
         steps = [step for step in (plan.get("steps") or []) if isinstance(step, dict)]
         confirmed = [step for step in steps if step.get("user_confirmed")]
+        raw_counts = Counter(
+            node.get("type")
+            for node in (generated.get("nodes") or {}).values()
+            if isinstance(node, dict) and node.get("type")
+        )
         node_counts = Counter(
-            _capture_family(node.get("type"))
+            _requirement_family(node.get("type"))
             for node in (generated.get("nodes") or {}).values()
             if isinstance(node, dict) and node.get("type")
         )
         required_counts = Counter(
-            _capture_family(step.get("node_type")) for step in confirmed if step.get("node_type")
+            _requirement_family(step.get("node_type")) for step in confirmed if step.get("node_type")
         )
         for node_type, required_count in required_counts.items():
             actual_count = node_counts.get(node_type, 0)
@@ -585,8 +704,8 @@ def _acxd_determinism_count_violations(bundle: dict, spec: Optional[dict]) -> li
             step.get("node_type") for step in confirmed
             if step.get("determinism") == "generative" and step.get("node_type")
         )
-        for node_type in sorted(set(node_counts) & GENERATIVE_NODE_TYPES):
-            actual_count = node_counts[node_type]
+        for node_type in sorted(set(raw_counts) & GENERATIVE_NODE_TYPES):
+            actual_count = raw_counts[node_type]
             allowed_count = confirmed_generative.get(node_type, 0)
             if actual_count > allowed_count:
                 violations.append(Violation(

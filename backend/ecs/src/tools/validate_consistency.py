@@ -2477,8 +2477,12 @@ def _d9_backend_auth_checks(bundle: dict, session_id: str) -> list[dict]:
             continue                      # a customer-supplied endpoint: its auth is theirs
         calls_backend = True
         headers = webhook.get("headers") or []
+        # Two spellings reference a Secret: the live contract
+        # `{Name:NLX.Secret}` (D1, 2026-09-13) and the legacy `{{secrets.Name}}`
+        # an older session may still carry (repaired on bundle load).
         has_secret_header = any(
-            isinstance(h, dict) and h.get("key") and "{{secrets." in str(h.get("value") or "")
+            isinstance(h, dict) and h.get("key")
+            and re.search(r"\{[A-Za-z0-9_]+:NLX\.Secret\}|\{\{secrets\.", str(h.get("value") or ""))
             for h in headers)
         if not has_secret_header:
             issues.append(_d9_issue(

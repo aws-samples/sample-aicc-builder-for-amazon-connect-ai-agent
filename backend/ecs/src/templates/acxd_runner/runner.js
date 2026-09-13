@@ -14,6 +14,11 @@
  *   ACXD_REGION         (ACXD API region; default us-west-2)
  *   AWS_DEFAULT_REGION  (default: ap-northeast-2)
  *   CONNECT_INSTANCE_ID (optional; enables contact flow import)
+ *   PROJECT_NAME        (optional; deploy.sh exports it — the CloudFormation
+ *                        stack becomes ${PROJECT_NAME}-stack, so a runner-only
+ *                        deploy reuses deploy.sh's backend instead of creating
+ *                        a second one)
+ *   AICC_STACK_NAME     (optional; exact stack name, wins over PROJECT_NAME)
  *
  * This file is static and tested — regenerating a bundle never changes it.
  * The per-project behavior lives entirely in deploy-manifest.json.
@@ -47,7 +52,12 @@ function log(line) {
 function makeCtx(manifest, bundleDir, { client, sdk, acxdRegion } = {}) {
   return {
     bundleDir,
-    project: manifest.project,
+    // deploy.sh derives every resource name from PROJECT_NAME and exports it
+    // (with AICC_STACK_NAME) before calling the runner, so the two entry points
+    // name the same stack and the same contact flow. Without this a runner-only
+    // deploy silently used the manifest's default project and stood up a second
+    // backend (live 2026-09-13).
+    project: process.env.PROJECT_NAME || manifest.project,
     // AWS region for CloudFormation / Connect calls. Live: with no manifest
     // region and a Seoul default profile, the Connect import ran against
     // ap-northeast-2 while the instance (and the ACXD workspace) lived in
@@ -66,7 +76,16 @@ function makeCtx(manifest, bundleDir, { client, sdk, acxdRegion } = {}) {
 
 async function cmdDeploy(args, bundleDir) {
   const manifest = loadManifest(path.join(bundleDir, args.manifest));
-  log(`AICC Builder ACXD deploy — project '${manifest.project}', ${manifest.steps.length} step(s)`);
+  const project = process.env.PROJECT_NAME || manifest.project;
+  log(`AICC Builder ACXD deploy — project '${project}', ${manifest.steps.length} step(s)`);
+  if (project !== manifest.project) {
+    log(`  (PROJECT_NAME=${project} overrides the manifest's '${manifest.project}')`);
+  } else if (!process.env.PROJECT_NAME && !process.env.AICC_STACK_NAME) {
+    // deploy.sh always exports these; a bare runner invocation does not, and
+    // then it deploys its own '<manifest project>-stack'.
+    log(`  Runner-only deploy: CloudFormation stack '${manifest.project}-stack'. To share ` +
+        "deploy.sh's backend, export PROJECT_NAME (or AICC_STACK_NAME) first.");
+  }
 
   if (args.dryRun) {
     log('DRY RUN — no changes will be made.\n');
@@ -107,6 +126,13 @@ async function cmdDeploy(args, bundleDir) {
   if (ctx.state.applicationId) {
     log(`   Application: ${ctx.state.applicationName} (${ctx.state.applicationId})`);
   }
+  if (ctx.state.aliasRotated) {
+    log('   ⚠️  The deployment was REPLACED, so its deployment key (the Agentic CX block\'s');
+    log('      Alias) changed. Re-select the alias in the block and publish, or run');
+    log('      ./deploy.sh --rebind-alias <deploymentKey> — until then Connect serves the');
+    log('      previous build. See WIRING-GUIDE.md.');
+    return 0;
+  }
   log('   Next: wire the Agentic CX block in your Connect contact flow (see WIRING-GUIDE.md).');
   return 0;
 }
@@ -122,8 +148,18 @@ function cmdStatus(bundleDir) {
     log(`  - ${r.kind}: ${r.id}${r.name ? ` (${r.name})` : ''}`);
   }
   if (state.webhookUrl) log(`  webhook base URL: ${state.webhookUrl}`);
+  if (state.cfnStackName) log(`  CloudFormation stack: ${state.cfnStackName}`);
   if (state.buildId) log(`  latest build: ${state.buildId}`);
   if (state.deploymentId) log(`  latest deployment: ${state.deploymentId}`);
+  if (state.aliasRotated) {
+    const r = state.aliasRotation || {};
+    log('  ⚠️  alias rotated: the last deploy REPLACED the ' +
+        `'${r.environment || 'development'}' deployment ` +
+        `(${r.previousDeploymentId || '?'} -> ${r.deploymentId || state.deploymentId})`);
+    log('      The Agentic CX block still holds the previous deployment key, so Connect');
+    log('      serves the PREVIOUS build. Re-select the alias in the block and publish, or');
+    log('      run ./deploy.sh --rebind-alias <deploymentKey>.');
+  }
   return 0;
 }
 

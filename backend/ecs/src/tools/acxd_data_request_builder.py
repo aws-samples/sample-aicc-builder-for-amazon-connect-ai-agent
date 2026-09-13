@@ -15,6 +15,18 @@ Modes (D3/D8):
                    (reused unchanged, D8). ``{WEBHOOK_URL}`` is resolved
                    by the deploy runner from the CFN stack output.
   - ``mcp``      → ``mcp`` webhook referencing an AgentCore MCP gateway.
+
+Two contract facts about ``external`` webhooks were established live in a
+Connect Customer account (2026-09-13) and are enforced here:
+
+  - a header takes a Secret as ``{<SecretName>:NLX.Secret}``. The
+    ``{{secrets.<name>}}`` spelling is sent to the backend VERBATIM (the API
+    Gateway answers 403). ``dynamic: true`` means "the caller supplies this
+    value per request", never "resolve a secret", so it is never set.
+  - the runtime resolves the secret only from
+    ``webhook.environments.{production,development}``; a top-level
+    ``url``/``headers`` pair alone also produced 403. Both environment blocks
+    are emitted with the same URL and headers as the top level.
 """
 
 from __future__ import annotations
@@ -135,16 +147,20 @@ def build_data_request(plan: dict) -> dict:
         # demo tables and seed rows, which is what a PoC customer means by
         # "샘플 DB로 만들어줘". Routing that to 'mock' produced an agent that
         # answered with one hard-coded string and nothing deployable.
+        url = f"{{WEBHOOK_URL}}{tool_path}"
+        # A header takes a SECRET, not a variable — that is the whole point
+        # of Secrets in ACXD. The reference syntax is {<SecretName>:NLX.Secret}
+        # and the runtime resolves it from the ENVIRONMENT blocks below; the
+        # runner creates the secret from an env var so no credential ever
+        # enters the bundle.
+        headers = auth_headers_for(plan)
         webhook = {
             "implementation": "external",
             "method": plan.get("http_method", "POST"),
-            "url": f"{{WEBHOOK_URL}}{tool_path}",
-            # A header takes a SECRET, not a variable — that is the whole point
-            # of Secrets in ACXD. When the interview captured an auth header we
-            # emit a {{secrets.<name>}} reference; the deploy runner creates the
-            # secret from an env var so no credential ever enters the bundle.
-            "headers": auth_headers_for(plan),
+            "url": url,
+            "headers": headers,
             "sendContext": True,
+            "environments": webhook_environments(url, headers),
         }
     elif mode == "mcp":
         webhook = {
@@ -365,6 +381,42 @@ def helper_flow_data_request_ref(data_request_id: str) -> dict:
 BACKEND_API_KEY_SECRET = "BackendApiKey"
 BACKEND_API_KEY_HEADER = "x-api-key"
 
+#: The environment blocks every external webhook must carry (D2, live 2026-09-13).
+WEBHOOK_ENVIRONMENTS = ("production", "development")
+
+#: Legacy secret spelling this builder used to emit. Sent to the backend
+#: verbatim → 403. Rewritten wherever it is still found (see
+#: ``repair_data_request_contract``).
+_LEGACY_SECRET_RE = re.compile(r"^\{\{secrets\.([A-Za-z0-9_]+)\}\}$")
+
+#: The live secret reference syntax: ``{<SecretName>:NLX.Secret}``.
+_SECRET_REFERENCE_RE = re.compile(r"^\{([A-Za-z0-9_]+):NLX\.Secret\}$")
+
+
+def secret_reference(secret_name: str) -> str:
+    """Header value that resolves to the ACXD Secret *secret_name*."""
+    return f"{{{secret_name}:NLX.Secret}}"
+
+
+def is_secret_reference(value: object) -> bool:
+    """True for a header value that references a Secret in either spelling."""
+    text = str(value or "")
+    return bool(_SECRET_REFERENCE_RE.match(text) or _LEGACY_SECRET_RE.match(text))
+
+
+def webhook_environments(url: str, headers: Optional[list] = None) -> dict:
+    """The ``production``/``development`` blocks a webhook needs.
+
+    D2 (live 2026-09-13): a Secret referenced only from the top-level
+    ``headers`` is not resolved — the runtime reads the environment the
+    application is deployed to. Both blocks carry the same URL and headers, so
+    a development and a production deployment behave identically.
+    """
+    return {
+        env: {"url": url, **({"headers": [dict(h) for h in headers]} if headers else {})}
+        for env in WEBHOOK_ENVIRONMENTS
+    }
+
 
 def _calls_generated_backend(plan: dict) -> bool:
     """True when the integration targets the backend this bundle deploys
@@ -387,14 +439,20 @@ def auth_secret_name_for(plan: dict) -> Optional[str]:
 
 
 def auth_headers_for(plan: dict) -> list:
-    """Header list for a webhook: a Secret reference, never a literal value."""
+    """Header list for a webhook: a Secret reference, never a literal value.
+
+    Shape is fixed by the live contract (D1): ``sensitive: true`` marks the
+    value as a credential, and ``dynamic`` is deliberately absent — it means
+    "the caller supplies this per request", which for a secret leaves the
+    header empty.
+    """
     header = str(plan.get("auth_header") or "").strip()
     if not header and _calls_generated_backend(plan):
         header = BACKEND_API_KEY_HEADER
     secret = auth_secret_name_for(plan)
     if not header or not secret:
         return []
-    return [{"key": header, "value": f"{{{{secrets.{secret}}}}}"}]
+    return [{"key": header, "value": secret_reference(secret), "sensitive": True}]
 
 
 def build_secret_assets(spec: dict) -> list:
@@ -429,4 +487,46 @@ def build_secret_assets(spec: dict) -> list:
             "valueEnv": f"ACXD_SECRET_{secret.upper()}",
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Load-time repair (assets generated before the live contract was known)
+# ---------------------------------------------------------------------------
+
+def repair_data_request_contract(doc: object) -> object:
+    """Mechanical D1/D2 repairs applied whenever a bundle is loaded.
+
+    A session generated before this contract was known still holds
+    ``{{secrets.X}}`` headers and no environment blocks in S3; deploying it
+    yields a 403 on every tool call. The generator is fixed at the source, so
+    this is a safety net, not the fix. Behaviour is never changed:
+
+    - ``{{secrets.X}}`` header value → ``{X:NLX.Secret}`` + ``sensitive: true``
+    - ``dynamic`` dropped from a header that carries a Secret
+    - ``environments.{production,development}`` back-filled from the top-level
+      ``url``/``headers`` when absent
+    """
+    if not isinstance(doc, dict):
+        return doc
+    webhook = doc.get("webhook")
+    if not isinstance(webhook, dict) or webhook.get("implementation") != "external":
+        return doc
+
+    headers = webhook.get("headers")
+    if isinstance(headers, list):
+        for header in headers:
+            if not isinstance(header, dict):
+                continue
+            legacy = _LEGACY_SECRET_RE.match(str(header.get("value") or ""))
+            if legacy:
+                header["value"] = secret_reference(legacy.group(1))
+            if is_secret_reference(header.get("value")):
+                header["sensitive"] = True
+                header.pop("dynamic", None)
+
+    url = webhook.get("url")
+    if url and not isinstance(webhook.get("environments"), dict):
+        webhook["environments"] = webhook_environments(
+            str(url), headers if isinstance(headers, list) else None)
+    return doc
 

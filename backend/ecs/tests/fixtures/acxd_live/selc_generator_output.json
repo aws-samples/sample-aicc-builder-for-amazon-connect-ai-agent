@@ -1,0 +1,2207 @@
+{
+  "_provenance": "Amazon Connect Customer / Agentic CX Designer live validation in a sandbox Connect Customer account (ap-northeast-2, 2026-09-13). 'flows_broken' is the UNMODIFIED ACXD flow generator output that built and deployed cleanly and then failed at runtime; the assets below are the ones the working application ended up with. Every runtime-contract rule in tools/acxd_runtime_contract.py was derived from the diff between this generator output and the flows that finally held a conversation.",
+  "flows_broken": {
+    "CreateCleaningReservation": {
+      "flowId": "CreateCleaningReservation",
+      "description": "Collect privacy consent, gather cleaning reservation details, quote total price, create the reservation and confirm.",
+      "aiDescription": "Operation flow for creating an air-conditioner cleaning reservation. First obtains privacy consent (deterministic compliance gate). If refused, informs the customer and escalates to a human agent. If consented, collects install location type, quantity, product type, service type, then calls getCleaningPrice to compute total price (unit price times quantity), collects a requested date, creates the reservation via createCleaningReservation, and reads back the reservation number and total amount before ending.",
+      "mainLanguageCode": "ko-KR",
+      "languageCodes": [
+        "ko-KR"
+      ],
+      "slotTypes": [
+        {
+          "name": "privacyConsent",
+          "type": "text",
+          "sensitive": false,
+          "examples": [
+            "예",
+            "아니오"
+          ],
+          "aiDescription": "Customer yes/no answer to privacy collection consent."
+        },
+        {
+          "name": "installLocationType",
+          "type": "installLocationType",
+          "sensitive": false,
+          "examples": [
+            "사업장",
+            "가정"
+          ],
+          "aiDescription": "Where the equipment is installed: business or home."
+        },
+        {
+          "name": "quantity",
+          "type": "number",
+          "sensitive": false,
+          "examples": [
+            "2"
+          ],
+          "aiDescription": "Number of units to clean."
+        },
+        {
+          "name": "productType",
+          "type": "productType",
+          "sensitive": false,
+          "examples": [
+            "벽걸이실내기"
+          ],
+          "aiDescription": "Type of air-conditioner product."
+        },
+        {
+          "name": "serviceType",
+          "type": "serviceType",
+          "sensitive": false,
+          "examples": [
+            "종합세척"
+          ],
+          "aiDescription": "Type of cleaning service requested."
+        },
+        {
+          "name": "requestedDate",
+          "type": "text",
+          "sensitive": false,
+          "examples": [
+            "2026-10-01"
+          ],
+          "aiDescription": "Desired reservation date."
+        }
+      ],
+      "contextVariables": [
+        {
+          "name": "totalAmount",
+          "type": "number"
+        }
+      ],
+      "nodes": {
+        "11111111-1111-4111-8111-111111111111": {
+          "nodeId": "11111111-1111-4111-8111-111111111111",
+          "type": "start",
+          "childNodes": [
+            {
+              "nodeId": "22222222-2222-4222-8222-222222222222",
+              "name": "toConsent"
+            }
+          ]
+        },
+        "22222222-2222-4222-8222-222222222222": {
+          "nodeId": "22222222-2222-4222-8222-222222222222",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "예약 진행을 위해 개인정보 수집·이용에 동의가 필요합니다. 수집 항목은 예약 접수 및 서비스 제공 목적으로만 사용됩니다. 동의하시겠습니까? 예 또는 아니오로 말씀해 주세요."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "text"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "33333333-3333-4333-8333-333333333333",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "22222222-2222-4222-8222-222222222222",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "33333333-3333-4333-8333-333333333333": {
+          "nodeId": "33333333-3333-4333-8333-333333333333",
+          "type": "choice",
+          "childNodes": [
+            {
+              "nodeId": "44444444-4444-4444-8444-444444444444",
+              "name": "consented",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "slot",
+                    "name": "privacyConsent"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "예"
+                  }
+                }
+              ]
+            },
+            {
+              "nodeId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              "name": "refused",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "slot",
+                    "name": "privacyConsent"
+                  },
+                  "operator": "neq",
+                  "right": {
+                    "type": "constant",
+                    "value": "예"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc": {
+          "nodeId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "type": "escalate",
+          "messages": [
+            {
+              "type": "text",
+              "body": "개인정보 수집·이용에 동의하지 않으시면 예약 진행이 어렵습니다. 상담원에게 연결해 드리겠습니다."
+            }
+          ],
+          "metadata": {
+            "stateModifications": [
+              {
+                "type": "context",
+                "name": "failReason",
+                "modification": "set",
+                "value": {
+                  "type": "constant",
+                  "value": "privacy_consent_refused"
+                }
+              }
+            ]
+          },
+          "childNodes": [
+            {
+              "nodeId": "20202020-2020-4020-8020-202020202020",
+              "name": "next"
+            }
+          ]
+        },
+        "44444444-4444-4444-8444-444444444444": {
+          "nodeId": "44444444-4444-4444-8444-444444444444",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "설치 장소 유형을 말씀해 주세요. 사업장 또는 가정 중 선택해 주세요."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "installLocationType"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "55555555-5555-4555-8555-555555555555",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "44444444-4444-4444-8444-444444444444",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "55555555-5555-4555-8555-555555555555": {
+          "nodeId": "55555555-5555-4555-8555-555555555555",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "세척할 대수를 말씀해 주세요."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "number"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "66666666-6666-4666-8666-666666666666",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "55555555-5555-4555-8555-555555555555",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "66666666-6666-4666-8666-666666666666": {
+          "nodeId": "66666666-6666-4666-8666-666666666666",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "제품 유형을 말씀해 주세요. 예: 벽걸이실내기."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "productType"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "77777777-7777-4777-8777-777777777777",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "66666666-6666-4666-8666-666666666666",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "77777777-7777-4777-8777-777777777777": {
+          "nodeId": "77777777-7777-4777-8777-777777777777",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "서비스 유형을 말씀해 주세요. 예: 종합세척."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "serviceType"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "88888888-8888-4888-8888-888888888888",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "77777777-7777-4777-8777-777777777777",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "88888888-8888-4888-8888-888888888888": {
+          "nodeId": "88888888-8888-4888-8888-888888888888",
+          "type": "data_request",
+          "dataRequests": [
+            {
+              "dataRequestId": "getCleaningPrice"
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "99999999-9999-4999-8999-999999999999",
+              "name": "success",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "success"
+                  }
+                }
+              ]
+            },
+            {
+              "nodeId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              "name": "error",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "error"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee": {
+          "nodeId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "type": "escalate",
+          "messages": [
+            {
+              "type": "text",
+              "body": "가격 조회 중 오류가 발생했습니다. 상담원에게 연결해 드리겠습니다."
+            }
+          ],
+          "metadata": {
+            "stateModifications": [
+              {
+                "type": "context",
+                "name": "failReason",
+                "modification": "set",
+                "value": {
+                  "type": "constant",
+                  "value": "price_lookup_failed"
+                }
+              }
+            ]
+          },
+          "childNodes": [
+            {
+              "nodeId": "20202020-2020-4020-8020-202020202020",
+              "name": "next"
+            }
+          ]
+        },
+        "99999999-9999-4999-8999-999999999999": {
+          "nodeId": "99999999-9999-4999-8999-999999999999",
+          "type": "define",
+          "metadata": {
+            "define": {
+              "name": "totalAmount",
+              "value": {
+                "type": "variable",
+                "name": "getCleaningPrice.totalAmount"
+              }
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "name": "toQuote"
+            }
+          ]
+        },
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {
+          "nodeId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "type": "basic",
+          "messages": [
+            {
+              "type": "text",
+              "body": "조회된 예상 총액은 {getCleaningPrice.totalAmount:NLX.Variable}원입니다. (단가 × 대수 {quantity:NLX.Slot}대 기준)"
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              "name": "toDate"
+            }
+          ]
+        },
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb": {
+          "nodeId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "희망하시는 예약일을 말씀해 주세요. 예: 2026-10-01."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "text"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd": {
+          "nodeId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "type": "data_request",
+          "dataRequests": [
+            {
+              "dataRequestId": "createCleaningReservation"
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+              "name": "success",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "success"
+                  }
+                }
+              ]
+            },
+            {
+              "nodeId": "10101010-1010-4010-8010-101010101010",
+              "name": "error",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "error"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "10101010-1010-4010-8010-101010101010": {
+          "nodeId": "10101010-1010-4010-8010-101010101010",
+          "type": "escalate",
+          "messages": [
+            {
+              "type": "text",
+              "body": "예약 접수 중 오류가 발생했습니다. 상담원에게 연결해 드리겠습니다."
+            }
+          ],
+          "metadata": {
+            "stateModifications": [
+              {
+                "type": "context",
+                "name": "failReason",
+                "modification": "set",
+                "value": {
+                  "type": "constant",
+                  "value": "reservation_create_failed"
+                }
+              }
+            ]
+          },
+          "childNodes": [
+            {
+              "nodeId": "20202020-2020-4020-8020-202020202020",
+              "name": "next"
+            }
+          ]
+        },
+        "ffffffff-ffff-4fff-8fff-ffffffffffff": {
+          "nodeId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          "type": "basic",
+          "messages": [
+            {
+              "type": "text",
+              "body": "예약이 접수되었습니다. 예약번호는 {createCleaningReservation.reservationId:NLX.Variable}이며, 총액은 {getCleaningPrice.totalAmount:NLX.Variable}원입니다. 감사합니다."
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "20202020-2020-4020-8020-202020202020",
+              "name": "toEnd"
+            }
+          ]
+        },
+        "20202020-2020-4020-8020-202020202020": {
+          "nodeId": "20202020-2020-4020-8020-202020202020",
+          "type": "end"
+        }
+      },
+      "metadata": {}
+    },
+    "DeliveryStatusByOrderNumber": {
+      "flowId": "DeliveryStatusByOrderNumber",
+      "description": "Collects a 10-digit order number and reports delivery status and estimated delivery date. Redirects to customer info lookup when not found, escalates on system error.",
+      "aiDescription": "Operation flow that collects a 10-digit order number, calls getDeliveryStatusByOrderNumber, and branches on the result. On success it delivers the delivery status and estimated delivery date in natural language. When the order is not found it redirects to the customer information lookup flow. On a system error it escalates to a human agent.",
+      "mainLanguageCode": "ko-KR",
+      "languageCodes": [
+        "ko-KR"
+      ],
+      "slotTypes": [
+        {
+          "name": "orderNumber",
+          "type": "orderNumber",
+          "sensitive": false,
+          "examples": [
+            "1234567890"
+          ],
+          "aiDescription": "A 10-digit numeric order number"
+        }
+      ],
+      "nodes": {
+        "11111111-1111-4111-8111-111111111111": {
+          "nodeId": "11111111-1111-4111-8111-111111111111",
+          "type": "start",
+          "childNodes": [
+            {
+              "nodeId": "22222222-2222-4222-8222-222222222222",
+              "name": "toAsk"
+            }
+          ]
+        },
+        "22222222-2222-4222-8222-222222222222": {
+          "nodeId": "22222222-2222-4222-8222-222222222222",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "배송 조회를 도와드리겠습니다. 주문번호 10자리를 말씀해 주세요."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "orderNumber"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "33333333-3333-4333-8333-333333333333",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "77777777-7777-4777-8777-777777777777",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "33333333-3333-4333-8333-333333333333": {
+          "nodeId": "33333333-3333-4333-8333-333333333333",
+          "type": "data_request",
+          "dataRequests": [
+            {
+              "dataRequestId": "getDeliveryStatusByOrderNumber"
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "44444444-4444-4444-8444-444444444444",
+              "name": "success",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "success"
+                  }
+                }
+              ]
+            },
+            {
+              "nodeId": "88888888-8888-4888-8888-888888888888",
+              "name": "error",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "error"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "44444444-4444-4444-8444-444444444444": {
+          "nodeId": "44444444-4444-4444-8444-444444444444",
+          "type": "choice",
+          "childNodes": [
+            {
+              "nodeId": "55555555-5555-4555-8555-555555555555",
+              "name": "found",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "variable",
+                    "name": "getDeliveryStatusByOrderNumber.deliveryStatus"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "66666666-6666-4666-8666-666666666666",
+              "name": "notFound",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "variable",
+                    "name": "getDeliveryStatusByOrderNumber.deliveryStatus"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "55555555-5555-4555-8555-555555555555": {
+          "nodeId": "55555555-5555-4555-8555-555555555555",
+          "type": "generative_text",
+          "metadata": {
+            "generativeText": {
+              "prompt": "고객에게 주문번호 {orderNumber:NLX.Slot}의 배송 상태와 예상 배송일을 친절하고 자연스러운 한국어로 안내하세요. 배송 상태는 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}, 예상 배송일은 {getDeliveryStatusByOrderNumber.expectedDeliveryDate:NLX.Variable} 입니다. 조회된 사실만 전달하고 추측하지 마세요."
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "99999999-9999-4999-8999-999999999999",
+              "name": "toEnd"
+            }
+          ]
+        },
+        "66666666-6666-4666-8666-666666666666": {
+          "nodeId": "66666666-6666-4666-8666-666666666666",
+          "type": "redirect",
+          "messages": [
+            {
+              "type": "text",
+              "body": "해당 주문번호로 조회되지 않아, 고객정보로 주문을 확인해 드리겠습니다."
+            }
+          ],
+          "metadata": {
+            "redirect": {
+              "flowId": "SearchOrderNumberByCustomerInfo",
+              "type": "flow"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "99999999-9999-4999-8999-999999999999",
+              "name": "next"
+            }
+          ]
+        },
+        "77777777-7777-4777-8777-777777777777": {
+          "nodeId": "77777777-7777-4777-8777-777777777777",
+          "type": "basic",
+          "messages": [
+            {
+              "type": "text",
+              "body": "주문번호를 확인하지 못했습니다. 10자리 숫자로 된 주문번호를 다시 말씀해 주세요."
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "22222222-2222-4222-8222-222222222222",
+              "name": "retry"
+            }
+          ]
+        },
+        "88888888-8888-4888-8888-888888888888": {
+          "nodeId": "88888888-8888-4888-8888-888888888888",
+          "type": "escalate",
+          "messages": [
+            {
+              "type": "text",
+              "body": "시스템 오류로 조회가 어려워 상담사에게 연결해 드리겠습니다. 잠시만 기다려 주세요."
+            }
+          ],
+          "metadata": {
+            "stateModifications": [
+              {
+                "type": "context",
+                "name": "failReason",
+                "modification": "set",
+                "value": {
+                  "type": "constant",
+                  "value": "delivery_lookup_system_error"
+                }
+              }
+            ]
+          },
+          "childNodes": [
+            {
+              "nodeId": "99999999-9999-4999-8999-999999999999",
+              "name": "next"
+            }
+          ]
+        },
+        "99999999-9999-4999-8999-999999999999": {
+          "nodeId": "99999999-9999-4999-8999-999999999999",
+          "type": "end"
+        }
+      },
+      "metadata": {},
+      "contextVariables": []
+    },
+    "EscalationFlow": {
+      "flowId": "EscalationFlow",
+      "description": "Passes collected customer info and failReason to contact attributes, checks operating hours, and transfers to a human agent queue. Outside hours, plays a message and ends.",
+      "aiDescription": "Escalation flow for selc-aicc. Announces the handoff to the customer, forwards previously collected information and the failure reason to the contact flow via context state modifications, then transfers the conversation to a human agent queue. Used when the customer requests an agent, after repeated failures, complaints, refund or claim requests, when the AI cannot handle the request, on system errors, when order info is not found, or when the customer declines the personal information consent.",
+      "mainLanguageCode": "ko-KR",
+      "languageCodes": [
+        "ko-KR"
+      ],
+      "slotTypes": [],
+      "contextVariables": [
+        {
+          "name": "failReason",
+          "type": "text"
+        }
+      ],
+      "nodes": {
+        "a1b2c3d4-0001-4a1b-9c2d-000000000001": {
+          "nodeId": "a1b2c3d4-0001-4a1b-9c2d-000000000001",
+          "type": "start",
+          "childNodes": [
+            {
+              "nodeId": "a1b2c3d4-0002-4a1b-9c2d-000000000002",
+              "name": "start"
+            }
+          ]
+        },
+        "a1b2c3d4-0002-4a1b-9c2d-000000000002": {
+          "nodeId": "a1b2c3d4-0002-4a1b-9c2d-000000000002",
+          "type": "basic",
+          "messages": [
+            {
+              "type": "text",
+              "body": "상담사를 연결해드리겠습니다. 이전에 전달해 주신 정보는 상담사에게 자동 전달됩니다."
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "a1b2c3d4-0003-4a1b-9c2d-000000000003",
+              "name": "toEscalate"
+            }
+          ]
+        },
+        "a1b2c3d4-0003-4a1b-9c2d-000000000003": {
+          "nodeId": "a1b2c3d4-0003-4a1b-9c2d-000000000003",
+          "type": "escalate",
+          "messages": [
+            {
+              "type": "text",
+              "body": "지금 상담사에게 연결하고 있습니다. 잠시만 기다려 주세요."
+            }
+          ],
+          "metadata": {
+            "stateModifications": [
+              {
+                "type": "context",
+                "name": "failReason",
+                "modification": "set",
+                "value": {
+                  "type": "variable",
+                  "name": "failReason"
+                }
+              }
+            ]
+          },
+          "childNodes": [
+            {
+              "nodeId": "a1b2c3d4-0004-4a1b-9c2d-000000000004",
+              "name": "next"
+            }
+          ]
+        },
+        "a1b2c3d4-0004-4a1b-9c2d-000000000004": {
+          "nodeId": "a1b2c3d4-0004-4a1b-9c2d-000000000004",
+          "type": "end"
+        }
+      },
+      "metadata": {}
+    },
+    "FallbackFlow": {
+      "flowId": "FallbackFlow",
+      "description": "Fallback flow that re-guides the customer when intent is not recognized, and escalates to a human agent after repeated failures.",
+      "aiDescription": "Handles situations where the AI cannot understand the customer's intent. It generates a natural re-guidance message and increments a retry counter. After three failed attempts it redirects to the escalation flow so a human agent can help.",
+      "mainLanguageCode": "ko-KR",
+      "languageCodes": [
+        "ko-KR"
+      ],
+      "slotTypes": [],
+      "contextVariables": [
+        {
+          "name": "fallbackAttempts",
+          "type": "number"
+        }
+      ],
+      "nodes": {
+        "a0000000-0000-4000-8000-000000000001": {
+          "nodeId": "a0000000-0000-4000-8000-000000000001",
+          "type": "start",
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000002",
+              "name": "toInit"
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000002": {
+          "nodeId": "a0000000-0000-4000-8000-000000000002",
+          "type": "define",
+          "metadata": {
+            "define": {
+              "name": "fallbackAttempts",
+              "value": {
+                "type": "variable",
+                "name": "fallbackAttempts",
+                "modification": "increment"
+              }
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000003",
+              "name": "toCheck"
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000003": {
+          "nodeId": "a0000000-0000-4000-8000-000000000003",
+          "type": "choice",
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000005",
+              "name": "escalateOnThirdFailure",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "variable",
+                    "name": "fallbackAttempts"
+                  },
+                  "operator": "gte",
+                  "right": {
+                    "type": "constant",
+                    "value": 3
+                  }
+                }
+              ]
+            },
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000004",
+              "name": "reguide",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "variable",
+                    "name": "fallbackAttempts"
+                  },
+                  "operator": "lt",
+                  "right": {
+                    "type": "constant",
+                    "value": 3
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000004": {
+          "nodeId": "a0000000-0000-4000-8000-000000000004",
+          "type": "generative_text",
+          "metadata": {
+            "generativeText": {
+              "prompt": "고객의 요청을 이해하지 못한 상황입니다. 정중하고 자연스러운 한국어로 이해하지 못했음을 안내하고, 무엇을 도와드릴지 다시 한 번 여쭤보세요. 예시로 배송 조회, 세탁 가격 문의, 예약 등을 짧게 언급해 주세요."
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000006",
+              "name": "end"
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000005": {
+          "nodeId": "a0000000-0000-4000-8000-000000000005",
+          "type": "redirect",
+          "metadata": {
+            "redirect": {
+              "flowId": "EscalationFlow",
+              "type": "flow"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000006",
+              "name": "end"
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000006": {
+          "nodeId": "a0000000-0000-4000-8000-000000000006",
+          "type": "end"
+        }
+      },
+      "metadata": {}
+    },
+    "GetCleaningPrice": {
+      "flowId": "GetCleaningPrice",
+      "description": "Looks up cleaning service unit price by product type and service type. Called during the price guidance step of the reservation flow.",
+      "aiDescription": "Operation flow that collects the product type and service type from the customer, calls the getCleaningPrice data request, and reports the exact cleaning service unit price. Deterministic throughout; price is reported precisely from the data request response. If the price lookup fails, the customer is informed and control returns to the caller.",
+      "mainLanguageCode": "ko-KR",
+      "languageCodes": [
+        "ko-KR"
+      ],
+      "slotTypes": [
+        {
+          "name": "productType",
+          "type": "productType",
+          "sensitive": false,
+          "examples": [
+            "벽걸이실내기",
+            "스탠드",
+            "시스템에어컨",
+            "천장형"
+          ],
+          "aiDescription": "Air conditioner product type to clean"
+        },
+        {
+          "name": "serviceType",
+          "type": "serviceType",
+          "sensitive": false,
+          "examples": [
+            "종합세척",
+            "기본세척"
+          ],
+          "aiDescription": "Type of cleaning service selected"
+        }
+      ],
+      "nodes": {
+        "3f5a1c20-1111-4a10-8b01-000000000001": {
+          "nodeId": "3f5a1c20-1111-4a10-8b01-000000000001",
+          "type": "start",
+          "childNodes": [
+            {
+              "nodeId": "3f5a1c20-1111-4a10-8b01-000000000002",
+              "name": "toProductType"
+            }
+          ]
+        },
+        "3f5a1c20-1111-4a10-8b01-000000000002": {
+          "nodeId": "3f5a1c20-1111-4a10-8b01-000000000002",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "세척 단가를 조회할 제품유형을 알려주세요. (예: 벽걸이실내기, 스탠드, 시스템에어컨, 천장형)"
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "productType"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "3f5a1c20-1111-4a10-8b01-000000000003",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "3f5a1c20-1111-4a10-8b01-000000000002",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "3f5a1c20-1111-4a10-8b01-000000000003": {
+          "nodeId": "3f5a1c20-1111-4a10-8b01-000000000003",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "원하시는 서비스유형을 알려주세요. (예: 종합세척, 기본세척)"
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "serviceType"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "3f5a1c20-1111-4a10-8b01-000000000004",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "3f5a1c20-1111-4a10-8b01-000000000003",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "3f5a1c20-1111-4a10-8b01-000000000004": {
+          "nodeId": "3f5a1c20-1111-4a10-8b01-000000000004",
+          "type": "data_request",
+          "dataRequests": [
+            {
+              "dataRequestId": "getCleaningPrice"
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "3f5a1c20-1111-4a10-8b01-000000000005",
+              "name": "success",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "success"
+                  }
+                }
+              ]
+            },
+            {
+              "nodeId": "3f5a1c20-1111-4a10-8b01-000000000006",
+              "name": "error",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "error"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "3f5a1c20-1111-4a10-8b01-000000000005": {
+          "nodeId": "3f5a1c20-1111-4a10-8b01-000000000005",
+          "type": "basic",
+          "messages": [
+            {
+              "type": "text",
+              "body": "{productType:NLX.Slot} {serviceType:NLX.Slot} 세척 단가는 {getCleaningPrice.price:NLX.Variable}원입니다."
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "3f5a1c20-1111-4a10-8b01-000000000007",
+              "name": "toEnd"
+            }
+          ]
+        },
+        "3f5a1c20-1111-4a10-8b01-000000000006": {
+          "nodeId": "3f5a1c20-1111-4a10-8b01-000000000006",
+          "type": "basic",
+          "messages": [
+            {
+              "type": "text",
+              "body": "죄송합니다. 지금은 세척 단가를 조회할 수 없습니다. 잠시 후 다시 시도해 주세요."
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "3f5a1c20-1111-4a10-8b01-000000000007",
+              "name": "toEnd"
+            }
+          ]
+        },
+        "3f5a1c20-1111-4a10-8b01-000000000007": {
+          "nodeId": "3f5a1c20-1111-4a10-8b01-000000000007",
+          "type": "end"
+        }
+      },
+      "metadata": {},
+      "contextVariables": []
+    },
+    "SearchOrderByCustomerInfo": {
+      "flowId": "SearchOrderByCustomerInfo",
+      "description": "Find an order number from customer name, phone and address, then redirect to delivery lookup or escalation.",
+      "aiDescription": "Collects the customer name, phone number and address for a caller who does not know their order number, calls the searchOrderNumberByCustomerInfo data request to locate the order, and branches deterministically: on a found order it redirects to the delivery status flow, and when no order is found it sets failReason and redirects to the escalation flow.",
+      "mainLanguageCode": "ko-KR",
+      "languageCodes": [
+        "ko-KR"
+      ],
+      "slotTypes": [
+        {
+          "name": "customerName",
+          "type": "text",
+          "sensitive": false,
+          "examples": [
+            "홍길동"
+          ],
+          "aiDescription": "The customer full name."
+        },
+        {
+          "name": "phoneNumber",
+          "type": "phoneNumber",
+          "sensitive": true,
+          "examples": [
+            "010-1234-5678"
+          ],
+          "aiDescription": "The customer mobile phone number in 010-XXXX-XXXX format."
+        },
+        {
+          "name": "address",
+          "type": "text",
+          "sensitive": true,
+          "examples": [
+            "서울시 강남구 ..."
+          ],
+          "aiDescription": "The customer delivery address."
+        }
+      ],
+      "contextVariables": [
+        {
+          "name": "failReason",
+          "type": "text"
+        }
+      ],
+      "nodes": {
+        "a0000000-0000-4000-8000-000000000001": {
+          "nodeId": "a0000000-0000-4000-8000-000000000001",
+          "type": "start",
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000002",
+              "name": "toName"
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000002": {
+          "nodeId": "a0000000-0000-4000-8000-000000000002",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "주문번호를 모르시는군요. 주문을 찾아드리기 위해 몇 가지 정보를 여쭤볼게요. 먼저 고객님 성함을 말씀해 주세요."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "text"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000003",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000002",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000003": {
+          "nodeId": "a0000000-0000-4000-8000-000000000003",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "감사합니다. 이제 010-XXXX-XXXX 형식으로 전화번호를 말씀해 주세요."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "phoneNumber"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000004",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000003",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000004": {
+          "nodeId": "a0000000-0000-4000-8000-000000000004",
+          "type": "user_choice",
+          "messages": [
+            {
+              "type": "text",
+              "body": "마지막으로 배송지 주소를 말씀해 주세요."
+            }
+          ],
+          "metadata": {
+            "choice": {
+              "source": "slotType",
+              "slotTypeId": "text"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000005",
+              "name": "captured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000004",
+              "name": "notCaptured",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "captured_flow"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000005": {
+          "nodeId": "a0000000-0000-4000-8000-000000000005",
+          "type": "data_request",
+          "messages": [
+            {
+              "type": "text",
+              "body": "입력하신 정보로 주문을 조회하고 있어요. 잠시만 기다려 주세요."
+            }
+          ],
+          "dataRequests": [
+            {
+              "dataRequestId": "searchOrderNumberByCustomerInfo"
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000006",
+              "name": "success",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "success"
+                  }
+                }
+              ]
+            },
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000008",
+              "name": "error",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "node_status"
+                  },
+                  "operator": "eq",
+                  "right": {
+                    "type": "constant",
+                    "value": "error"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000006": {
+          "nodeId": "a0000000-0000-4000-8000-000000000006",
+          "type": "choice",
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000007",
+              "name": "found",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "variable",
+                    "name": "searchOrderNumberByCustomerInfo.orderNumber"
+                  },
+                  "operator": "exists"
+                }
+              ]
+            },
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000008",
+              "name": "notFound",
+              "conditions": [
+                {
+                  "left": {
+                    "type": "variable",
+                    "name": "searchOrderNumberByCustomerInfo.orderNumber"
+                  },
+                  "operator": "not_exists"
+                }
+              ]
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000007": {
+          "nodeId": "a0000000-0000-4000-8000-000000000007",
+          "type": "redirect",
+          "messages": [
+            {
+              "type": "text",
+              "body": "주문번호 {searchOrderNumberByCustomerInfo.orderNumber:NLX.Variable} 를 찾았어요. 배송조회로 이어드릴게요."
+            }
+          ],
+          "metadata": {
+            "redirect": {
+              "flowId": "DeliveryStatusByOrderNumber",
+              "type": "flow"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000010",
+              "name": "done"
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000008": {
+          "nodeId": "a0000000-0000-4000-8000-000000000008",
+          "type": "define",
+          "metadata": {
+            "define": {
+              "name": "failReason",
+              "value": {
+                "type": "constant",
+                "value": "주문정보미조회"
+              }
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000009",
+              "name": "toEscalationRedirect"
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000009": {
+          "nodeId": "a0000000-0000-4000-8000-000000000009",
+          "type": "redirect",
+          "messages": [
+            {
+              "type": "text",
+              "body": "입력하신 정보로는 주문을 찾지 못했어요. 상담사에게 연결해 드릴게요."
+            }
+          ],
+          "metadata": {
+            "redirect": {
+              "flowId": "EscalationFlow",
+              "type": "flow"
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a0000000-0000-4000-8000-000000000010",
+              "name": "done"
+            }
+          ]
+        },
+        "a0000000-0000-4000-8000-000000000010": {
+          "nodeId": "a0000000-0000-4000-8000-000000000010",
+          "type": "end"
+        }
+      },
+      "metadata": {}
+    },
+    "WelcomeFlow": {
+      "flowId": "WelcomeFlow",
+      "description": "Greets the customer and routes to delivery status lookup or air-conditioner cleaning reservation based on detected intent.",
+      "aiDescription": "Welcome flow for selc-aicc. Greets the customer, then uses a generative journey to understand the customer's intent from free speech and route to either the delivery status lookup flow or the air-conditioner cleaning reservation flow. The application handles the greeting and conversation.",
+      "mainLanguageCode": "ko-KR",
+      "languageCodes": [
+        "ko-KR"
+      ],
+      "slotTypes": [],
+      "contextVariables": [
+        {
+          "name": "routedIntent",
+          "type": "text"
+        }
+      ],
+      "nodes": {
+        "a1b2c3d4-1111-4a2b-8c3d-000000000001": {
+          "nodeId": "a1b2c3d4-1111-4a2b-8c3d-000000000001",
+          "type": "start",
+          "childNodes": [
+            {
+              "nodeId": "a1b2c3d4-2222-4a2b-8c3d-000000000002",
+              "name": "toGreeting",
+              "conditions": []
+            }
+          ]
+        },
+        "a1b2c3d4-2222-4a2b-8c3d-000000000002": {
+          "nodeId": "a1b2c3d4-2222-4a2b-8c3d-000000000002",
+          "type": "basic",
+          "messages": [
+            {
+              "type": "text",
+              "body": "안녕하세요, 삼성전자로지텍입니다. 무엇을 도와드릴까요?"
+            }
+          ],
+          "childNodes": [
+            {
+              "nodeId": "c3f6e4a2-3d45-4e78-a0f1-23456789abcd",
+              "name": "toJourney",
+              "conditions": []
+            }
+          ]
+        },
+        "c3f6e4a2-3d45-4e78-a0f1-23456789abcd": {
+          "nodeId": "c3f6e4a2-3d45-4e78-a0f1-23456789abcd",
+          "type": "generative_journey",
+          "metadata": {
+            "generativeJourney": {
+              "prompt": "당신은 삼성전자로지텍 고객 응대 에이전트입니다. 고객의 자유로운 발화에서 의도를 파악하세요. 의도가 배송 조회(주문/택배/배송 상태 문의)라면 DeliveryStatusByOrderNumber 도구를 호출하여 배송 조회 플로우로 이동하세요. 의도가 에어컨 세척 예약(청소/세척/방문 예약 문의)이라면 CreateCleaningReservation 도구를 호출하여 세척 예약 플로우로 이동하세요. 의도가 모호하면 정중히 다시 질문하여 명확히 하세요. 라우팅이 완료되면 대화를 마칩니다.",
+              "modelType": "anthropic.claude-haiku-4-5",
+              "tools": [
+                {
+                  "type": "flow",
+                  "flowId": "DeliveryStatusByOrderNumber"
+                },
+                {
+                  "type": "flow",
+                  "flowId": "CreateCleaningReservation"
+                }
+              ],
+              "exitConditions": [
+                {
+                  "name": "routed",
+                  "prompt": "고객의 의도가 파악되어 해당 플로우로 라우팅이 완료된 경우"
+                }
+              ],
+              "maxSteps": 6
+            }
+          },
+          "childNodes": [
+            {
+              "nodeId": "a1b2c3d4-3333-4a2b-8c3d-000000000003",
+              "name": "done",
+              "conditions": []
+            }
+          ]
+        },
+        "a1b2c3d4-3333-4a2b-8c3d-000000000003": {
+          "nodeId": "a1b2c3d4-3333-4a2b-8c3d-000000000003",
+          "type": "end"
+        }
+      },
+      "metadata": {}
+    }
+  },
+  "slot_types": {
+    "installLocationType": {
+      "slotTypeId": "installLocationType",
+      "values": [
+        {
+          "value": "사업장"
+        },
+        {
+          "value": "가정"
+        }
+      ],
+      "sensitive": false,
+      "metadata": {}
+    },
+    "orderNumber": {
+      "slotTypeId": "orderNumber",
+      "values": [
+        {
+          "value": "1234567890"
+        }
+      ],
+      "sensitive": false,
+      "metadata": {
+        "constraints": {
+          "regex": "^[0-9]{10}$",
+          "min_length": 10,
+          "max_length": 10
+        }
+      }
+    },
+    "phoneNumber": {
+      "slotTypeId": "phoneNumber",
+      "values": [
+        {
+          "value": "010-1234-5678"
+        }
+      ],
+      "sensitive": true,
+      "metadata": {
+        "constraints": {
+          "regex": "^010-[0-9]{4}-[0-9]{4}$"
+        }
+      }
+    },
+    "productType": {
+      "slotTypeId": "productType",
+      "values": [
+        {
+          "value": "벽걸이실내기"
+        },
+        {
+          "value": "스탠드"
+        },
+        {
+          "value": "시스템에어컨"
+        },
+        {
+          "value": "천장형"
+        }
+      ],
+      "sensitive": false,
+      "metadata": {}
+    },
+    "serviceType": {
+      "slotTypeId": "serviceType",
+      "values": [
+        {
+          "value": "종합세척"
+        },
+        {
+          "value": "기본세척"
+        }
+      ],
+      "sensitive": false,
+      "metadata": {}
+    },
+    "yesNo": {
+      "slotTypeId": "yesNo",
+      "values": [
+        {
+          "value": "예",
+          "synonyms": [
+            "네",
+            "응",
+            "그래",
+            "그렇습니다",
+            "좋아요",
+            "동의",
+            "동의합니다",
+            "동의해요",
+            "있어요",
+            "있습니다",
+            "맞아요",
+            "해주세요"
+          ]
+        },
+        {
+          "value": "아니요",
+          "synonyms": [
+            "아니오",
+            "아뇨",
+            "아니",
+            "싫어요",
+            "없어요",
+            "없습니다",
+            "괜찮아요",
+            "동의하지 않아요",
+            "동의 안 해요",
+            "안 해요",
+            "됐어요"
+          ]
+        }
+      ],
+      "sensitive": false,
+      "metadata": {}
+    }
+  },
+  "data_requests": {
+    "createCleaningReservation": {
+      "dataRequestId": "createCleaningReservation",
+      "type": "object",
+      "webhook": {
+        "implementation": "external",
+        "method": "POST",
+        "url": "{WEBHOOK_URL}/tools/create_cleaning_reservation",
+        "headers": [
+          {
+            "key": "x-api-key",
+            "value": "{BackendApiKey:NLX.Secret}",
+            "sensitive": true
+          }
+        ],
+        "sendContext": true,
+        "environments": {
+          "production": {
+            "url": "{WEBHOOK_URL}/tools/create_cleaning_reservation",
+            "headers": [
+              {
+                "key": "x-api-key",
+                "value": "{BackendApiKey:NLX.Secret}",
+                "sensitive": true
+              }
+            ]
+          },
+          "development": {
+            "url": "{WEBHOOK_URL}/tools/create_cleaning_reservation",
+            "headers": [
+              {
+                "key": "x-api-key",
+                "value": "{BackendApiKey:NLX.Secret}",
+                "sensitive": true
+              }
+            ]
+          }
+        }
+      },
+      "responseSchema": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "true when the business outcome succeeded; false with errorCode/message otherwise"
+          },
+          "errorCode": {
+            "type": "string",
+            "description": "Machine-readable outcome code when success is false (e.g. NOT_FOUND, VALIDATION_ERROR)"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable outcome message when success is false"
+          },
+          "reservationId": {
+            "type": "string"
+          },
+          "reservationDate": {
+            "type": "string"
+          },
+          "totalAmount": {
+            "type": "number",
+            "description": "(unitPrice quantity)"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "CONFIRMED",
+              "PENDING"
+            ]
+          }
+        },
+        "required": [
+          "success",
+          "reservationId",
+          "reservationDate",
+          "totalAmount",
+          "status"
+        ]
+      },
+      "sensitive": false,
+      "requestSchema": {
+        "type": "object",
+        "properties": {
+          "privacyConsent": {
+            "type": "boolean",
+            "description": "(true ) (REQUIRED)"
+          },
+          "customerName": {
+            "type": "string",
+            "description": "(REQUIRED)"
+          },
+          "phoneNumber": {
+            "type": "string",
+            "description": "(010-XXXX-XXXX ) (REQUIRED)"
+          },
+          "address": {
+            "type": "string",
+            "description": "(REQUIRED)"
+          },
+          "installLocationType": {
+            "type": "string"
+          },
+          "productType": {
+            "type": "string",
+            "description": "(REQUIRED)"
+          },
+          "quantity": {
+            "type": "number",
+            "description": "(REQUIRED)"
+          },
+          "serviceType": {
+            "type": "string",
+            "description": "(REQUIRED)"
+          },
+          "requestedDate": {
+            "type": "string",
+            "description": "(YYYY-MM-DD) (REQUIRED)"
+          }
+        },
+        "required": [
+          "privacyConsent",
+          "customerName",
+          "phoneNumber",
+          "address",
+          "productType",
+          "quantity",
+          "serviceType",
+          "requestedDate"
+        ]
+      }
+    },
+    "getCleaningPrice": {
+      "dataRequestId": "getCleaningPrice",
+      "type": "object",
+      "webhook": {
+        "implementation": "external",
+        "method": "POST",
+        "url": "{WEBHOOK_URL}/tools/get_cleaning_price",
+        "headers": [
+          {
+            "key": "x-api-key",
+            "value": "{BackendApiKey:NLX.Secret}",
+            "sensitive": true
+          }
+        ],
+        "sendContext": true,
+        "environments": {
+          "production": {
+            "url": "{WEBHOOK_URL}/tools/get_cleaning_price",
+            "headers": [
+              {
+                "key": "x-api-key",
+                "value": "{BackendApiKey:NLX.Secret}",
+                "sensitive": true
+              }
+            ]
+          },
+          "development": {
+            "url": "{WEBHOOK_URL}/tools/get_cleaning_price",
+            "headers": [
+              {
+                "key": "x-api-key",
+                "value": "{BackendApiKey:NLX.Secret}",
+                "sensitive": true
+              }
+            ]
+          }
+        }
+      },
+      "responseSchema": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "true when the business outcome succeeded; false with errorCode/message otherwise"
+          },
+          "errorCode": {
+            "type": "string",
+            "description": "Machine-readable outcome code when success is false (e.g. NOT_FOUND, VALIDATION_ERROR)"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable outcome message when success is false"
+          },
+          "unitPrice": {
+            "type": "number"
+          },
+          "currency": {
+            "type": "string",
+            "description": "(KRW )"
+          }
+        },
+        "required": [
+          "success",
+          "unitPrice",
+          "currency"
+        ]
+      },
+      "sensitive": false,
+      "requestSchema": {
+        "type": "object",
+        "properties": {
+          "productType": {
+            "type": "string",
+            "description": "(REQUIRED)"
+          },
+          "serviceType": {
+            "type": "string",
+            "description": "(REQUIRED)"
+          }
+        },
+        "required": [
+          "productType",
+          "serviceType"
+        ]
+      }
+    },
+    "getDeliveryStatusByOrderNumber": {
+      "dataRequestId": "getDeliveryStatusByOrderNumber",
+      "type": "object",
+      "webhook": {
+        "implementation": "external",
+        "method": "POST",
+        "url": "{WEBHOOK_URL}/tools/get_delivery_status_by_order_number",
+        "headers": [
+          {
+            "key": "x-api-key",
+            "value": "{BackendApiKey:NLX.Secret}",
+            "sensitive": true
+          }
+        ],
+        "sendContext": true,
+        "environments": {
+          "production": {
+            "url": "{WEBHOOK_URL}/tools/get_delivery_status_by_order_number",
+            "headers": [
+              {
+                "key": "x-api-key",
+                "value": "{BackendApiKey:NLX.Secret}",
+                "sensitive": true
+              }
+            ]
+          },
+          "development": {
+            "url": "{WEBHOOK_URL}/tools/get_delivery_status_by_order_number",
+            "headers": [
+              {
+                "key": "x-api-key",
+                "value": "{BackendApiKey:NLX.Secret}",
+                "sensitive": true
+              }
+            ]
+          }
+        }
+      },
+      "responseSchema": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "true when the business outcome succeeded; false with errorCode/message otherwise"
+          },
+          "errorCode": {
+            "type": "string",
+            "description": "Machine-readable outcome code when success is false (e.g. NOT_FOUND, VALIDATION_ERROR)"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable outcome message when success is false"
+          },
+          "orderNumber": {
+            "type": "string"
+          },
+          "customerName": {
+            "type": "string"
+          },
+          "deliveryStatus": {
+            "type": "string"
+          },
+          "expectedDeliveryDate": {
+            "type": "string",
+            "description": "(YYYY-MM-DD)"
+          }
+        },
+        "required": [
+          "success",
+          "orderNumber",
+          "customerName",
+          "deliveryStatus",
+          "expectedDeliveryDate"
+        ]
+      },
+      "sensitive": false,
+      "description": "(10 ) [ACXD external Data Request {WEBHOOK_URL}/tools/get_delivery_status_by_order_number]",
+      "requestSchema": {
+        "type": "object",
+        "properties": {
+          "orderNumber": {
+            "type": "string",
+            "description": "( 10 ) (REQUIRED)"
+          }
+        },
+        "required": [
+          "orderNumber"
+        ]
+      }
+    },
+    "searchOrderNumberByCustomerInfo": {
+      "dataRequestId": "searchOrderNumberByCustomerInfo",
+      "type": "object",
+      "webhook": {
+        "implementation": "external",
+        "method": "POST",
+        "url": "{WEBHOOK_URL}/tools/search_order_number_by_customer_info",
+        "headers": [
+          {
+            "key": "x-api-key",
+            "value": "{BackendApiKey:NLX.Secret}",
+            "sensitive": true
+          }
+        ],
+        "sendContext": true,
+        "environments": {
+          "production": {
+            "url": "{WEBHOOK_URL}/tools/search_order_number_by_customer_info",
+            "headers": [
+              {
+                "key": "x-api-key",
+                "value": "{BackendApiKey:NLX.Secret}",
+                "sensitive": true
+              }
+            ]
+          },
+          "development": {
+            "url": "{WEBHOOK_URL}/tools/search_order_number_by_customer_info",
+            "headers": [
+              {
+                "key": "x-api-key",
+                "value": "{BackendApiKey:NLX.Secret}",
+                "sensitive": true
+              }
+            ]
+          }
+        }
+      },
+      "responseSchema": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "true when the business outcome succeeded; false with errorCode/message otherwise"
+          },
+          "errorCode": {
+            "type": "string",
+            "description": "Machine-readable outcome code when success is false (e.g. NOT_FOUND, VALIDATION_ERROR)"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable outcome message when success is false"
+          },
+          "orderNumber": {
+            "type": "string"
+          },
+          "orderDate": {
+            "type": "string",
+            "description": "(YYYY-MM-DD)"
+          }
+        },
+        "required": [
+          "success",
+          "orderNumber",
+          "orderDate"
+        ]
+      },
+      "sensitive": false,
+      "requestSchema": {
+        "type": "object",
+        "properties": {
+          "customerName": {
+            "type": "string",
+            "description": "(REQUIRED)"
+          },
+          "phoneNumber": {
+            "type": "string",
+            "description": "(010-XXXX-XXXX ) (REQUIRED)"
+          },
+          "address": {
+            "type": "string",
+            "description": "(REQUIRED)"
+          }
+        },
+        "required": [
+          "customerName",
+          "phoneNumber",
+          "address"
+        ]
+      }
+    }
+  },
+  "context_variables": [
+    "customerPhone"
+  ],
+  "flow_ids": [
+    "CreateCleaningReservation",
+    "DeliveryStatusByOrderNumber",
+    "EscalationFlow",
+    "FallbackFlow",
+    "FollowUpFlow",
+    "GetCleaningPrice",
+    "RequestAgentFlow",
+    "SearchOrderByCustomerInfo",
+    "WelcomeFlow"
+  ]
+}
