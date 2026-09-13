@@ -602,3 +602,46 @@ def test_ai_prompt_unknown_variable_is_rewritten_to_a_custom_attribute():
     assert any("Custom.channel" in w for w in result["warnings"])
     clean = lint_ai_prompt("{{$.toolConfigurationList}} and {{$.Custom.x}}")
     assert clean["fixes_applied"] == [] and clean["unknown_variables"] == []
+
+
+def test_cors_headers_mapped_by_integration_are_declared_in_method_responses():
+    """Live (GreenCart, 2026-09-13): the model declared
+    'Access-Control-All-Methods' (typo) while mapping 'Access-Control-Allow-Methods';
+    API Gateway rejected the OPTIONS method and the whole stack rolled back."""
+    from tools.merge_infrastructure import _fix_cors_response_headers
+
+    tpl = """Resources:
+  RequestReturnOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-All-Methods: true
+  GetOrderStatus:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: GET
+      Integration:
+        Type: AWS_PROXY
+      MethodResponses:
+        - StatusCode: 200
+  Bucket:
+    Type: AWS::S3::Bucket
+"""
+    out = _fix_cors_response_headers(tpl)
+    assert "method.response.header.Access-Control-All-Methods" not in out
+    assert out.count("method.response.header.Access-Control-Allow-Methods: true") == 1
+    assert out.count("method.response.header.Access-Control-Allow-Origin: true") == 1
+    assert _fix_cors_response_headers(out) == out          # idempotent
+    assert "Bucket:\n    Type: AWS::S3::Bucket" in out       # untouched neighbours

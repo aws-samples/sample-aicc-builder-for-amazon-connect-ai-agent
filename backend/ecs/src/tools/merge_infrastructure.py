@@ -13,6 +13,7 @@ Usage by Orchestrator:
 
 import json
 import logging
+import difflib
 import re
 from strands import tool
 
@@ -510,6 +511,96 @@ def _fix_common_property_hallucinations(yaml_str: str) -> str:
     return yaml_str
 
 
+_METHOD_TYPE_RE = re.compile(r'^(\s+)Type:\s*[\'"]?AWS::ApiGateway::Method[\'"]?\s*$', re.M)
+_RESP_HEADER_RE = re.compile(r'^(\s+)method\.response\.header\.([\w-]+):\s*(.*?)\s*$', re.M)
+
+
+def _fix_cors_response_headers(yaml_str: str) -> str:
+    """Every header an ApiGateway::Method's IntegrationResponses maps must be
+    declared in its MethodResponses, or API Gateway rejects the method with
+    "Invalid mapping expression parameter specified: method.response.header.X"
+    and the whole stack rolls back. Live (GreenCart): the model declared
+    `Access-Control-All-Methods` (typo) while mapping `Access-Control-Allow-Methods`.
+
+    Per method: a declared name that is a near-miss spelling of a mapped one is
+    renamed; a mapped header with no declaration gets `: true` added next to the
+    existing declarations. Text-based, indentation-preserving; never removes.
+    """
+    lines = yaml_str.split("\n")
+    # Locate each Method resource: from its `Type:` line back to the resource
+    # key (one indent level up) and forward to the next key at that indent.
+    type_positions = [i for i, line in enumerate(lines) if _METHOD_TYPE_RE.match(line)]
+    if not type_positions:
+        return yaml_str
+    fixes = 0
+    for type_idx in reversed(type_positions):  # bottom-up so insertions keep earlier indices valid
+        type_indent = len(lines[type_idx]) - len(lines[type_idx].lstrip())
+        start = type_idx
+        while start > 0 and (len(lines[start - 1]) - len(lines[start - 1].lstrip()) >= type_indent
+                             or not lines[start - 1].strip()):
+            start -= 1
+        end = type_idx + 1
+        while end < len(lines) and (not lines[end].strip()
+                                    or len(lines[end]) - len(lines[end].lstrip()) >= type_indent):
+            end += 1
+        block = lines[start:end]
+        # Split the block into the MethodResponses section and everything else.
+        mr_idx = next((k for k, line in enumerate(block) if re.match(r'^\s+MethodResponses:\s*$', line)), None)
+        if mr_idx is None:
+            continue
+        mr_indent = len(block[mr_idx]) - len(block[mr_idx].lstrip())
+        mr_end = mr_idx + 1
+        while mr_end < len(block) and (not block[mr_end].strip()
+                                       or len(block[mr_end]) - len(block[mr_end].lstrip()) > mr_indent):
+            mr_end += 1
+        mapped = {m.group(2) for k, line in enumerate(block) if not (mr_idx <= k < mr_end)
+                  for m in [_RESP_HEADER_RE.match(line)] if m}
+        if not mapped:
+            continue
+        declared_lines = [(k, _RESP_HEADER_RE.match(block[k])) for k in range(mr_idx, mr_end)
+                          if _RESP_HEADER_RE.match(block[k])]
+        declared = {m.group(2) for _, m in declared_lines}
+
+        def _norm(name: str) -> str:
+            return re.sub(r'[^a-z]', '', name.lower())
+
+        # 1) near-miss spellings → the mapped name
+        for k, m in declared_lines:
+            name = m.group(2)
+            if name in mapped:
+                continue
+            for target in mapped:
+                if target in declared:
+                    continue
+                a, b = _norm(name), _norm(target)
+                if a == b or difflib.SequenceMatcher(None, a, b).ratio() >= 0.9:
+                    block[k] = block[k].replace(f"method.response.header.{name}:", f"method.response.header.{target}:", 1)
+                    declared.discard(name); declared.add(target)
+                    logger.info(f"[MERGE] CORS: MethodResponses header '{name}' renamed to mapped '{target}'")
+                    fixes += 1
+                    break
+        # 2) mapped but undeclared → declare
+        missing = sorted(mapped - declared)
+        if missing:
+            if declared_lines:
+                anchor_k, anchor_m = declared_lines[-1]
+                indent = anchor_m.group(1)
+            else:
+                rp = next((k for k in range(mr_idx, mr_end) if re.match(r'^\s+ResponseParameters:\s*$', block[k])), None)
+                if rp is None:
+                    continue  # no ResponseParameters section to extend safely
+                anchor_k = rp
+                indent = " " * (len(block[rp]) - len(block[rp].lstrip()) + 2)
+            for offset, name in enumerate(missing, start=1):
+                block.insert(anchor_k + offset, f"{indent}method.response.header.{name}: true")
+                logger.info(f"[MERGE] CORS: declared missing MethodResponses header '{name}'")
+                fixes += 1
+        lines[start:end] = block
+    if fixes:
+        logger.info(f"[MERGE] CORS response-header declarations fixed: {fixes}")
+    return "\n".join(lines)
+
+
 def _deduplicate_resources(yaml_str: str) -> str:
     """Remove duplicate CloudFormation resource blocks, keeping the first occurrence.
 
@@ -768,6 +859,7 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     merged, merge_info = _merge_at_anchor(base_yaml, fragments)
     final_yaml = _remove_anchor_comment(merged)
     final_yaml = _fix_common_property_hallucinations(final_yaml)
+    final_yaml = _fix_cors_response_headers(final_yaml)
     final_yaml = _fix_qconnect_namespace(final_yaml)
     final_yaml = _fix_rds_env_var_names(final_yaml)
     final_yaml = _fix_inline_handler_name(final_yaml)
