@@ -584,6 +584,16 @@ class DynamoDbConfig(FlexibleBaseModel):
         description="Whether to seed sample data on deployment",
         validation_alias=AliasChoices("include_sample_data", "includeSampleData"),
     )
+    sample_rows: dict[str, list[dict]] = Field(
+        default_factory=dict,
+        description=(
+            "Sample rows the customer supplied, table name -> rows, copied VERBATIM from the "
+            "requirements (every column, exact values). The seeder loads exactly these rows and "
+            "the consistency gate fails the bundle when a row is missing or altered; rows the "
+            "generator invents are only allowed when this is empty."
+        ),
+        validation_alias=AliasChoices("sample_rows", "sampleRows", "sample_data", "sampleData"),
+    )
 
 
 class LambdaConfig(FlexibleBaseModel):
@@ -2421,7 +2431,13 @@ def save_infrastructure_spec(
              "engine": "postgresql", "tables": [{"name": "reservations", "columns": [...]}]}
         dynamodb_config: DynamoDB settings (required when db_type is 'dynamodb').
             {"tables": [{"name": "...", "partition_key": "pk", "sort_key": "sk", "gsi": [...]}],
-             "billing_mode": "PAY_PER_REQUEST", "include_sample_data": true}
+             "billing_mode": "PAY_PER_REQUEST", "include_sample_data": true,
+             "sample_rows": {"<table>": [{"<column>": <value>, ...}, ...]}}
+            sample_rows: when the customer's requirements list sample records (a table of
+            subscribers, orders, patients...), copy them here VERBATIM — every column, exact
+            values, no rounding, no "improved" examples. The infrastructure generator seeds
+            exactly these rows and the review gate fails the bundle when a row is missing or
+            altered, so the live test dialogs in the requirements keep working.
         lambda_config: Lambda function defaults.
             {"runtime": "python3.11", "memory_mb": 256, "timeout_seconds": 30,
              "architectures": ["arm64"], "layers": [], "environment_variables": {}}

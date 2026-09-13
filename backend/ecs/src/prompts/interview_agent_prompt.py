@@ -193,6 +193,11 @@ Phase 2에 진입하면 **가장 먼저** 데이터베이스 타입을 확인하
    - project_name, db_type, region 필수
    - RDS면 rds_config (cluster_arn, secret_arn, database_name, engine, tables)
    - DynamoDB면 dynamodb_config (tables, billing_mode, include_sample_data)
+   - 요구사항 문서에 샘플 데이터 표가 있으면 `dynamodb_config.sample_rows`에
+     **테이블별로 원문 그대로** 기록한다(모든 컬럼, 값 한 글자도 바꾸지 않음 —
+     생년월일·전화번호·금액·날짜 포함). 생성기는 이 행을 그대로 시딩하고, 리뷰
+     게이트는 한 행이라도 빠지거나 바뀌면 번들을 막는다. 문서의 기대 대화가
+     이 값으로 테스트되기 때문이다.
    - lambda_config, api_gateway_config는 기본값 사용 가능 (명시적으로 논의된 것만 override)
 2. `save_operation_spec` — 각 operation의 상세 스펙 저장
 3. `save_session_flow_config` — 세션 레벨 설정 저장
@@ -215,7 +220,13 @@ save_infrastructure_spec(
              "gsi": [{"name": "phone-index", "partition_key": "phoneNumber"}]},
         ],
         "billing_mode": "PAY_PER_REQUEST",
-        "include_sample_data": true
+        "include_sample_data": true,
+        "sample_rows": {
+            "Reservations": [
+                {"reservationId": "R-1001", "phoneNumber": "010-2222-3333", "guestName": "홍길동",
+                 "checkIn": "2026-10-01", "status": "CONFIRMED"}
+            ]
+        }
     },
     api_gateway_config={"stage_name": "prod", "base_path": "/tools"},
     include_customer_phone_lookup=false

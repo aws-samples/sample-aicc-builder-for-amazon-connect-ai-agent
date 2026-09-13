@@ -470,3 +470,52 @@ def test_qsession_env_complete_is_untouched():
         'CONNECT_INSTANCE_ID: ""\n',
         'CONNECT_INSTANCE_ID: ""\n          AI_ASSISTANT_ID: ""\n')
     assert _ensure_qsession_env_vars(complete) == complete
+
+
+def _sample_rows_gate(monkeypatch, tmp_path, template: str):
+    """Run the consistency gate with one infrastructure template and a spec that
+    carries customer-supplied sample rows."""
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
+    import tools.validate_consistency as vc
+    from tools.spec_manager import InfrastructureSpec, DynamoDbConfig
+
+    ispec = InfrastructureSpec.model_construct(
+        project_name="daon", db_type="dynamodb", region="ap-northeast-2",
+        dynamodb_config=DynamoDbConfig.model_construct(
+            tables=[{"name": "subscribers", "partition_key": "phoneNumber"}],
+            sample_rows={"subscribers": [
+                {"phoneNumber": "010-2222-3333", "customerName": "홍길동",
+                 "birthDate": "19900512", "planCode": "STD15", "usedGb": 12.4},
+            ]}),
+    )
+    import tools.spec_manager as sm
+    from tools.spec_manager import OperationSpec
+    op = OperationSpec.model_construct(operation_id="get_plan_info", input_fields=[], output_fields=[], tools=[])
+    monkeypatch.setattr(sm, "get_infrastructure_spec", lambda: ispec)
+    monkeypatch.setattr(vc, "get_all_specs", lambda: {"get_plan_info": op})
+    monkeypatch.setattr(vc, "get_all_tools", lambda: [])
+    monkeypatch.setattr(vc, "list_session_assets",
+                        lambda sid: ["assets/session-x/infrastructure/daon/infrastructure.yaml"])
+    monkeypatch.setattr(vc, "get_asset_from_s3", lambda key: template)
+    return vc.validate_parameter_consistency("session-x")
+
+
+def test_sample_rows_seeded_verbatim_pass(monkeypatch, tmp_path):
+    template = ("Resources:\n  Seeder:\n    Properties:\n      Code: |\n"
+                "        rows = [{'phoneNumber': '010-2222-3333', 'customerName': '홍길동',"
+                " 'birthDate': '19900512', 'planCode': 'STD15', 'usedGb': 12.4}]\n")
+    result = _sample_rows_gate(monkeypatch, tmp_path, template)
+    assert [m for m in result["mismatches"] if m["asset_type"] == "infrastructure"] == []
+
+
+def test_sample_rows_altered_by_the_seeder_is_a_blocking_mismatch(monkeypatch, tmp_path):
+    """Live (Daon, 2026-09-13): the requirements said 홍길동 / 19900512; the seeder
+    shipped 19880312 and the identity check in every test dialog failed."""
+    template = ("Resources:\n  Seeder:\n    Properties:\n      Code: |\n"
+                "        rows = [{'phoneNumber': '010-2222-3333', 'customerName': '홍길동',"
+                " 'birthDate': '19880312', 'planCode': 'STD15', 'usedGb': 12.4}]\n")
+    result = _sample_rows_gate(monkeypatch, tmp_path, template)
+    hits = [m for m in result["mismatches"] if m["asset_type"] == "infrastructure"]
+    assert len(hits) == 1
+    assert "birthDate='19900512'" in hits[0]["issue"]
+    assert hits[0]["operation_id"] == "subscribers"

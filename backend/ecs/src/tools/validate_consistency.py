@@ -1563,6 +1563,40 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
                 if _t_id and _t_code is not None:
                     _check_success_code(_t_id, _t_code)
 
+    # SAMPLE_DATA: rows the customer supplied must be seeded verbatim. The
+    # requirements' test dialogs are written against these values (live: the
+    # seeder "improved" a birth date and every identity check in the PoC
+    # failed). Each scalar value of each supplied row must appear literally
+    # in the merged template; the seeder is inline code, so a text search is
+    # exact enough and independent of how the rows are encoded.
+    if infra_yaml:
+        try:
+            from tools.spec_manager import get_infrastructure_spec as _get_infra_spec
+            _ispec = _get_infra_spec()
+            _ddb = getattr(_ispec, "dynamodb_config", None) if _ispec else None
+            _sample_rows = getattr(_ddb, "sample_rows", None) if _ddb else None
+        except Exception:
+            _sample_rows = None
+        if isinstance(_sample_rows, dict):
+            for _table, _rows in _sample_rows.items():
+                for _idx, _row in enumerate(_rows or []):
+                    if not isinstance(_row, dict):
+                        continue
+                    _missing = [
+                        f"{k}={v!r}" for k, v in _row.items()
+                        if isinstance(v, (str, int, float)) and not isinstance(v, bool)
+                        and str(v).strip() and str(v) not in infra_yaml
+                    ]
+                    if _missing:
+                        mismatches.append({
+                            "operation_id": _table, "field": f"sample_rows[{_idx}]",
+                            "asset_type": "infrastructure",
+                            "issue": f"Customer-supplied sample row {_idx + 1} of table '{_table}' is not "
+                                     f"seeded verbatim: {', '.join(_missing[:6])} not found in the "
+                                     f"CloudFormation template. The requirements' test dialogs use these "
+                                     f"exact values — seed the row as given instead of an invented one.",
+                        })
+
     summary = f"Found {len(mismatches)} mismatches across {len(expected)} operations"
     if mismatches:
         summary += ". Fix by using patch_workspace_file for simple renames, or re-calling the affected generator with modification_request for structural changes."
