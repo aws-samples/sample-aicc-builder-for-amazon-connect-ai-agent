@@ -1964,6 +1964,47 @@ s = open(path).read()
 open(path, 'w').write(s.replace('{{%s}}' % token, value))
 PYEOF
     }
+    # A Lambda block whose function this stack does not have (live: an ACXD
+    # bundle's flow kept a customer-lookup block while the backend had no such
+    # function; the auto-picked first Lambda answered 403 on every contact).
+    # Remove the block and route its callers to its own success transition.
+    bypass_lambda_block() { # placeholder name
+        python3 - "$WORK_FLOW" "$1" <<'PYEOF'
+import sys, json
+path, name = sys.argv[1], sys.argv[2]
+doc = json.load(open(path))
+marker = '{{%s}}' % name
+victims = {a['Identifier']: a for a in doc.get('Actions', [])
+           if marker in json.dumps(a.get('Parameters', {}), ensure_ascii=False)}
+if not victims:
+    sys.exit(0)
+remap = {ident: (a.get('Transitions') or {}).get('NextAction') for ident, a in victims.items()}
+def resolve(target, seen=()):
+    while target in remap and target not in seen:
+        seen += (target,); target = remap[target]
+    return target
+def rewrite(obj):
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            if k == 'NextAction' and isinstance(v, str) and v in remap:
+                obj[k] = resolve(v)
+            else:
+                rewrite(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            rewrite(v)
+doc['Actions'] = [a for a in doc['Actions'] if a['Identifier'] not in victims]
+rewrite(doc)
+if doc.get('StartAction') in remap:
+    doc['StartAction'] = resolve(doc['StartAction'])
+meta = doc.get('Metadata') or {}
+if isinstance(meta.get('ActionMetadata'), dict):
+    for ident in victims:
+        meta['ActionMetadata'].pop(ident, None)
+json.dump(doc, open(path, 'w'), ensure_ascii=False, indent=2)
+print('   bypassed %d Lambda block(s) for {{%s}} (function not in this stack)' % (len(victims), name))
+PYEOF
+    }
 
     # queue / hours menus (lazy-loaded once)
     local QUEUES_JSON="" HOURS_JSON=""
@@ -1980,16 +2021,19 @@ PYEOF
                     value="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${fn}"
                     info "$token -> $fn (auto-resolved from stack)"
                 else
-                    # multiple choice: pick from stack Lambdas
+                    # multiple choice: pick from stack Lambdas. The default is to
+                    # SKIP: guessing a function is what bound an API-key retriever
+                    # to a customer-lookup block (live). Skipping removes the block.
                     _load_stack_lambda_names
-                    local menu=() arns=()
+                    local menu=("Skip — this stack has no '$stem' function; remove the block from the flow") arns=("")
                     for f in $STACK_LAMBDA_NAMES; do
                         menu+=("$f"); arns+=("arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:$f")
                     done
-                    menu+=("Skip (configure manually in console)")
                     choose "Select the Lambda to map to placeholder {{$token}}" 1 "${menu[@]}"
-                    if [ "$CHOICE_VALUE" != "Skip (configure manually in console)" ]; then
+                    if [ "$CHOICE" -gt 1 ]; then
                         value="${arns[$((CHOICE-1))]}"
+                    else
+                        bypass_lambda_block "$token"
                     fi
                 fi
                 ;;
