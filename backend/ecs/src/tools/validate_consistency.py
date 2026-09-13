@@ -2076,6 +2076,55 @@ def _d9_data_request_checks(bundle: dict, session_id: str) -> list[dict]:
     return issues
 
 
+def _d9_open_value_slot_issues(bundle: dict, flow_plan: dict, slot: dict, field_name: str,
+                               operation_id: Optional[str], expected_regex, expected_min,
+                               expected_max) -> list[dict]:
+    """D9-4 for a regex/length-only field: the generated flow must attach the slot
+    as an NLX built-in that carries the constraint. A custom slot type here is
+    the one-item menu the runtime auto-selects (live defect); a built-in with no
+    regex accepts anything."""
+    flow_id = flow_plan.get("flow_id") or flow_plan.get("flowId")
+    generated = next((f for f in (bundle.get("flows") or [])
+                      if isinstance(f, dict) and f.get("flowId") == flow_id), None)
+    if generated is None:
+        return []  # not generated yet — D9-1 reports missing flows
+    slot_name = str(slot.get("name") or "")
+    attached = next((s for s in (generated.get("slotTypes") or [])
+                     if isinstance(s, dict) and s.get("name") == slot_name), None)
+    if attached is None:
+        for variant in _d9_name_variants(slot_name):
+            attached = next((s for s in (generated.get("slotTypes") or [])
+                             if isinstance(s, dict) and str(s.get("name")) in _d9_name_variants(variant)), None)
+            if attached:
+                break
+    if attached is None:
+        return [_d9_issue(
+            "D9-4", f"Flow {flow_id!r} does not attach slot {slot_name!r} for constrained field "
+            f"{field_name!r}", asset_type="flow", field=field_name, operation_id=operation_id)]
+    slot_type = str(attached.get("type") or "")
+    if not slot_type.startswith("NLX."):
+        return [_d9_issue(
+            "D9-4", f"Flow {flow_id!r} slot {slot_name!r} attaches custom slot type {slot_type!r} for an "
+            f"open value; a custom slot type is a value set and a single sample deploys as a one-item "
+            f"menu the runtime auto-selects. Attach an NLX built-in with regex instead",
+            asset_type="flow", field=field_name, operation_id=operation_id)]
+    if slot_type == "NLX.PhoneNumber":
+        return []  # the built-in validates the shape itself
+    if expected_regex:
+        if _d9_regex_canonical(attached.get("regex")) != _d9_regex_canonical(expected_regex):
+            return [_d9_issue(
+                "D9-4", f"Flow {flow_id!r} slot {slot_name!r} regex {attached.get('regex')!r} does not match "
+                f"OperationSpec {field_name!r} regex {expected_regex!r}", asset_type="flow",
+                field=field_name, operation_id=operation_id)]
+        return []
+    if (expected_min is not None or expected_max is not None) and not attached.get("regex"):
+        return [_d9_issue(
+            "D9-4", f"Flow {flow_id!r} slot {slot_name!r} has no regex although OperationSpec "
+            f"{field_name!r} constrains its length ({expected_min}-{expected_max})",
+            asset_type="flow", field=field_name, operation_id=operation_id)]
+    return []
+
+
 def _d9_slot_type_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
     if not flow_spec:
         return [_d9_issue("D9-4", "ACXDFlowSpec is missing; slot constraints cannot be verified", asset_type="slot_type")]
@@ -2114,7 +2163,17 @@ def _d9_slot_type_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
             expected_max = _d9_get(field, "max_length", "maxLength")
             if not any(value is not None and value != [] for value in (expected_enum, expected_regex, expected_min, expected_max)):
                 continue
-            # Task B derives a custom SlotType for every constrained slot: named
+            if not expected_enum:
+                # An OPEN value (regex / length only) is NOT a custom slot type: a
+                # slot type is a value set, and one built from a single sample
+                # deploys as a one-item menu the runtime auto-selects without
+                # asking (live). The contract is an NLX built-in on the flow's
+                # attached slot carrying the field's regex — check that instead.
+                issues.extend(_d9_open_value_slot_issues(
+                    bundle, flow, slot, field_name, operation_id,
+                    expected_regex, expected_min, expected_max))
+                continue
+            # Task B derives a custom SlotType for every ENUM slot: named
             # after the slot when the plan only declared a built-in or generic
             # type ('text', 'enum', …), after the declared type otherwise. Resolve
             # the id with the builder's own rule so D9 validates the emitted
@@ -2124,7 +2183,7 @@ def _d9_slot_type_checks(bundle: dict, flow_spec: Optional[dict]) -> list[dict]:
             slot_type = slot_types.get(type_id)
             if slot_type is None:
                 issues.append(_d9_issue(
-                    "D9-4", f"Constrained field {field_name!r} requires a generated custom slot type; "
+                    "D9-4", f"Enumerated field {field_name!r} requires a generated custom slot type; "
                     f"{type_id or '<missing>'!r} is not available", asset_type="slot_type", field=field_name,
                     operation_id=operation_id,
                 ))

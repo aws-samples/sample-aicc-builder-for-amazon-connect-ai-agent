@@ -73,7 +73,7 @@ def valid_flow_spec() -> dict:
                     {"step": 2, "description": "Look up order", "node_type": "data_request", "determinism": "deterministic", "user_confirmed": True, "data_request_id": "lookupOrder"},
                 ],
                 "slots": [
-                    {"name": "orderNumber", "type": "OrderNumber", "field_name": "orderNumber", "regex": "^[A-Z0-9]{8}$"},
+                    {"name": "orderNumber", "type": "NLX.AlphaNumeric", "field_name": "orderNumber", "regex": "^[A-Z0-9]{8}$"},
                     {"name": "priority", "type": "Priority", "field_name": "priority"},
                 ],
             },
@@ -109,7 +109,9 @@ def valid_bundle() -> dict:
         "mainLanguageCode": "en-US",
         "languageCodes": ["en-US"],
         "slotTypes": [
-            {"name": "orderNumber", "type": "OrderNumber"},
+            # An OPEN value attaches an NLX built-in with the field's regex (live
+            # contract): a one-item custom slot type auto-selects without asking.
+            {"name": "orderNumber", "type": "NLX.AlphaNumeric", "regex": "^[A-Z0-9]{8}$"},
             {"name": "priority", "type": "Priority"},
         ],
         "nodes": {
@@ -153,7 +155,6 @@ def valid_bundle() -> dict:
             _simple_flow("EscalationFlow", "escalate"),
         ],
         "slot_types": [
-            {"slotTypeId": "OrderNumber", "values": [{"value": "placeholder"}], "metadata": {"regex": "^[A-Z0-9]{8}$", "minLength": 8, "maxLength": 8}},
             {"slotTypeId": "Priority", "values": [{"value": "standard"}, {"value": "express"}]},
         ],
         "data_requests": [
@@ -241,7 +242,7 @@ def test_valid_acxd_bundle_passes_all_d9_checks(d9_runner):
         ("D9-1", lambda bundle: bundle["flows"][0]["nodes"][N2]["childNodes"].append({"nodeId": "ghost"}), None, None, "D9-1"),
         ("D9-2", None, lambda spec: spec["flows"][0]["steps"][0].update(user_confirmed=False), None, "D9-2"),
         ("D9-3", lambda bundle: bundle["data_requests"][0]["webhook"].update(url="{WEBHOOK_URL}/tools/missing"), None, None, "D9-3"),
-        ("D9-4", lambda bundle: bundle["slot_types"][0]["metadata"].update(maxLength=7), None, None, "D9-4"),
+        ("D9-4", lambda bundle: bundle["flows"][0]["slotTypes"][0].update(regex="^[A-Z0-9]{7}$"), None, None, "D9-4"),
         ("D9-5", lambda bundle: bundle["knowledge_bases"][0].update(articles=[]), None, None, "D9-5"),
         ("D9-6", lambda bundle: bundle["contact_flows"][0]["Metadata"]["acxdBinding"]["branches"].update(Escalation="MissingAction"), None, None, "D9-6"),
         ("D9-7", lambda bundle: bundle["flows"][0].update(description="한국어 설명"), None, None, "D9-7"),
@@ -334,3 +335,15 @@ def test_d9_8_backend_auth_requires_secret_header_and_api_key_on_methods(monkeyp
     assert not any("'crm'" in m for m in messages)                 # customer endpoint: not ours to judge
     assert any("'GetPriceMethod'" in m for m in messages)
     assert not any("'GetPriceOptions'" in m or "'LookupMethod'" in m for m in messages)
+
+
+def test_d9_4_rejects_a_custom_slot_type_for_an_open_value(d9_runner):
+    """Live (Hanbit, 2026-09-13): the old D9-4 demanded a custom slot type for
+    every constrained field, which is exactly the one-item menu the runtime
+    auto-selects without asking. The contract is an NLX built-in + regex on the
+    attached slot; a custom type there is now the finding."""
+    bundle = valid_bundle()
+    bundle["flows"][0]["slotTypes"][0] = {"name": "orderNumber", "type": "OrderNumber"}
+    bundle["slot_types"].append({"slotTypeId": "OrderNumber", "values": [{"value": "placeholder"}]})
+    issues = d9_runner(bundle, valid_flow_spec())
+    assert any(i["id"] == "D9-4" and "one-item menu" in i["message"] for i in issues), issues
