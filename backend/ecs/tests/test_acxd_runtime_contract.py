@@ -944,3 +944,29 @@ def test_s8_yes_no_constants_become_the_slot_types_values():
     from tools.acxd_runtime_contract import runtime_contract_violations
     assert any(v.rule == "S8" if hasattr(v, "rule") else "S8" in str(v)
                for v in runtime_contract_violations(out, **ctx))
+
+
+def test_m3_a_message_node_is_only_a_message():
+    """Live (SELC, 2026-09-13): the price announcement 'basic' carried
+    metadata.redirect and cleared the slots its own message rendered; the
+    runtime showed the fallback re-guide instead of the price."""
+    flow = broken("GetCleaningPrice")
+    start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
+    flow["nodes"]["say"] = {"nodeId": "say", "type": "basic",
+                            "messages": [{"type": "text", "body": "{productType:NLX.Slot} 단가는 100원입니다."}],
+                            "metadata": {"redirect": {"type": "flow", "flowId": "FollowUpFlow"},
+                                         "stateModifications": [
+                                             {"type": "slot", "name": "productType", "modification": "clear"},
+                                             {"type": "slot", "name": "serviceType", "modification": "clear"}]},
+                            "childNodes": [{"nodeId": "go", "name": "next"}]}
+    flow["nodes"]["go"] = {"nodeId": "go", "type": "redirect",
+                           "metadata": {"redirect": {"type": "flow", "flowId": "FollowUpFlow"}},
+                           "childNodes": [{"nodeId": "fin", "name": "next"}]}
+    flow["nodes"]["fin"] = {"nodeId": "fin", "type": "end"}
+    start["childNodes"] = [{"nodeId": "say", "name": "next"}]
+    out, notes = apply_runtime_contract(flow, **context("GetCleaningPrice"))
+    say = out["nodes"]["say"]
+    assert "redirect" not in (say.get("metadata") or {})
+    mods = (say.get("metadata") or {}).get("stateModifications") or []
+    assert [m["name"] for m in mods] == ["serviceType"]  # the rendered slot keeps its value
+    assert sum("(M3)" in n for n in notes) == 2

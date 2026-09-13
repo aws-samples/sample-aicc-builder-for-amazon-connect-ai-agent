@@ -142,7 +142,7 @@ NO_MATCH_EDGE_NAMES = frozenset({
 #: :func:`apply_runtime_contract` and their residue is reported only to a
 #: caller that asks for every scope — the generator's repair loop — so a
 #: minimal unit fixture is not failed by a rule about conversation shape.
-FLOW_SCOPE_RULES = frozenset({"S1", "S2", "S3", "S8", "R6", "R7", "D4", "J", "A2"})
+FLOW_SCOPE_RULES = frozenset({"S1", "S2", "S3", "S8", "M3", "R6", "R7", "D4", "J", "A2"})
 CROSS_SCOPE_RULES = frozenset({"S1", "S5", "D3", "M1", "RX"})
 NORMALIZER_SCOPE_RULES = frozenset({"M2", "R3", "S6"})
 ALL_SCOPES = ("flow", "cross", "normalizer")
@@ -819,6 +819,63 @@ class _RuntimeContract:
     # M2 — generative_text sends nothing
     # ==================================================================
 
+    # ==================================================================
+    # M3 — a message node is only a message
+    # ==================================================================
+
+    def rule_m3(self) -> None:
+        """Live (SELC, 2026-09-13): the price announcement was a ``basic`` node
+        that also carried ``metadata.redirect`` (the next node was the real
+        redirect) and cleared the very slots its own message rendered. The
+        runtime never showed the message — the contact fell into the fallback
+        re-guide instead — while every plain ``basic`` announcement worked.
+        Strip the stray redirect (the node's edge already leads to a redirect
+        node) and drop a ``clear`` of a slot the node's own message references
+        (the following redirect node clears it anyway)."""
+        for node_id, node in self.nodes_of_type("basic"):
+            metadata = node.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if "redirect" in metadata:
+                target = (metadata.get("redirect") or {}).get("flowId") if isinstance(metadata.get("redirect"), dict) else None
+                leads_to_redirect = any(
+                    (self.nodes.get(edge.get("nodeId")) or {}).get("type") == "redirect"
+                    for edge in _edges(node))
+                if leads_to_redirect or not target:
+                    metadata.pop("redirect")
+                    self.change(f"{_label(node_id, node)}: removed metadata.redirect from a message node "
+                                f"(redirecting is the next node's job) (M3)")
+                else:
+                    # No redirect node follows: turn the stray metadata into one.
+                    redirect_id = f"{node_id}-redirect"
+                    self.nodes[redirect_id] = {
+                        "nodeId": redirect_id, "type": "redirect",
+                        "metadata": {"redirect": metadata.pop("redirect")},
+                        "childNodes": list(_edges(node)),
+                    }
+                    node["childNodes"] = [{"nodeId": redirect_id, "name": "next"}]
+                    self.change(f"{_label(node_id, node)}: moved metadata.redirect into its own redirect node (M3)")
+            referenced = set()
+            for message in node.get("messages") or []:
+                body = message.get("body") if isinstance(message, dict) else None
+                if isinstance(body, str):
+                    referenced.update(re.findall(r"\{([A-Za-z_][\w-]*):NLX\.Slot\}", body))
+            mods = metadata.get("stateModifications")
+            if referenced and isinstance(mods, list):
+                kept = [m for m in mods if not (isinstance(m, dict) and m.get("type") == "slot"
+                                                and m.get("modification") == "clear"
+                                                and str(m.get("name")) in referenced)]
+                if len(kept) != len(mods):
+                    dropped = sorted({str(m.get('name')) for m in mods if m not in kept})
+                    if kept:
+                        metadata["stateModifications"] = kept
+                    else:
+                        metadata.pop("stateModifications")
+                    self.change(f"{_label(node_id, node)}: dropped clear of slot(s) {dropped} that its own "
+                                f"message renders (M3)")
+            if not metadata:
+                node.pop("metadata", None)
+
     def rule_m2(self) -> None:
         for node_id, node in self.nodes_of_type("generative_text"):
             if not self._is_last_customer_facing(node_id):
@@ -1450,6 +1507,7 @@ class _RuntimeContract:
         self.rule_s2()
         self.rule_s3()
         self.rule_s8()
+        self.rule_m3()
         self.rule_m2()
         self.rule_r7()
         self.rule_r6()
