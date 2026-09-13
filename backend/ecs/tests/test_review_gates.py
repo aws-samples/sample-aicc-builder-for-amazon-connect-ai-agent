@@ -519,3 +519,34 @@ def test_sample_rows_altered_by_the_seeder_is_a_blocking_mismatch(monkeypatch, t
     assert len(hits) == 1
     assert "birthDate='19900512'" in hits[0]["issue"]
     assert hits[0]["operation_id"] == "subscribers"
+
+
+def test_retrieve_guide_is_added_once_after_the_tool_list():
+    """Live (Daon, 2026-09-13): the generated prompt had guides for every
+    operation tool, Escalate and Complete but none for RETRIEVE, and the agent
+    answered a FAQ the knowledge base held with "I cannot tell you precisely"."""
+    from tools.asset_linters import ensure_retrieve_tool_guide
+
+    prompt = (
+        "system_prompt: |\n"
+        "  <tool_instructions>\n"
+        "  사용 가능한 도구:\n"
+        "  {{$.toolConfigurationList}}\n"
+        "\n"
+        "  [get_plan_info 도구 사용 가이드 - 요금제 조회]\n"
+        "  고객이 자신의 요금제를 문의할 때 사용합니다.\n"
+        "  </tool_instructions>\n"
+    )
+    fixed, fixes = ensure_retrieve_tool_guide(prompt, "ko")
+    assert fixes and "RETRIEVE" in fixes[0]
+    lines = fixed.split("\n")
+    i = next(k for k, l in enumerate(lines) if "toolConfigurationList" in l)
+    assert lines[i + 2].startswith("  [RETRIEVE 도구 사용 가이드")
+    assert "  [get_plan_info 도구 사용 가이드" in fixed
+    again, fixes2 = ensure_retrieve_tool_guide(fixed, "ko")
+    assert again == fixed and fixes2 == []
+    # a prompt that already guides RETRIEVE is left alone
+    ok_prompt = prompt.replace("[get_plan_info", "[RETRIEVE 도구 사용 가이드 - 지식 검색]\n  검색하세요.\n  [get_plan_info")
+    assert ensure_retrieve_tool_guide(ok_prompt, "ko") == (ok_prompt, [])
+    # no tool block → untouched
+    assert ensure_retrieve_tool_guide("system_prompt: |\n  hello\n", "en") == ("system_prompt: |\n  hello\n", [])
