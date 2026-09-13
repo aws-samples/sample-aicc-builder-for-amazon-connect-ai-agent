@@ -132,6 +132,35 @@ def _extract_required_iam_actions(code: str) -> set:
     return {a for a in required if a not in _IMPLICITLY_GRANTED}
 
 
+def _cfn_gsi_names(infra_yaml: Optional[str]) -> Dict[str, set]:
+    """{table logical id or TableName: {GSI IndexName, ...}} read from the
+    CloudFormation template — the artifact that actually deploys. Tolerant of
+    short-form intrinsics; empty on any parse problem (never raises)."""
+    if not infra_yaml or not isinstance(infra_yaml, str):
+        return {}
+    try:
+        sanitized = re.sub(r'!(Sub|Ref|GetAtt|Join|If|ImportValue|Select|FindInMap)\b', '', infra_yaml)
+        doc = yaml.safe_load(sanitized) or {}
+    except Exception as e:
+        logger.debug(f"[VALIDATE] template not parseable for GSI names: {e}")
+        return {}
+    found: Dict[str, set] = {}
+    for logical_id, resource in ((doc.get("Resources") or {}) or {}).items():
+        if not isinstance(resource, dict) or resource.get("Type") != "AWS::DynamoDB::Table":
+            continue
+        props = resource.get("Properties") or {}
+        names = {
+            str(gsi.get("IndexName"))
+            for gsi in (props.get("GlobalSecondaryIndexes") or [])
+            if isinstance(gsi, dict) and isinstance(gsi.get("IndexName"), str)
+        }
+        if not names:
+            continue
+        table_name = props.get("TableName")
+        found[str(table_name) if isinstance(table_name, str) else str(logical_id)] = names
+    return found
+
+
 def _extract_role_actions_from_template(infra_yaml: str) -> Dict[str, set]:
     """Map each Lambda function logical/FunctionName to the IAM actions its role grants.
 
@@ -1165,6 +1194,12 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
             logger.warning(f"[VALIDATE] Failed to check infra schema: {e}")
 
     # D1-1: Lambda IndexName= vs infrastructure GSI name matching
+    # The schema registry is a draft; the CloudFormation template is what deploys.
+    # Live (Hanbit): PatientsTable carried 'phone-birth-index' in the template
+    # but not in the registry, and the gate blocked a correct Lambda. Union the
+    # template's GlobalSecondaryIndexes into the known set.
+    for tbl_name, gsis in _cfn_gsi_names(infra_yaml).items():
+        infra_gsi_names.setdefault(tbl_name, set()).update(gsis)
     for op_id, code in lambda_code.items():
         index_names_in_code = set(re.findall(r"IndexName\s*[=:]\s*['\"](\w[\w-]*)['\"]", code))
         for idx_name in index_names_in_code:

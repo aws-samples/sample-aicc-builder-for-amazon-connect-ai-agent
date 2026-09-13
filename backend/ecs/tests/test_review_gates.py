@@ -550,3 +550,34 @@ def test_retrieve_guide_is_added_once_after_the_tool_list():
     assert ensure_retrieve_tool_guide(ok_prompt, "ko") == (ok_prompt, [])
     # no tool block → untouched
     assert ensure_retrieve_tool_guide("system_prompt: |\n  hello\n", "en") == ("system_prompt: |\n  hello\n", [])
+
+
+def test_cfn_gsi_names_reads_every_table_in_the_template():
+    """Live (Hanbit, 2026-09-13): D1-1 knew only the schema registry's GSIs and
+    blocked a Lambda querying PatientsTable's 'phone-birth-index', which the
+    CloudFormation template (the artifact that deploys) defined."""
+    from tools.validate_consistency import _cfn_gsi_names
+
+    template = """
+Resources:
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-patients"
+      GlobalSecondaryIndexes:
+        - IndexName: phone-birth-index
+          KeySchema: [{AttributeName: phone, KeyType: HASH}]
+  AppointmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hanbit-appointments
+      GlobalSecondaryIndexes:
+        - IndexName: phone-index
+        - IndexName: dept-date-index
+  Fn:
+    Type: AWS::Lambda::Function
+"""
+    names = _cfn_gsi_names(template)
+    assert names["hanbit-appointments"] == {"phone-index", "dept-date-index"}
+    assert {"phone-birth-index"} in names.values()
+    assert _cfn_gsi_names(None) == {} and _cfn_gsi_names("not: [valid") == {}
