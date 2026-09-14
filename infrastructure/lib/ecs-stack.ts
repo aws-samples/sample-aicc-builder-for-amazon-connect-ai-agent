@@ -382,6 +382,11 @@ export class EcsStack extends cdk.Stack {
         // endpoint is patched in by deploy.sh (from AGENTCORE_GATEWAY_URL);
         // when empty the agents fall back to built-in knowledge.
         AGENTCORE_GATEWAY_REGION: "us-east-1",
+        // Which build of AICC Builder this is (git commit from deploy.sh); the
+        // backend stamps it into every ACXD bundle's deploy-manifest.json.
+        ...(this.node.tryGetContext("builderBuild")
+          ? { AICC_BUILDER_BUILD: String(this.node.tryGetContext("builderBuild")) }
+          : {}),
       },
       portMappings: [
         { containerPort: 8080, protocol: ecs.Protocol.TCP },

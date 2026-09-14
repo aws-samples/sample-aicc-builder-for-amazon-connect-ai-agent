@@ -244,6 +244,15 @@ if [ -n "$STAGE" ]; then
     echo -e "${CYAN}Stage: ${STAGE} (stack suffix: ${STAGE_SUFFIX})${NC}"
 fi
 
+# The backend records which build generated a bundle (deploy-manifest.json
+# → builder.build), so a downloaded bundle can be matched to the code that
+# produced it. The git commit is the build id when the tree is a checkout.
+BUILDER_BUILD="$(git rev-parse --short HEAD 2>/dev/null || true)"
+if [ -n "$BUILDER_BUILD" ]; then
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then BUILDER_BUILD="${BUILDER_BUILD}-dirty"; fi
+    CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c builderBuild=${BUILDER_BUILD}"
+fi
+
 if [ "$ALLOW_VPC_PUBLIC_ACCESS" = true ]; then
     CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c allowVpcPublicAccess=true"
     echo -e "${YELLOW}VPC Block Public Access exclusion ENABLED: this VPC will be excluded from the account BPA guardrail (allow-bidirectional).${NC}"
