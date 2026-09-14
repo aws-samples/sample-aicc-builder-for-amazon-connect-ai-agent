@@ -234,7 +234,14 @@ function readCfnOutput(ctx, stack, key) {
 // stack's ApiKeyValue output. Kept in memory only — never written to the state
 // file or the log.
 function readBackendApiKey(ctx, stack) {
-  if (ctx.env && ctx.env.ACXD_SECRET_BACKENDAPIKEY) return;
+  // The backend key may arrive under the generic env name while the bundle's
+  // secret carries the project-scoped name (<projectSlug>BackendApiKey): the
+  // env value serves every *BackendApiKey secret. Live: the scoped secret was
+  // skipped ("env not set") and every data request answered 403.
+  if (ctx.env && ctx.env.ACXD_SECRET_BACKENDAPIKEY) {
+    ctx.backendApiKey = ctx.env.ACXD_SECRET_BACKENDAPIKEY;
+    return;
+  }
   try {
     const value = readCfnOutput(ctx, stack, 'ApiKeyValue');
     if (value && value !== 'None' && value !== 'RETRIEVE_FAILED') {
@@ -930,4 +937,4 @@ const STEPS = {
 };
 
 module.exports = { STEPS, listAll, send, normalizeFlowForService, applicationLanguageCodes,
-                   bindAgenticCx, resolveStackName, resolveAssetPlaceholders };
+                   bindAgenticCx, resolveStackName, resolveAssetPlaceholders, readBackendApiKey };
