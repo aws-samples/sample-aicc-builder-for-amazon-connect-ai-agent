@@ -1091,3 +1091,19 @@ def test_m2_prompt_labels_do_not_leak_fragments_of_earlier_placeholders():
     body = out["nodes"][generative["nodeId"]]["messages"][0]["body"]
     assert "Variable}" not in body.replace(":NLX.Variable}", "")
     assert "배송 예정일 {" in body and "상태 {" in body
+
+
+def test_m2_result_labels_stay_in_the_callers_language():
+    """Live (SELC v4): 'Air conditioner product type {…}' was read to a Korean
+    caller because the interview described the field in English."""
+    flow = broken("DeliveryStatusByOrderNumber")
+    generative = next(n for n in flow["nodes"].values() if n["type"] == "generative_text")
+    generative["metadata"]["generativeText"]["prompt"] = "친절하게 안내하세요."
+    kwargs = context("DeliveryStatusByOrderNumber")
+    kwargs["field_labels"] = {"getDeliveryStatusByOrderNumber": {"deliveryStatus": "Delivery status in English",
+                                                                 "expectedDeliveryDate": "예상 배송일"}}
+    out, _ = apply_runtime_contract(flow, **kwargs)
+    body = out["nodes"][generative["nodeId"]]["messages"][0]["body"]
+    assert "Delivery status in English" not in body
+    assert "배송 상태 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}" in body   # dictionary word
+    assert "예상 배송일 {getDeliveryStatusByOrderNumber.expectedDeliveryDate:NLX.Variable}" in body  # Korean description kept

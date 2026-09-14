@@ -964,14 +964,16 @@ class _RuntimeContract:
         if not isinstance(properties, dict):
             return None
         labels = self.field_labels.get(request_id, {})
+        korean = self.is_korean()
         parts: list[str] = []
         for field, schema in properties.items():
             if field in self._ENVELOPE_FIELDS or not isinstance(schema, dict):
                 continue
             if schema.get("type") in ("object", "array"):
                 continue
-            label = labels.get(field) or field
-            parts.append(f"{label} {{{request_id}.{field}:NLX.Variable}}")
+            label = self._result_label(field, labels.get(field), korean)
+            token = f"{{{request_id}.{field}:NLX.Variable}}"
+            parts.append(f"{label} {token}" if label else token)
             if len(parts) >= 6:
                 break
         if not parts:
@@ -979,6 +981,31 @@ class _RuntimeContract:
         if self.is_korean():
             return "조회 결과: " + ", ".join(parts) + "입니다."
         return "Here is what I found: " + ", ".join(parts) + "."
+
+    #: Korean labels for result fields the interview described in English (live:
+    #: "Air conditioner product type {…}" read aloud to a Korean caller).
+    _KO_FIELD_WORDS = {
+        "price": "가격", "unitprice": "단가", "amount": "금액", "totalamount": "총 금액", "fee": "요금",
+        "status": "상태", "deliverystatus": "배송 상태", "date": "날짜", "deliverydate": "배송일",
+        "expecteddeliverydate": "예상 배송일", "reservationdate": "예약일", "appointmentdate": "예약 날짜",
+        "time": "시간", "timeslot": "예약 시간", "name": "이름", "customername": "고객명",
+        "patientname": "환자명", "phone": "전화번호", "phonenumber": "전화번호", "address": "주소",
+        "ordernumber": "주문번호", "orderid": "주문번호", "reservationid": "예약번호",
+        "appointmentid": "예약번호", "returnid": "반품번호", "trackingnumber": "운송장번호",
+        "carrier": "택배사", "department": "진료과", "quantity": "수량", "producttype": "제품 유형",
+        "servicetype": "서비스 유형", "planname": "요금제", "balance": "잔액", "points": "포인트",
+        "claimnumber": "청구번호", "policynumber": "증권번호", "message": "안내",
+    }
+
+    def _result_label(self, field: str, described: Optional[str], korean: bool) -> str:
+        """The label spoken before a result value: the interview's description when
+        it is in the caller's language, a common Korean word for the field, or
+        nothing (the value alone) rather than an English fragment."""
+        if not korean:
+            return described or field
+        if described and _HANGUL.search(described):
+            return described
+        return self._KO_FIELD_WORDS.get(re.sub(r"[^a-z]", "", field.lower()), "")
 
     def _upstream_data_request(self, node_id: str) -> Optional[str]:
         """The data request id of the nearest data_request node that leads here
