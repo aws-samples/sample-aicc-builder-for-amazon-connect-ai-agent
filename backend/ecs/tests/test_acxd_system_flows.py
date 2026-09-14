@@ -267,8 +267,8 @@ def test_operation_labels_never_cut_a_menu_out_of_purpose_sentences():
 def test_follow_up_flow_shape():
     flow = build_follow_up_flow(KO_SPEC)
     assert flow["flowId"] == "FollowUpFlow"
-    assert _walk(flow) == ["start", "basic", "user_choice", "choice", "redirect",
-                           "basic", "basic", "end", "user_input", "redirect"]
+    assert _walk(flow) == ["start", "basic", "user_choice", "choice", "choice", "basic",
+                           "basic", "redirect", "redirect", "user_input", "end"]
 
     # R6: the slot is cleared at the START of the flow, before it is asked again
     start = _node_of_type(flow, "start")
@@ -305,8 +305,24 @@ def test_follow_up_flow_shape():
 def test_follow_up_yes_value_follows_the_language():
     yes = next(c["conditions"][0]["right"]["value"]
                for n in build_follow_up_flow(EN_SPEC)["nodes"].values()
-               if n["type"] == "choice" for c in n["childNodes"] if c["conditions"])
+               if n["type"] == "choice" for c in n["childNodes"]
+               if c["conditions"] and c["conditions"][0]["left"].get("type") == "slot")
     assert yes == "yes"
+
+
+def test_follow_up_routes_a_direct_request_given_instead_of_yes_no():
+    """Live (SELC, 2026-09-14): '더 도와드릴 일이 있을까요?' answered with
+    '세척 가격도 알려주세요' went to the fallback ('잘 이해하지 못했습니다')
+    although the utterance named a flow."""
+    flow = build_follow_up_flow(KO_SPEC)
+    ask = _node_of_type(flow, "user_choice")
+    not_captured = next(c for c in ask["childNodes"] if c["name"] == "notCaptured")
+    direct = flow["nodes"][not_captured["nodeId"]]
+    assert direct["type"] == "choice"
+    recognized, unrecognized = direct["childNodes"]
+    assert recognized["conditions"] == [{"left": {"type": "captured_flow"}, "operator": "exists"}]
+    assert flow["nodes"][recognized["nodeId"]]["metadata"]["redirect"]["flowId"] == CAPTURED_FLOW_PLACEHOLDER
+    assert flow["nodes"][unrecognized["nodeId"]]["metadata"]["redirect"]["flowId"] == "FallbackFlow"
 
 
 # ---------------------------------------------------------------------------

@@ -543,6 +543,7 @@ def build_follow_up_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict
     recognized = _node_id(flow_id, "redirectRecognized")
     thanks = _node_id(flow_id, "thanks")
     unrecognized = _node_id(flow_id, "redirectFallback")
+    direct = _node_id(flow_id, "routeDirectRequest")
     end = _node_id(flow_id, "end")
 
     flow = _flow_shell(
@@ -580,9 +581,18 @@ def build_follow_up_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict
               },
               "childNodes": [
                   _child(branch, "captured", _slot_condition(MORE_HELP_SLOT_NAME, True)),
-                  _child(unrecognized, "notCaptured",
+                  _child(direct, "notCaptured",
                          _slot_condition(MORE_HELP_SLOT_NAME, False)),
               ]},
+        # "Anything else?" is often answered with the next request itself
+        # ("세척 가격도 알려주세요", live) rather than yes/no. When the utterance
+        # was recognised as a flow, go there; only a genuinely unrecognised
+        # answer is a fallback.
+        direct: {"nodeId": direct, "type": "choice",
+                 "childNodes": [
+                     _child(recognized, "flowRecognized", _captured_flow_condition(True)),
+                     _child(unrecognized, "noFlowRecognized", []),
+                 ]},
         branch: {"nodeId": branch, "type": "choice",
                  "childNodes": [
                      _child(prompt, "yes", [{
