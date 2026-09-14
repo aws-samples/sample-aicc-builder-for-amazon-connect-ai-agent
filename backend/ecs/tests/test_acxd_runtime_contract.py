@@ -970,3 +970,35 @@ def test_m3_a_message_node_is_only_a_message():
     mods = (say.get("metadata") or {}).get("stateModifications") or []
     assert [m["name"] for m in mods] == ["serviceType"]  # the rendered slot keeps its value
     assert sum("(M3)" in n for n in notes) == 2
+
+
+def test_d5_a_condition_on_a_data_request_result_names_a_returned_field():
+    """Live (GreenCart, 2026-09-14): the choice branched on requestReturn.accepted
+    while the data request returns 'success'; every accepted return escalated."""
+    flow = broken("GetCleaningPrice")
+    start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
+    flow["nodes"]["gate"] = {"nodeId": "gate", "type": "choice", "childNodes": [
+        {"nodeId": "ok", "name": "accepted", "conditions": [
+            {"left": {"type": "variable", "name": "getCleaningPrice.accepted"}, "operator": "eq",
+             "right": {"type": "constant", "value": True}}]},
+        {"nodeId": "no", "name": "rejected", "conditions": [
+            {"left": {"type": "variable", "name": "getCleaningPrice.accepted"}, "operator": "neq",
+             "right": {"type": "constant", "value": True}}]},
+        {"nodeId": "odd", "name": "odd", "conditions": [
+            {"left": {"type": "variable", "name": "getCleaningPrice.zzzUnknown"}, "operator": "eq",
+             "right": {"type": "constant", "value": "x"}}]},
+    ]}
+    for nid in ("ok", "no", "odd"):
+        flow["nodes"][nid] = {"nodeId": nid, "type": "end"}
+    start["childNodes"] = [{"nodeId": "gate", "name": "next"}]
+    ctx = context("GetCleaningPrice")
+    props = (ctx["data_requests"]["getCleaningPrice"].get("responseSchema") or {}).get("properties") or {}
+    assert "success" in props and "accepted" not in props
+    out, notes = apply_runtime_contract(flow, **ctx)
+    edges = {e["name"]: e for e in out["nodes"]["gate"]["childNodes"]}
+    assert edges["accepted"]["conditions"][0]["left"]["name"] == "getCleaningPrice.success"
+    assert edges["rejected"]["conditions"][0]["left"]["name"] == "getCleaningPrice.success"
+    assert edges["odd"]["conditions"][0]["left"]["name"] == "getCleaningPrice.zzzUnknown"
+    assert sum("(D5)" in n for n in notes) == 2
+    from tools.acxd_runtime_contract import runtime_contract_violations
+    assert any("D5" in str(v) for v in runtime_contract_violations(out, **ctx))

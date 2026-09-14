@@ -143,7 +143,7 @@ NO_MATCH_EDGE_NAMES = frozenset({
 #: caller that asks for every scope — the generator's repair loop — so a
 #: minimal unit fixture is not failed by a rule about conversation shape.
 FLOW_SCOPE_RULES = frozenset({"S1", "S2", "S3", "S8", "M3", "R6", "R7", "D4", "J", "A2"})
-CROSS_SCOPE_RULES = frozenset({"S1", "S5", "D3", "M1", "RX"})
+CROSS_SCOPE_RULES = frozenset({"S1", "S5", "D3", "D5", "M1", "RX"})
 NORMALIZER_SCOPE_RULES = frozenset({"M2", "R3", "S6"})
 ALL_SCOPES = ("flow", "cross", "normalizer")
 
@@ -1275,6 +1275,62 @@ class _RuntimeContract:
     # M1 — message placeholders must resolve
     # ==================================================================
 
+    # ==================================================================
+    # D5 — a condition on a data-request result names a field it returns
+    # ==================================================================
+
+    _SUCCESS_LIKE = frozenset({
+        "accepted", "ok", "succeeded", "isSuccess", "issuccess", "approved",
+        "completed", "done", "valid", "result", "status_ok", "successful",
+    })
+
+    def rule_d5(self) -> None:
+        """Live (GreenCart, 2026-09-14): a choice branched on
+        ``requestReturn.accepted`` while the data request returns ``success``;
+        the field never existed, so every accepted return took the "rejected"
+        edge to escalation. A result field the schema does not have is
+        rewritten to the one obviously meant (the shared ``success`` flag for a
+        success-ish name, a close spelling otherwise) and reported when it
+        cannot be resolved."""
+        if not self.data_requests:
+            return
+        for node_id, node in self.nodes.items():
+            if not isinstance(node, dict):
+                continue
+            for edge in _edges(node):
+                for condition in (edge.get("conditions") or []):
+                    if not isinstance(condition, dict):
+                        continue
+                    for side in ("left", "right"):
+                        operand = condition.get(side)
+                        if not (isinstance(operand, dict) and operand.get("type") == "variable"
+                                and isinstance(operand.get("name"), str) and "." in operand["name"]):
+                            continue
+                        request_id, _, field = operand["name"].partition(".")
+                        document = self.data_requests.get(request_id)
+                        if not isinstance(document, dict):
+                            continue
+                        properties = (document.get("responseSchema") or {}).get("properties") or {}
+                        if not isinstance(properties, dict) or not properties or field in properties:
+                            continue
+                        replacement = None
+                        if field in self._SUCCESS_LIKE or field.lower() in self._SUCCESS_LIKE:
+                            replacement = next((n for n in properties if n.lower() == "success"), None)
+                        if replacement is None:
+                            replacement = self._close_field(field, properties)
+                        if replacement is None:
+                            self.violation(
+                                "D5", "cross",
+                                f"{_label(node_id, node)} edge {edge.get('name')!r} tests "
+                                f"{request_id}.{field}, which {request_id} does not return "
+                                f"({sorted(properties)}) — the branch can never be taken")
+                            continue
+                        operand["name"] = f"{request_id}.{replacement}"
+                        self.change(
+                            f"{_label(node_id, node)} edge {edge.get('name')!r}: condition field "
+                            f"{request_id}.{field} → {request_id}.{replacement} (the field the data "
+                            f"request actually returns) (D5)")
+
     def rule_m1(self) -> None:
         slots = set(self.slot_names)
         for node_id, node in self.nodes.items():
@@ -1515,6 +1571,7 @@ class _RuntimeContract:
         self.rule_s6()
         self.rule_d3()
         self.rule_d4()
+        self.rule_d5()
         self.rule_m1()
         self.rule_rx()
         self.rule_j()
