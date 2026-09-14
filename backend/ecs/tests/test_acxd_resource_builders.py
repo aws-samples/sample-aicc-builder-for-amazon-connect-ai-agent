@@ -388,11 +388,22 @@ def test_guardrails_generalise_literal_regex_and_localise_the_modify_message():
                 {"name": "explicit", "trigger": "input", "policy": "x", "detection_method": "regex",
                  "action": "flag", "pattern": r"^\d{10}$"},
             ]}
+    spec["guardrails"].append({"name": "explicit_mask", "trigger": "output", "policy": "mask card numbers",
+                               "detection_method": "regex", "action": "mask", "pattern": r"\d{4}-\d{4}-\d{4}-\d{4}"})
     docs, problems = build_guardrails(spec)
     assert problems == []
     by_name = {d["name"]: d["rules"][0] for d in docs}
     assert by_name["pii"]["detection"]["pattern"] == r"\d{3}-\d{4}-\d{4}"
     assert by_name["explicit"]["detection"]["pattern"] == r"^\d{10}$"      # a real regex is kept
-    message = by_name["medical"]["enforcement"]["behavior"]["message"]
-    assert message.startswith("죄송합니다") and "can't" not in message
     assert "never violate" in by_name["medical"]["detection"]["prompt"]
+    # Live: derived OUTPUT rules replaced the greeting / redacted the bot's own
+    # format hint. They stay advisory; an explicit interviewer regex keeps mask.
+    assert by_name["medical"]["enforcement"] == {"action": "flag"}
+    assert by_name["pii"]["enforcement"] == {"action": "flag"}
+    assert by_name["explicit_mask"]["enforcement"]["action"] == "mask"
+    # the localised replacement message is still what an INPUT modify rule says
+    spec["guardrails"] = [{"name": "abuse", "trigger": "input", "policy": "욕설 금지", "detection_method": "llmJudge",
+                           "action": "modify", "examples": ["…"]}]
+    docs, _ = build_guardrails(spec)
+    message = docs[0]["rules"][0]["enforcement"]["behavior"]["message"]
+    assert message.startswith("죄송합니다") and "can't" not in message

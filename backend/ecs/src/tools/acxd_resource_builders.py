@@ -270,6 +270,40 @@ def _resolve_enforcement(plan: dict, spec: Optional[dict] = None) -> dict:
     return {"action": "flag"}
 
 
+def _keep_derived_output_rules_advisory(doc: dict, plan: dict) -> None:
+    """An output guardrail whose detection the builder DERIVED must not rewrite
+    what the caller hears.
+
+    Live (Hanbit, 2026-09-14): an llmJudge output rule replaced the greeting
+    itself with the refusal message, and a regex generalised from a sample phone
+    number redacted the bot's own "010-1234-5678 형식으로" hint. A false positive
+    on an output rule silences the assistant; a missed one is only a log line. So
+    a derived output rule (judge, keywords, or a generalised literal) with a
+    message-altering action is kept as ``flag``; an explicit regex the interview
+    wrote itself (``pattern``) keeps its ``mask`` / ``modify``.
+    """
+    if doc.get("trigger") != "output":
+        return
+    rule = doc["rules"][0]
+    action = (rule.get("enforcement") or {}).get("action")
+    if action not in ("mask", "modify", "block"):
+        return
+    if action == "modify" and isinstance(plan.get("message"), str) and plan["message"].strip():
+        return  # the interview wrote the replacement itself: a deliberate design
+    method = (rule.get("detection") or {}).get("method")
+    if method == "regex":
+        examples = [e for e in plan.get("examples") or [] if isinstance(e, str) and e]
+        source = plan.get("pattern") or (examples[0] if examples else "")
+        # a real regex (metacharacters present) was written on purpose; a plain
+        # literal was generalised by the builder and is only a guess at intent
+        if isinstance(source, str) and re.search(r"[\\^$.*+?()\[\]{}|]", source):
+            return
+    rule["enforcement"] = {"action": "flag"}
+    logger.info("[ACXDGuardrails] %s: output rule with derived %s detection kept advisory "
+                "(flag) instead of %s — a false positive would silence the assistant",
+                doc.get("name"), method, action)
+
+
 def _guardrail_name(plan: dict, index: int) -> str:
     """A usable name for a guardrail the interview left unnamed.
 
@@ -357,6 +391,7 @@ def build_guardrails(spec: dict) -> tuple[list[dict], list[str]]:
             }],
             "fallbackBehavior": {"type": "continue"},
         }
+        _keep_derived_output_rules_advisory(doc, plan)
         errors = validate_acxd_asset("guardrail", doc)
         if errors:
             problems.extend(f"guardrails[{i}] ({name}): {e}" for e in errors)
