@@ -270,6 +270,7 @@ class _RuntimeContract:
         escalation_flow_id: str,
         slot_plans: Optional[dict] = None,
         field_labels: Optional[dict] = None,
+        field_enums: Optional[dict] = None,
     ) -> None:
         self.flow = flow
         self.role = (role or "").strip().lower() or None
@@ -290,6 +291,13 @@ class _RuntimeContract:
         self.field_labels = {
             str(k): {str(f): str(l) for f, l in v.items() if isinstance(l, str) and l.strip()}
             for k, v in (field_labels or {}).items() if isinstance(v, dict)}
+        # {data request id: {field: [allowed values]}} from the interview's
+        # OperationSpec — the reply schema no longer carries enums (they made
+        # not-found replies fail), so D5 reads the allowed values from here.
+        self.field_enums = {
+            str(k): {str(f): [str(x) for x in vals] for f, vals in v.items()
+                     if isinstance(vals, (list, tuple)) and vals}
+            for k, v in (field_enums or {}).items() if isinstance(v, dict)}
 
         self.changes: list[str] = []
         #: (scope, rule, message)
@@ -1600,6 +1608,8 @@ class _RuntimeContract:
             return
         schema = properties.get(field) if isinstance(properties.get(field), dict) else {}
         enum = schema.get("enum") if isinstance(schema.get("enum"), list) else None
+        if not enum:
+            enum = self.field_enums.get(request_id, {}).get(field)
         if not enum or constant["value"] in enum:
             return
         success = next((n for n in properties if n.lower() == "success"), None)
@@ -1906,6 +1916,7 @@ def apply_runtime_contract(
     escalation_flow_id: str = "EscalationFlow",
     slot_plans: Optional[dict] = None,
     field_labels: Optional[dict] = None,
+    field_enums: Optional[dict] = None,
 ) -> tuple[dict, list[str]]:
     """Normalize ``flow`` onto the live-verified runtime contract.
 
@@ -1941,7 +1952,7 @@ def apply_runtime_contract(
         slot_type_docs=slot_type_docs, data_requests=data_requests,
         flow_ids=flow_ids, context_variables=context_variables,
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
-        slot_plans=slot_plans, field_labels=field_labels)
+        slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums)
     engine.run()
     return engine.flow, engine.changes
 
@@ -1960,6 +1971,7 @@ def runtime_contract_violations(
     scope: str = "all",
     slot_plans: Optional[dict] = None,
     field_labels: Optional[dict] = None,
+    field_enums: Optional[dict] = None,
 ) -> list[str]:
     """Report what the runtime contract cannot repair. Never mutates ``flow``.
 
@@ -1988,7 +2000,7 @@ def runtime_contract_violations(
         slot_type_docs=slot_type_docs, data_requests=data_requests,
         flow_ids=flow_ids, context_variables=context_variables,
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
-        slot_plans=slot_plans, field_labels=field_labels)
+        slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums)
     engine.run()
     wanted = set(ALL_SCOPES) if scope == "all" else {scope}
     return [message for item_scope, _rule, message in engine.violations

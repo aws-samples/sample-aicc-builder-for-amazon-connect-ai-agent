@@ -174,3 +174,16 @@ def test_response_schema_requires_only_the_envelope():
     assert fields_to_json_schema(fields)["required"] == ["success", "orderNumber", "totalAmount"]  # request side unchanged
     assert response_json_schema(fields)["required"] == ["success"]
     assert "required" not in response_json_schema([{"name": "orderNumber", "type": "string"}])
+
+
+def test_response_schema_carries_no_value_constraints():
+    """Live (Hanbit, 2026-09-14): a not-found reply's status "" against enum
+    [예약, 취소, 완료] failed the whole reply and the caller was escalated."""
+    from tools.acxd_data_request_builder import response_json_schema, fields_to_json_schema
+    fields = [{"name": "success", "type": "boolean"},
+              {"name": "status", "type": "string", "enum_values": ["예약", "취소", "완료"], "max_length": 10},
+              {"name": "appointmentId", "type": "string", "regex": "^A\\d{8}$"}]
+    request_side = fields_to_json_schema(fields)["properties"]
+    assert request_side["status"]["enum"] == ["예약", "취소", "완료"] and request_side["appointmentId"]["pattern"]
+    reply = response_json_schema(fields)["properties"]
+    assert reply["status"] == {"type": "string"} and reply["appointmentId"] == {"type": "string"}

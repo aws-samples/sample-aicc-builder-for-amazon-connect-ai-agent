@@ -1184,3 +1184,30 @@ def test_s9_date_and_time_shaped_regex_slots_become_date_and_time_slots():
     assert slots["orderNo"] == {"name": "orderNo", "type": "NLX.AlphaNumeric", "sensitive": False,
                                 "regex": "^\\d{10}$", "aiDescription": "Order number"}
     assert sum("S9)" in n for n in notes) == 2
+
+
+def test_d5_reads_enum_values_from_the_spec_when_the_reply_schema_has_none():
+    """The reply schema no longer carries enums (a not-found reply's status ""
+    failed the whole reply, live); the interview's allowed values reach D5 as
+    field_enums."""
+    import copy
+    flow = broken("GetCleaningPrice")
+    start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
+    edges = [{"nodeId": "ok", "name": "cancelable", "conditions": [
+                  {"left": {"type": "variable", "name": "getCleaningPrice.state"}, "operator": "neq",
+                   "right": {"type": "constant", "value": "not_cancelable"}}]},
+             {"nodeId": "no", "name": "notCancelable", "conditions": [
+                  {"left": {"type": "variable", "name": "getCleaningPrice.state"}, "operator": "eq",
+                   "right": {"type": "constant", "value": "not_cancelable"}}]}]
+    flow["nodes"]["gate"] = {"nodeId": "gate", "type": "choice", "childNodes": edges}
+    for e in edges:
+        flow["nodes"][e["nodeId"]] = {"nodeId": e["nodeId"], "type": "end"}
+    start["childNodes"] = [{"nodeId": "gate", "name": "next"}]
+    ctx = context("GetCleaningPrice")
+    ctx["data_requests"] = copy.deepcopy(ctx["data_requests"])
+    ctx["data_requests"]["getCleaningPrice"]["responseSchema"]["properties"]["state"] = {"type": "string"}  # no enum
+    ctx["field_enums"] = {"getCleaningPrice": {"state": ["예약", "취소", "완료"]}}
+    out, notes = apply_runtime_contract(flow, **ctx)
+    edges_out = {e["name"]: e["conditions"][0] for e in out["nodes"]["gate"]["childNodes"]}
+    assert edges_out["cancelable"]["left"] == {"type": "variable", "name": "getCleaningPrice.success"}
+    assert sum("(D5)" in n for n in notes) == 2

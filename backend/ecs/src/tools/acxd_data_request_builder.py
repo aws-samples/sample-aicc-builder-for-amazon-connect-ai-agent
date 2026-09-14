@@ -110,6 +110,14 @@ def response_json_schema(fields: list[dict]) -> dict:
     send the conversation down the failure branch instead.
     """
     schema = fields_to_json_schema(fields)
+    # Value constraints belong to the request side. On the reply they turn a
+    # legitimate outcome into a failure: live, a not-found reply carried
+    # status "" against enum [예약, 취소, 완료], the service failed the whole
+    # reply and the caller was escalated instead of told "not found".
+    for prop in (schema.get("properties") or {}).values():
+        if isinstance(prop, dict):
+            for key in ("enum", "pattern", "minLength", "maxLength"):
+                prop.pop(key, None)
     names = set(schema.get("properties") or {})
     required = [n for n in _ENVELOPE_REQUIRED if n in names]
     if required:
