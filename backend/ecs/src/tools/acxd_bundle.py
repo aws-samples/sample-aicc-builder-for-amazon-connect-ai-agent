@@ -372,12 +372,88 @@ def load_acxd_bundle(session_id: str) -> dict:
     bundle["context_variables"] = cvs
 
     bundle["contact_flows"] = _dedupe_contact_flows(_read_json_docs(session_id, CLASSIC_CONTACT_FLOW_TYPE))
+    # The Contact Flow was generated once; the binding contract (language block
+    # before the Agentic CX block, chat analytics the API rejects, branch
+    # targets) has grown since. Re-apply the linter and the binding on load so a
+    # bundle packaged today carries today's contract — both are idempotent.
+    bundle["contact_flows"] = [_refresh_contact_flow(doc, session_id) for doc in bundle["contact_flows"]]
+    # Guardrails the application does not reference and secrets no Data Request
+    # uses are leftovers of earlier generations (live: an unprefixed
+    # 'BackendApiKey' secret shipped next to the project-scoped one and, once
+    # deployed, overwrote the workspace-level value every other project read).
+    bundle["guardrails"], dropped_guardrails = _referenced_guardrails(bundle["guardrails"], bundle["application"])
+    bundle["secrets"], dropped_secrets = _referenced_secrets(bundle["secrets"], bundle["data_requests"])
+    if dropped_guardrails:
+        bundle["dropped_guardrails"] = dropped_guardrails
+        logger.info("[ACXDBundle] %d guardrail(s) the application does not reference left out: %s",
+                    len(dropped_guardrails), dropped_guardrails)
+    if dropped_secrets:
+        bundle["dropped_secrets"] = dropped_secrets
+        logger.info("[ACXDBundle] %d secret(s) no data request uses left out: %s",
+                    len(dropped_secrets), dropped_secrets)
 
     inventory = _backend_inventory(session_id)
     bundle["infrastructure"] = inventory["infrastructure"]
     bundle["lambdas"] = inventory["lambdas"]
     bundle["openapi"] = inventory["openapi"]
     return bundle
+
+
+def _refresh_contact_flow(document: Any, session_id: str) -> Any:
+    """Run the Contact Flow linter and the ACXD binding on a stored flow."""
+    if not isinstance(document, dict) or not isinstance(document.get("Actions"), list):
+        return document
+    refreshed = document
+    try:
+        from tools.asset_linters import lint_contact_flow
+        result = lint_contact_flow(json.dumps(refreshed, ensure_ascii=False))
+        fixed = result.get("fixed_json")
+        if result.get("fixes_applied") and fixed:
+            refreshed = json.loads(fixed)
+            logger.info("[ACXDBundle] contact flow re-linted on load: %s", "; ".join(result["fixes_applied"][:4]))
+    except Exception as exc:  # pragma: no cover - the stored flow is still returned
+        logger.debug("[ACXDBundle] contact flow re-lint skipped: %s", exc)
+    try:
+        from tools.acxd_contact_flow_binding import normalize_acxd_contact_flow
+        from tools.acxd_flow_spec import get_acxd_flow_spec
+        refreshed = normalize_acxd_contact_flow(refreshed, get_acxd_flow_spec(session_id))
+    except Exception as exc:  # pragma: no cover - the stored flow is still returned
+        logger.debug("[ACXDBundle] contact flow binding refresh skipped: %s", exc)
+    return refreshed
+
+
+def _referenced_guardrails(guardrails: list, application: Any) -> tuple[list, list]:
+    """(kept, dropped names): only guardrails the application references."""
+    settings = (application or {}).get("settings") if isinstance(application, dict) else None
+    refs = (settings or {}).get("guardrails") if isinstance(settings, dict) else None
+    if not isinstance(refs, list) or not refs:
+        return list(guardrails), []
+    wanted: set[str] = set()
+    for ref in refs:
+        value = ref.get("guardrailId") if isinstance(ref, dict) else ref
+        match = re.fullmatch(r"\{GUARDRAIL:(.+)\}", str(value or ""))
+        wanted.add(match.group(1) if match else str(value))
+    kept, dropped = [], []
+    for doc in guardrails:
+        name = doc.get("name") if isinstance(doc, dict) else None
+        (kept if not name or name in wanted else dropped).append(doc)
+    return kept, [d.get("name") for d in dropped]
+
+
+def _referenced_secrets(secrets: list, data_requests: list) -> tuple[list, list]:
+    """(kept, dropped names): only secrets some Data Request header names."""
+    if not data_requests:
+        return list(secrets), []
+    used: set[str] = set()
+    for doc in data_requests:
+        text = json.dumps(doc, ensure_ascii=False) if isinstance(doc, dict) else ""
+        used.update(re.findall(r"\{([A-Za-z0-9_]+):NLX\.Secret\}", text))
+        used.update(re.findall(r"\{\{secrets\.([A-Za-z0-9_]+)\}\}", text))
+    kept, dropped = [], []
+    for doc in secrets:
+        name = doc.get("name") if isinstance(doc, dict) else None
+        (kept if not name or name in used else dropped).append(doc)
+    return kept, [d.get("name") for d in dropped]
 
 
 def bundle_summary(bundle: dict) -> dict:

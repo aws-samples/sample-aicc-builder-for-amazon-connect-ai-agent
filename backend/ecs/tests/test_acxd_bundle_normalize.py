@@ -64,3 +64,41 @@ def test_load_acxd_bundle_leaves_out_slot_types_no_flow_attaches(monkeypatch):
     loaded = bundle_mod.load_acxd_bundle("session-x")
     assert [st["slotTypeId"] for st in loaded["slot_types"]] == ["serviceType"]
     assert loaded["dropped_slot_types"] == ["orderNumber"]
+
+
+def test_load_acxd_bundle_refreshes_the_contact_flow_and_prunes_unreferenced_resources(monkeypatch):
+    """Live (GreenCart, 2026-09-14): the stored Contact Flow predated the language
+    block and still carried the rejected chat analytics; an unprefixed
+    'BackendApiKey' secret and 'guardrail1' from earlier generations shipped next
+    to the project-scoped ones."""
+    import tools.acxd_bundle as bundle_mod
+
+    flow = {"Version": "2019-10-30", "StartAction": "acx", "Actions": [
+        {"Identifier": "acx", "Type": "ConnectParticipantWithAgenticCX",
+         "Parameters": {"AgentConfiguration": {"WorkspaceId": "{ACXD_WORKSPACE_ID}", "ApplicationId": "{ACXD_APPLICATION_ID}",
+                                               "Alias": "{ACXD_ALIAS_ID}", "ContextVariables": {}}},
+         "Transitions": {"NextAction": "end", "Errors": [{"ErrorType": "NoMatchingError", "NextAction": "end"}]}},
+        {"Identifier": "end", "Type": "DisconnectParticipant", "Parameters": {}, "Transitions": {}},
+    ]}
+    docs = {
+        "contact_flow": [flow],
+        "acxd_application": [{"name": "app", "settings": {"guardrails": [{"guardrailId": "{GUARDRAIL:gc-pii}"}]}}],
+        "acxd_guardrail": [{"name": "gc-pii", "rules": []}, {"name": "guardrail1", "rules": []}],
+        "acxd_secret": [{"name": "gcBackendApiKey"}, {"name": "BackendApiKey"}],
+        "acxd_data_request": [{"dataRequestId": "getOrder", "webhook": {"headers": [
+            {"key": "x-api-key", "value": "{gcBackendApiKey:NLX.Secret}"}]}}],
+    }
+    monkeypatch.setattr(bundle_mod, "_read_json_docs", lambda _sid, asset_type: list(docs.get(asset_type, [])))
+    monkeypatch.setattr(bundle_mod, "_backend_inventory",
+                        lambda _sid: {"infrastructure": None, "lambdas": [], "openapi": None})
+    monkeypatch.setattr(bundle_mod, "_collapse_identical_docs", lambda d, _t: d)
+    monkeypatch.setattr(bundle_mod, "_dedupe_contact_flows", lambda d: d)
+    import tools.acxd_flow_spec as afs
+    monkeypatch.setattr(afs, "get_acxd_flow_spec", lambda sid=None: None)
+    loaded = bundle_mod.load_acxd_bundle("session-x")
+    types = [a["Type"] for a in loaded["contact_flows"][0]["Actions"]]
+    assert "UpdateContactData" in types                       # language block added on load
+    assert [g["name"] for g in loaded["guardrails"]] == ["gc-pii"]
+    assert loaded["dropped_guardrails"] == ["guardrail1"]
+    assert [s["name"] for s in loaded["secrets"]] == ["gcBackendApiKey"]
+    assert loaded["dropped_secrets"] == ["BackendApiKey"]
