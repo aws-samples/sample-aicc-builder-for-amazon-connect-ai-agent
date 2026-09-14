@@ -269,6 +269,7 @@ class _RuntimeContract:
         follow_up_flow_id: str,
         escalation_flow_id: str,
         slot_plans: Optional[dict] = None,
+        field_labels: Optional[dict] = None,
     ) -> None:
         self.flow = flow
         self.role = (role or "").strip().lower() or None
@@ -284,6 +285,11 @@ class _RuntimeContract:
         #: that the attached slot needs as an NLX built-in + regex (S1/S5).
         self.slot_plans = {
             str(k): v for k, v in (slot_plans or {}).items() if isinstance(v, dict)}
+        #: data request id -> {field -> customer-facing label} from the interview's
+        #: OperationSpec (the deployed document's descriptions are ASCII-only).
+        self.field_labels = {
+            str(k): {str(f): str(l) for f, l in v.items() if isinstance(l, str) and l.strip()}
+            for k, v in (field_labels or {}).items() if isinstance(v, dict)}
 
         self.changes: list[str] = []
         #: (scope, rule, message)
@@ -883,11 +889,17 @@ class _RuntimeContract:
             prompt = ((node.get("metadata") or {}).get("generativeText") or {}).get("prompt")
             body = self._template_from_prompt(prompt if isinstance(prompt, str) else "")
             if not body:
+                # Live (SELC v3): "성공 시 배송상태와 예정일을 자연스럽게 안내한다" has no
+                # placeholders and the node said nothing — the caller heard
+                # "anything else?" right after giving the order number. Announce
+                # the data request's own result fields instead.
+                body = self._template_from_result(node_id)
+            if not body:
                 self.violation(
                     "M2", "normalizer",
                     f"{_label(node_id, node)} is the last customer-facing step but "
-                    f"generative_text sends no message, and its prompt has no "
-                    f"placeholders to build a deterministic sentence from")
+                    f"generative_text sends no message, and neither its prompt nor a "
+                    f"preceding data request gives fields to build a sentence from")
                 continue
             node["type"] = "basic"
             node["messages"] = [{"type": "text", "body": body}]
@@ -937,6 +949,65 @@ class _RuntimeContract:
         if self.is_korean():
             return "조회 결과: " + ", ".join(parts) + "입니다."
         return "Here is what I found: " + ", ".join(parts) + "."
+
+    _ENVELOPE_FIELDS = frozenset({"success", "errorCode", "errorcode", "message"})
+
+    def _template_from_result(self, node_id: str) -> Optional[str]:
+        """A deterministic announcement of the fields the nearest upstream data
+        request returns (envelope fields excluded), labelled from the interview's
+        field descriptions when known, else the field name."""
+        request_id = self._upstream_data_request(node_id)
+        if not request_id:
+            return None
+        document = self.data_requests.get(request_id)
+        properties = ((document or {}).get("responseSchema") or {}).get("properties") or {}
+        if not isinstance(properties, dict):
+            return None
+        labels = self.field_labels.get(request_id, {})
+        parts: list[str] = []
+        for field, schema in properties.items():
+            if field in self._ENVELOPE_FIELDS or not isinstance(schema, dict):
+                continue
+            if schema.get("type") in ("object", "array"):
+                continue
+            label = labels.get(field) or field
+            parts.append(f"{label} {{{request_id}.{field}:NLX.Variable}}")
+            if len(parts) >= 6:
+                break
+        if not parts:
+            return None
+        if self.is_korean():
+            return "조회 결과: " + ", ".join(parts) + "입니다."
+        return "Here is what I found: " + ", ".join(parts) + "."
+
+    def _upstream_data_request(self, node_id: str) -> Optional[str]:
+        """The data request id of the nearest data_request node that leads here
+        (through choices and message nodes), or None."""
+        parents: dict[str, list[str]] = {}
+        for pid, pnode in self.nodes.items():
+            for edge in _edges(pnode):
+                target = edge.get("nodeId")
+                if isinstance(target, str):
+                    parents.setdefault(target, []).append(pid)
+        seen = {node_id}
+        frontier = list(parents.get(node_id, []))
+        while frontier:
+            pid = frontier.pop(0)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            pnode = self.nodes.get(pid) or {}
+            if pnode.get("type") == "data_request":
+                requests = pnode.get("dataRequests") or []
+                for entry in requests:
+                    rid = entry.get("dataRequestId") if isinstance(entry, dict) else entry
+                    if isinstance(rid, str) and rid:
+                        return rid
+                return None
+            if pnode.get("type") in ("start", "user_input", "user_choice"):
+                continue
+            frontier.extend(parents.get(pid, []))
+        return None
 
     @staticmethod
     def _prompt_label(prompt: str, position: int) -> str:
@@ -1634,6 +1705,7 @@ def apply_runtime_contract(
     follow_up_flow_id: str = "FollowUpFlow",
     escalation_flow_id: str = "EscalationFlow",
     slot_plans: Optional[dict] = None,
+    field_labels: Optional[dict] = None,
 ) -> tuple[dict, list[str]]:
     """Normalize ``flow`` onto the live-verified runtime contract.
 
@@ -1669,7 +1741,7 @@ def apply_runtime_contract(
         slot_type_docs=slot_type_docs, data_requests=data_requests,
         flow_ids=flow_ids, context_variables=context_variables,
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
-        slot_plans=slot_plans)
+        slot_plans=slot_plans, field_labels=field_labels)
     engine.run()
     return engine.flow, engine.changes
 
@@ -1687,6 +1759,7 @@ def runtime_contract_violations(
     escalation_flow_id: str = "EscalationFlow",
     scope: str = "all",
     slot_plans: Optional[dict] = None,
+    field_labels: Optional[dict] = None,
 ) -> list[str]:
     """Report what the runtime contract cannot repair. Never mutates ``flow``.
 
@@ -1715,7 +1788,7 @@ def runtime_contract_violations(
         slot_type_docs=slot_type_docs, data_requests=data_requests,
         flow_ids=flow_ids, context_variables=context_variables,
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
-        slot_plans=slot_plans)
+        slot_plans=slot_plans, field_labels=field_labels)
     engine.run()
     wanted = set(ALL_SCOPES) if scope == "all" else {scope}
     return [message for item_scope, _rule, message in engine.violations

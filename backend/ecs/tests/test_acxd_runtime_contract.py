@@ -670,17 +670,39 @@ def test_m2_leaves_a_generative_text_a_message_already_follows():
     assert out["nodes"][generative["nodeId"]]["type"] == "generative_text"
 
 
-def test_m2_without_placeholders_is_reported_to_the_generator_only():
-    """Nothing to template from: a violation, but not one a schema gate raises."""
+def test_m2_without_placeholders_announces_the_data_request_result_fields():
+    """Live (SELC v3, 2026-09-14): '성공 시 배송상태와 예정일을 자연스럽게 안내한다' had
+    no placeholders and the generative node said nothing — the caller heard
+    "anything else?" right after the order number. The nearest upstream data
+    request's result fields make the announcement, labelled from the interview."""
     flow = broken("DeliveryStatusByOrderNumber")
     generative = next(n for n in flow["nodes"].values()
                       if n["type"] == "generative_text")
     generative["metadata"]["generativeText"]["prompt"] = "친절하게 안내하세요."
     kwargs = context("DeliveryStatusByOrderNumber")
-    assert any("M2" in p for p in runtime_contract_violations(
-        flow, **kwargs, scope="normalizer"))
-    assert not [p for p in runtime_contract_violations(flow, **kwargs, scope="flow")
-                if "M2" in p]
+    request_id = "getDeliveryStatusByOrderNumber"
+    assert request_id in kwargs["data_requests"]
+    kwargs["field_labels"] = {request_id: {"deliveryStatus": "배송 상태"}}
+    out, notes = apply_runtime_contract(flow, **kwargs)
+    node = out["nodes"][generative["nodeId"]]
+    assert node["type"] == "basic"
+    body = node["messages"][0]["body"]
+    assert body.startswith("조회 결과: ") and f"{{{request_id}.deliveryStatus:NLX.Variable}}" in body
+    assert "배송 상태 {" in body            # the interview's label, not the field name
+    assert "success" not in body           # envelope fields are not announced
+    assert any("M2)" in n for n in notes)
+    assert not [p for p in runtime_contract_violations(flow, **kwargs, scope="flow") if "M2" in p]
+
+
+def test_m2_without_any_result_fields_is_reported_to_the_generator_only():
+    """No placeholders and no upstream data request: still a normalizer-scope violation."""
+    flow = broken("DeliveryStatusByOrderNumber")
+    generative = next(n for n in flow["nodes"].values()
+                      if n["type"] == "generative_text")
+    generative["metadata"]["generativeText"]["prompt"] = "친절하게 안내하세요."
+    kwargs = context("DeliveryStatusByOrderNumber")
+    kwargs["data_requests"] = {}
+    assert any("M2" in p for p in runtime_contract_violations(flow, **kwargs, scope="normalizer"))
 
 
 # ---------------------------------------------------------------------------

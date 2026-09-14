@@ -1095,6 +1095,19 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
     context_variables = [var["name"] for var
                          in ((spec.get("application") or {}).get("context_variables") or [])
                          if isinstance(var, dict) and var.get("name")]
+    # Customer-facing labels for result fields (the deployed data-request
+    # document keeps ASCII-only descriptions; the interview's wording lives on
+    # the spec's response_fields). M2 announces results with these.
+    field_labels: dict = {}
+    for integration in spec.get("data_integrations") or []:
+        if not isinstance(integration, dict) or not integration.get("data_request_id"):
+            continue
+        labels = {}
+        for field in integration.get("response_fields") or []:
+            if isinstance(field, dict) and field.get("name") and isinstance(field.get("description"), str):
+                labels[str(field["name"])] = field["description"].strip()
+        if labels:
+            field_labels[str(integration["data_request_id"])] = labels
     return {
         "role": plan.get("role") or "operation",
         "slot_type_ids": sorted(slot_type_docs),
@@ -1110,6 +1123,7 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
             str(s["name"]): s for s in (plan.get("slots") or [])
             if isinstance(s, dict) and s.get("name")
         },
+        "field_labels": field_labels,
     }
 
 
