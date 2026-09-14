@@ -200,7 +200,7 @@ def test_acxd_lambda_handlers_get_the_format_restorer(monkeypatch):
     with zipfile.ZipFile(io.BytesIO(client.payload)) as archive:
         code = archive.read("acme-refunds/lambda/get_order/index.py").decode("utf-8")
     assert "ACXD delivers slot values without separators" in code
-    assert "_aicc_restore_formats" in code and "def lambda_handler(event, context)" in code
+    assert "_aicc_restore_formats" in code and "def handler(event, context):" in code  # the fixture's handler is wrapped
 
 
 def test_classic_lambda_handlers_are_left_alone(monkeypatch):
