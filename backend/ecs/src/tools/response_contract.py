@@ -143,9 +143,36 @@ def operation_bundles(spec: Any) -> list[dict]:
         t_id = t.get("tool_id") or op_id
         bundles.append({"id": t_id, "method": str(t.get("http_method") or method),
                         "path": t.get("path") or f"/tools/{t_id}",
-                        "input_fields": t.get("input_fields") or [], "output_fields": t.get("output_fields") or [],
+                        "input_fields": resolve_tool_fields(s, t.get("input_fields"), "input_fields"),
+                        "output_fields": resolve_tool_fields(s, t.get("output_fields"), "output_fields"),
                         "status": str(t.get("success_status_code") or status)})
     return bundles
+
+
+def resolve_tool_fields(spec: dict, tool_fields: Any, kind: str) -> list:
+    """A tool's field list as FieldSpec dicts.
+
+    Interviews store a tool's ``input_fields`` / ``output_fields`` either as
+    FieldSpecs or as the NAMES of the operation's top-level fields. Live (SELC):
+    the names were taken as-is, projected to nothing, and the OpenAPI request
+    schema was rewritten to ``properties: {}`` — thirteen fields gone. A name
+    resolves to the top-level field of that name; an unknown name is kept as a
+    string-typed field rather than dropped. An empty tool list falls back to the
+    operation's own fields.
+    """
+    top = [_dump(f) for f in (spec.get(kind) or []) if f is not None]
+    by_name = {str(f.get("name")): f for f in top if isinstance(f, dict) and f.get("name")}
+    if not tool_fields:
+        return top
+    out = []
+    for item in tool_fields:
+        if isinstance(item, str):
+            out.append(by_name.get(item) or {"name": item, "field_type": "string"})
+        else:
+            d = _dump(item)
+            if isinstance(d, dict):
+                out.append(d)
+    return out
 
 
 # --------------------------------------------------------------------------

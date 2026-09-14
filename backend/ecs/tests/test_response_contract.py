@@ -109,3 +109,21 @@ def test_unknown_operation_is_reported_not_invented():
     _, changes = enforce_operation_shapes(doc, {"ghost": dict(SPEC, operation_id="ghost", path="/tools/ghost")})
     assert changes == ["ghost: operation not found in the OpenAPI document (left for review)"]
     assert "/tools/ghost" not in doc["paths"]
+
+
+def test_tool_field_names_resolve_to_the_operations_fields():
+    """Live (SELC, 2026-09-14): a tool listed its fields as NAMES of the
+    operation's top-level FieldSpecs; enforce_openapi_contract projected them to
+    nothing and rewrote the request schema to properties: {} (13 fields gone),
+    and shape parity saw every field as 'string'."""
+    from tools.response_contract import operation_bundles, resolve_tool_fields
+    spec = {"operation_id": "create_reservation", "http_method": "POST",
+            "input_fields": [{"name": "consent", "field_type": "boolean"}, {"name": "quantity", "field_type": "integer"}],
+            "output_fields": [{"name": "reservationId", "field_type": "string"}],
+            "tools": [{"tool_id": "create_reservation", "input_fields": ["consent", "quantity", "unknownOne"],
+                       "output_fields": ["reservationId"]}]}
+    bundles = operation_bundles(spec)
+    assert [f["name"] for f in bundles[0]["input_fields"]] == ["consent", "quantity", "unknownOne"]
+    assert bundles[0]["input_fields"][0]["field_type"] == "boolean"
+    assert bundles[0]["input_fields"][2] == {"name": "unknownOne", "field_type": "string"}
+    assert resolve_tool_fields(spec, [], "output_fields") == spec["output_fields"]   # empty list → the operation's own

@@ -430,6 +430,10 @@ def validate_shape_parity(spec: dict, openapi_doc: dict) -> list[ShapeMismatch]:
             t_id = t.get("tool_id") or ""
             t_method = t.get("http_method") or method
             t_path = t.get("path") or (f"/tools/{t_id}" if t_id else op_path)
+            # a tool may name the operation's top-level fields instead of repeating them
+            from tools.response_contract import resolve_tool_fields
+            t = dict(t, input_fields=resolve_tool_fields(spec, t.get("input_fields"), "input_fields"),
+                     output_fields=resolve_tool_fields(spec, t.get("output_fields"), "output_fields"))
             _compare_bundle(
                 owner_label=t_id or op_id,
                 in_fields=t.get("input_fields") or [],
