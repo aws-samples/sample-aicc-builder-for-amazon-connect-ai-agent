@@ -1002,3 +1002,36 @@ def test_d5_a_condition_on_a_data_request_result_names_a_returned_field():
     assert sum("(D5)" in n for n in notes) == 2
     from tools.acxd_runtime_contract import runtime_contract_violations
     assert any("D5" in str(v) for v in runtime_contract_violations(out, **ctx))
+
+
+def test_d5_an_impossible_enum_constant_moves_the_branch_onto_the_success_flag():
+    """Live (Hanbit, 2026-09-14): 'cancelAppointment.status neq "not_cancelable"'
+    while the API's status enum is 예/취소/완료 — every appointment was cancelable."""
+    import copy
+    flow = broken("GetCleaningPrice")
+    ctx = context("GetCleaningPrice")
+    ctx["data_requests"] = copy.deepcopy(ctx["data_requests"])
+    props = ctx["data_requests"]["getCleaningPrice"]["responseSchema"]["properties"]
+    props["state"] = {"type": "string", "enum": ["예약", "취소", "완료"]}
+    start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
+    flow["nodes"]["gate"] = {"nodeId": "gate", "type": "choice", "childNodes": [
+        {"nodeId": "ok", "name": "cancelable", "conditions": [
+            {"left": {"type": "variable", "name": "getCleaningPrice.state"}, "operator": "neq",
+             "right": {"type": "constant", "value": "not_cancelable"}}]},
+        {"nodeId": "no", "name": "notCancelable", "conditions": [
+            {"left": {"type": "variable", "name": "getCleaningPrice.state"}, "operator": "eq",
+             "right": {"type": "constant", "value": "not_cancelable"}}]},
+        {"nodeId": "fine", "name": "fine", "conditions": [
+            {"left": {"type": "variable", "name": "getCleaningPrice.state"}, "operator": "eq",
+             "right": {"type": "constant", "value": "취소"}}]},
+    ]}
+    for nid in ("ok", "no", "fine"):
+        flow["nodes"][nid] = {"nodeId": nid, "type": "end"}
+    start["childNodes"] = [{"nodeId": "gate", "name": "next"}]
+    out, notes = apply_runtime_contract(flow, **ctx)
+    edges = {e["name"]: e["conditions"][0] for e in out["nodes"]["gate"]["childNodes"]}
+    assert edges["cancelable"] == {"left": {"type": "variable", "name": "getCleaningPrice.success"},
+                                   "operator": "eq", "right": {"type": "constant", "value": True}}
+    assert edges["notCancelable"]["operator"] == "neq"
+    assert edges["fine"]["right"]["value"] == "취소"  # a real enum member is left alone
+    assert sum("(D5)" in n for n in notes) == 2

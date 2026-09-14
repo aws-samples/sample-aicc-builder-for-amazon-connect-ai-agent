@@ -1311,7 +1311,11 @@ class _RuntimeContract:
                         if not isinstance(document, dict):
                             continue
                         properties = (document.get("responseSchema") or {}).get("properties") or {}
-                        if not isinstance(properties, dict) or not properties or field in properties:
+                        if not isinstance(properties, dict) or not properties:
+                            continue
+                        if field in properties:
+                            self._d5_enum_constant(node_id, node, edge, condition, side, request_id,
+                                                   field, properties)
                             continue
                         replacement = None
                         if field in self._SUCCESS_LIKE or field.lower() in self._SUCCESS_LIKE:
@@ -1330,6 +1334,41 @@ class _RuntimeContract:
                             f"{_label(node_id, node)} edge {edge.get('name')!r}: condition field "
                             f"{request_id}.{field} → {request_id}.{replacement} (the field the data "
                             f"request actually returns) (D5)")
+
+    def _d5_enum_constant(self, node_id: str, node: dict, edge: dict, condition: dict, side: str,
+                          request_id: str, field: str, properties: dict) -> None:
+        """Live (Hanbit, 2026-09-14): a branch tested ``cancelAppointment.status
+        neq "not_cancelable"`` while the API's ``status`` enum is 예/취소/완료 and
+        a passed deadline is signalled by ``success=false`` + ``errorCode``; the
+        impossible constant made every appointment "cancelable". A constant an
+        enum field can never hold is a dead branch: when the response carries the
+        shared ``success`` flag the pair is rewritten onto it (eq impossible →
+        the failure branch, neq impossible → the success branch); otherwise it is
+        reported."""
+        other = "right" if side == "left" else "left"
+        constant = condition.get(other)
+        if not (isinstance(constant, dict) and constant.get("type") == "constant"
+                and isinstance(constant.get("value"), str)
+                and condition.get("operator") in ("eq", "neq")):
+            return
+        schema = properties.get(field) if isinstance(properties.get(field), dict) else {}
+        enum = schema.get("enum") if isinstance(schema.get("enum"), list) else None
+        if not enum or constant["value"] in enum:
+            return
+        success = next((n for n in properties if n.lower() == "success"), None)
+        if success is None:
+            self.violation(
+                "D5", "cross",
+                f"{_label(node_id, node)} edge {edge.get('name')!r} compares {request_id}.{field} with "
+                f"{constant['value']!r}, a value the API never returns (enum {enum}) — the branch is dead")
+            return
+        condition[side] = {"type": "variable", "name": f"{request_id}.{success}"}
+        condition[other] = {"type": "constant", "value": True}
+        condition["operator"] = "neq" if condition["operator"] == "eq" else "eq"
+        self.change(
+            f"{_label(node_id, node)} edge {edge.get('name')!r}: {request_id}.{field} vs "
+            f"{constant['value']!r} (not in enum {enum}) → {request_id}.{success} "
+            f"{condition['operator']} true (D5)")
 
     def rule_m1(self) -> None:
         slots = set(self.slot_names)
