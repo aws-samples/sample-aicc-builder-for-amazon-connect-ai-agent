@@ -579,6 +579,10 @@ design the ACXD flows before moving to the analysis document.
    Include every ordered step with:
    `node_type`, `determinism`, `determinism_rationale`, and
    `decision_category`.
+   Collect from the customer only what the customer knows. A value the backend
+   computes or looks up — a refund or total amount, a price, a status, an id it
+   issues — is an OUTPUT field, never a slot the caller is asked for (live: a
+   return flow asked the caller for the refund amount).
    For a `redirect` step that hands the conversation to another business flow
    (e.g. "order not found → search by customer info"), set `redirect_flow_id`
    to that flow's `flow_id`; the generated flow is checked against it.

@@ -1088,6 +1088,9 @@ class _RuntimeContract:
         "carrier": "택배사", "department": "진료과", "quantity": "수량", "producttype": "제품 유형",
         "servicetype": "서비스 유형", "planname": "요금제", "balance": "잔액", "points": "포인트",
         "claimnumber": "청구번호", "policynumber": "증권번호", "message": "안내",
+        "orderdate": "주문일", "pickupdate": "수거 예정일", "refundamount": "환불 금액",
+        "returnstatus": "반품 상태", "appointmenttime": "예약 시간", "doctorname": "담당 의사",
+        "items": "주문 상품", "shippingfee": "배송비", "totalprice": "총 금액", "duedate": "예정일",
     }
 
     def _result_label(self, field: str, described: Optional[str], korean: bool) -> str:
