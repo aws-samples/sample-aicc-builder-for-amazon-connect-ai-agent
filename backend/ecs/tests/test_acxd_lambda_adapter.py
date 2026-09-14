@@ -46,6 +46,21 @@ def test_injected_wrapper_restores_the_payload_and_is_idempotent():
                                        "appointmentId": "A20260916", "name": "김하늘"}
     again, fields2 = inject(code, {"phoneNumber": r"^010-\d{4}-\d{4}$"})
     assert again == code and fields2 == []
-    assert inject(handler, {"appointmentId": r"^A\d{8}$"}) == (handler, [])       # nothing restorable
     assert inject("def other(e, c): pass\n", {"phoneNumber": r"^010-\d{4}-\d{4}$"})[1] == []
     assert code.count(MARKER) == 1
+
+
+def test_injected_wrapper_normalises_the_response_for_acxd():
+    """Live (SELC v4): the create handler answered 201 with errorCode null; ACXD
+    took the failure branch and the caller never heard the reservation number."""
+    handler = ("import json\n"
+               "def lambda_handler(event, context):\n"
+               "    return {'statusCode': 201, 'body': json.dumps({'success': True, 'reservationId': 'RSV-1',"
+               " 'errorCode': None, 'message': None})}\n")
+    code, fields = inject(handler, {"appointmentId": r"^A\d{8}$"})   # nothing to restore, still wrapped
+    assert fields == ["<response>"]
+    module = types.ModuleType("h")
+    exec(compile(code, "h.py", "exec"), module.__dict__)
+    out = module.lambda_handler({"body": "{}"}, None)
+    assert out["statusCode"] == 200
+    assert json.loads(out["body"]) == {"success": True, "reservationId": "RSV-1", "errorCode": "", "message": ""}

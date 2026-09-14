@@ -618,16 +618,15 @@ def package_assets_impl(
                 if acxd_plan and asset_type.lower() == "lambda" and file_name.endswith(".py") \
                         and operation_id:
                     patterns = _acxd_field_patterns(operation_id)
-                    if patterns:
-                        try:
-                            from tools.acxd_lambda_adapter import inject as _inject_adapter
-                            new_content, restored = _inject_adapter(
-                                content if isinstance(content, str) else content.decode("utf-8"), patterns)
-                            if restored:
-                                content = new_content
-                                logger.info(f"[packager] {operation_id}: format restorer added for {restored}")
-                        except Exception as exc:  # pragma: no cover - never block packaging on the aid
-                            logger.warning(f"[packager] {operation_id}: format restorer skipped: {exc}")
+                    try:
+                        from tools.acxd_lambda_adapter import inject as _inject_adapter
+                        new_content, restored = _inject_adapter(
+                            content if isinstance(content, str) else content.decode("utf-8"), patterns)
+                        if restored:
+                            content = new_content
+                            logger.info(f"[packager] {operation_id}: ACXD boundary adapter added ({restored})")
+                    except Exception as exc:  # pragma: no cover - never block packaging on the aid
+                        logger.warning(f"[packager] {operation_id}: ACXD boundary adapter skipped: {exc}")
 
                 if asset_type.lower() in ACXD_STORAGE_TYPES:
                     # Filtered ACXD download: keep the deployment layout so the

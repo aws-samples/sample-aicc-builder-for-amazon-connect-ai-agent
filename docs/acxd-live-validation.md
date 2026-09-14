@@ -136,6 +136,9 @@ note when the manifest disagrees), and a runner-only deploy is told to export
 | Result conditions | A branch on `<dataRequest>.<field>` only works for a field the Data Request's `responseSchema` declares; an undeclared field (`accepted` where the API returns `success`) sends every success down the failure branch | runtime contract D5 |
 | Custom slot types | A slot type exists to enumerate a menu. A one-value type built for an open value (an order number, a phone) is auto-selected without asking; open values are collected as an NLX built-in with the field's regex, and `user_choice` on such a slot is the working single-value capture | slot-type builder, D9-4, bundle loader |
 | Guardrail messages | An output guardrail's replacement message is spoken verbatim; the service has no default in the caller's language | guardrail builder localises the default |
+| Slot values at the webhook | Built-in slot values reach the Data Request without their separators (`010-1111-2222` → `01011112222`, `2026-09-16` → `20260916`, `10:00` → `1000`) | ACXD bundles wrap each Lambda handler with a format restorer built from the OperationSpec patterns |
+| Webhook reply | A Data Request succeeds only on HTTP 200 with a body that matches its `responseSchema`; a `201` from a create operation or `errorCode: null` where the schema says string takes the failure branch | the same wrapper returns 200 and coerces the envelope |
+| Output guardrails | A derived output rule (LLM judge, generalised literal) that rewrites messages fired on the greeting itself and on the bot's own format hint | derived output rules stay advisory (`flag`) |
 
 ## Cross-asset contract facts
 

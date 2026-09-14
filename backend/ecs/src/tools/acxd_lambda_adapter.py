@@ -216,11 +216,41 @@ def _aicc_restore_formats(event):
     return event
 
 
+def _aicc_normalize_response(result):
+    """ACXD treats the webhook reply as a success only for HTTP 200 with a body
+    that matches the Data Request's responseSchema: a 201 from a create
+    operation, or `errorCode: null` where the schema says string, sends the
+    conversation down the failure branch (live). Classic callers never see this."""
+    try:
+        if not isinstance(result, dict):
+            return result
+        if result.get("statusCode") in (201, 202, 204):
+            result = dict(result)
+            result["statusCode"] = 200
+        body = result.get("body")
+        data = _aicc_json.loads(body) if isinstance(body, str) else body
+        if isinstance(data, dict):
+            changed = False
+            for key in ("errorCode", "message"):
+                if key in data and data[key] is None:
+                    data[key] = ""
+                    changed = True
+            if "success" in data and not isinstance(data["success"], bool):
+                data["success"] = bool(data["success"])
+                changed = True
+            if changed:
+                result = dict(result)
+                result["body"] = _aicc_json.dumps(data, ensure_ascii=False) if isinstance(body, str) else data
+    except Exception:
+        return result
+    return result
+
+
 _aicc_wrapped_handler = {handler}
 
 
 def {handler}(event, context):
-    return _aicc_wrapped_handler(_aicc_restore_formats(event), context)
+    return _aicc_normalize_response(_aicc_wrapped_handler(_aicc_restore_formats(event), context))
 '''
 
 
@@ -234,8 +264,7 @@ def inject(code: str, field_patterns: dict, handler: Optional[str] = None) -> tu
     if not isinstance(code, str) or MARKER in code:
         return code, []
     patterns = restorable_patterns(field_patterns)
-    if not patterns:
-        return code, []
+    # The response normalisation applies even when no field has a format.
     candidates = [handler] if handler else ["lambda_handler", "handler"]
     handler = next((name for name in candidates
                     if name and re.search(rf"^def {re.escape(name)}\s*\(", code, re.M)), None)
@@ -246,4 +275,4 @@ def inject(code: str, field_patterns: dict, handler: Optional[str] = None) -> tu
         patterns=json.dumps(patterns, ensure_ascii=False),
         handler=handler,
     )
-    return code.rstrip("\n") + "\n" + wrapper, sorted(patterns)
+    return code.rstrip("\n") + "\n" + wrapper, sorted(patterns) or ["<response>"]
