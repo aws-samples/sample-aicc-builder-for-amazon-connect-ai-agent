@@ -176,6 +176,10 @@ const wireWebhookUrls = {
     if (supplied) {
       ctx.state.webhookUrl = supplied.replace(/\/$/, '');
       ctx.log(`  = webhook base URL: ${ctx.state.webhookUrl} (WEBHOOK_URL)`);
+      // deploy.sh supplies WEBHOOK_URL, so this is the path every bundle deploy
+      // takes: the backend key must still be resolved for the *BackendApiKey
+      // secret (live: it was skipped here and every data request answered 403).
+      readBackendApiKey(ctx, ctx.state.cfnStackName);
       return;
     }
     const stack = ctx.state.cfnStackName;
@@ -240,6 +244,10 @@ function readBackendApiKey(ctx, stack) {
   // skipped ("env not set") and every data request answered 403.
   if (ctx.env && ctx.env.ACXD_SECRET_BACKENDAPIKEY) {
     ctx.backendApiKey = ctx.env.ACXD_SECRET_BACKENDAPIKEY;
+    return;
+  }
+  if (!stack) {
+    ctx.log('  ! no CloudFormation stack known — the BackendApiKey secret will need ACXD_SECRET_BACKENDAPIKEY');
     return;
   }
   try {
@@ -357,7 +365,8 @@ const upsertSecrets = {
       const doc = readJson(file);
       // Secret values are NEVER stored in the bundle: read from env.
       const envVar = doc.valueEnv || `ACXD_SECRET_${String(doc.name || '').toUpperCase()}`;
-      const value = ctx.env[envVar] || (/BackendApiKey$/.test(doc.name || '') ? ctx.backendApiKey : undefined);
+      const value = ctx.env[envVar]
+        || (/BackendApiKey$/.test(doc.name || '') ? (ctx.backendApiKey || ctx.env.ACXD_SECRET_BACKENDAPIKEY) : undefined);
       if (!value) {
         ctx.log(`  ! skipping secret '${doc.name}': env ${envVar} not set`);
         continue;

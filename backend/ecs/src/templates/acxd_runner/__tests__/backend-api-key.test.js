@@ -18,3 +18,11 @@ test('without the env value the key is read from the CloudFormation output', () 
   // readCfnOutput shells out; a missing CLI must not throw — the runner logs and continues
   assert.doesNotThrow(() => readBackendApiKey(ctx, 'stack'));
 });
+
+test('the WEBHOOK_URL path of wire-webhook-urls still resolves the backend key', async () => {
+  const { STEPS } = require('../lib/steps');
+  const ctx = { env: { WEBHOOK_URL: 'https://x.example/dev/', ACXD_SECRET_BACKENDAPIKEY: 'k-env' }, state: { cfnStackName: 'stack' }, log() {} };
+  await STEPS['wire-webhook-urls'].run(ctx, {});
+  assert.strictEqual(ctx.state.webhookUrl, 'https://x.example/dev');
+  assert.strictEqual(ctx.backendApiKey, 'k-env');
+});
