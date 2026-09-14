@@ -3042,7 +3042,18 @@ do_acxd_deploy() {
 published_flow_alias() {
     local flow_id="${CONTACT_FLOW_ID:-$(state_get CONTACT_FLOW_ID)}"
     [ -z "$flow_id" ] && flow_id="$(runner_contact_flow_id 2>/dev/null || true)"
-    [ -z "$flow_id" ] || [ -z "${CONNECT_INSTANCE_ID:-}" ] && { echo ""; return; }
+    [ -z "${CONNECT_INSTANCE_ID:-}" ] && { echo ""; return; }
+    if [ -z "$flow_id" ]; then
+        # A fresh bundle directory has no state yet — the flow this project
+        # published earlier is still there under its name.
+        flow_id=$(aws connect list-contact-flows --instance-id "$CONNECT_INSTANCE_ID" \
+            --region "$REGION" --output json 2>/dev/null | python3 -c "
+import sys, json
+for f in json.load(sys.stdin).get('ContactFlowSummaryList', []):
+    if f.get('Name') == '${FLOW_NAME}': print(f['Id']); break
+" 2>/dev/null || echo "")
+    fi
+    [ -z "$flow_id" ] && { echo ""; return; }
     aws connect describe-contact-flow \
         --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$flow_id" \
         --region "$REGION" --query 'ContactFlow.Content' --output text 2>/dev/null | python3 -c '
