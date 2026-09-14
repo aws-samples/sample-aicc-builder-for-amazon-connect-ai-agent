@@ -285,11 +285,16 @@ def _acxd_slot_patterns(bundle: dict, operation_folder: str) -> dict:
         # values still arrive without separators; the canonical shapes let the
         # adapter restore 20260918 → 2026-09-18 and 1000 → 10:00.
         for s in flow.get("slotTypes") or []:
-            if isinstance(s, dict) and s.get("name") and not isinstance(s.get("regex"), str):
+            if not isinstance(s, dict) or not s.get("name"):
+                continue
+            if not isinstance(s.get("regex"), str):
                 if s.get("type") == "NLX.Date":
                     slot_regex.setdefault(str(s["name"]), r"^\d{4}-\d{2}-\d{2}$")
                 elif s.get("type") == "NLX.Time":
                     slot_regex.setdefault(str(s["name"]), r"^\d{2}:\d{2}$")
+            elif s.get("regex") == "^[0-9]{3,4}$":
+                # S9's compact-time capture regex: the adapter must restore HH:MM
+                slot_regex[str(s["name"])] = r"^\d{2}:\d{2}$"
         for node in (flow.get("nodes") or {}).values():
             if not isinstance(node, dict) or node.get("type") != "data_request":
                 continue

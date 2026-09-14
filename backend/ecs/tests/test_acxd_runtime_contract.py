@@ -1178,7 +1178,9 @@ def test_s9_date_and_time_shaped_regex_slots_become_date_and_time_slots():
     out, notes = apply_runtime_contract(flow, **context("DeliveryStatusByOrderNumber"))
     slots = {s["name"]: s for s in out["slotTypes"]}
     assert slots["appointmentDate"]["type"] == "NLX.Date" and "regex" not in slots["appointmentDate"]
-    assert slots["timeSlot"]["type"] == "NLX.Time" and "regex" not in slots["timeSlot"]
+    # NLX.Time delivers a timezone-shifted instant ("10:00" → "2026-09-14T14:00:00.000Z", live),
+    # so a time keeps the text type with the compact-digits regex the typed value arrives in
+    assert slots["timeSlot"]["type"] == "NLX.AlphaNumeric" and slots["timeSlot"]["regex"] == "^[0-9]{3,4}$"
     assert slots["orderNo"] == {"name": "orderNo", "type": "NLX.AlphaNumeric", "sensitive": False,
                                 "regex": "^\\d{10}$", "aiDescription": "Order number"}
     assert sum("S9)" in n for n in notes) == 2

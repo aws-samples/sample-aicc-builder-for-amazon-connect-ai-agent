@@ -101,3 +101,11 @@ def test_packager_reads_response_types_from_the_operations_data_request():
     assert _acxd_response_types(bundle, "get_order_status") == {"success": "boolean", "totalAmount": "number"}
     assert _acxd_response_types(bundle, "request_return") == {"returnId": "string"}
     assert _acxd_response_types(bundle, "unknown_op") == {}
+
+
+def test_a_time_typed_without_a_leading_zero_is_restored():
+    """"9:30" reaches the slot as "930" (compact); the skeleton needs four digits."""
+    from tools.acxd_lambda_adapter import restore
+    assert restore("930", r"^\d{2}:\d{2}$") == "09:30"
+    assert restore("1000", r"^\d{2}:\d{2}$") == "10:00"
+    assert restore("123456789", r"^\d{10}$") is None      # an id one digit short is not padded

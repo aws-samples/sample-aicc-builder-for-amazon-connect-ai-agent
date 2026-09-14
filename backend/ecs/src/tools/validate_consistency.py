@@ -2138,6 +2138,7 @@ def _d9_data_request_checks(bundle: dict, session_id: str) -> list[dict]:
 
 
 _D9_SELF_VALIDATING_BUILTINS = frozenset({"NLX.Date", "NLX.Time", "NLX.Email", "NLX.Url", "NLX.Number"})
+_D9_TIME_SHAPE = re.compile(r"^\^?(?:\\d|\[0-9\])\{1,2\}:(?:\\d|\[0-9\])\{2\}\$?$|^\^?(?:\\d|\[0-9\])\{2\}:(?:\\d|\[0-9\])\{2\}\$?$")
 
 
 def _d9_open_value_slot_issues(bundle: dict, flow_plan: dict, slot: dict, field_name: str,
@@ -2182,6 +2183,8 @@ def _d9_open_value_slot_issues(bundle: dict, flow_plan: dict, slot: dict, field_
         # format, restored by the Lambda adapter, not a capture constraint.
         return []
     if expected_regex:
+        if attached.get("regex") == "^[0-9]{3,4}$" and _D9_TIME_SHAPE.match(str(expected_regex).strip()):
+            return []  # S9: a typed HH:MM reaches the slot as compact digits; the adapter restores it
         if _d9_regex_canonical(attached.get("regex")) != _d9_regex_canonical(expected_regex):
             return [_d9_issue(
                 "D9-4", f"Flow {flow_id!r} slot {slot_name!r} regex {attached.get('regex')!r} does not match "

@@ -89,6 +89,9 @@ def restore(value: str, pattern: str) -> Optional[str]:
     if parts is None:
         return None
     compact = "".join(ch for ch in value if ch not in _SEPARATORS)
+    expected = sum(len(t) for k, t in parts if k != "sep")
+    if len(compact) == expected - 1 and compact.isdigit() and ":" in pattern:
+        compact = "0" + compact  # "930" → "0930": a dropped leading zero (times only)
     out: list[str] = []
     pos = 0
     for kind, text in parts:
@@ -175,6 +178,11 @@ def _aicc_restore(value, pattern):
     if parts is None:
         return None
     compact = "".join(ch for ch in value if ch not in _AICC_SEPARATORS)
+    # A typed "9:30" reaches the slot as "930": one digit short of the skeleton
+    # means a dropped leading zero (times, never ids), so pad it back.
+    expected = sum(len(t) for k, t in parts if k != "sep")
+    if len(compact) == expected - 1 and compact.isdigit() and ":" in pattern:
+        compact = "0" + compact
     out, pos = [], 0
     for kind, text in parts:
         if kind == "sep":

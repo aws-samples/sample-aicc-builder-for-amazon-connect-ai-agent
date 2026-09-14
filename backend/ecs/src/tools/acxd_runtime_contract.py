@@ -650,30 +650,44 @@ class _RuntimeContract:
     _TIME_REGEX = re.compile(
         r"^\^?(?:\\d|\[0-9\])\{1,2\}:(?:\\d|\[0-9\])\{2\}\$?$|^\^?(?:\\d|\[0-9\])\{2\}:(?:\\d|\[0-9\])\{2\}\$?$")
 
+    #: The compact form a typed HH:MM reaches the slot in ("10:00" → "1000",
+    #: "9:30" → "930"); the Lambda adapter restores the colon.
+    COMPACT_TIME_REGEX = "^[0-9]{3,4}$"
+
     def rule_s9(self) -> None:
-        """A built-in text slot whose regex is a date (YYYY-MM-DD) or time (HH:MM)
-        skeleton becomes ``NLX.Date`` / ``NLX.Time`` without the regex. Built-in
-        values arrive without separators (live), so a regex with '-' or ':' can
-        never match: the appointment date '2026-09-18' was rejected, the flow's
-        retry edge led to the fallback, and the third miss escalated. The date
-        type recognised the same input in another project."""
+        """A built-in text slot whose regex is a date (YYYY-MM-DD) skeleton becomes
+        ``NLX.Date`` without the regex; a time (HH:MM) skeleton keeps the text type
+        with the compact-digits regex. Built-in values arrive without separators
+        (live), so a regex with '-' or ':' never matches: the appointment date
+        '2026-09-18' was rejected, the flow's retry edge led to the fallback, and
+        the third miss escalated. ``NLX.Date`` recognised the same input and
+        delivers the ISO date; ``NLX.Time`` is NOT used because it delivers an
+        instant in an assumed timezone ("10:00" → "2026-09-14T14:00:00.000Z",
+        live) that no backend can map back to what the caller said."""
         for slot in self.attached:
             slot_type = slot.get("type")
             regex = slot.get("regex")
-            if slot_type not in ("NLX.AlphaNumeric", "NLX.Text") or not isinstance(regex, str):
+            if slot_type not in ("NLX.AlphaNumeric", "NLX.Text", "NLX.Time") or not isinstance(regex, str):
+                if slot_type == "NLX.Time":
+                    slot["type"] = "NLX.AlphaNumeric"
+                    slot["regex"] = self.COMPACT_TIME_REGEX
+                    self.change(f"slot {slot.get('name')!r}: NLX.Time → NLX.AlphaNumeric with regex "
+                                f"{self.COMPACT_TIME_REGEX!r} (NLX.Time delivers a timezone-shifted instant; S9)")
                 continue
-            target = None
-            if self._DATE_REGEX.match(regex.strip()):
-                target = "NLX.Date"
-            elif self._TIME_REGEX.match(regex.strip()):
-                target = "NLX.Time"
-            if target is None:
-                continue
-            slot["type"] = target
-            slot.pop("regex", None)
-            self.change(
-                f"slot {slot.get('name')!r}: {slot_type} with regex {regex!r} → {target} "
-                f"(built-in values carry no separators, so the regex never matched; S9)")
+            stripped = regex.strip()
+            if self._DATE_REGEX.match(stripped):
+                slot["type"] = "NLX.Date"
+                slot.pop("regex", None)
+                self.change(
+                    f"slot {slot.get('name')!r}: {slot_type} with regex {regex!r} → NLX.Date "
+                    f"(built-in values carry no separators, so the regex never matched; S9)")
+            elif self._TIME_REGEX.match(stripped) or slot_type == "NLX.Time":
+                slot["type"] = "NLX.AlphaNumeric"
+                slot["regex"] = self.COMPACT_TIME_REGEX
+                self.change(
+                    f"slot {slot.get('name')!r}: {slot_type} with regex {regex!r} → NLX.AlphaNumeric with "
+                    f"regex {self.COMPACT_TIME_REGEX!r} (the typed HH:MM reaches the slot without the "
+                    f"colon; the Lambda adapter restores it; S9)")
 
     def rule_s2(self) -> None:
         names = self.slot_names
