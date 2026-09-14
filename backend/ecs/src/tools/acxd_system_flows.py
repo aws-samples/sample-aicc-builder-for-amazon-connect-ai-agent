@@ -92,6 +92,8 @@ _TEXTS: dict[str, dict] = {
     "ko": {
         "greeting": "안녕하세요, {company}입니다. 무엇을 도와드릴까요?",
         "greeting_no_company": "안녕하세요. 무엇을 도와드릴까요?",
+        "greeting_ops": "안녕하세요, {company}입니다. {operations} 등을 도와드릴 수 있어요. 무엇을 도와드릴까요?",
+        "greeting_ops_no_company": "안녕하세요. {operations} 등을 도와드릴 수 있어요. 무엇을 도와드릴까요?",
         "reguide": "죄송합니다, 잘 이해하지 못했습니다. {operations} 중 무엇을 "
                    "도와드릴까요? 상담사 연결도 가능합니다.",
         "reguide_no_operations": "죄송합니다, 잘 이해하지 못했습니다. 무엇을 "
@@ -114,6 +116,8 @@ _TEXTS: dict[str, dict] = {
     "en": {
         "greeting": "Hello, this is {company}. How can I help you today?",
         "greeting_no_company": "Hello. How can I help you today?",
+        "greeting_ops": "Hello, this is {company}. I can help with {operations}. How can I help you today?",
+        "greeting_ops_no_company": "Hello. I can help with {operations}. How can I help you today?",
         "reguide": "Sorry, I did not catch that. I can help with {operations}. "
                    "Which one would you like? I can also connect you to an agent.",
         "reguide_no_operations": "Sorry, I did not catch that. How can I help "
@@ -138,6 +142,8 @@ _TEXTS: dict[str, dict] = {
     "ja": {
         "greeting": "こんにちは、{company}です。ご用件をお伺いします。",
         "greeting_no_company": "こんにちは。ご用件をお伺いします。",
+        "greeting_ops": "こんにちは、{company}です。{operations}をご案内できます。ご用件をお伺いします。",
+        "greeting_ops_no_company": "こんにちは。{operations}をご案内できます。ご用件をお伺いします。",
         "reguide": "申し訳ございません、うまく理解できませんでした。{operations} の"
                    "うち、どのご用件でしょうか。オペレーターへのお繋ぎも可能です。",
         "reguide_no_operations": "申し訳ございません、うまく理解できませんでした。"
@@ -227,6 +233,21 @@ def _company(spec: dict) -> str:
         if value and value != str(profile.get("project_name") or "").strip():
             return value
     return ""
+
+
+def _composed_greeting(spec: dict, text: dict, company: str) -> str:
+    """Greeting built from what the interview did record: the company name when
+    it is a real name, and the operations the assistant can help with (the same
+    display names the re-guide uses), so a first-time caller hears the menu."""
+    labels = operation_labels(spec)
+    operations = text["operation_joiner"].join(labels) if labels else ""
+    if operations and company:
+        return text["greeting_ops"].format(company=company, operations=operations)
+    if operations:
+        return text["greeting_ops_no_company"].format(operations=operations)
+    if company:
+        return text["greeting"].format(company=company)
+    return text["greeting_no_company"]
 
 
 def _approved_greeting(spec: dict) -> str:
@@ -370,9 +391,7 @@ def build_welcome_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict:
     # (SessionFlowConfig.common_greeting / ContactFlowSpec.welcome_message).
     # Live (SELC): composing one from the profile said "안녕하세요, selc-aicc입니다"
     # — the project slug — because the profile had no company name.
-    greeting = _approved_greeting(spec) or (
-        text["greeting"].format(company=company) if company
-        else text["greeting_no_company"])
+    greeting = _approved_greeting(spec) or _composed_greeting(spec, text, company)
 
     start = _node_id(flow_id, "start")
     greet = _node_id(flow_id, "greeting")

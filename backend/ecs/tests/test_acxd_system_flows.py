@@ -164,8 +164,10 @@ def test_welcome_flow_shape():
     assert "generative_journey" not in set(_types(flow).values())
 
     greeting = _node_of_type(flow, "basic")
-    assert greeting["messages"][0]["body"] == \
-        "안녕하세요, 삼성전자로지텍입니다. 무엇을 도와드릴까요?"
+    # No approved greeting in the spec → company + the operations menu
+    assert greeting["messages"][0]["body"] == (
+        "안녕하세요, 삼성전자로지텍입니다. 배송 조회, 에어컨 세척 가격 문의, 세척 예약 등을 "
+        "도와드릴 수 있어요. 무엇을 도와드릴까요?")
     # the counter is reset on entry, not in FallbackFlow
     assert greeting["metadata"]["stateModifications"] == [{
         "type": "context", "name": "fallbackAttempts", "modification": "set",
@@ -596,6 +598,10 @@ def test_welcome_flow_speaks_the_approved_greeting_and_never_the_project_slug():
     assert _node_of_type(flow, "basic")["messages"][0]["body"] == \
         "안녕하세요, 삼성전자로지텍 고객센터입니다. 무엇을 도와드릴까요?"
     spec["business_profile"].pop("greeting")
+    flow = build_welcome_flow(spec)
+    body = _node_of_type(flow, "basic")["messages"][0]["body"]
+    assert body.startswith("안녕하세요. 배송 조회, ") and "selc-aicc" not in body
+    spec["flows"] = []
     flow = build_welcome_flow(spec)
     assert _node_of_type(flow, "basic")["messages"][0]["body"] == "안녕하세요. 무엇을 도와드릴까요?"
 
