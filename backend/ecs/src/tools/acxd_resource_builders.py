@@ -304,6 +304,14 @@ def _keep_derived_output_rules_advisory(doc: dict, plan: dict) -> None:
                 doc.get("name"), method, action)
 
 
+def _project_scoped_name(spec: dict, name: str) -> str:
+    """``<projectSlug>-<name>`` (ASCII, ≤100 chars) when the spec knows its project."""
+    slug = re.sub(r"[^A-Za-z0-9]", "", str(((spec or {}).get("infrastructure") or {}).get("project_name") or ""))
+    if not slug or name.lower().startswith(slug.lower()):
+        return name[:100]
+    return f"{slug}-{name}"[:100]
+
+
 def _guardrail_name(plan: dict, index: int) -> str:
     """A usable name for a guardrail the interview left unnamed.
 
@@ -354,6 +362,11 @@ def build_guardrails(spec: dict) -> tuple[list[dict], list[str]]:
                         "using %r (the live API rejects non-ASCII names)",
                         i, name, derived)
             name = derived
+
+        # Guardrails are workspace-level resources keyed by name. Live: three
+        # projects in one workspace all produced 'guardrail1'/'guardrail2' and
+        # each deploy overwrote the others' rules. Prefix with the project slug.
+        name = _project_scoped_name(spec, name)
 
         action = plan.get("action")
         route_target = plan.get("route_flow_id")
@@ -558,6 +571,7 @@ def build_application(spec: dict) -> dict:
         guardrail_name = guardrail.get("name") or _guardrail_name(guardrail, index)
         if any(ord(char) > 126 for char in str(guardrail_name)):
             guardrail_name = _guardrail_name(guardrail, index)
+        guardrail_name = _project_scoped_name(spec, str(guardrail_name)[:100])
         guardrail_refs.append({"guardrailId": f"{{GUARDRAIL:{guardrail_name}}}"})
     if guardrail_refs:
         settings["guardrails"] = guardrail_refs

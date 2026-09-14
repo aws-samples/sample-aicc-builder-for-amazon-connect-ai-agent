@@ -133,7 +133,7 @@ def test_generation_context_adapts_classic_specs_openapi_and_faq(monkeypatch):
     # comes from the BackendApiKey secret deploy.sh fills — never inline. The
     # runtime resolves `{Name:NLX.Secret}` (not `{{secrets.Name}}`, which is sent
     # verbatim → 403) and only from the environment blocks (live 2026-09-13).
-    secret_header = {"key": "x-api-key", "value": "{BackendApiKey:NLX.Secret}", "sensitive": True}
+    secret_header = {"key": "x-api-key", "value": "{ordersBackendApiKey:NLX.Secret}", "sensitive": True}  # project-scoped: secrets are workspace-level
     assert data_request["webhook"] == {
         "implementation": "external",
         "method": "POST",

@@ -350,7 +350,7 @@ const upsertSecrets = {
       const doc = readJson(file);
       // Secret values are NEVER stored in the bundle: read from env.
       const envVar = doc.valueEnv || `ACXD_SECRET_${String(doc.name || '').toUpperCase()}`;
-      const value = ctx.env[envVar] || (doc.name === 'BackendApiKey' ? ctx.backendApiKey : undefined);
+      const value = ctx.env[envVar] || (/BackendApiKey$/.test(doc.name || '') ? ctx.backendApiKey : undefined);
       if (!value) {
         ctx.log(`  ! skipping secret '${doc.name}': env ${envVar} not set`);
         continue;

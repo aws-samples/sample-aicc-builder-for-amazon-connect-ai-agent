@@ -407,3 +407,19 @@ def test_guardrails_generalise_literal_regex_and_localise_the_modify_message():
     docs, _ = build_guardrails(spec)
     message = docs[0]["rules"][0]["enforcement"]["behavior"]["message"]
     assert message.startswith("죄송합니다") and "can't" not in message
+
+
+def test_guardrail_names_are_project_scoped_and_the_application_references_them():
+    """Live (2026-09-14): 'guardrail1' from three projects in one workspace kept
+    overwriting each other."""
+    import copy
+    from tools.acxd_resource_builders import build_application, build_guardrails
+    spec = copy.deepcopy(SPEC)
+    spec["infrastructure"] = {"project_name": "green-cart"}
+    docs, problems = build_guardrails(spec)
+    assert problems == []
+    names = {d["name"] for d in docs}
+    assert "greencart-PII Filter" in names and "greencart-Abuse Filter" in names
+    app = build_application(spec)
+    refs = {g["guardrailId"] for g in app["settings"]["guardrails"]}
+    assert refs == {f"{{GUARDRAIL:{n}}}" for n in names}

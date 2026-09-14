@@ -346,3 +346,20 @@ def test_data_request_and_slot_type_descriptions_are_ascii_by_construction():
     product = next(d for d in docs if d["slotTypeId"] == "productType")
     assert all(ord(c) < 0x80 for c in product.get("description", ""))
     assert product["values"][0]["value"] == "벽걸이실내기"
+
+
+def test_backend_api_key_secret_is_named_per_project():
+    """Live (2026-09-14): three projects in one ACXD workspace shared the secret
+    'BackendApiKey'; each deploy overwrote the others' API key and their Data
+    Requests answered 403."""
+    from tools.acxd_data_request_builder import (
+        auth_secret_name_for, backend_api_key_secret_name, build_secret_assets)
+
+    assert backend_api_key_secret_name("greencart") == "greencartBackendApiKey"
+    assert backend_api_key_secret_name("Hanbit-Hospital") == "hanbitHospitalBackendApiKey"
+    assert backend_api_key_secret_name(None) == "BackendApiKey"          # no project: legacy name
+    plan = {"data_request_id": "getOrder", "url": "{WEBHOOK_URL}/tools/get_order", "project_slug": "greencart"}
+    assert auth_secret_name_for(plan) == "greencartBackendApiKey"
+    docs = build_secret_assets({"data_integrations": [plan]})
+    assert [d["name"] for d in docs] == ["greencartBackendApiKey"]
+    assert docs[0]["valueEnv"] == "ACXD_SECRET_GREENCARTBACKENDAPIKEY"

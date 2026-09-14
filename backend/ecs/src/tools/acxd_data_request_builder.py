@@ -433,10 +433,27 @@ def _calls_generated_backend(plan: dict) -> bool:
     return not url or "{WEBHOOK_URL}" in url
 
 
+def backend_api_key_secret_name(project_slug: Optional[str]) -> str:
+    """The ACXD Secret that holds this project's API Gateway key.
+
+    Secrets are workspace-level resources keyed by name. Live (2026-09-14): three
+    projects in one workspace all used ``BackendApiKey``, so every deploy
+    overwrote the others' key and their Data Requests started answering 403.
+    The name is therefore prefixed with the project slug (letters/digits only):
+    ``greencartBackendApiKey``.
+    """
+    slug = re.sub(r"[^A-Za-z0-9]", "", str(project_slug or ""))
+    if not slug:
+        return BACKEND_API_KEY_SECRET
+    return slug[0].lower() + slug[1:] + BACKEND_API_KEY_SECRET
+
+
 def auth_secret_name_for(plan: dict) -> Optional[str]:
     """Secret name for this integration's auth header, if any."""
     if not plan.get("auth_header"):
-        return BACKEND_API_KEY_SECRET if _calls_generated_backend(plan) else None
+        if not _calls_generated_backend(plan):
+            return None
+        return backend_api_key_secret_name(plan.get("project_slug"))
     explicit = plan.get("auth_secret_name")
     if explicit:
         return re.sub(r"[^A-Za-z0-9_]", "", str(explicit)) or None
@@ -475,14 +492,15 @@ def build_secret_assets(spec: dict) -> list:
         if not secret or secret in seen:
             continue
         seen.add(secret)
-        if secret == BACKEND_API_KEY_SECRET:
+        if secret.endswith(BACKEND_API_KEY_SECRET):
+            env_name = "ACXD_SECRET_" + re.sub(r"[^A-Za-z0-9]", "", secret).upper()
             out.append({
                 "name": secret,
                 "description": (
                     "API Gateway key of the generated backend, sent as x-api-key by the "
                     "Data Requests. deploy.sh fills it from the CloudFormation ApiKeyValue "
-                    "output (env ACXD_SECRET_BACKENDAPIKEY)."),
-                "valueEnv": "ACXD_SECRET_BACKENDAPIKEY",
+                    f"output (env {env_name})."),
+                "valueEnv": env_name,
             })
             continue
         out.append({

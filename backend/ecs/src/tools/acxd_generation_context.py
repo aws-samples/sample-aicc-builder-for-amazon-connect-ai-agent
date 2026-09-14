@@ -555,6 +555,8 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
                 contract.get("response_fields"),
                 [_field_dict(field) for field in (op.get("output_fields") or [])])),
             "purpose": op.get("summary") or op.get("description") or raw_id,
+            # Secrets are workspace-level: the backend key secret is named per project.
+            "project_slug": infrastructure.get("project_name"),
         })
 
     for plan in plans:
