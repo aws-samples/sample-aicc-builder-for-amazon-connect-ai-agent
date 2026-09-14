@@ -28,8 +28,12 @@ _WATCHED = (
 _CLAIM_VERBS = (
     r"(?:returned|was (?:actually )?(?:called|invoked|run|executed)|(?:has been|have been) (?:called|invoked|executed)|"
     r"result(?:s)?(?: JSON)?(?: was| were| is| are)?|output|"
-    r"호출(?:했|됐|되었|됨|완료|되어|한 결과)|반환|실행(?:했|됐|되었|됨|완료|결과|되어))"
+    r"호출\s*(?:했|됐|되었|됨|완료|되어|한 결과|결과|\)|:|：)|반환|실행\s*(?:했|됐|되었|됨|완료|결과|되어))"
 )
+
+# A tool name followed closely by a result-shaped block is a narrated result
+# even without a verb: "`generate_acxd_application` (실제 호출):\n```json {…}".
+_RESULT_BLOCK = r"(?:```json|\{\s*\"(?:status|success|blocking|counts)\")"
 
 
 def _claimed_tools(text: str) -> set[str]:
@@ -40,6 +44,10 @@ def _claimed_tools(text: str) -> set[str]:
         # `name` ... verb within ~80 chars, or verb ... `name` (Korean puts the verb last)
         pattern = rf"`?{re.escape(name)}`?[^\n`]{{0,80}}?{_CLAIM_VERBS}|{_CLAIM_VERBS}[^\n`]{{0,40}}?`?{re.escape(name)}`?"
         if re.search(pattern, text, re.I):
+            claimed.add(name)
+            continue
+        block = rf"`?{re.escape(name)}`?[^`]{{0,120}}?{_RESULT_BLOCK}"
+        if re.search(block, text, re.I | re.S):
             claimed.add(name)
     return claimed
 
