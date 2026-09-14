@@ -1923,6 +1923,19 @@ phase_contact_flow() {
         fi
         FLOW_LANG="${FLOW_LANG:-$DETECTED_LANG}"
         ACXD_ALIAS_ROTATED="$(runner_alias_rotated)"
+        # A re-run without ACXD_ALIAS_ID must not regress a working flow to the
+        # placeholder (live: every redeploy reset the alias the operator had
+        # already bound). Reuse the alias recorded by --rebind-alias, else the
+        # one the published flow carries today.
+        if [ -z "${ACXD_ALIAS_ID:-}" ]; then
+            local prev_alias
+            prev_alias="$(state_get ACXD_ALIAS_ID)"
+            [ -z "$prev_alias" ] && prev_alias="$(published_flow_alias)"
+            if [ -n "$prev_alias" ] && [ "$prev_alias" != "SELECT_ALIAS_IN_CONSOLE" ]; then
+                ACXD_ALIAS_ID="$prev_alias"
+                info "Reusing the Agentic CX alias already bound to this flow ($prev_alias)"
+            fi
+        fi
         local ACXD_ALIAS_VALUE="${ACXD_ALIAS_ID:-SELECT_ALIAS_IN_CONSOLE}"
         python3 - "$WORK_FLOW" "${ACXD_WORKSPACE_ID:-}" "$ACXD_APPLICATION_ID" "$ACXD_ALIAS_VALUE" <<'PYEOF'
 import sys
@@ -3024,6 +3037,29 @@ do_acxd_deploy() {
 # rotates the key, the block keeps the previous one, and the previous one still
 # resolves — to the previous build. Patches AgentConfiguration.Alias in place
 # (aws connect update-contact-flow-content), then reads the flow back.
+# The Agentic CX alias the already-imported Contact Flow carries (empty when
+# there is no imported flow yet, or the block still holds the placeholder).
+published_flow_alias() {
+    local flow_id="${CONTACT_FLOW_ID:-$(state_get CONTACT_FLOW_ID)}"
+    [ -z "$flow_id" ] && flow_id="$(runner_contact_flow_id 2>/dev/null || true)"
+    [ -z "$flow_id" ] || [ -z "${CONNECT_INSTANCE_ID:-}" ] && { echo ""; return; }
+    aws connect describe-contact-flow \
+        --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$flow_id" \
+        --region "$REGION" --query 'ContactFlow.Content' --output text 2>/dev/null | python3 -c '
+import json, sys
+try:
+    content = json.loads(sys.stdin.read() or "{}")
+except ValueError:
+    content = {}
+for action in content.get("Actions", []):
+    if action.get("Type") == "ConnectParticipantWithAgenticCX":
+        alias = ((action.get("Parameters") or {}).get("AgentConfiguration") or {}).get("Alias") or ""
+        if alias and alias != "SELECT_ALIAS_IN_CONSOLE":
+            print(alias)
+        break
+' 2>/dev/null || true
+}
+
 do_acxd_rebind_alias() {
     local alias_value="$1"
     hr
