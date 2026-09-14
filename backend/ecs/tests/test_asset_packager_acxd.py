@@ -189,3 +189,24 @@ def test_differing_duplicate_copy_is_refused(monkeypatch):
     })
     assert result["success"] is False
     assert "different content" in (result.get("error") or "")
+
+
+def test_acxd_lambda_handlers_get_the_format_restorer(monkeypatch):
+    import tools.asset_packager as packager
+    monkeypatch.setattr(packager, "_acxd_field_patterns",
+                        lambda folder: {"phoneNumber": r"^010-\d{4}-\d{4}$"} if folder == "get_order" else {})
+    result, client = _package(monkeypatch, acxd=True)
+    assert result["success"] is True
+    with zipfile.ZipFile(io.BytesIO(client.payload)) as archive:
+        code = archive.read("acme-refunds/lambda/get_order/index.py").decode("utf-8")
+    assert "ACXD delivers slot values without separators" in code
+    assert "_aicc_restore_formats" in code and "def lambda_handler(event, context)" in code
+
+
+def test_classic_lambda_handlers_are_left_alone(monkeypatch):
+    import tools.asset_packager as packager
+    monkeypatch.setattr(packager, "_acxd_field_patterns", lambda folder: {"phoneNumber": r"^010-\d{4}-\d{4}$"})
+    result, client = _package(monkeypatch, acxd=False)
+    with zipfile.ZipFile(io.BytesIO(client.payload)) as archive:
+        code = archive.read("acme-refunds/lambda/get_order/index.py").decode("utf-8")
+    assert "ACXD delivers slot values" not in code

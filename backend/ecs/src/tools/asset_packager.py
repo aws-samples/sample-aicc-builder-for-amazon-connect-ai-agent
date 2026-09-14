@@ -199,6 +199,36 @@ def _slug(value: Any, fallback: str = "unnamed") -> str:
     return value or fallback
 
 
+def _acxd_field_patterns(operation_folder: str) -> dict:
+    """{input field name: regex} for the OperationSpec whose id or tool id names
+    this Lambda folder (spellings compared without case, '_' or '-')."""
+    try:
+        from tools.spec_manager import get_all_specs
+        specs = get_all_specs() or {}
+    except Exception:  # pragma: no cover - spec store outage is non-fatal
+        return {}
+
+    def norm(value) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+    wanted = norm(operation_folder)
+    for op_id, spec in specs.items():
+        names = {norm(op_id), norm(getattr(spec, "operation_id", None))}
+        for tool in getattr(spec, "tools", None) or []:
+            names.add(norm(getattr(tool, "tool_id", None) or getattr(tool, "name", None)
+                           or (tool.get("tool_id") if isinstance(tool, dict) else None)))
+        if wanted not in names:
+            continue
+        patterns = {}
+        for field in getattr(spec, "input_fields", None) or []:
+            name = getattr(field, "name", None) or (field.get("name") if isinstance(field, dict) else None)
+            pattern = getattr(field, "pattern", None) or (field.get("pattern") if isinstance(field, dict) else None)
+            if name and isinstance(pattern, str) and pattern:
+                patterns[str(name)] = pattern
+        return patterns
+    return {}
+
+
 def _is_acxd_target(session_id: str) -> bool:
     """Late-load the target contract so old Classic sessions remain unaffected."""
     try:
@@ -580,6 +610,24 @@ def package_assets_impl(
                 if not content:
                     logger.warning(f"[packager] empty/unreadable S3 asset: {s3_key}")
                     continue
+
+                # ACXD delivers built-in slot values without separators (live:
+                # 010-1111-2222 → 01011112222); the handler validates the spec
+                # format. Wrap every ACXD bundle's Python handler so the
+                # OperationSpec formats are restored before validation.
+                if acxd_plan and asset_type.lower() == "lambda" and file_name.endswith(".py") \
+                        and operation_id:
+                    patterns = _acxd_field_patterns(operation_id)
+                    if patterns:
+                        try:
+                            from tools.acxd_lambda_adapter import inject as _inject_adapter
+                            new_content, restored = _inject_adapter(
+                                content if isinstance(content, str) else content.decode("utf-8"), patterns)
+                            if restored:
+                                content = new_content
+                                logger.info(f"[packager] {operation_id}: format restorer added for {restored}")
+                        except Exception as exc:  # pragma: no cover - never block packaging on the aid
+                            logger.warning(f"[packager] {operation_id}: format restorer skipped: {exc}")
 
                 if asset_type.lower() in ACXD_STORAGE_TYPES:
                     # Filtered ACXD download: keep the deployment layout so the
