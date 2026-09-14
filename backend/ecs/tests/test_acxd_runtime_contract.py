@@ -1257,3 +1257,36 @@ def test_p1_a_request_reached_by_alternative_captures_sends_only_the_slots_each_
     assert requests[by_return] == {"returnId": "{returnId:NLX.Slot}"}
     assert requests[by_order] == {"orderNumber": "{orderNumber:NLX.Slot}"}
     assert sum("P1)" in n for n in notes) == 2
+
+
+def test_p1_a_single_path_request_drops_slots_the_path_never_captures():
+    """Live (GreenCart, 2026-09-14): the flow asked for the return number only
+    but the payload also sent the never-asked order number."""
+    flow = {"flowId": "ReturnStatus", "nodes": {
+        "s": {"nodeId": "s", "type": "start", "childNodes": [{"nodeId": "askR", "name": "ask"}]},
+        "askR": {"nodeId": "askR", "type": "user_choice", "messages": [{"type": "text", "body": "반품번호?"}],
+                 "metadata": {"choice": {"source": "slotType", "slotTypeId": "returnId"}},
+                 "childNodes": [{"nodeId": "dr", "name": "captured",
+                                 "conditions": [{"left": {"type": "slot", "name": "returnId"}, "operator": "exists"}]},
+                                {"nodeId": "esc", "name": "not captured",
+                                 "conditions": [{"left": {"type": "slot", "name": "returnId"}, "operator": "not_exists"}]}]},
+        "dr": {"nodeId": "dr", "type": "data_request",
+               "dataRequests": [{"dataRequestId": "getReturnStatus",
+                                 "payload": {"returnId": "{returnId:NLX.Slot}", "orderNumber": "{orderNumber:NLX.Slot}"}}],
+               "childNodes": [{"nodeId": "say", "name": "success",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "success"}}]},
+                              {"nodeId": "esc", "name": "failure",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "failure"}}]}]},
+        "say": {"nodeId": "say", "type": "basic", "messages": [{"type": "text", "body": "상태 {getReturnStatus.status:NLX.Variable}"}],
+                "childNodes": [{"nodeId": "end", "name": "done"}]},
+        "esc": {"nodeId": "esc", "type": "escalate"},
+        "end": {"nodeId": "end", "type": "end"},
+    }, "slotTypes": [{"name": "returnId", "type": "NLX.AlphaNumeric", "sensitive": False, "regex": "^RT-[0-9]{6}$"},
+                     {"name": "orderNumber", "type": "NLX.AlphaNumeric", "sensitive": False, "regex": "^GC-[0-9]{8}$"}]}
+    dr_doc = {"dataRequestId": "getReturnStatus", "webhook": {"url": "{WEBHOOK_URL}/tools/get_return_status"},
+              "requestSchema": {"type": "object", "properties": {"returnId": {"type": "string"}, "orderNumber": {"type": "string"}}},
+              "responseSchema": {"type": "object", "properties": {"success": {"type": "boolean"}, "status": {"type": "string"}}}}
+    out, notes = apply_runtime_contract(flow, role="operation", data_requests={"getReturnStatus": dr_doc},
+                                        flow_ids=["ReturnStatus"], escalation_flow_id="Escalation")
+    assert out["nodes"]["dr"]["dataRequests"][0]["payload"] == {"returnId": "{returnId:NLX.Slot}"}
+    assert any("payload dropped ['orderNumber']" in n for n in notes)

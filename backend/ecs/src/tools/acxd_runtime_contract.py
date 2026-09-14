@@ -1499,12 +1499,32 @@ class _RuntimeContract:
                     match = _PLACEHOLDER_SLOT.fullmatch(str(value or ""))
                     if match:
                         slot_fields[match.group(1)] = str(field)
-            if len(slot_fields) < 2:
-                continue  # one slot (or none): a single path captured it or D3 reports it
+            if not slot_fields:
+                continue
             parents = [(pid, edge) for pid, pnode in self.nodes.items()
                        for edge in _edges(pnode) if edge.get("nodeId") == node_id]
-            if len(parents) < 2:
-                continue  # a single way in: every slot was collected on it
+            if not parents:
+                continue
+            if len(parents) == 1:
+                # One way in: a slot the path never captures is simply dropped from
+                # the payload (live: the flow asked for a return number only but the
+                # payload also sent the never-asked order number).
+                pid, edge = parents[0]
+                guaranteed = {slot for slot in slot_fields
+                              if _captures_slot(edge, slot) or self._slot_guaranteed_before(pid, slot)}
+                missing = set(slot_fields) - guaranteed
+                if missing and guaranteed:
+                    for entry in node.get("dataRequests") or []:
+                        if isinstance(entry, dict) and isinstance(entry.get("payload"), dict):
+                            entry["payload"] = {
+                                f: v for f, v in entry["payload"].items()
+                                if not (_PLACEHOLDER_SLOT.fullmatch(str(v or ""))
+                                        and _PLACEHOLDER_SLOT.fullmatch(str(v or "")).group(1) in missing)}
+                    self.change(
+                        f"{_label(node_id, node)}: payload dropped {sorted(missing)} — never captured on "
+                        f"the path that reaches the request (an unfilled slot placeholder fails the request "
+                        f"before the call; P1)")
+                continue
             clones: dict[frozenset, str] = {}
             for pid, edge in parents:
                 # the capture itself happens on the edge into the request
