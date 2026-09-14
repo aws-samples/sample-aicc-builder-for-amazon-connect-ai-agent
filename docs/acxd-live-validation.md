@@ -130,6 +130,12 @@ note when the manifest disagrees), and a runner-only deploy is told to export
 | Deployment language | `CreateApplicationDeployment` with `languageCodes: ["ko-KR"]` answered `InternalServerException: Failed to create deployment`; the same request without `languageCodes` was accepted and the deployment uses the application's language settings (`UpdateApplicationDeployment` without them answers `A deployment requires at least one language code`) (2026-09-12) | runner: send the codes, fall back without |
 | Backend API key | The generated API Gateway requires its key in the ACXD target; Data Requests send `x-api-key: {{secrets.BackendApiKey}}`; the runner fills the secret from the stack's `ApiKeyValue` output. Verified 2026-09-12: 403 without the key, 200 with it, Data Request stored with the secret reference | merge, Data Request builder, runner, D9-8 |
 | Lambda names | The template names functions `${ProjectName}-${Environment}-<op-with-hyphens>`; the runner resolves them from the stack's `AWS::Lambda::Function` resources instead of a naming convention | runner |
+| Application language | `CreateApplication` silently ignores `settings.languageCode` / `languageCodes` / `languageSettings` and creates the application as `en-US`; the build then snapshots `en-US` while every flow is `ko-KR`, and the Agentic CX block fails with "NLX Chat Streaming Failed" on the first contact. `UpdateApplication` honours the fields | runner re-reads the application after create and re-applies the languages |
+| Yes/no comparisons | A condition on a slot attached as the `yesNo` type must compare against that type's own values (`예` / `아니요`, …); `"yes"` never matches, so a consent question read every answer as a refusal | runtime contract S8 |
+| Message nodes | A `basic` node that also carries `metadata.redirect` (or clears the slots its own message renders) never shows its message — the contact falls into the fallback re-guide | runtime contract M3 |
+| Result conditions | A branch on `<dataRequest>.<field>` only works for a field the Data Request's `responseSchema` declares; an undeclared field (`accepted` where the API returns `success`) sends every success down the failure branch | runtime contract D5 |
+| Custom slot types | A slot type exists to enumerate a menu. A one-value type built for an open value (an order number, a phone) is auto-selected without asking; open values are collected as an NLX built-in with the field's regex, and `user_choice` on such a slot is the working single-value capture | slot-type builder, D9-4, bundle loader |
+| Guardrail messages | An output guardrail's replacement message is spoken verbatim; the service has no default in the caller's language | guardrail builder localises the default |
 
 ## Cross-asset contract facts
 
@@ -168,5 +174,11 @@ note when the manifest disagrees), and a runner-only deploy is told to export
   SDK, so binding it is either `ACXD_ALIAS_ID` / `--rebind-alias` with a key
   taken from the console-internal `flowResources` endpoint, or a click in the
   block's dropdown followed by Publish. `WIRING-GUIDE.md` explains the console
-  step.
+  step. A re-run of `./deploy.sh` keeps the alias already bound to the flow;
+  when the run had to replace the application deployment the key rotates and
+  the script says so — re-bind once more.
+- Two projects deployed into one Connect instance share that instance's single
+  Q in Connect assistant (Classic target): the most recently deployed project
+  owns the assistant's default AI agent. Use one instance per Classic project
+  when both must answer at the same time.
 - Rotate any programmatic API key that was used from a shared machine.
