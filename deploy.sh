@@ -787,13 +787,14 @@ if [ "$DEPLOY_BACKEND" = true ]; then
                 | .containerDefinitions = (.containerDefinitions | map(
                     if .name == \"app\" then
                       .environment = (
-                        [(.environment // [])[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"AGENTCORE_GATEWAY_URL\",\"AGENTCORE_GATEWAY_REGION\") | not)]
+                        [(.environment // [])[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"AGENTCORE_GATEWAY_URL\",\"AGENTCORE_GATEWAY_REGION\",\"AICC_BUILDER_BUILD\") | not)]
                         + [{\"name\":\"ASSETS_BUCKET_NAME\",\"value\":\$bucket},
                        {\"name\":\"USER_POOL_ID\",\"value\":\$pool},
                        {\"name\":\"USER_POOL_CLIENT_ID\",\"value\":\$poolclient},
                        {\"name\":\"CONTACT_FLOW_KB_ID\",\"value\":\$kbid},
                        {\"name\":\"AGENTCORE_GATEWAY_URL\",\"value\":\$gateway},
-                       {\"name\":\"AGENTCORE_GATEWAY_REGION\",\"value\":\"us-east-1\"}]
+                       {\"name\":\"AGENTCORE_GATEWAY_REGION\",\"value\":\"us-east-1\"},
+                       {\"name\":\"AICC_BUILDER_BUILD\",\"value\":\$build}]
                       )
                     else . end
                   ))"
@@ -804,6 +805,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
                      --arg poolclient "${USER_POOL_CLIENT_ID:-}" \
                      --arg kbid "${CONTACT_FLOW_KB_ID:-}" \
                      --arg gateway "${AGENTCORE_GATEWAY_URL:-}" \
+                     --arg build "${BUILDER_BUILD:-}" \
                      "$JQ_FILTER" > /tmp/patched-task-def.json
 
             PATCHED_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file:///tmp/patched-task-def.json \
