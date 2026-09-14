@@ -43,7 +43,8 @@ def test_injected_wrapper_restores_the_payload_and_is_idempotent():
     out = module.lambda_handler({"body": json.dumps({"phoneNumber": "01011112222", "date": "20260916",
                                                      "appointmentId": "A20260916", "name": "김하늘"})}, None)
     assert json.loads(out["body"]) == {"phoneNumber": "010-1111-2222", "date": "2026-09-16",
-                                       "appointmentId": "A20260916", "name": "김하늘"}
+                                       "appointmentId": "A20260916", "name": "김하늘",
+                                       "success": True}   # the envelope flag is derived when the handler omits it
     again, fields2 = inject(code, {"phoneNumber": r"^010-\d{4}-\d{4}$"})
     assert again == code and fields2 == []
     assert inject("def other(e, c): pass\n", {"phoneNumber": r"^010-\d{4}-\d{4}$"})[1] == []
