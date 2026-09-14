@@ -109,3 +109,29 @@ def test_a_time_typed_without_a_leading_zero_is_restored():
     assert restore("930", r"^\d{2}:\d{2}$") == "09:30"
     assert restore("1000", r"^\d{2}:\d{2}$") == "10:00"
     assert restore("123456789", r"^\d{10}$") is None      # an id one digit short is not padded
+
+
+def test_a_reply_without_the_success_flag_gets_it_derived():
+    """Live (GreenCart, 2026-09-14): get_return_status answered {found: true, …}
+    with no `success`; the reply schema requires it, so the lookup escalated."""
+    import json as _json
+    from tools.acxd_lambda_adapter import inject
+    code = (
+        "import json\n"
+        "def lambda_handler(event, context):\n"
+        "    body = json.loads(event.get('body') or '{}')\n"
+        "    if body.get('returnId') == 'RT-1':\n"
+        "        return {'statusCode': 200, 'body': json.dumps({'found': True, 'status': '접수'})}\n"
+        "    if body.get('returnId') == 'RT-0':\n"
+        "        return {'statusCode': 200, 'body': json.dumps({'found': False, 'message': 'no'})}\n"
+        "    return {'statusCode': 404, 'body': json.dumps({'errorCode': 'NOT_FOUND'})}\n"
+    )
+    new_code, _ = inject(code, {})
+    ns: dict = {}
+    exec(new_code, ns)  # noqa: S102
+    ok = _json.loads(ns["lambda_handler"]({"body": _json.dumps({"returnId": "RT-1"})}, None)["body"])
+    assert ok["success"] is True
+    missing = _json.loads(ns["lambda_handler"]({"body": _json.dumps({"returnId": "RT-0"})}, None)["body"])
+    assert missing["success"] is False
+    err = _json.loads(ns["lambda_handler"]({"body": _json.dumps({"returnId": "x"})}, None)["body"])
+    assert err["success"] is False

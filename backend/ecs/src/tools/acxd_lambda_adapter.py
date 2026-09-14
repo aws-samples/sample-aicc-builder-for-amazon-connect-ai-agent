@@ -247,6 +247,15 @@ def _aicc_normalize_response(result):
             if "success" in data and not isinstance(data["success"], bool):
                 data["success"] = bool(data["success"])
                 changed = True
+            elif "success" not in data:
+                # The reply schema requires the envelope's success flag; a handler
+                # that answers with `found` alone fails the whole reply (live: the
+                # return-status lookup escalated every caller). Derive it.
+                status_code = result.get("statusCode", 200)
+                ok = (status_code is None or 200 <= int(status_code) < 300) \
+                    and not data.get("errorCode") and data.get("found", True) is not False
+                data["success"] = bool(ok)
+                changed = True
             # The Data Request's responseSchema is validated by the service: a
             # numeric field returned as the string "45000" fails the whole reply
             # (live: the order lookup went silent). Coerce to the schema's type.
