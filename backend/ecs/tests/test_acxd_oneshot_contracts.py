@@ -376,3 +376,23 @@ def test_the_manifest_records_when_and_by_what_it_was_generated(monkeypatch):
     assert validate_deploy_manifest(manifest) == []
     monkeypatch.delenv("AICC_BUILDER_BUILD")
     assert build_manifest({"flows": []}, project_name="selc")["builder"] == {"name": "aicc-builder"}
+
+
+def test_d9_4_accepts_self_validating_builtins_without_a_regex():
+    """Live (Hanbit, 2026-09-14): S9 turned the date/time slots into NLX.Date /
+    NLX.Time (the regex with separators could never match a built-in value) and
+    D9-4 then blocked the bundle for the missing regex."""
+    from tools.validate_consistency import _d9_open_value_slot_issues
+    bundle = {"flows": [{"flowId": "BookAppointment", "slotTypes": [
+        {"name": "appointmentDate", "type": "NLX.Date", "sensitive": False},
+        {"name": "timeSlot", "type": "NLX.Time", "sensitive": False},
+        {"name": "orderNo", "type": "NLX.AlphaNumeric", "sensitive": False, "regex": "^\\d{8}$"},
+    ]}]}
+    plan = {"flow_id": "BookAppointment"}
+    assert _d9_open_value_slot_issues(bundle, plan, {"name": "appointmentDate"}, "appointmentDate",
+                                      "book_appointment", "^\\d{4}-\\d{2}-\\d{2}$", None, None) == []
+    assert _d9_open_value_slot_issues(bundle, plan, {"name": "timeSlot"}, "timeSlot",
+                                      "book_appointment", "^\\d{2}:\\d{2}$", None, None) == []
+    mismatch = _d9_open_value_slot_issues(bundle, plan, {"name": "orderNo"}, "orderNo",
+                                          "book_appointment", "^\\d{10}$", None, None)
+    assert mismatch and "does not match" in mismatch[0]["message"]

@@ -2137,6 +2137,9 @@ def _d9_data_request_checks(bundle: dict, session_id: str) -> list[dict]:
     return issues
 
 
+_D9_SELF_VALIDATING_BUILTINS = frozenset({"NLX.Date", "NLX.Time", "NLX.Email", "NLX.Url", "NLX.Number"})
+
+
 def _d9_open_value_slot_issues(bundle: dict, flow_plan: dict, slot: dict, field_name: str,
                                operation_id: Optional[str], expected_regex, expected_min,
                                expected_max) -> list[dict]:
@@ -2171,6 +2174,13 @@ def _d9_open_value_slot_issues(bundle: dict, flow_plan: dict, slot: dict, field_
             asset_type="flow", field=field_name, operation_id=operation_id)]
     if slot_type == "NLX.PhoneNumber":
         return []  # the built-in validates the shape itself
+    if slot_type in _D9_SELF_VALIDATING_BUILTINS:
+        # NLX.Date / NLX.Time / NLX.Email / NLX.Url / NLX.Number recognise the
+        # value's shape themselves, and built-in values arrive without
+        # separators, so a YYYY-MM-DD or HH:MM regex on them could never match
+        # (live: '2026-09-18' rejected). The regex is the spec's transport
+        # format, restored by the Lambda adapter, not a capture constraint.
+        return []
     if expected_regex:
         if _d9_regex_canonical(attached.get("regex")) != _d9_regex_canonical(expected_regex):
             return [_d9_issue(
