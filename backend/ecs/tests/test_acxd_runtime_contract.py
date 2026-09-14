@@ -1128,3 +1128,34 @@ def test_d4_failure_edge_to_a_silent_followup_is_sent_to_the_escalation():
                    if any(c.get("right", {}).get("value") == "failure" for c in e.get("conditions") or []))
     assert out["nodes"][failure["nodeId"]]["type"] == "escalate"
     assert any("answered nothing on failure" in note for note in notes)
+
+
+def test_m2_after_the_answer_was_already_given_is_a_silent_pass_through():
+    """Live (SELC, 2026-09-14): the flow's own message said '예약이 접수되었습니다.
+    예약번호는 …' and a trailing generative node then produced a second
+    '조회 결과: …' from raw field descriptions."""
+    flow = broken("DeliveryStatusByOrderNumber")
+    generative = next(n for n in flow["nodes"].values() if n["type"] == "generative_text")
+    generative["metadata"]["generativeText"]["prompt"] = "친절하게 안내하세요."
+    # a message node between the data request and the generative node already answers
+    request = next(n for n in flow["nodes"].values() if n["type"] == "data_request")
+    said_id = "5a1d0000-0000-4000-8000-000000000001"
+    for edge in request["childNodes"]:
+        if edge["nodeId"] == generative["nodeId"]:
+            edge["nodeId"] = said_id
+    flow["nodes"][said_id] = {"nodeId": said_id, "type": "basic",
+                              "messages": [{"type": "text", "body": "배송 상태는 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}입니다."}],
+                              "childNodes": [{"nodeId": generative["nodeId"], "name": "next"}]}
+    out, notes = apply_runtime_contract(flow, **context("DeliveryStatusByOrderNumber"))
+    node = out["nodes"][generative["nodeId"]]
+    assert node["type"] == "basic" and not node.get("messages")
+    assert any("silent pass-through" in n for n in notes)
+
+
+def test_result_labels_are_short_spoken_labels_not_whole_descriptions():
+    from tools.acxd_runtime_contract import _RuntimeContract
+    short = _RuntimeContract._short_label
+    assert short("총 금액 (unitPrice × quantity)") == "총 금액"
+    assert short("예약 상태. PoC에서는 PENDING으로 접수 후 확정 연락") == "예약 상태"
+    assert short("발급된 예약번호") == "발급된 예약번호"
+    assert short("이 필드는 고객이 예약을 접수할 때 시스템이 자동으로 발급하는 번호입니다") == ""

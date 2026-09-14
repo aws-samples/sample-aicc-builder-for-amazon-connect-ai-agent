@@ -899,6 +899,23 @@ class _RuntimeContract:
             if not self._is_last_customer_facing(node_id):
                 continue
             prompt = ((node.get("metadata") or {}).get("generativeText") or {}).get("prompt")
+            if self._result_already_announced(node_id):
+                # Live (SELC): the flow's own basic node had already said
+                # "예약이 접수되었습니다. 예약번호는 …" and a trailing generative
+                # node then produced a second "조회 결과: …" built from raw field
+                # descriptions. A node that would only repeat the answer is
+                # made a silent pass-through instead.
+                node["type"] = "basic"
+                node.pop("messages", None)
+                meta = node.get("metadata")
+                if isinstance(meta, dict):
+                    meta.pop("generativeText", None)
+                    if not meta:
+                        node.pop("metadata", None)
+                self.change(
+                    f"{_label(node_id, node)}: generative_text after the result was already "
+                    f"announced → silent pass-through (M2)")
+                continue
             body = self._template_from_prompt(prompt if isinstance(prompt, str) else "")
             if not body:
                 # Live (SELC v3): "성공 시 배송상태와 예정일을 자연스럽게 안내한다" has no
@@ -923,6 +940,36 @@ class _RuntimeContract:
             self.change(
                 f"{_label(node_id, node)}: generative_text → basic with a templated "
                 f"message (generative_text sends nothing; M2)")
+
+    def _result_already_announced(self, node_id: str) -> bool:
+        """True when, between the nearest upstream data request and this node, a
+        message node already speaks (the answer has been given)."""
+        parents: dict[str, list[str]] = {}
+        for pid, pnode in self.nodes.items():
+            for edge in _edges(pnode):
+                target = edge.get("nodeId")
+                if isinstance(target, str):
+                    parents.setdefault(target, []).append(pid)
+        seen = {node_id}
+        frontier = list(parents.get(node_id, []))
+        found_request = False
+        spoke = False
+        while frontier:
+            pid = frontier.pop(0)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            pnode = self.nodes.get(pid) or {}
+            if pnode.get("type") == "data_request":
+                found_request = True
+                continue
+            if pnode.get("type") in ("start", "user_input", "user_choice"):
+                continue
+            if any(isinstance(m, dict) and str(m.get("body") or "").strip()
+                   for m in pnode.get("messages") or []):
+                spoke = True
+            frontier.extend(parents.get(pid, []))
+        return found_request and spoke
 
     def _is_last_customer_facing(self, node_id: str) -> bool:
         """True when nothing between here and leaving the flow says anything."""
@@ -1013,11 +1060,25 @@ class _RuntimeContract:
         """The label spoken before a result value: the interview's description when
         it is in the caller's language, a common Korean word for the field, or
         nothing (the value alone) rather than an English fragment."""
+        short = self._short_label(described)
         if not korean:
-            return described or field
-        if described and _HANGUL.search(described):
-            return described
+            return short or field
+        if short and _HANGUL.search(short):
+            return short
         return self._KO_FIELD_WORDS.get(re.sub(r"[^a-z]", "", field.lower()), "")
+
+    @staticmethod
+    def _short_label(described: Optional[str]) -> str:
+        """A spoken label from an interview description: the text before the
+        first parenthesis, sentence break or comma, at most 20 characters —
+        never the whole explanation (live: "총 금액 (unitPrice × quantity)",
+        "예약 상태. PoC에서는 PENDING으로 접수 후 확정 연락" read out to the caller)."""
+        if not described:
+            return ""
+        head = re.split(r"[(\[（.。,，:：;/]", str(described), maxsplit=1)[0].strip(" -–—·")
+        if len(head) > 20:
+            return ""
+        return head
 
     def _upstream_data_request(self, node_id: str) -> Optional[str]:
         """The data request id of the nearest data_request node that leads here
