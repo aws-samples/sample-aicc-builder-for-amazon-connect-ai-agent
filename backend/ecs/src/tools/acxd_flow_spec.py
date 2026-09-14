@@ -387,6 +387,12 @@ class ACXDFlowPlan(_Model):
                     "(2-4 words, e.g. '배송 조회'); spoken verbatim when the assistant lists "
                     "what it can help with")
     role: str = Field(default="operation", description=f"One of {FLOW_ROLES}")
+    customer_initiated: bool = Field(
+        default=True,
+        description="False for an operation the customer never asks for by itself — e.g. "
+                    "recording the call result after a conversation — that other flows reach "
+                    "by redirect. Such a flow is left out of the greeting/re-guide menu and is "
+                    "not an intent-routing target")
     operation_id: Optional[str] = Field(
         default=None, description="OperationSpec this flow implements (required when role='operation')")
     steps: List[ACXDNodeStep] = Field(default_factory=list)
@@ -672,6 +678,7 @@ def upsert_acxd_flow_plan(
     uses_knowledge_base: bool = False,
     escalation_conditions: str = None,
     display_name: str = None,
+    customer_initiated: bool = True,
 ) -> dict:
     """
     Propose or update the plan for ONE ACXD flow (runtime target acxd only).
@@ -722,6 +729,10 @@ def upsert_acxd_flow_plan(
                  "examples":[...],"regex":"..."}]
         uses_knowledge_base: True when the flow answers from the FAQ knowledge base.
         escalation_conditions: When this flow hands off to a human, in plain language.
+        customer_initiated: False when the customer never asks for this operation
+            by itself (e.g. recording the call result after a conversation, an
+            internal follow-up other flows redirect to). Such a flow is not offered
+            in the greeting/re-guide menu and is not an intent-routing target.
         display_name: Short customer-facing name of the operation in the project
             language (2-4 words, e.g. '배송 조회', 'Order status'). The assistant
             says it verbatim when it lists what it can help with (fallback
@@ -788,6 +799,7 @@ def upsert_acxd_flow_plan(
             plan = ACXDFlowPlan(
                 flow_id=flow_id, purpose=purpose, role=role, operation_id=operation_id,
                 display_name=(display_name or "").strip() or (existing.display_name if existing else None),
+                customer_initiated=bool(customer_initiated),
                 steps=new_steps,
                 slots=[ACXDSlotPlan.model_validate(x) for x in _as_list(slots, 'slots')],
                 uses_knowledge_base=uses_knowledge_base,

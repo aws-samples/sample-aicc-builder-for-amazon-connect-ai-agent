@@ -263,6 +263,8 @@ def operation_labels(spec: dict) -> list[str]:
     for plan in spec.get("flows") or []:
         if not isinstance(plan, dict) or plan.get("role", "operation") != "operation":
             continue
+        if plan.get("customer_initiated") is False:
+            continue  # internal operation (e.g. call-result logging): never offered
         label = re.sub(r"\s+", " ", str(plan.get("display_name") or "")).strip(" .,;:-·")
         if not label or len(label) > _MAX_OPERATION_LABEL:
             return []

@@ -572,7 +572,11 @@ design the ACXD flows before moving to the analysis document.
    propose exactly one operation flow. Give it a `display_name`: the short
    customer-facing name of the operation in the project language (2-4 words,
    e.g. '배송 조회', 'Order status') — the assistant says it verbatim when it
-   lists what it can help with. Include every ordered step with:
+   lists what it can help with. If the customer never asks for the operation
+   by itself (recording the call result after a conversation, an internal
+   follow-up that other flows redirect to), pass `customer_initiated=false`:
+   it is then left out of the menu and is not an intent-routing target.
+   Include every ordered step with:
    `node_type`, `determinism`, `determinism_rationale`, and
    `decision_category`.
    `node_type` must be a real ACXD node type — use exactly these names:

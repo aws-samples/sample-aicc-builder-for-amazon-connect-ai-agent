@@ -598,3 +598,16 @@ def test_welcome_flow_speaks_the_approved_greeting_and_never_the_project_slug():
     spec["business_profile"].pop("greeting")
     flow = build_welcome_flow(spec)
     assert _node_of_type(flow, "basic")["messages"][0]["body"] == "안녕하세요. 무엇을 도와드릴까요?"
+
+
+def test_operation_labels_leave_out_internal_operations():
+    """Live (SELC, 2026-09-13): the re-guide menu offered '통화 결과 기록'
+    (call-result logging) — an operation the customer never asks for."""
+    import copy
+    spec = copy.deepcopy(KO_SPEC)
+    spec["flows"].append({"flow_id": "LogCallResult", "role": "operation", "purpose": "통화 결과를 기록한다.",
+                          "display_name": "통화 결과 기록", "operation_id": "log_call_result",
+                          "customer_initiated": False})
+    labels = operation_labels(spec)
+    assert "통화 결과 기록" not in labels
+    assert "배송 조회" in labels

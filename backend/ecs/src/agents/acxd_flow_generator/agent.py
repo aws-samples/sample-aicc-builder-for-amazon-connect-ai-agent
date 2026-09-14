@@ -1275,6 +1275,15 @@ def run_flow_generation(
                 logger.info("[ACXDFlowGen] %s attempt %d: runtime contract applied "
                             "%d change(s): %s", flow_id, attempt, len(contract_notes),
                             "; ".join(str(n) for n in contract_notes[:6]))
+            # An operation the customer never asks for by itself (the plan says
+            # customer_initiated=false — e.g. call-result logging reached by
+            # redirect) must not be an intent-routing target: live, such a flow
+            # was offered in the re-guide menu and routable by utterance.
+            if plan.get("customer_initiated") is False and isinstance(flow, dict):
+                metadata = flow.setdefault("metadata", {})
+                if isinstance(metadata, dict) and metadata.get("untrained") is not True:
+                    metadata["untrained"] = True
+                    logger.info("[ACXDFlowGen] %s: internal operation → untrained (not routable)", flow_id)
             # Extra keys the model invents are the second most common failure
             # and carry no contract meaning, so drop them instead of spending an
             # attempt on them.
