@@ -1026,34 +1026,68 @@ def test_d5_a_condition_on_a_data_request_result_names_a_returned_field():
     assert any("D5" in str(v) for v in runtime_contract_violations(out, **ctx))
 
 
-def test_d5_an_impossible_enum_constant_moves_the_branch_onto_the_success_flag():
+def test_d5_an_impossible_enum_constant_moves_a_two_way_branch_onto_the_success_flag():
     """Live (Hanbit, 2026-09-14): 'cancelAppointment.status neq "not_cancelable"'
-    while the API's status enum is 예/취소/완료 — every appointment was cancelable."""
+    while the API's status enum is 예/취소/완료 — every appointment was cancelable.
+    Only the two-way eq/neq pair is unambiguous; a three-way choice on impossible
+    constants is reported (mapping all three onto the flag collapsed them, live)."""
     import copy
-    flow = broken("GetCleaningPrice")
+
+    def flow_with(edges):
+        flow = broken("GetCleaningPrice")
+        start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
+        flow["nodes"]["gate"] = {"nodeId": "gate", "type": "choice", "childNodes": edges}
+        for e in edges:
+            flow["nodes"][e["nodeId"]] = {"nodeId": e["nodeId"], "type": "end"}
+        start["childNodes"] = [{"nodeId": "gate", "name": "next"}]
+        return flow
+
+    def cond(op, value):
+        return [{"left": {"type": "variable", "name": "getCleaningPrice.state"}, "operator": op,
+                 "right": {"type": "constant", "value": value}}]
+
     ctx = context("GetCleaningPrice")
     ctx["data_requests"] = copy.deepcopy(ctx["data_requests"])
     props = ctx["data_requests"]["getCleaningPrice"]["responseSchema"]["properties"]
     props["state"] = {"type": "string", "enum": ["예약", "취소", "완료"]}
-    start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
-    flow["nodes"]["gate"] = {"nodeId": "gate", "type": "choice", "childNodes": [
-        {"nodeId": "ok", "name": "cancelable", "conditions": [
-            {"left": {"type": "variable", "name": "getCleaningPrice.state"}, "operator": "neq",
-             "right": {"type": "constant", "value": "not_cancelable"}}]},
-        {"nodeId": "no", "name": "notCancelable", "conditions": [
-            {"left": {"type": "variable", "name": "getCleaningPrice.state"}, "operator": "eq",
-             "right": {"type": "constant", "value": "not_cancelable"}}]},
-        {"nodeId": "fine", "name": "fine", "conditions": [
-            {"left": {"type": "variable", "name": "getCleaningPrice.state"}, "operator": "eq",
-             "right": {"type": "constant", "value": "취소"}}]},
-    ]}
-    for nid in ("ok", "no", "fine"):
-        flow["nodes"][nid] = {"nodeId": nid, "type": "end"}
-    start["childNodes"] = [{"nodeId": "gate", "name": "next"}]
-    out, notes = apply_runtime_contract(flow, **ctx)
+
+    two_way = flow_with([{"nodeId": "ok", "name": "cancelable", "conditions": cond("neq", "not_cancelable")},
+                         {"nodeId": "no", "name": "notCancelable", "conditions": cond("eq", "not_cancelable")}])
+    out, notes = apply_runtime_contract(two_way, **ctx)
     edges = {e["name"]: e["conditions"][0] for e in out["nodes"]["gate"]["childNodes"]}
     assert edges["cancelable"] == {"left": {"type": "variable", "name": "getCleaningPrice.success"},
                                    "operator": "eq", "right": {"type": "constant", "value": True}}
     assert edges["notCancelable"]["operator"] == "neq"
-    assert edges["fine"]["right"]["value"] == "취소"  # a real enum member is left alone
     assert sum("(D5)" in n for n in notes) == 2
+
+    three_way = flow_with([{"nodeId": "a", "name": "lookup", "conditions": cond("eq", "lookup")},
+                           {"nodeId": "b", "name": "cancelled", "conditions": cond("eq", "cancelled")},
+                           {"nodeId": "c", "name": "blocked", "conditions": cond("eq", "not_cancelable")}])
+    out, notes = apply_runtime_contract(three_way, **ctx)
+    conds = [e["conditions"][0]["right"]["value"] for e in out["nodes"]["gate"]["childNodes"]]
+    assert conds == ["lookup", "cancelled", "not_cancelable"]          # left for the generator to fix
+    from tools.acxd_runtime_contract import runtime_contract_violations
+    d5 = [v for v in runtime_contract_violations(three_way, **ctx) if "D5" in str(v)]
+    assert len(d5) == 3 and all("errorCode" in str(v) for v in d5)
+
+    fine = flow_with([{"nodeId": "a", "name": "done", "conditions": cond("eq", "취소")},
+                      {"nodeId": "b", "name": "other", "conditions": cond("neq", "취소")}])
+    out, notes = apply_runtime_contract(fine, **ctx)
+    assert not [n for n in notes if "(D5)" in n]                       # real enum members are left alone
+
+
+
+
+def test_m2_prompt_labels_do_not_leak_fragments_of_earlier_placeholders():
+    """Live (GreenCart, 2026-09-14): '상태 {a.status:NLX.Variable}, 택배사 {a.carrier:NLX.Variable}'
+    produced '…, Variable} 택배사 …' because the sentence split cut through the
+    first placeholder's ':' / '.'."""
+    flow = broken("DeliveryStatusByOrderNumber")
+    generative = next(n for n in flow["nodes"].values() if n["type"] == "generative_text")
+    rid = "getDeliveryStatusByOrderNumber"
+    generative["metadata"]["generativeText"]["prompt"] = (
+        f"상태 {{{rid}.deliveryStatus:NLX.Variable}}, 배송 예정일 {{{rid}.expectedDeliveryDate:NLX.Variable}}를 안내한다")
+    out, _ = apply_runtime_contract(flow, **context("DeliveryStatusByOrderNumber"))
+    body = out["nodes"][generative["nodeId"]]["messages"][0]["body"]
+    assert "Variable}" not in body.replace(":NLX.Variable}", "")
+    assert "배송 예정일 {" in body and "상태 {" in body

@@ -1013,6 +1013,10 @@ class _RuntimeContract:
     def _prompt_label(prompt: str, position: int) -> str:
         """The one or two words the prompt itself puts in front of a placeholder."""
         head = prompt[:position]
+        # Earlier placeholders contain ':' and '.', which the sentence split below
+        # would cut through — live (GreenCart) that left a "Variable}" fragment in
+        # the label ("…, Variable} 택배사 …"). Blank them out first.
+        head = _PLACEHOLDER.sub(" ", head)
         head = re.split(r"[.!?:;\n]", head)[-1]
         tokens = [t for t in re.split(r"\s+", head.strip()) if t]
         tokens = [t.strip("'\"(),") for t in tokens[-2:] if t.strip("'\"(),")]
@@ -1408,6 +1412,7 @@ class _RuntimeContract:
 
     def _d5_enum_constant(self, node_id: str, node: dict, edge: dict, condition: dict, side: str,
                           request_id: str, field: str, properties: dict) -> None:
+        operand_name = f"{request_id}.{field}"
         """Live (Hanbit, 2026-09-14): a branch tested ``cancelAppointment.status
         neq "not_cancelable"`` while the API's ``status`` enum is 예/취소/완료 and
         a passed deadline is signalled by ``success=false`` + ``errorCode``; the
@@ -1427,19 +1432,42 @@ class _RuntimeContract:
         if not enum or constant["value"] in enum:
             return
         success = next((n for n in properties if n.lower() == "success"), None)
-        if success is None:
+        # Only a two-way choice (eq X / neq X on the same impossible constant) has
+        # an unambiguous meaning — success vs failure. Live (Hanbit): a
+        # three-way choice on three impossible constants collapsed into three
+        # identical conditions when every branch was mapped onto the flag.
+        edges = _edges(node)
+        pair = len(edges) == 2 and all(
+            any(isinstance(c, dict) and (c.get("left") or {}).get("name") == operand_name
+                and (c.get("right") or {}).get("value") == constant["value"]
+                and c.get("operator") in ("eq", "neq")
+                for c in (e.get("conditions") or []))
+            for e in edges) and {
+            c.get("operator") for e in edges for c in (e.get("conditions") or [])
+            if isinstance(c, dict) and (c.get("left") or {}).get("name") == operand_name} == {"eq", "neq"}
+        if success is None or not pair:
             self.violation(
                 "D5", "cross",
                 f"{_label(node_id, node)} edge {edge.get('name')!r} compares {request_id}.{field} with "
-                f"{constant['value']!r}, a value the API never returns (enum {enum}) — the branch is dead")
+                f"{constant['value']!r}, a value the API never returns (enum {enum}) — the branch is dead. "
+                f"Branch on a value from the enum, or on {request_id}.success / {request_id}.errorCode")
             return
-        condition[side] = {"type": "variable", "name": f"{request_id}.{success}"}
-        condition[other] = {"type": "constant", "value": True}
-        condition["operator"] = "neq" if condition["operator"] == "eq" else "eq"
-        self.change(
-            f"{_label(node_id, node)} edge {edge.get('name')!r}: {request_id}.{field} vs "
-            f"{constant['value']!r} (not in enum {enum}) → {request_id}.{success} "
-            f"{condition['operator']} true (D5)")
+        # Rewrite BOTH edges of the pair now: once the first is on the flag the
+        # second no longer looks like a pair.
+        for pair_edge in edges:
+            for pair_condition in (pair_edge.get("conditions") or []):
+                if not (isinstance(pair_condition, dict)
+                        and (pair_condition.get("left") or {}).get("name") == operand_name
+                        and (pair_condition.get("right") or {}).get("value") == constant["value"]):
+                    continue
+                operator = "neq" if pair_condition.get("operator") == "eq" else "eq"
+                pair_condition["left"] = {"type": "variable", "name": f"{request_id}.{success}"}
+                pair_condition["right"] = {"type": "constant", "value": True}
+                pair_condition["operator"] = operator
+                self.change(
+                    f"{_label(node_id, node)} edge {pair_edge.get('name')!r}: {request_id}.{field} vs "
+                    f"{constant['value']!r} (not in enum {enum}) → {request_id}.{success} "
+                    f"{operator} true (D5)")
 
     def rule_m1(self) -> None:
         slots = set(self.slot_names)
