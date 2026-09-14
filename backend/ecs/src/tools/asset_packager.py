@@ -229,6 +229,40 @@ def _acxd_field_patterns(operation_folder: str) -> dict:
     return {}
 
 
+def _acxd_slot_patterns(bundle: dict, operation_folder: str) -> dict:
+    """{request field: regex} for the Lambda folder's data request(s), taken from
+    the attached slots that the data_request node's payload maps onto them."""
+    def norm(value) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+    wanted = norm(operation_folder)
+    request_ids = set()
+    for document in bundle.get("data_requests") or []:
+        url = str(((document or {}).get("webhook") or {}).get("url") or "")
+        tail = url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+        if wanted and (norm(tail) == wanted or norm(document.get("dataRequestId")) == wanted):
+            request_ids.add(document.get("dataRequestId"))
+    if not request_ids:
+        return {}
+    patterns: dict = {}
+    for flow in bundle.get("flows") or []:
+        if not isinstance(flow, dict):
+            continue
+        slot_regex = {str(s.get("name")): s.get("regex") for s in (flow.get("slotTypes") or [])
+                      if isinstance(s, dict) and s.get("name") and isinstance(s.get("regex"), str)}
+        for node in (flow.get("nodes") or {}).values():
+            if not isinstance(node, dict) or node.get("type") != "data_request":
+                continue
+            for entry in node.get("dataRequests") or []:
+                if not isinstance(entry, dict) or entry.get("dataRequestId") not in request_ids:
+                    continue
+                for field, value in (entry.get("payload") or {}).items():
+                    match = re.fullmatch(r"\{([A-Za-z_][\w-]*):NLX\.Slot\}", str(value or ""))
+                    if match and match.group(1) in slot_regex:
+                        patterns.setdefault(str(field), slot_regex[match.group(1)])
+    return patterns
+
+
 def _is_acxd_target(session_id: str) -> bool:
     """Late-load the target contract so old Classic sessions remain unaffected."""
     try:
@@ -618,6 +652,12 @@ def package_assets_impl(
                 if acxd_plan and asset_type.lower() == "lambda" and file_name.endswith(".py") \
                         and operation_id:
                     patterns = _acxd_field_patterns(operation_id)
+                    # The interview often records the format only on the flow's
+                    # slot (appointmentDate ^\d{4}-\d{2}-\d{2}$) and not on the
+                    # OperationSpec field: the payload mapping says which slot
+                    # feeds which request field.
+                    for name, pattern in _acxd_slot_patterns(acxd_plan[0], operation_id).items():
+                        patterns.setdefault(name, pattern)
                     try:
                         from tools.acxd_lambda_adapter import inject as _inject_adapter
                         new_content, restored = _inject_adapter(

@@ -1002,10 +1002,20 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
             tr = a.setdefault("Transitions", {})
             nxt = tr.get("NextAction") or fallback
             errs = tr.setdefault("Errors", [])
+            # ChatBehavior.ChatAnalyticsBehavior: every shape the generator produced
+            # (AnalyticsModes ContactLens / RealTime / PostContact / omitted) was
+            # rejected by CreateContactFlow with "Invalid Action property value ...
+            # Parameters" (ap-northeast-2, 2026-09-14), while the voice-only block
+            # imports cleanly. Chat analytics is optional for the PoC: drop it and
+            # the error branch that only exists for it.
+            if isinstance(p, dict) and "ChatBehavior" in p:
+                p.pop("ChatBehavior", None)
+                tr["Errors"] = errs = [e for e in errs if not (isinstance(e, dict)
+                                       and e.get("ErrorType") == "InFlightRedactionConfigurationFailed")]
+                fixes.append(f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: removed ChatBehavior "
+                             f"(CreateContactFlow rejects every chat-analytics shape; the voice-only block imports)")
             have = {e.get("ErrorType") for e in errs if isinstance(e, dict)}
             required = ["NoMatchingError", "ChannelMismatch"]
-            if isinstance(p, dict) and "ChatBehavior" in p:
-                required.append("InFlightRedactionConfigurationFailed")
             for et in required:
                 if et not in have and nxt:
                     errs.append({"ErrorType": et, "NextAction": nxt})

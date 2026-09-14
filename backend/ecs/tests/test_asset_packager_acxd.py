@@ -210,3 +210,21 @@ def test_classic_lambda_handlers_are_left_alone(monkeypatch):
     with zipfile.ZipFile(io.BytesIO(client.payload)) as archive:
         code = archive.read("acme-refunds/lambda/get_order/index.py").decode("utf-8")
     assert "ACXD delivers slot values" not in code
+
+
+def test_slot_regexes_feed_the_format_restorer_through_the_payload_mapping():
+    """Live (Hanbit v4): appointmentDate had its format only on the flow's slot;
+    the OperationSpec field had no pattern, so 20260918 reached the Lambda."""
+    from tools.asset_packager import _acxd_slot_patterns
+    bundle = {
+        "data_requests": [{"dataRequestId": "bookAppointment",
+                           "webhook": {"url": "{WEBHOOK_URL}/tools/book_appointment"}}],
+        "flows": [{"flowId": "BookAppointment",
+                   "slotTypes": [{"name": "appointmentDate", "type": "NLX.AlphaNumeric", "regex": r"^\d{4}-\d{2}-\d{2}$"},
+                                 {"name": "patientName", "type": "NLX.Text"}],
+                   "nodes": {"n1": {"type": "data_request", "dataRequests": [{"dataRequestId": "bookAppointment",
+                             "payload": {"appointmentDate": "{appointmentDate:NLX.Slot}",
+                                         "patientName": "{patientName:NLX.Slot}"}}]}}}],
+    }
+    assert _acxd_slot_patterns(bundle, "book_appointment") == {"appointmentDate": r"^\d{4}-\d{2}-\d{2}$"}
+    assert _acxd_slot_patterns(bundle, "other_op") == {}

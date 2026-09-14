@@ -365,3 +365,29 @@ def test_redaction_already_disabled_is_left_alone():
     flow = _analytics_flow(language="ko-KR", redaction_enabled=False)
     vab = _voice_analytics(flow)
     assert vab["ConversationalAnalyticsRedactionConfiguration"]["Enabled"] == "False"
+
+
+def test_recording_block_drops_chat_analytics_and_its_error_branch():
+    """Live (GreenCart, 2026-09-14): every ChatBehavior shape was rejected by
+    CreateContactFlow and its InFlightRedactionConfigurationFailed branch is
+    invalid without it; the voice-only block imports."""
+    import json
+    from tools.asset_linters import lint_contact_flow
+    flow = {"Version": "2019-10-30", "StartAction": "rec", "Actions": [
+        {"Identifier": "rec", "Type": "UpdateContactRecordingAndAnalyticsBehavior",
+         "Parameters": {"VoiceBehavior": {"VoiceRecordingBehavior": {"RecordedParticipants": ["Agent", "Customer"]},
+                                          "VoiceAnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "ko-KR"}},
+                        "ChatBehavior": {"ChatAnalyticsBehavior": {"Enabled": "True", "AnalyticsLanguage": "ko-KR",
+                                                                   "AnalyticsModes": ["ContactLens"]}}},
+         "Transitions": {"NextAction": "end", "Errors": [
+             {"ErrorType": "NoMatchingError", "NextAction": "end"},
+             {"ErrorType": "ChannelMismatch", "NextAction": "end"},
+             {"ErrorType": "InFlightRedactionConfigurationFailed", "NextAction": "end"}]}},
+        {"Identifier": "end", "Type": "DisconnectParticipant", "Parameters": {}, "Transitions": {}},
+    ]}
+    result = lint_contact_flow(json.dumps(flow))
+    fixed = json.loads(result["fixed_json"])
+    rec = fixed["Actions"][0]
+    assert "ChatBehavior" not in rec["Parameters"]
+    assert [e["ErrorType"] for e in rec["Transitions"]["Errors"]] == ["NoMatchingError", "ChannelMismatch"]
+    assert any("removed ChatBehavior" in f for f in result["fixes_applied"])

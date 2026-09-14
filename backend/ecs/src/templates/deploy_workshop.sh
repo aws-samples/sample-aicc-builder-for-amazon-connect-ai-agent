@@ -2302,6 +2302,24 @@ if 'AnalyticsLanguage' in problems:
            and str(vab.get('AnalyticsLanguage','')) not in REDACTION_OK:
             vab['ConversationalAnalyticsRedactionConfiguration'] = {'Enabled': 'False'}
 
+# Chat analytics on the recording block. Verified against CreateContactFlow
+# (2026-09-14): every ChatBehavior.ChatAnalyticsBehavior shape the generator
+# produced was rejected ("Invalid Action property value ... Parameters"), it
+# demands an InFlightRedactionConfigurationFailed error branch that is itself
+# invalid without ChatBehavior, and the voice-only block imports cleanly. Drop
+# the chat analytics and its error branch rather than loop on it.
+if 'Actions[' in problems and 'Parameters' in problems:
+    for a in d.get('Actions', []):
+        if a.get('Type') != 'UpdateContactRecordingAndAnalyticsBehavior':
+            continue
+        params = a.get('Parameters') or {}
+        if 'ChatBehavior' in params:
+            params.pop('ChatBehavior', None)
+        errors = (a.get('Transitions') or {}).get('Errors')
+        if isinstance(errors, list):
+            a['Transitions']['Errors'] = [e for e in errors
+                                          if e.get('ErrorType') != 'InFlightRedactionConfigurationFailed']
+
 # Generic: drop the property the API called invalid. Two things matter here.
 #  1. Delete the LEAF named in the path, not the top-level branch. The old code
 #     matched only the first path segment, so a complaint about
@@ -2332,7 +2350,11 @@ PYEOF
     done
 
     if [ -z "$CONTACT_FLOW_ID" ]; then
-        warn "Contact Flow import failed. Import manually in the console: $WORK_FLOW"
+        # The scratch directory is removed on exit; keep the resolved flow where
+        # the operator can find it (live: the printed path no longer existed).
+        local KEPT_FLOW="$SCRIPT_DIR/contact-flow/${PROJECT_NAME}_flow_resolved.json"
+        cp "$WORK_FLOW" "$KEPT_FLOW" 2>/dev/null || KEPT_FLOW="$WORK_FLOW"
+        warn "Contact Flow import failed. Import manually in the console: $KEPT_FLOW"
         return 0
     fi
     if [ -z "$CONTACT_FLOW_ARN" ]; then
