@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +210,12 @@ def build_manifest(
     }
     if region:
         manifest["region"] = region
+    # Provenance: when the assets were last generated (the manifest is rebuilt
+    # with them) and, when the runtime knows it, which AICC Builder build did
+    # it — so a bundle can be checked against a claimed regeneration.
+    manifest["generatedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    build = os.environ.get("AICC_BUILDER_BUILD", "").strip()
+    manifest["builder"] = {"name": "aicc-builder", **({"build": build[:64]} if build else {})}
     return manifest
 
 

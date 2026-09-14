@@ -363,3 +363,16 @@ def test_backend_api_key_secret_is_named_per_project():
     docs = build_secret_assets({"data_integrations": [plan]})
     assert [d["name"] for d in docs] == ["greencartBackendApiKey"]
     assert docs[0]["valueEnv"] == "ACXD_SECRET_GREENCARTBACKENDAPIKEY"
+
+
+def test_the_manifest_records_when_and_by_what_it_was_generated(monkeypatch):
+    """Live (2026-09-14): two orchestrators reported a regeneration that never
+    ran. The manifest's provenance lets a bundle be checked against the claim."""
+    from tools.acxd_manifest_builder import build_manifest, validate_deploy_manifest
+    monkeypatch.setenv("AICC_BUILDER_BUILD", "abc1234")
+    manifest = build_manifest({"flows": [{"flowId": "Welcome", "nodes": {}}]}, project_name="selc")
+    assert manifest["generatedAt"].endswith("Z") and manifest["generatedAt"][:2] == "20"
+    assert manifest["builder"] == {"name": "aicc-builder", "build": "abc1234"}
+    assert validate_deploy_manifest(manifest) == []
+    monkeypatch.delenv("AICC_BUILDER_BUILD")
+    assert build_manifest({"flows": []}, project_name="selc")["builder"] == {"name": "aicc-builder"}
