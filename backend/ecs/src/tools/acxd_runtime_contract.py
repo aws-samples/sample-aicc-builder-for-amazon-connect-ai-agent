@@ -49,6 +49,7 @@ import copy
 import difflib
 import hashlib
 import re
+import uuid
 from typing import Any, Iterable, Optional
 
 # --------------------------------------------------------------------------
@@ -228,6 +229,20 @@ def _reachable(nodes: dict, start_id: Optional[str]) -> set[str]:
 def _status_condition(status: str) -> dict:
     return {"left": {"type": "node_status"}, "operator": "eq",
             "right": {"type": "constant", "value": status}}
+
+
+_PLACEHOLDER_SLOT = re.compile(r"\{([A-Za-z_][\w-]*):NLX\.Slot\}")
+
+
+def _captures_slot(edge: dict, slot: str) -> bool:
+    """An edge whose conditions include ``slot <slot> exists`` — the capture edge."""
+    for condition in edge.get("conditions") or []:
+        if not isinstance(condition, dict):
+            continue
+        left = condition.get("left") or {}
+        if left.get("type") == "slot" and left.get("name") == slot and condition.get("operator") == "exists":
+            return True
+    return False
 
 
 def _slot_condition(slot: str, operator: str) -> dict:
@@ -1465,6 +1480,84 @@ class _RuntimeContract:
                     names.add(entry)
         return names
 
+    def rule_p1(self) -> None:
+        """A data request whose payload references a slot that is empty on the
+        path that reaches it fails before the HTTP call is made (live: a return
+        lookup by return number OR order number sent ``{orderNumber:NLX.Slot}``
+        with the order number never asked, the webhook was never invoked and
+        the caller was escalated). For each incoming edge the slots guaranteed
+        captured on every path from start are computed; when the payload names
+        others, the request node is cloned for that edge with a payload reduced
+        to the guaranteed slots."""
+        for node_id, node in list(self.nodes_of_type("data_request")):
+            entries = node.get("dataRequests") if isinstance(node.get("dataRequests"), list) else []
+            slot_fields: dict[str, str] = {}  # slot name → payload field
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for field, value in (entry.get("payload") or {}).items():
+                    match = _PLACEHOLDER_SLOT.fullmatch(str(value or ""))
+                    if match:
+                        slot_fields[match.group(1)] = str(field)
+            if len(slot_fields) < 2:
+                continue  # one slot (or none): a single path captured it or D3 reports it
+            parents = [(pid, edge) for pid, pnode in self.nodes.items()
+                       for edge in _edges(pnode) if edge.get("nodeId") == node_id]
+            if len(parents) < 2:
+                continue  # a single way in: every slot was collected on it
+            clones: dict[frozenset, str] = {}
+            for pid, edge in parents:
+                # the capture itself happens on the edge into the request
+                # ("slot X exists"), then on every path before its source
+                guaranteed = {slot for slot in slot_fields
+                              if _captures_slot(edge, slot) or self._slot_guaranteed_before(pid, slot)}
+                missing = set(slot_fields) - guaranteed
+                if not missing:
+                    continue
+                key = frozenset(guaranteed)
+                clone_id = clones.get(key)
+                if clone_id is None:
+                    clone = copy.deepcopy(node)
+                    clone_id = str(uuid.uuid4())
+                    clone["nodeId"] = clone_id
+                    for entry in clone.get("dataRequests") or []:
+                        if isinstance(entry, dict) and isinstance(entry.get("payload"), dict):
+                            entry["payload"] = {
+                                f: v for f, v in entry["payload"].items()
+                                if not (_PLACEHOLDER_SLOT.fullmatch(str(v or ""))
+                                        and _PLACEHOLDER_SLOT.fullmatch(str(v or "")).group(1) in missing)}
+                    self.nodes[clone_id] = clone
+                    clones[key] = clone_id
+                edge["nodeId"] = clone_id
+                self.change(
+                    f"{_label(node_id, node)}: path via [{pid[:8]}] never captures {sorted(missing)}; "
+                    f"the request is cloned as [{clone_id[:8]}] sending only "
+                    f"{sorted(guaranteed) or 'no slots'} (an unfilled slot placeholder fails the "
+                    f"request before the call; P1)")
+
+    def _slot_guaranteed_before(self, node_id: str, slot: str) -> bool:
+        """True when every path from start to ``node_id`` passes a capture of
+        ``slot`` (an edge conditioned on ``slot <slot> exists``)."""
+        start = self.start_id()
+        if start is None or start == node_id:
+            return False
+        seen: set[str] = set()
+        stack = [start]
+        while stack:
+            current = stack.pop()
+            if current in seen or current not in self.nodes:
+                continue
+            seen.add(current)
+            if current == node_id:
+                return False  # reached without passing a capture of the slot
+            for edge in _edges(self.nodes[current]):
+                if _captures_slot(edge, slot):
+                    continue  # this way is fine: the slot is filled from here on
+                target = edge.get("nodeId")
+                if isinstance(target, str):
+                    stack.append(target)
+        return True
+
     def rule_d4(self) -> None:
         for node_id, node in self.nodes_of_type("data_request"):
             for edge in _edges(node):
@@ -1890,6 +1983,7 @@ class _RuntimeContract:
         self.rule_r3()
         self.rule_s6()
         self.rule_d3()
+        self.rule_p1()
         self.rule_d4()
         self.rule_d5()
         self.rule_m1()

@@ -1211,3 +1211,49 @@ def test_d5_reads_enum_values_from_the_spec_when_the_reply_schema_has_none():
     edges_out = {e["name"]: e["conditions"][0] for e in out["nodes"]["gate"]["childNodes"]}
     assert edges_out["cancelable"]["left"] == {"type": "variable", "name": "getCleaningPrice.success"}
     assert sum("(D5)" in n for n in notes) == 2
+
+
+def test_p1_a_request_reached_by_alternative_captures_sends_only_the_slots_each_path_filled():
+    """Live (GreenCart, 2026-09-14): a return lookup by return number OR order
+    number sent both slot placeholders; on either path one slot was empty, the
+    webhook was never invoked and the caller was escalated."""
+    flow = {"flowId": "ReturnStatus", "nodes": {
+        "s": {"nodeId": "s", "type": "start", "childNodes": [{"nodeId": "askR", "name": "ask"}]},
+        "askR": {"nodeId": "askR", "type": "user_choice", "messages": [{"type": "text", "body": "반품번호 또는 주문번호?"}],
+                 "metadata": {"choice": {"source": "slotType", "slotTypeId": "returnId"}},
+                 "childNodes": [{"nodeId": "dr", "name": "returnId captured",
+                                 "conditions": [{"left": {"type": "slot", "name": "returnId"}, "operator": "exists"}]},
+                                {"nodeId": "askO", "name": "try order",
+                                 "conditions": [{"left": {"type": "slot", "name": "returnId"}, "operator": "not_exists"}]}]},
+        "askO": {"nodeId": "askO", "type": "user_choice", "messages": [{"type": "text", "body": "주문번호?"}],
+                 "metadata": {"choice": {"source": "slotType", "slotTypeId": "orderNumber"}},
+                 "childNodes": [{"nodeId": "dr", "name": "orderNumber captured",
+                                 "conditions": [{"left": {"type": "slot", "name": "orderNumber"}, "operator": "exists"}]},
+                                {"nodeId": "esc", "name": "order not captured",
+                                 "conditions": [{"left": {"type": "slot", "name": "orderNumber"}, "operator": "not_exists"}]}]},
+        "dr": {"nodeId": "dr", "type": "data_request",
+               "dataRequests": [{"dataRequestId": "getReturnStatus",
+                                 "payload": {"returnId": "{returnId:NLX.Slot}", "orderNumber": "{orderNumber:NLX.Slot}"}}],
+               "childNodes": [{"nodeId": "say", "name": "success",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "success"}}]},
+                              {"nodeId": "esc", "name": "failure",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "failure"}}]}]},
+        "say": {"nodeId": "say", "type": "basic", "messages": [{"type": "text", "body": "상태 {getReturnStatus.status:NLX.Variable}"}],
+                "childNodes": [{"nodeId": "end", "name": "done"}]},
+        "esc": {"nodeId": "esc", "type": "escalate"},
+        "end": {"nodeId": "end", "type": "end"},
+    }, "slotTypes": [{"name": "returnId", "type": "NLX.AlphaNumeric", "sensitive": False, "regex": "^RT-[0-9]{6}$"},
+                     {"name": "orderNumber", "type": "NLX.AlphaNumeric", "sensitive": False, "regex": "^GC-[0-9]{8}$"}]}
+    dr_doc = {"dataRequestId": "getReturnStatus", "webhook": {"url": "{WEBHOOK_URL}/tools/get_return_status"},
+              "requestSchema": {"type": "object", "properties": {"returnId": {"type": "string"}, "orderNumber": {"type": "string"}}},
+              "responseSchema": {"type": "object", "properties": {"success": {"type": "boolean"}, "status": {"type": "string"}}}}
+    out, notes = apply_runtime_contract(flow, role="operation", data_requests={"getReturnStatus": dr_doc},
+                                        flow_ids=["ReturnStatus"], escalation_flow_id="Escalation")
+    requests = {nid: n["dataRequests"][0]["payload"] for nid, n in out["nodes"].items() if n["type"] == "data_request"}
+    payloads = sorted(tuple(sorted(p)) for p in requests.values())
+    assert payloads == [("orderNumber",), ("returnId",)]          # one request per capture path, one slot each
+    by_return = out["nodes"]["askR"]["childNodes"][0]["nodeId"]
+    by_order = out["nodes"]["askO"]["childNodes"][0]["nodeId"]
+    assert requests[by_return] == {"returnId": "{returnId:NLX.Slot}"}
+    assert requests[by_order] == {"orderNumber": "{orderNumber:NLX.Slot}"}
+    assert sum("P1)" in n for n in notes) == 2
