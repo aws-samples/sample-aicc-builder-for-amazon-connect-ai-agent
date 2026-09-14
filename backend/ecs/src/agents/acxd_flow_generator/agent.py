@@ -1299,7 +1299,11 @@ def run_flow_generation(
                 # flows use); the model tends to put it under metadata, where the
                 # service ignores it — live, such a flow stayed routable.
                 model_marked = metadata.pop("untrained", None) is True
-                if plan.get("customer_initiated") is False or model_marked or flow.get("untrained") is True:
+                # The model may say it in words instead: a routing descriptor
+                # that tells the router not to route here is the same signal.
+                described_internal = bool(_INTERNAL_DESCRIPTION.search(str(flow.get("aiDescription") or "")))
+                if (plan.get("customer_initiated") is False or model_marked or described_internal
+                        or flow.get("untrained") is True):
                     if flow.get("untrained") is not True:
                         flow["untrained"] = True
                         logger.info("[ACXDFlowGen] %s: internal operation → untrained (not routable)", flow_id)
@@ -1380,6 +1384,12 @@ def _store_flow(session_id: str, flow: dict) -> None:
         is_complete=True,
         s3_key=s3_key,
     )
+
+
+_INTERNAL_DESCRIPTION = re.compile(
+    r"not (?:a )?routing target|should not be (?:matched|routed)|never (?:matched|routed)|"
+    r"invoked (?:internally|by other flows)|not exposed (?:directly )?to (?:the )?(?:customer|caller)s?|"
+    r"system utility flow|internal utility flow", re.I)
 
 
 def _stored_untrained_flow_ids(session_id: str) -> set[str]:

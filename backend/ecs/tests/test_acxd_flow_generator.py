@@ -1160,3 +1160,16 @@ def test_model_marked_metadata_untrained_becomes_the_contract_field():
 
     plain, _, _ = run_flow_generation(PLAN, SPEC, lambda prompt: json.dumps(REFUND_FLOW))
     assert plain.get("untrained") is not True          # a routable flow stays routable
+
+
+def test_a_routing_descriptor_that_says_do_not_route_here_makes_the_flow_untrained():
+    """Live (SELC, 2026-09-14): the plan still said customer_initiated=True, the
+    model did not set metadata.untrained this time, but its aiDescription read
+    'System utility flow … not a routing target' — and the menu offered it."""
+    import copy
+    described = copy.deepcopy(REFUND_FLOW)
+    described["aiDescription"] = ("System utility flow that logs call results to the backend. This is not a "
+                                  "routing target and should not be matched against customer utterances.")
+    flow, problems, _ = run_flow_generation(PLAN, SPEC, lambda prompt: json.dumps(described))
+    assert problems == []
+    assert flow["untrained"] is True
