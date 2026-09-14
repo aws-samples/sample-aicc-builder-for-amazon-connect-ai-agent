@@ -292,7 +292,8 @@ def test_follow_up_flow_shape():
           "operator": "not_exists"}],
     ]
 
-    yes_branch, no_branch = _node_of_type(flow, "choice")["childNodes"]
+    captured_target = next(c["nodeId"] for c in ask["childNodes"] if c["name"] == "captured")
+    yes_branch, no_branch = flow["nodes"][captured_target]["childNodes"]
     assert yes_branch["conditions"] == [{
         "left": {"type": "slot", "name": MORE_HELP_SLOT_NAME},
         "operator": "eq", "right": {"type": "constant", "value": "예"},
