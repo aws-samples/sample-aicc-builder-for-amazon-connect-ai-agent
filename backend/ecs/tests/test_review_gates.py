@@ -645,3 +645,46 @@ def test_cors_headers_mapped_by_integration_are_declared_in_method_responses():
     assert out.count("method.response.header.Access-Control-Allow-Origin: true") == 1
     assert _fix_cors_response_headers(out) == out          # idempotent
     assert "Bucket:\n    Type: AWS::S3::Bucket" in out       # untouched neighbours
+
+
+def test_template_under_cloudformation_folder_feeds_the_template_checks(monkeypatch, tmp_path):
+    """Live (Hanbit, 2026-09-14): the generator stores the template under
+    cloudformation/<project>/infrastructure.yaml; the gate only read
+    infrastructure/…, so the template-based checks (IAM, GSI union) silently
+    never ran and a correct 'phone-birth-index' query stayed blocked."""
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
+    import tools.validate_consistency as vc
+    from tools.spec_manager import OperationSpec
+
+    spec = OperationSpec(operation_id="book_appointment", input_fields=[], output_fields=[])
+    monkeypatch.setattr(vc, "get_all_specs", lambda: {"book_appointment": spec})
+    monkeypatch.setattr(vc, "get_all_tools", lambda: [])
+    template = """
+Resources:
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: patients
+      GlobalSecondaryIndexes:
+        - IndexName: phone-birth-index
+  AppointmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: appointments
+      GlobalSecondaryIndexes:
+        - IndexName: phone-index
+"""
+    handler = "import boto3\ndef lambda_handler(e, c):\n    t.query(IndexName='phone-birth-index')\n"
+    assets = {
+        "sessions/s1/cloudformation/hanbit/infrastructure.yaml": template,
+        "sessions/s1/lambda/book_appointment/handler.py": handler,
+    }
+    monkeypatch.setattr(vc, "list_session_assets", lambda sid: list(assets.keys()))
+    monkeypatch.setattr(vc, "get_asset_from_s3", lambda key: assets.get(key))
+    # a registry that only knows the appointments table's GSI (the live drift)
+    schema = {"tables": {"appointments": {"gsi": [{"index_name": "phone-index"}]}}}
+    import agents.infrastructure_generator.agent as infra_agent
+    monkeypatch.setattr(infra_agent, "get_infrastructure_schema", lambda: __import__("json").dumps(schema))
+    result = vc.validate_parameter_consistency("s1")
+    gsi_issues = [m for m in result["mismatches"] if m["asset_type"] == "lambda_gsi"]
+    assert gsi_issues == [], gsi_issues

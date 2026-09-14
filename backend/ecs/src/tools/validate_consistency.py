@@ -1064,7 +1064,10 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
             content = get_asset_from_s3(key)
             if content:
                 openapi_yaml = content
-        elif asset_type == "infrastructure" and (key.endswith(".yaml") or key.endswith(".yml")):
+        elif asset_type in ("infrastructure", "cloudformation", "cdk") and (key.endswith(".yaml") or key.endswith(".yml")):
+            # The generator stores the template under cloudformation/<project>/…;
+            # matching only "infrastructure" left infra_yaml empty for every
+            # session, silently skipping the IAM, GSI and env-var checks (live).
             content = get_asset_from_s3(key)
             if content:
                 infra_yaml = content
