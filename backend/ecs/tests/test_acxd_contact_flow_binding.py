@@ -104,7 +104,12 @@ def test_normalizer_replaces_lex_with_agentic_cx_binding_and_real_branches():
     # The application owns the greeting: the Contact Flow's pre-block welcome
     # message is stripped and the caller reaches the block directly.
     assert "Greeting" not in actions
-    assert normalized["StartAction"] == AGENTIC_CX_PLACEHOLDER_ID
+    # Live (2026-09-14): a flow without a language block in front of the Agentic CX
+    # block fails every contact ("NLX Chat Streaming Failed"); the binding inserts one.
+    assert normalized["StartAction"] == "AgenticCXSetLanguage"
+    language = next(a for a in normalized["Actions"] if a["Identifier"] == "AgenticCXSetLanguage")
+    assert language["Type"] == "UpdateContactData" and language["Parameters"]["LanguageCode"]
+    assert language["Transitions"]["NextAction"] == AGENTIC_CX_PLACEHOLDER_ID
 
 
 def test_normalizer_rewrites_known_attribute_after_connect_lint_pass():
@@ -174,7 +179,8 @@ def test_real_agentic_cx_block_replaces_placeholder_and_wisdom_session_is_splice
     actions = {action["Identifier"]: action for action in normalized["Actions"]}
     assert "Wisdom" not in actions
     assert "Wisdom" not in normalized["Metadata"].get("ActionMetadata", {})
-    assert actions["Logging"]["Transitions"]["NextAction"] == AGENTIC_CX_PLACEHOLDER_ID
+    assert actions["Logging"]["Transitions"]["NextAction"] == "AgenticCXSetLanguage"
+    assert actions["AgenticCXSetLanguage"]["Transitions"]["NextAction"] == AGENTIC_CX_PLACEHOLDER_ID
     block = actions[AGENTIC_CX_PLACEHOLDER_ID]
     assert block["Type"] == "ConnectParticipantWithAgenticCX"
     assert "AgenticCXBranch" not in actions
@@ -273,7 +279,22 @@ def test_speech_ownership_contact_flow_stays_silent_except_telephony_states():
     assert "goodbye" not in by_id                       # closing: the app's
     assert "recording-notice" in by_id                  # legal notice: the flow's
     assert normalized["StartAction"] == "recording-notice"
-    assert by_id["recording-notice"]["Transitions"]["NextAction"] == AGENTIC_CX_PLACEHOLDER_ID
+    assert by_id["recording-notice"]["Transitions"]["NextAction"] == "AgenticCXSetLanguage"
+    assert by_id["AgenticCXSetLanguage"]["Transitions"]["NextAction"] == AGENTIC_CX_PLACEHOLDER_ID
     assert by_id[AGENTIC_CX_PLACEHOLDER_ID]["Transitions"]["NextAction"] == "log"   # Default → logger, silent
     assert "after-hours" in by_id                       # telephony state: the flow's
     assert by_id["AgenticCXFallbackMessage"]["Parameters"]["Text"].startswith("죄송합니다")
+
+
+def test_language_block_is_kept_when_the_flow_already_sets_one():
+    from tools.acxd_contact_flow_binding import _ensure_language_before_block, _application_locale
+    doc = {"StartAction": "lang", "Actions": [
+        {"Identifier": "lang", "Type": "UpdateContactData", "Parameters": {"LanguageCode": "ko-KR"},
+         "Transitions": {"NextAction": "acx"}},
+        {"Identifier": "acx", "Type": "ConnectParticipantWithAgenticCX", "Parameters": {}, "Transitions": {}},
+    ]}
+    _ensure_language_before_block(doc, {"locales": ["ko-KR"]})
+    assert [a["Identifier"] for a in doc["Actions"]] == ["lang", "acx"]
+    assert _application_locale({"locales": ["ko-KR"]}) == "ko-KR"
+    assert _application_locale({"language": "ja"}) == "ja-JP"
+    assert _application_locale({}) == "en-US"

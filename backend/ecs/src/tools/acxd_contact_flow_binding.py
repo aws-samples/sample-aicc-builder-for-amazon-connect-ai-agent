@@ -136,6 +136,71 @@ def _application_language(application: dict) -> str:
     return str(primary).split("-")[0].lower() or "en"
 
 
+def _application_locale(application: dict) -> str:
+    """The application's primary locale as Connect spells it (``ko-KR``)."""
+    locales = application.get("locales") or []
+    primary = application.get("primary_locale") or (locales[0] if locales else "") or application.get("language") or ""
+    primary = str(primary).replace("_", "-")
+    if not primary:
+        return "en-US"
+    if "-" not in primary:
+        return {"ko": "ko-KR", "ja": "ja-JP", "en": "en-US", "zh": "zh-CN", "es": "es-ES",
+                "fr": "fr-FR", "de": "de-DE", "pt": "pt-BR"}.get(primary.lower(), primary)
+    language, _, region = primary.partition("-")
+    return f"{language.lower()}-{region.upper()}"
+
+
+LANGUAGE_ACTION_ID = "AgenticCXSetLanguage"
+
+
+def _ensure_language_before_block(document: dict, application: dict) -> None:
+    """Make sure the contact's language is set before the Agentic CX block.
+
+    Live (GreenCart, 2026-09-14): a flow without an ``UpdateContactData``
+    (LanguageCode) block in front of the block failed every contact with
+    "NLX Chat Streaming Failed" although the application and its build were
+    ko-KR; the flows that carried the block worked. Inserting the block fixed it.
+    A flow that already sets a language anywhere on the way to the block is
+    left alone.
+    """
+    actions = document.get("Actions") or []
+    block = next((a for a in actions if _action_type(a) == AGENTIC_CX_ACTION_TYPE), None)
+    if block is None:
+        return
+    block_id = _action_id(block)
+    for action in actions:
+        if _action_type(action) == "UpdateContactData" and (action.get("Parameters") or {}).get("LanguageCode"):
+            return
+    locale = _application_locale(application)
+    language_action = {
+        "Identifier": LANGUAGE_ACTION_ID,
+        "Type": "UpdateContactData",
+        "Parameters": {"LanguageCode": locale},
+        "Transitions": {
+            "NextAction": block_id,
+            "Errors": [{"ErrorType": "NoMatchingError", "NextAction": block_id}],
+        },
+    }
+    # Every hop into the block now goes through the language block.
+    for action in actions:
+        transitions = action.get("Transitions")
+        if not isinstance(transitions, dict):
+            continue
+        if transitions.get("NextAction") == block_id:
+            transitions["NextAction"] = LANGUAGE_ACTION_ID
+        for error in transitions.get("Errors") or []:
+            if isinstance(error, dict) and error.get("NextAction") == block_id:
+                error["NextAction"] = LANGUAGE_ACTION_ID
+        for condition in transitions.get("Conditions") or []:
+            if isinstance(condition, dict) and condition.get("NextAction") == block_id:
+                condition["NextAction"] = LANGUAGE_ACTION_ID
+    if document.get("StartAction") == block_id:
+        document["StartAction"] = LANGUAGE_ACTION_ID
+    index = next(i for i, a in enumerate(actions) if _action_id(a) == block_id)
+    actions.insert(index, language_action)
+    document["Actions"] = actions
+
+
 def _fallback_text(application: dict) -> str:
     return _FALLBACK_TEXT_BY_LANGUAGE.get(_application_language(application), _FALLBACK_TEXT_BY_LANGUAGE["en"])
 
@@ -513,6 +578,8 @@ def normalize_acxd_contact_flow(
         "Error": error_target,
         "IdleChatTimeout": idle_target,
     }
+    _ensure_language_before_block(document, application)
+    actions = document["Actions"]
     metadata = document.get("Metadata")
     if not isinstance(metadata, dict):
         metadata = {}

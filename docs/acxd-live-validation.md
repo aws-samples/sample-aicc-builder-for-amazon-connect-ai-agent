@@ -139,6 +139,8 @@ note when the manifest disagrees), and a runner-only deploy is told to export
 | Slot values at the webhook | Built-in slot values reach the Data Request without their separators (`010-1111-2222` → `01011112222`, `2026-09-16` → `20260916`, `10:00` → `1000`) | ACXD bundles wrap each Lambda handler with a format restorer built from the OperationSpec patterns |
 | Webhook reply | A Data Request succeeds only on HTTP 200 with a body that matches its `responseSchema`; a `201` from a create operation or `errorCode: null` where the schema says string takes the failure branch | the same wrapper returns 200 and coerces the envelope |
 | Output guardrails | A derived output rule (LLM judge, generalised literal) that rewrites messages fired on the greeting itself and on the bot's own format hint | derived output rules stay advisory (`flag`) |
+| Contact language | The Agentic CX block fails every contact with "NLX Chat Streaming Failed" unless the contact's language has been set (an `UpdateContactData` block with `LanguageCode` matching one of the application's languages) before the block | the Contact Flow binding inserts the block when the flow has none |
+| Workspace-level names | Secrets, guardrails and slot types are keyed by name across the whole workspace: two projects using `BackendApiKey` overwrote each other's API key on every deploy | the backend key secret and guardrails are named per project |
 
 ## Cross-asset contract facts
 
