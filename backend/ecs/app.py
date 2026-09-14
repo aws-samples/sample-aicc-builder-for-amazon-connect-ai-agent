@@ -2795,6 +2795,21 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                 for evt in remaining_events:
                     await safe_send_or_log(evt)
 
+            # Claim audit: the model can narrate a tool result it never received
+            # (live: "reviewer_agent returned blocking: []" with no reviewer call
+            # in the turn). Only the runtime knows which tools ran; tell the user
+            # where the claim was made.
+            try:
+                from tools.tool_claim_audit import audit_notice
+                _notice = audit_notice(full_response, tool_names_map.values(),
+                                       language=str(session.get("language") or "ko"))
+                if _notice:
+                    logger.warning(f"[ClaimAudit] {session_id}: unbacked tool claims — {_notice.strip()[:200]}")
+                    full_response += _notice
+                    await safe_send_or_log({"type": "stream", "content": _notice})
+            except Exception as audit_err:  # never let the audit break the turn
+                logger.debug(f"[ClaimAudit] skipped: {audit_err}")
+
             # Stream end
             await safe_send_or_log({"type": "stream_end"})
 

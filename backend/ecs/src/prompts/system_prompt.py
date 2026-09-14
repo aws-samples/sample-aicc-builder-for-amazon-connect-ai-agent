@@ -2287,6 +2287,16 @@ prompt's `<instructions>` section (as a reference, not a duplicate).
 # REVIEW_PROMPT — Asset review, change impact, regeneration
 # =============================================================================
 REVIEW_PROMPT = """
+## ⛔ NEVER NARRATE A TOOL RESULT YOU DID NOT RECEIVE
+
+A tool "ran" only if you emitted the tool call in THIS turn and its result
+came back to you. Never write "`<tool>` returned …", "`<tool>` was called",
+"실제 호출됨", or a result JSON for a tool you did not call this turn — not
+from memory of an earlier turn, not as what the result "would" be. If you did
+not call it, say so and call it. The runtime records every tool call and
+appends a visible verification notice to any turn whose narrated tool
+results have no matching call, so a fabricated result is always exposed.
+
 ## ⛔ MANDATORY RULE: NEVER AUTO-FIX — ALWAYS ASK USER FIRST
 
 **THIS IS THE SINGLE MOST IMPORTANT RULE IN REVIEW MODE.**
