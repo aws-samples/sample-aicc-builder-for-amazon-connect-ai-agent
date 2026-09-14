@@ -641,6 +641,40 @@ class _RuntimeContract:
     # S2 — metadata.choice.slotTypeId is the attached slot NAME
     # ==================================================================
 
+    # ==================================================================
+    # S9 — a date or time shaped slot is a date or time slot
+    # ==================================================================
+
+    _DATE_REGEX = re.compile(
+        r"^\^?(?:\\d|\[0-9\])\{4\}[-./](?:\\d|\[0-9\])\{2\}[-./](?:\\d|\[0-9\])\{2\}\$?$")
+    _TIME_REGEX = re.compile(
+        r"^\^?(?:\\d|\[0-9\])\{1,2\}:(?:\\d|\[0-9\])\{2\}\$?$|^\^?(?:\\d|\[0-9\])\{2\}:(?:\\d|\[0-9\])\{2\}\$?$")
+
+    def rule_s9(self) -> None:
+        """A built-in text slot whose regex is a date (YYYY-MM-DD) or time (HH:MM)
+        skeleton becomes ``NLX.Date`` / ``NLX.Time`` without the regex. Built-in
+        values arrive without separators (live), so a regex with '-' or ':' can
+        never match: the appointment date '2026-09-18' was rejected, the flow's
+        retry edge led to the fallback, and the third miss escalated. The date
+        type recognised the same input in another project."""
+        for slot in self.attached:
+            slot_type = slot.get("type")
+            regex = slot.get("regex")
+            if slot_type not in ("NLX.AlphaNumeric", "NLX.Text") or not isinstance(regex, str):
+                continue
+            target = None
+            if self._DATE_REGEX.match(regex.strip()):
+                target = "NLX.Date"
+            elif self._TIME_REGEX.match(regex.strip()):
+                target = "NLX.Time"
+            if target is None:
+                continue
+            slot["type"] = target
+            slot.pop("regex", None)
+            self.change(
+                f"slot {slot.get('name')!r}: {slot_type} with regex {regex!r} → {target} "
+                f"(built-in values carry no separators, so the regex never matched; S9)")
+
     def rule_s2(self) -> None:
         names = self.slot_names
         if not names and not self.nodes_of_type("user_choice"):
@@ -1818,6 +1852,7 @@ class _RuntimeContract:
         before = _reachable(self.nodes, self.start_id())
         self.rule_s1()
         self.rule_s5()
+        self.rule_s9()
         self.rule_s2()
         self.rule_s3()
         self.rule_s8()

@@ -1159,3 +1159,26 @@ def test_result_labels_are_short_spoken_labels_not_whole_descriptions():
     assert short("예약 상태. PoC에서는 PENDING으로 접수 후 확정 연락") == "예약 상태"
     assert short("발급된 예약번호") == "발급된 예약번호"
     assert short("이 필드는 고객이 예약을 접수할 때 시스템이 자동으로 발급하는 번호입니다") == ""
+
+
+def test_s9_date_and_time_shaped_regex_slots_become_date_and_time_slots():
+    """Live (Hanbit, 2026-09-14): appointmentDate was NLX.AlphaNumeric with regex
+    ^\\d{4}-\\d{2}-\\d{2}$; built-in values arrive without separators, so
+    '2026-09-18' never matched, the retry edge led to the fallback and the third
+    miss escalated. NLX.Date recognised the same input in another project."""
+    flow = broken("DeliveryStatusByOrderNumber")
+    flow["slotTypes"] = list(flow.get("slotTypes") or []) + [
+        {"name": "appointmentDate", "type": "NLX.AlphaNumeric", "sensitive": False,
+         "regex": "^\\d{4}-\\d{2}-\\d{2}$", "aiDescription": "Appointment date"},
+        {"name": "timeSlot", "type": "NLX.AlphaNumeric", "sensitive": False,
+         "regex": "^\\d{2}:\\d{2}$", "aiDescription": "Appointment time"},
+        {"name": "orderNo", "type": "NLX.AlphaNumeric", "sensitive": False,
+         "regex": "^\\d{10}$", "aiDescription": "Order number"},
+    ]
+    out, notes = apply_runtime_contract(flow, **context("DeliveryStatusByOrderNumber"))
+    slots = {s["name"]: s for s in out["slotTypes"]}
+    assert slots["appointmentDate"]["type"] == "NLX.Date" and "regex" not in slots["appointmentDate"]
+    assert slots["timeSlot"]["type"] == "NLX.Time" and "regex" not in slots["timeSlot"]
+    assert slots["orderNo"] == {"name": "orderNo", "type": "NLX.AlphaNumeric", "sensitive": False,
+                                "regex": "^\\d{10}$", "aiDescription": "Order number"}
+    assert sum("S9)" in n for n in notes) == 2

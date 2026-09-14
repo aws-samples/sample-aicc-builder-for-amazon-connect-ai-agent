@@ -281,6 +281,15 @@ def _acxd_slot_patterns(bundle: dict, operation_folder: str) -> dict:
             continue
         slot_regex = {str(s.get("name")): s.get("regex") for s in (flow.get("slotTypes") or [])
                       if isinstance(s, dict) and s.get("name") and isinstance(s.get("regex"), str)}
+        # Built-in date/time slots carry no regex (S9 removes it) but their
+        # values still arrive without separators; the canonical shapes let the
+        # adapter restore 20260918 → 2026-09-18 and 1000 → 10:00.
+        for s in flow.get("slotTypes") or []:
+            if isinstance(s, dict) and s.get("name") and not isinstance(s.get("regex"), str):
+                if s.get("type") == "NLX.Date":
+                    slot_regex.setdefault(str(s["name"]), r"^\d{4}-\d{2}-\d{2}$")
+                elif s.get("type") == "NLX.Time":
+                    slot_regex.setdefault(str(s["name"]), r"^\d{2}:\d{2}$")
         for node in (flow.get("nodes") or {}).values():
             if not isinstance(node, dict) or node.get("type") != "data_request":
                 continue
