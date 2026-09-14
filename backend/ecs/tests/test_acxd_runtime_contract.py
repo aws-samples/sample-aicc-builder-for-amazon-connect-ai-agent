@@ -1107,3 +1107,24 @@ def test_m2_result_labels_stay_in_the_callers_language():
     assert "Delivery status in English" not in body
     assert "배송 상태 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}" in body   # dictionary word
     assert "예상 배송일 {getDeliveryStatusByOrderNumber.expectedDeliveryDate:NLX.Variable}" in body  # Korean description kept
+
+
+def test_d4_failure_edge_to_a_silent_followup_is_sent_to_the_escalation():
+    """Live (GreenCart, 2026-09-14): the failure edge went straight to the
+    FollowUp redirect, so a failed lookup produced '더 도와드릴 일이 있을까요?'
+    and nothing else."""
+    flow = broken("DeliveryStatusByOrderNumber")
+    request_node = next(n for n in flow["nodes"].values() if n["type"] == "data_request")
+    followup_id = "f0110000-0000-4000-8000-000000000001"
+    flow["nodes"][followup_id] = {"nodeId": followup_id, "type": "redirect",
+                                  "metadata": {"redirect": {"type": "flow", "flowId": "FollowUpFlow"}},
+                                  "childNodes": []}
+    request_node["childNodes"] = [e for e in request_node["childNodes"] if e["name"] != "error"]
+    request_node["childNodes"].append({"nodeId": followup_id, "conditions": [
+        {"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "failure"}}]})
+    out, notes = apply_runtime_contract(flow, **context("DeliveryStatusByOrderNumber"))
+    fixed = nodes_of(out, "data_request")[0]
+    failure = next(e for e in fixed["childNodes"]
+                   if any(c.get("right", {}).get("value") == "failure" for c in e.get("conditions") or []))
+    assert out["nodes"][failure["nodeId"]]["type"] == "escalate"
+    assert any("answered nothing on failure" in note for note in notes)

@@ -64,3 +64,40 @@ def test_injected_wrapper_normalises_the_response_for_acxd():
     out = module.lambda_handler({"body": "{}"}, None)
     assert out["statusCode"] == 200
     assert json.loads(out["body"]) == {"success": True, "reservationId": "RSV-1", "errorCode": "", "message": ""}
+
+
+def test_response_values_are_coerced_to_the_data_request_schema_types():
+    """Live (GreenCart, 2026-09-14): the handler returned totalAmount "45000"
+    where the Data Request's responseSchema says number; the service failed the
+    whole reply and the order lookup went silent."""
+    import json as _json
+    from tools.acxd_lambda_adapter import inject
+    code = (
+        "import json\n"
+        "def lambda_handler(event, context):\n"
+        "    return {'statusCode': 200, 'body': json.dumps({'success': True, 'totalAmount': '45,000',"
+        " 'quantity': '2', 'found': 'true', 'orderNumber': 20260901, 'note': None})}\n"
+    )
+    new_code, _ = inject(code, {}, response_types={
+        "totalAmount": "number", "quantity": "integer", "found": "boolean", "orderNumber": "string", "note": "string"})
+    ns: dict = {}
+    exec(new_code, ns)  # noqa: S102 - executing the generated handler is the test
+    out = ns["lambda_handler"]({}, None)
+    body = _json.loads(out["body"])
+    assert body["totalAmount"] == 45000 and isinstance(body["totalAmount"], int)
+    assert body["quantity"] == 2 and body["found"] is True
+    assert body["orderNumber"] == "20260901" and body["note"] == ""
+
+
+def test_packager_reads_response_types_from_the_operations_data_request():
+    from tools.asset_packager import _acxd_response_types
+    bundle = {"data_requests": [
+        {"dataRequestId": "getOrderStatus",
+         "webhook": {"url": "{WEBHOOK_URL}/tools/get_order_status"},
+         "responseSchema": {"type": "object", "properties": {"success": {"type": "boolean"}, "totalAmount": {"type": "number"}}}},
+        {"dataRequestId": "requestReturn", "webhook": {"urls": {"development": "{WEBHOOK_URL}/tools/request_return"}},
+         "responseSchema": {"type": "object", "properties": {"returnId": {"type": "string"}}}},
+    ]}
+    assert _acxd_response_types(bundle, "get_order_status") == {"success": "boolean", "totalAmount": "number"}
+    assert _acxd_response_types(bundle, "request_return") == {"returnId": "string"}
+    assert _acxd_response_types(bundle, "unknown_op") == {}

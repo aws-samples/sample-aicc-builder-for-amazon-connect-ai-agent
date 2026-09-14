@@ -355,6 +355,18 @@ class _RuntimeContract:
     def retry_message(self) -> str:
         return DEFAULT_RETRY_MESSAGE_KO if self.is_korean() else DEFAULT_RETRY_MESSAGE_EN
 
+    def _silent_handoff(self, node: dict) -> bool:
+        """True for a node that ends the turn without telling the caller anything:
+        the end node, or a redirect to any flow but the escalation."""
+        if not isinstance(node, dict):
+            return False
+        if node.get("type") == "end":
+            return True
+        if node.get("type") != "redirect":
+            return False
+        redirect = (node.get("metadata") or {}).get("redirect") or {}
+        return redirect.get("flowId") != self.escalation_flow_id
+
     def escalation_target(self) -> Optional[str]:
         """The node that hands this flow's caller to a human, if it has one."""
         for node_id, node in self.nodes.items():
@@ -1356,6 +1368,26 @@ class _RuntimeContract:
             if not any(_has_status(edge, status) for edge in edges
                        for status in ("success", "failure", "timeout")):
                 continue  # no status routing at all: a different, earlier defect
+            # A failure or timeout edge that lands on a silent hand-off — the
+            # follow-up redirect or the end node, with no message in between —
+            # makes a failed call look like a finished one (live: a schema
+            # mismatch sent "더 도와드릴 일이 있을까요?" instead of any answer).
+            # Send it where a failure belongs: the escalation.
+            for edge in edges:
+                if not (_has_status(edge, "failure") or _has_status(edge, "timeout")):
+                    continue
+                target_node = self.nodes.get(edge.get("nodeId")) or {}
+                if not self._silent_handoff(target_node):
+                    continue
+                escalation = self.escalation_target()
+                if escalation is None or escalation == edge.get("nodeId"):
+                    continue
+                previous = str(edge.get("nodeId") or "")[:8]
+                edge["nodeId"] = escalation
+                self.change(
+                    f"{_label(node_id, node)} edge {edge.get('name') or 'failure'!r}: "
+                    f"→ [{previous}] answered nothing on failure; now → escalation "
+                    f"[{escalation[:8]}] (D4)")
             if any(_has_status(edge, "failure") for edge in edges):
                 continue
             target = self.escalation_target()

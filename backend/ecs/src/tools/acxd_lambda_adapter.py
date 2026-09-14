@@ -136,6 +136,7 @@ import json as _aicc_json
 import re as _aicc_re
 
 _AICC_FIELD_PATTERNS = {patterns}
+_AICC_RESPONSE_TYPES = {response_types}
 _AICC_SEPARATORS = set("-:/. ")
 _AICC_RUN = _aicc_re.compile(r"\\\\d\\{{(\\d+)\\}}|\\[0-9\\]\\{{(\\d+)\\}}|\\[A-Z\\]\\{{(\\d+)\\}}|\\[a-z\\]\\{{(\\d+)\\}}|\\[A-Za-z0-9\\]\\{{(\\d+)\\}}|\\[A-Za-z\\]\\{{(\\d+)\\}}|\\\\d")
 _AICC_LITERAL = _aicc_re.compile(r"\\\\([-.:/ ])|([A-Za-z0-9])|([-:/. ])")
@@ -238,12 +239,55 @@ def _aicc_normalize_response(result):
             if "success" in data and not isinstance(data["success"], bool):
                 data["success"] = bool(data["success"])
                 changed = True
+            # The Data Request's responseSchema is validated by the service: a
+            # numeric field returned as the string "45000" fails the whole reply
+            # (live: the order lookup went silent). Coerce to the schema's type.
+            for key, kind in _AICC_RESPONSE_TYPES.items():
+                if key not in data:
+                    continue
+                value = data[key]
+                coerced = _aicc_coerce(value, kind)
+                if coerced is not value:
+                    data[key] = coerced
+                    changed = True
             if changed:
                 result = dict(result)
                 result["body"] = _aicc_json.dumps(data, ensure_ascii=False) if isinstance(body, str) else data
     except Exception:
         return result
     return result
+
+
+def _aicc_coerce(value, kind):
+    try:
+        if kind in ("number", "integer"):
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)):
+                return int(value) if kind == "integer" and float(value).is_integer() else value
+            if isinstance(value, str):
+                text = value.strip().replace(",", "")
+                if kind == "integer" and text.lstrip("-").isdigit():
+                    return int(text)
+                number = float(text)
+                return int(number) if kind == "integer" or number.is_integer() else number
+        elif kind == "boolean":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str) and value.strip().lower() in ("true", "false", "1", "0", "yes", "no", "y", "n"):
+                return value.strip().lower() in ("true", "1", "yes", "y")
+        elif kind == "string":
+            if value is None:
+                return ""
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            if isinstance(value, (int, float)):
+                return str(value)
+    except (TypeError, ValueError):
+        return value
+    return value
 
 
 _aicc_wrapped_handler = {handler}
@@ -254,7 +298,8 @@ def {handler}(event, context):
 '''
 
 
-def inject(code: str, field_patterns: dict, handler: Optional[str] = None) -> tuple[str, list[str]]:
+def inject(code: str, field_patterns: dict, handler: Optional[str] = None,
+           response_types: Optional[dict] = None) -> tuple[str, list[str]]:
     """Append the format-restoring wrapper to a Python handler source.
 
     Returns (new_code, restored_fields). The code is returned unchanged when no
@@ -270,9 +315,12 @@ def inject(code: str, field_patterns: dict, handler: Optional[str] = None) -> tu
                     if name and re.search(rf"^def {re.escape(name)}\s*\(", code, re.M)), None)
     if handler is None:
         return code, []
+    types = {str(k): str(v) for k, v in (response_types or {}).items()
+             if v in ("number", "integer", "boolean", "string")}
     wrapper = _WRAPPER.format(
         marker=MARKER,
         patterns=json.dumps(patterns, ensure_ascii=False),
+        response_types=json.dumps(types, ensure_ascii=False),
         handler=handler,
     )
     return code.rstrip("\n") + "\n" + wrapper, sorted(patterns) or ["<response>"]
