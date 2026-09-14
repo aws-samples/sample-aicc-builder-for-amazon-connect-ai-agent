@@ -267,8 +267,8 @@ def test_operation_labels_never_cut_a_menu_out_of_purpose_sentences():
 def test_follow_up_flow_shape():
     flow = build_follow_up_flow(KO_SPEC)
     assert flow["flowId"] == "FollowUpFlow"
-    assert _walk(flow) == ["start", "basic", "user_choice", "choice", "choice", "basic",
-                           "basic", "redirect", "redirect", "user_input", "end"]
+    assert _walk(flow) == ["start", "basic", "user_choice", "choice", "basic", "basic",
+                           "user_input", "end", "redirect", "redirect"]
 
     # R6: the slot is cleared at the START of the flow, before it is asked again
     start = _node_of_type(flow, "start")
@@ -311,19 +311,24 @@ def test_follow_up_yes_value_follows_the_language():
     assert yes == "yes"
 
 
-def test_follow_up_routes_a_direct_request_given_instead_of_yes_no():
-    """Live (SELC, 2026-09-14): '더 도와드릴 일이 있을까요?' answered with
-    '세척 가격도 알려주세요' went to the fallback ('잘 이해하지 못했습니다')
-    although the utterance named a flow."""
+def test_follow_up_answered_with_a_request_asks_and_listens_instead_of_falling_back():
+    """Live (SELC/GreenCart, 2026-09-14): '더 도와드릴 일이 있을까요?' answered with
+    '반품 신청하고 싶어요' went to the fallback ('잘 이해하지 못했습니다'). A
+    user_choice cannot route the utterance — captured_flow is only set by a
+    user_input node (live) — so the unrecognised answer is treated as 'yes,
+    and…': the flow asks what they need and listens."""
     flow = build_follow_up_flow(KO_SPEC)
     ask = _node_of_type(flow, "user_choice")
     not_captured = next(c for c in ask["childNodes"] if c["name"] == "notCaptured")
-    direct = flow["nodes"][not_captured["nodeId"]]
-    assert direct["type"] == "choice"
-    recognized, unrecognized = direct["childNodes"]
-    assert recognized["conditions"] == [{"left": {"type": "captured_flow"}, "operator": "exists"}]
+    prompt = flow["nodes"][not_captured["nodeId"]]
+    assert prompt["type"] == "basic" and prompt["messages"][0]["body"]
+    listen = flow["nodes"][prompt["childNodes"][0]["nodeId"]]
+    assert listen["type"] == "user_input"
+    recognized = next(c for c in listen["childNodes"] if c["name"] == "flowRecognized")
     assert flow["nodes"][recognized["nodeId"]]["metadata"]["redirect"]["flowId"] == CAPTURED_FLOW_PLACEHOLDER
-    assert flow["nodes"][unrecognized["nodeId"]]["metadata"]["redirect"]["flowId"] == "FallbackFlow"
+    # the yes path shares the same prompt + listen
+    yes_branch = flow["nodes"][next(c["nodeId"] for c in ask["childNodes"] if c["name"] == "captured")]
+    assert yes_branch["childNodes"][0]["nodeId"] == prompt["nodeId"]
 
 
 # ---------------------------------------------------------------------------
