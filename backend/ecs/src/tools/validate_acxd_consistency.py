@@ -494,6 +494,22 @@ def validate_acxd_consistency(
                     _v(out, "DETERMINISM_UNAUTHORIZED_GENERATIVE", f"flows[{flow_id}]",
                        f"flow contains generative node type {nt!r} that the user "
                        f"never confirmed in the interview")
+            # A planned hand-off names its target flow. Live (SELC): six
+            # regenerations in a row sent the "order not found → search by
+            # customer info" step to EscalationFlow while the message promised a
+            # customer-info search; only the plan knows the intended target.
+            planned_targets = {
+                str(s.get("redirect_flow_id")).strip() for s in plan.get("steps") or []
+                if s.get("user_confirmed") and s.get("redirect_flow_id")}
+            if planned_targets:
+                actual_targets = {
+                    str(((n.get("metadata") or {}).get("redirect") or {}).get("flowId") or "")
+                    for n in (generated.get("nodes") or {}).values()
+                    if isinstance(n, dict) and n.get("type") == "redirect"}
+                for target in sorted(planned_targets - actual_targets):
+                    _v(out, "DETERMINISM_REDIRECT_TARGET", f"flows[{flow_id}]",
+                       f"the confirmed plan hands off to flow {target!r} but no redirect node "
+                       f"targets it (redirects found: {sorted(t for t in actual_targets if t)})")
 
     _check_backend_for_live_data_requests(bundle, spec, out)
     _check_runtime_contract(bundle, out)

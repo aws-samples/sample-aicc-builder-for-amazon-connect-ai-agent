@@ -579,6 +579,9 @@ design the ACXD flows before moving to the analysis document.
    Include every ordered step with:
    `node_type`, `determinism`, `determinism_rationale`, and
    `decision_category`.
+   For a `redirect` step that hands the conversation to another business flow
+   (e.g. "order not found → search by customer info"), set `redirect_flow_id`
+   to that flow's `flow_id`; the generated flow is checked against it.
    `node_type` must be a real ACXD node type — use exactly these names:
    - deterministic: `start`, `end` (exits the application — only after a
      goodbye), `basic` (fixed message), `user_choice`

@@ -360,6 +360,12 @@ class ACXDNodeStep(_Model):
         default=None,
         description="For data_request steps: the Data Request to call. Defaults to the "
                     "flow's operation_id (one Data Request per operation).")
+    redirect_flow_id: Optional[str] = Field(
+        default=None,
+        description="For redirect steps: the flow_id this step hands the conversation to "
+                    "(e.g. the customer-info search flow when the order number is not found). "
+                    "The generated flow must redirect there; system hand-offs (follow-up, "
+                    "escalation) need not be named.")
     user_confirmed: bool = Field(default=False)
     confirmation_pending_reason: Optional[str] = Field(
         default=None, description="Set when a re-upsert changed the decision and reset confirmation")

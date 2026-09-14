@@ -404,3 +404,33 @@ def test_user_selected_choice_needs_no_conditions():
     }}
     codes = {v.code for v in validate_acxd_consistency({"flows": [flow]}, spec={})}
     assert "FLOW_CHOICE_NO_CONDITIONS" not in codes
+
+
+def test_a_planned_redirect_target_must_be_wired():
+    """Live (SELC, 2026-09-14): six regenerations sent the 'order not found →
+    search by customer info' step to EscalationFlow; only the plan knows the
+    intended target, so the interview records it and the gate checks it."""
+    import copy
+    bundle = coherent_bundle()
+    spec = matching_spec()
+    spec["flows"][0]["steps"].append({"step": 5, "description": "not found → customer-info search",
+                                      "node_type": "redirect", "determinism": "deterministic",
+                                      "user_confirmed": True, "redirect_flow_id": "SearchByCustomer"})
+    flow = next(f for f in bundle["flows"] if f["flowId"] == "RefundFlow")
+    redirects = {((n.get("metadata") or {}).get("redirect") or {}).get("flowId")
+                 for n in flow["nodes"].values() if n.get("type") == "redirect"}
+    assert "SearchByCustomer" not in redirects
+    problems = [str(v) for v in validate_acxd_consistency(bundle, spec=spec)]
+    assert any("DETERMINISM_REDIRECT_TARGET" in p and "SearchByCustomer" in p for p in problems), problems
+
+    wired = copy.deepcopy(bundle)
+    wired_flow = next(f for f in wired["flows"] if f["flowId"] == "RefundFlow")
+    end_id = next(nid for nid, n in wired_flow["nodes"].items() if n.get("type") == "end")
+    wired_flow["nodes"]["b0000000-0000-4000-8000-000000000099"] = {
+        "nodeId": "b0000000-0000-4000-8000-000000000099", "type": "redirect",
+        "metadata": {"redirect": {"type": "flow", "flowId": "SearchByCustomer"}},
+        "childNodes": [{"nodeId": end_id, "name": "next"}]}
+    start = next(n for n in wired_flow["nodes"].values() if n.get("type") == "start")
+    start["childNodes"].append({"nodeId": "b0000000-0000-4000-8000-000000000099", "name": "alt"})
+    problems = [str(v) for v in validate_acxd_consistency(wired, spec=spec)]
+    assert not any("DETERMINISM_REDIRECT_TARGET" in p for p in problems)
