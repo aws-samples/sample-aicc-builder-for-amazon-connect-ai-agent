@@ -94,8 +94,28 @@ def _get_items(field: dict) -> Optional[dict]:
 
 
 def _get_properties(field: dict) -> Optional[list]:
-    """FieldSpec `properties` is a LIST of sub-FieldSpec (not a dict)."""
-    return _pick_field(field, "properties", "sub_fields", "subFields", "fields")
+    """FieldSpec `properties` is a LIST of sub-FieldSpec (not a dict).
+
+    Interviews have stored it as a list of names (``["code", "detail"]``) or as a
+    name → spec mapping; live (SELC) the validator then died with
+    ``'str' object has no attribute 'get'`` and the whole check was refused.
+    Normalise both shapes to a list of dicts.
+    """
+    raw = _pick_field(field, "properties", "sub_fields", "subFields", "fields")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return [dict(spec, name=name) if isinstance(spec, dict) else {"name": name}
+                for name, spec in raw.items()]
+    if isinstance(raw, list):
+        out = []
+        for item in raw:
+            if isinstance(item, dict):
+                out.append(item)
+            elif isinstance(item, str) and item.strip():
+                out.append({"name": item.strip()})
+        return out
+    return None
 
 
 def _get_field_type(field: dict) -> str:

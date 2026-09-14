@@ -463,3 +463,25 @@ def test_envelope_fields_still_checked_if_declared_in_spec():
     })
     mismatches = validate_shape_parity(spec, doc)
     assert any(m.reason == "missing_enum_in_openapi" for m in mismatches)
+
+
+def test_properties_stored_as_names_or_a_mapping_are_compared_not_crashed():
+    """Live (SELC, 2026-09-14): an object field's `properties` was a list of
+    names; the validator died with "'str' object has no attribute 'get'" and the
+    whole shape-parity check was refused for the operation."""
+    from tools.shape_parity import validate_shape_parity
+
+    doc = {"openapi": "3.0.0", "paths": {"/tools/op": {"post": {
+        "operationId": "op",
+        "requestBody": {"content": {"application/json": {"schema": {
+            "type": "object", "properties": {"payload": {"type": "object", "properties": {
+                "code": {"type": "string"}, "detail": {"type": "string"}}}}}}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {
+            "type": "object", "properties": {"success": {"type": "boolean"}}}}}}}}}}}
+    spec = {"operation_id": "op", "path": "/tools/op", "http_method": "POST",
+            "input_fields": [{"name": "payload", "field_type": "object", "properties": ["code", "detail", "extra"]}],
+            "output_fields": []}
+    mismatches = validate_shape_parity(spec, doc)
+    assert [m.reason for m in mismatches] == ["property_missing_in_openapi"]   # 'extra' is missing; nothing crashed
+    spec["input_fields"][0]["properties"] = {"code": {"field_type": "string"}, "detail": {"type": "string"}}
+    assert validate_shape_parity(spec, doc) == []
