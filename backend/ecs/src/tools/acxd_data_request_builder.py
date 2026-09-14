@@ -97,6 +97,28 @@ def fields_to_json_schema(fields: list[dict]) -> dict:
     return schema
 
 
+_ENVELOPE_REQUIRED = ("success",)
+
+
+def response_json_schema(fields: list[dict]) -> dict:
+    """The reply schema the service validates the webhook body against.
+
+    Only the envelope's ``success`` is required: a not-found or refused
+    outcome legitimately omits the data fields, and the flow's choice node
+    tells the outcomes apart with ``exists`` conditions. Requiring every
+    output field would fail the whole reply on exactly those outcomes and
+    send the conversation down the failure branch instead.
+    """
+    schema = fields_to_json_schema(fields)
+    names = set(schema.get("properties") or {})
+    required = [n for n in _ENVELOPE_REQUIRED if n in names]
+    if required:
+        schema["required"] = required
+    else:
+        schema.pop("required", None)
+    return schema
+
+
 def build_mock_response(response_fields: list[dict],
                         override: Optional[dict] = None) -> dict:
     """Static mock payload: spec-provided override wins, else type defaults."""
@@ -171,7 +193,7 @@ def build_data_request(plan: dict) -> dict:
                     "name": operation,
                     "enabled": True,
                     "requestSchema": fields_to_json_schema(request_fields),
-                    "responseSchema": fields_to_json_schema(response_fields),
+                    "responseSchema": response_json_schema(response_fields),
                 }],
             },
         }
@@ -183,7 +205,7 @@ def build_data_request(plan: dict) -> dict:
         "dataRequestId": dr_id,
         "type": "object",
         "webhook": webhook,
-        "responseSchema": fields_to_json_schema(response_fields),
+        "responseSchema": response_json_schema(response_fields),
         "sensitive": bool(plan.get("sensitive")),
         "description": (plan.get("purpose") or "")[:200],
     }
