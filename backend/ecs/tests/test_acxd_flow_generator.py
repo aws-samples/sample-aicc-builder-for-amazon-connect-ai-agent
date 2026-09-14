@@ -1143,3 +1143,20 @@ def test_repair_renames_digit_slot_type_ids_and_fills_generative_prompts():
     assert fixed["slotTypes"][0] == {"name": "cardLast", "type": "cardLast"}
     assert fixed["nodes"][uid]["slot"] == {"name": "cardLast", "type": "cardLast"}
     assert fixed["nodes"][gid]["metadata"]["generativeText"]["prompt"].strip()
+
+
+def test_model_marked_metadata_untrained_becomes_the_contract_field():
+    """Live (SELC, 2026-09-14): the model wrote metadata.untrained=true for the
+    call-logging flow; the service reads only the top-level field, so the flow
+    stayed routable and the re-guide menu offered it."""
+    import copy
+    marked = copy.deepcopy(REFUND_FLOW)
+    marked.setdefault("metadata", {})["untrained"] = True
+
+    flow, problems, _ = run_flow_generation(PLAN, SPEC, lambda prompt: json.dumps(marked))
+    assert problems == []
+    assert flow["untrained"] is True
+    assert "untrained" not in (flow.get("metadata") or {})
+
+    plain, _, _ = run_flow_generation(PLAN, SPEC, lambda prompt: json.dumps(REFUND_FLOW))
+    assert plain.get("untrained") is not True          # a routable flow stays routable

@@ -1293,11 +1293,18 @@ def run_flow_generation(
             # customer_initiated=false — e.g. call-result logging reached by
             # redirect) must not be an intent-routing target: live, such a flow
             # was offered in the re-guide menu and routable by utterance.
-            if plan.get("customer_initiated") is False and isinstance(flow, dict):
-                metadata = flow.setdefault("metadata", {})
-                if isinstance(metadata, dict) and metadata.get("untrained") is not True:
-                    metadata["untrained"] = True
-                    logger.info("[ACXDFlowGen] %s: internal operation → untrained (not routable)", flow_id)
+            if isinstance(flow, dict):
+                metadata = flow.get("metadata") if isinstance(flow.get("metadata"), dict) else {}
+                # The contract field is top-level ``untrained`` (what the system
+                # flows use); the model tends to put it under metadata, where the
+                # service ignores it — live, such a flow stayed routable.
+                model_marked = metadata.pop("untrained", None) is True
+                if plan.get("customer_initiated") is False or model_marked or flow.get("untrained") is True:
+                    if flow.get("untrained") is not True:
+                        flow["untrained"] = True
+                        logger.info("[ACXDFlowGen] %s: internal operation → untrained (not routable)", flow_id)
+                if not metadata and "metadata" in flow and isinstance(flow.get("metadata"), dict) and not flow["metadata"]:
+                    flow.pop("metadata", None)
             # Extra keys the model invents are the second most common failure
             # and carry no contract meaning, so drop them instead of spending an
             # attempt on them.
@@ -1373,6 +1380,18 @@ def _store_flow(session_id: str, flow: dict) -> None:
         is_complete=True,
         s3_key=s3_key,
     )
+
+
+def _stored_untrained_flow_ids(session_id: str) -> set[str]:
+    """flowIds of already-stored operation flows marked ``untrained`` (a partial
+    regeneration must not put them back on the menu)."""
+    try:
+        from tools.acxd_bundle import _read_json_docs
+        docs = _read_json_docs(session_id, "acxd_flow")
+    except Exception:  # pragma: no cover - the store is best-effort here
+        return set()
+    return {str(d.get("flowId")) for d in docs or []
+            if isinstance(d, dict) and d.get("untrained") is True and d.get("flowId")}
 
 
 def _system_flow_plan(role: str, flow_id: str) -> dict:
@@ -1455,11 +1474,35 @@ def generate_acxd_flows(flow_ids: list = None) -> dict:
 
     results = []
 
+    invoke = _make_llm_invoke() if llm_plans else None
+
+    # Operation flows first: the system flows' menus must know which operation
+    # flows ended up routable, and only a generated document says so.
+    untrained_ids: set[str] = {
+        str(p.get("flow_id")) for p in spec.get("flows") or []
+        if isinstance(p, dict) and p.get("customer_initiated") is False}
+    # SlotType documents are derived from ACXDFlowSpec slots plus FieldSpec
+    # constraints by tools.acxd_generation_context before this generator runs.
+    for plan in llm_plans:
+        flow, problems, attempts = run_flow_generation(plan, spec, invoke)
+        if flow is None:
+            results.append({"flow_id": plan["flow_id"], "status": "failed",
+                            "problems": problems, "attempts": len(attempts)})
+            continue
+        if flow.get("untrained") is True:
+            untrained_ids.add(str(plan["flow_id"]))
+        _store_flow(session_id, flow)
+        results.append({"flow_id": plan["flow_id"], "status": "generated",
+                        "nodes": len(flow.get("nodes") or {}),
+                        "attempts": len(attempts)})
+    untrained_ids.update(_stored_untrained_flow_ids(session_id))
+    menu_spec = {**spec, "untrained_flow_ids": sorted(untrained_ids)}
+
     for role, plan in system_jobs:
         flow_id = plan.get("flow_id")
         _acxd_progress("running", f"{flow_id}: building the {role} flow deterministically",
                        flow_id)
-        flow = build_system_flow(role, spec)
+        flow = build_system_flow(role, menu_spec)
         # The determinism contract compares a flow against the steps the LLM was
         # told to honour. A deterministic builder does not read them — the plan's
         # steps are what the user was SHOWN — so validate against an empty step
@@ -1476,21 +1519,6 @@ def generate_acxd_flows(flow_ids: list = None) -> dict:
         _store_flow(session_id, flow)
         results.append({"flow_id": flow_id, "status": "generated", "source": "deterministic",
                         "nodes": len(flow.get("nodes") or {}), "attempts": 0})
-
-    invoke = _make_llm_invoke() if llm_plans else None
-
-    # SlotType documents are derived from ACXDFlowSpec slots plus FieldSpec
-    # constraints by tools.acxd_generation_context before this generator runs.
-    for plan in llm_plans:
-        flow, problems, attempts = run_flow_generation(plan, spec, invoke)
-        if flow is None:
-            results.append({"flow_id": plan["flow_id"], "status": "failed",
-                            "problems": problems, "attempts": len(attempts)})
-            continue
-        _store_flow(session_id, flow)
-        results.append({"flow_id": plan["flow_id"], "status": "generated",
-                        "nodes": len(flow.get("nodes") or {}),
-                        "attempts": len(attempts)})
 
     failed = [r for r in results if r["status"] == "failed"]
     out = {

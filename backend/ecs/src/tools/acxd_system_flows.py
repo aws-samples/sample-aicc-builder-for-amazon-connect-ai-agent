@@ -281,10 +281,15 @@ def operation_labels(spec: dict) -> list[str]:
     operation flow lacks a display name the list is empty and the caller gets
     the generic re-guidance instead."""
     labels: list[str] = []
+    # Flows the generator marked ``untrained`` (the model recognised an internal
+    # utility flow the plan did not flag) are not routing targets either; a menu
+    # that names them offers something the caller cannot reach (live: "통화 결과
+    # 기록" listed in the re-guide).
+    not_routable = {str(f) for f in (spec.get("untrained_flow_ids") or [])}
     for plan in spec.get("flows") or []:
         if not isinstance(plan, dict) or plan.get("role", "operation") != "operation":
             continue
-        if plan.get("customer_initiated") is False:
+        if plan.get("customer_initiated") is False or str(plan.get("flow_id")) in not_routable:
             continue  # internal operation (e.g. call-result logging): never offered
         label = re.sub(r"\s+", " ", str(plan.get("display_name") or "")).strip(" .,;:-·")
         if not label or len(label) > _MAX_OPERATION_LABEL:
