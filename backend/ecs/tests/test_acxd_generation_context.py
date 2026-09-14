@@ -161,3 +161,16 @@ def test_context_shim_returns_a_defensive_model_dump():
     first = shim.model_dump()
     first["flows"][0]["flow_id"] = "Changed"
     assert shim.model_dump()["flows"][0]["flow_id"] == "Welcome"
+
+
+def test_response_schema_requires_only_the_envelope():
+    """A not-found or refused outcome legitimately omits the data fields; the
+    choice node tells outcomes apart with `exists`. Requiring every output
+    field would fail the reply on exactly those outcomes (live contract:
+    the service validates the body against responseSchema)."""
+    from tools.acxd_data_request_builder import response_json_schema, fields_to_json_schema
+    fields = [{"name": "success", "type": "boolean"}, {"name": "errorCode", "type": "string", "required": False},
+              {"name": "orderNumber", "type": "string"}, {"name": "totalAmount", "type": "number"}]
+    assert fields_to_json_schema(fields)["required"] == ["success", "orderNumber", "totalAmount"]  # request side unchanged
+    assert response_json_schema(fields)["required"] == ["success"]
+    assert "required" not in response_json_schema([{"name": "orderNumber", "type": "string"}])
