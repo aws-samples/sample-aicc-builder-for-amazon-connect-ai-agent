@@ -1,4 +1,4 @@
-# ACXD runtime target — live validation log (2026-09-10, extended 2026-09-13)
+# ACXD runtime target — live validation log (2026-09-10, extended 2026-09-13 and 2026-09-14)
 
 This log records what the first real deployments of generated ACXD bundles
 taught us. Every item below was found by deploying a bundle that had already
@@ -114,6 +114,50 @@ invoking the runner, the runner honours them (and logs the stack it uses, plus a
 note when the manifest disagrees), and a runner-only deploy is told to export
 `PROJECT_NAME` to share the backend.
 
+## 2026-09-14 — three scenarios end to end on one backend build
+
+The 09-13 round proved one scenario. This round regenerated three scenarios of
+different shape on the same builder build — an appliance-service desk
+(delivery lookup, price quote, cleaning reservation, agent hand-off), an
+e-commerce returns desk (order lookup, return request with a policy decision,
+return status by return number or by order number) and a hospital appointments
+desk (identity lookup, booking, cancellation, FAQ) — downloaded each bundle,
+ran its own `./deploy.sh` with no manual edit, bound the alias once, and drove
+every operation over Connect chat against the generated backend. All three
+completed their business conversations; the agent request reached the Contact
+Flow's Escalation branch and went through the hours-of-operation and staffing
+checks the generated flow carries. The bundles are also stamped
+(`deploy-manifest.json` → `generatedAt`, `builder.build`) so a chat result can
+be traced to the builder build that produced it.
+
+Six more runtime-contract facts came out of the chats. Each is fixed at the
+source (generator rule, packager or the Lambda boundary adapter) with a test.
+
+| Finding | Fix |
+|---------|-----|
+| `NLX.Date` delivers an ISO date (`2026-09-18`), but `NLX.Time` delivers a **timezone-shifted UTC instant**: a typed `10:00` reached the Data Request as `2026-09-14T14:00:00.000Z`. A time typed into an `NLX.AlphaNumeric` slot arrives as compact digits (`1000`, `930`) | rule S9 converts date-shaped regex slots to `NLX.Date` but keeps time slots on `NLX.AlphaNumeric` with `^[0-9]{3,4}$`; the boundary adapter restores `HH:MM` (left-padding `930` → `09:30`); D9-4 accepts the compact shape |
+| A Data Request payload that names a slot **not filled on the path that reached the node** fails before any HTTP call — the webhook is never invoked and the turn takes the failure edge. Seen on a status lookup reachable by "return number" or by "order number": the shared request referenced both slots, so neither path could succeed | rule P1 keeps a payload to the slots every incoming path is guaranteed to have captured; when paths differ the node is cloned per incoming edge, and a slot no path captures is dropped from the request |
+| The reply is validated against the whole `responseSchema`, `enum` and `pattern` included. A legitimate "not found" answer (`status: ""`) failed the enum for `status`, and the customer was sent to an agent | reply schemas carry **types only**; enum values for result branches come from the OperationSpec (`field_enums`) into rule D5, and `required` names only the envelope |
+| A handler that answered with `found` but no `success` field took the failure edge on every call | the adapter derives `success` from the HTTP status, `errorCode` and `found` when the handler omits it |
+| The `captured_flow` context variable is populated **only by `user_input`**. A `user_choice` node over the flow-choice slot never sets it, so the follow-up flow's "not yes/no" answer never routed | the FollowUp flow answers "무엇을 도와드릴까요?" and hands the next utterance to the shared `user_input` listen; a request named directly in the follow-up costs one extra turn |
+| The `PhoneNumber` built-in delivered its value with separators in one deployment and without in another | the format restorer accepts both |
+
+Also observed, and not something a bundle can fix:
+
+- `knowledge_base` and generative nodes need a generative model configured in
+  the ACXD **workspace**. A workspace without one accepts the deployment and
+  the published knowledge base, routes the FAQ utterance to the FAQ flow — and
+  the node emits nothing, so the turn is silent. Check the workspace's model
+  settings before testing FAQ answers.
+- `description` / `aiDescription` are ASCII-only, so routing descriptions are
+  written in English even for a Korean application; two Korean utterances that
+  are close in meaning ("예약 조회" vs. identity lookup) can still route to the
+  neighbouring flow. Spell the distinguishing words out in the flow plan's
+  description during the interview.
+- Every redeploy that has to replace the application deployment rotates the
+  alias key (see above); `./deploy.sh --rebind-alias <key>` was needed after
+  each of the redeploys in this round.
+
 ## Service contract facts (not in the SDK types, learned from the API)
 
 | Area | Fact | Where it is enforced now |
@@ -141,6 +185,12 @@ note when the manifest disagrees), and a runner-only deploy is told to export
 | Output guardrails | A derived output rule (LLM judge, generalised literal) that rewrites messages fired on the greeting itself and on the bot's own format hint | derived output rules stay advisory (`flag`) |
 | Contact language | The Agentic CX block fails every contact with "NLX Chat Streaming Failed" unless the contact's language has been set (an `UpdateContactData` block with `LanguageCode` matching one of the application's languages) before the block | the Contact Flow binding inserts the block when the flow has none |
 | Workspace-level names | Secrets, guardrails and slot types are keyed by name across the whole workspace: two projects using `BackendApiKey` overwrote each other's API key on every deploy | the backend key secret and guardrails are named per project |
+| Built-in date / time slots | `NLX.Date` → ISO date; `NLX.Time` → a timezone-shifted UTC instant, unusable as a wall-clock time | S9 uses `NLX.Date`; time stays `NLX.AlphaNumeric` `^[0-9]{3,4}$`, restored to `HH:MM` by the adapter |
+| Payload placeholders | A `{slot:…}` placeholder for a slot not filled on the reaching path fails the Data Request **before the HTTP call** | runtime contract P1 (per-path payloads, node cloned per incoming edge) |
+| Reply validation | The reply must satisfy the full `responseSchema` including `enum` / `pattern`; a valid "not found" answer can fail it | reply schemas carry types only; result-branch enums come from the OperationSpec into D5 |
+| `captured_flow` | Populated by `user_input` only, never by a `user_choice` over the flow-choice slot | FollowUp flow re-listens through `user_input` |
+| Generative / KB nodes | Need a generative model configured on the workspace; without one the node is silent although the deployment and knowledge base succeed | documented prerequisite (`WIRING-GUIDE.md`) |
+| Routing text | `description` / `aiDescription` are ASCII-only; non-ASCII is rejected on create | system flows and the generator write English routing text; the bundle loader strips non-ASCII |
 
 ## Cross-asset contract facts
 

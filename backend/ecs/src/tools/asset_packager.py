@@ -527,6 +527,18 @@ def _generate_wiring_guide(bundle: dict) -> str:
         "   Later actions can read `$.AgenticCX.ContextVariables.<name>`.",
         "4. Attach the flow to the intended phone number (voice) or chat widget.",
         "",
+        "## Before you test",
+        "",
+        "- **Workspace model.** Knowledge-base answers and generative replies run on the",
+        "  generative model configured on the ACXD *workspace*. A workspace without one",
+        "  still accepts the deployment and the published knowledge base, but those",
+        "  nodes answer nothing — set the model in the workspace settings first.",
+        "- **After a redeploy.** When `./deploy.sh` has to replace the application",
+        "  deployment (the service refuses to update a deployment in place), the alias",
+        "  key changes and the published flow keeps serving the previous build. The",
+        "  script prints the new key; run `./deploy.sh --rebind-alias <key>` or pick",
+        "  the alias again in the block and publish.",
+        "",
     ]
     for contact_flow in bundle.get("contact_flows") or []:
         binding = _binding_for_contact_flow(contact_flow)
