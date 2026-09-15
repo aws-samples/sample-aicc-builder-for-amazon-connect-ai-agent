@@ -373,6 +373,13 @@ operation spec 하나의 JSON payload는 매우 큽니다. 한 턴에 여러 개
 - `summary` (한 줄 설명)
 - `input_fields` (list: name, type, required, format, description)
 - `output_fields` (list: name, type, description)
+  - **입력은 고객이 아는 값만.** 백엔드가 계산·조회·발급하는 값(환불/총 금액,
+    가격, 상태, 시스템이 부여하는 번호)은 `output_fields`로 저장하세요. 요구사항
+    문서가 그런 값을 입력으로 적어 두었더라도 그대로 옮기지 말고, 같은 턴에
+    "환불 금액은 조회한 주문 총액으로 자동 산정하겠습니다 (고객에게 묻지 않음)"
+    처럼 산정 방식을 제안하고 확인을 받으세요. 고객이 부분 금액을 직접
+    정해야 하는 업무라고 명시적으로 답한 경우에만 입력으로 남깁니다.
+    (라이브: 문서를 그대로 따른 반품 플로우가 고객에게 환불 금액을 물었습니다.)
 - `business_rules` (list)
 - `tools` (list of ToolSpec: tool_id, role, input_fields, output_fields)
 - `conversation_script` (원문 시나리오, 500자 초과 시 S3 저장)
@@ -581,8 +588,11 @@ design the ACXD flows before moving to the analysis document.
    `decision_category`.
    Collect from the customer only what the customer knows. A value the backend
    computes or looks up — a refund or total amount, a price, a status, an id it
-   issues — is an OUTPUT field, never a slot the caller is asked for (live: a
-   return flow asked the caller for the refund amount).
+   issues — is an OUTPUT field, never a slot the caller is asked for, even when
+   the requirements document lists it as an input: propose the derivation
+   ("refund amount = the order's total") and confirm it in the same turn
+   instead of copying the document (live: a return flow built from the
+   document as written asked the caller for the refund amount).
    For a `redirect` step that hands the conversation to another business flow
    (e.g. "order not found → search by customer info"), set `redirect_flow_id`
    to that flow's `flow_id`; the generated flow is checked against it.

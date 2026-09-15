@@ -1230,6 +1230,41 @@ def _apply_length_constraint(data: dict, text: str) -> bool:
     return applied
 
 
+# Input fields whose name says the BACKEND produces the value. The caller cannot
+# know a refund or total amount, a price, a status or an approval outcome, so a
+# spec that collects one of these asks the customer for a number the system
+# would have to check anyway (live: a return flow asked for the refund amount).
+# Order/return/reservation numbers are NOT listed — the caller does know those.
+_BACKEND_COMPUTED_INPUT = re.compile(
+    r"(?:(?:refund|total|final|settle(?:d|ment)?|net|payable|approved|discount)_?amount$"
+    r"|(?:^|_)price$|(?:^|_)fee$|(?:^|_)status$|approval_?(?:status|result|decision)|(?:^|_)result$)",
+    re.I,
+)
+_BACKEND_COMPUTED_DESCRIPTION = re.compile(r"환불|총\s*액|총\s*금액|합계|산정|판정|refund|total|computed|calculated", re.I)
+
+
+def backend_computed_input_warnings(input_fields) -> list[str]:
+    """One advisory per input field that looks like a value the backend computes."""
+    warnings: list[str] = []
+    for field in input_fields or []:
+        name = str(getattr(field, "name", None) or (field.get("name") if isinstance(field, dict) else "") or "")
+        description = str(getattr(field, "description", None) or (field.get("description") if isinstance(field, dict) else "") or "")
+        if not name:
+            continue
+        snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
+        hit = bool(_BACKEND_COMPUTED_INPUT.search(snake))
+        if not hit and snake.lower() in ("amount", "value") and _BACKEND_COMPUTED_DESCRIPTION.search(description):
+            hit = True
+        if hit:
+            warnings.append(
+                f"Input field '{name}' looks like a value the backend computes or looks up "
+                f"(an amount, price, status or decision). The caller cannot know it — move it to "
+                f"output_fields and derive it in the business rules (e.g. refund amount = the order's "
+                f"total), unless the customer confirmed the caller really chooses this value."
+            )
+    return warnings
+
+
 def _exact_length_pattern(text: str, n: int) -> Optional[str]:
     """Regex for an exact-length phrase: alphanumeric beats digits ("영숫자 12자리"
     contains the substring "숫자" but means letters AND digits)."""
@@ -1532,7 +1567,7 @@ def save_operation_spec(
         except Exception:
             pass  # Phase tracking must never block core logic
 
-        return {
+        result = {
             "success": True,
             "operation_id": operation_id,
             "message": f"Operation '{operation_id}' specification saved successfully.",
@@ -1549,6 +1584,14 @@ def save_operation_spec(
                 "flow_type": spec.flow_type,
             }
         }
+        computed_inputs = backend_computed_input_warnings(spec.input_fields)
+        if computed_inputs:
+            result["warnings"] = computed_inputs
+            result["message"] += (
+                " Review the warnings: confirm with the customer in this turn whether the caller "
+                "really supplies these values, or move them to output_fields with update_operation_spec."
+            )
+        return result
     except Exception as e:
         return {
             "success": False,
