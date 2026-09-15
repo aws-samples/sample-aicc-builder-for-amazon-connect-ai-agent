@@ -556,15 +556,15 @@ test('deploy-cfn-backend resolves Lambda names from the stack resources, not a n
   ctx.exec = (cmd, args) => {
     execLog.push([cmd, ...args]);
     if (args.includes('describe-stack-resources')) {
-      return 'selc-aicc-prod-get-cleaning-price selc-aicc-prod-customer-lookup\n';
+      return 'gaon-aicc-prod-get-cleaning-price gaon-aicc-prod-customer-lookup\n';
     }
     return '';
   };
   await STEPS['deploy-cfn-backend'].run(ctx, {
-    templatePath: 'cloudformation/infrastructure.yaml', stackName: 'selc-stack',
+    templatePath: 'cloudformation/infrastructure.yaml', stackName: 'gaon-stack',
     lambdaDirs: ['lambda/get_cleaning_price'],
   });
   const update = execLog.find((a) => a.includes('update-function-code'));
   assert.ok(update, 'update-function-code was called');
-  assert.equal(update[update.indexOf('--function-name') + 1], 'selc-aicc-prod-get-cleaning-price');
+  assert.equal(update[update.indexOf('--function-name') + 1], 'gaon-aicc-prod-get-cleaning-price');
 });

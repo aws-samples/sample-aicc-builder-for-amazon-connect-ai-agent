@@ -65,7 +65,7 @@ def test_open_value_attaches_a_builtin_and_gets_no_custom_slot_type():
     variant (plan `phonePin` <- FieldSpec `phone_pin`), and 'phonePin' is a PIN,
     not a phone number, so it must not become NLX.PhoneNumber. A value WITH a
     format is an identifier, not a quantity: it attaches NLX.AlphaNumeric and
-    keeps the regex (the live SELC order number), never NLX.Number, which would
+    keeps the regex (the live GAON order number), never NLX.Number, which would
     drop leading zeros and ignore the exact length.
     """
     plans = [{"operation_id": "check_balance",
@@ -203,7 +203,7 @@ def test_the_manifest_still_schedules_upsert_secrets_for_the_new_reference_synta
     bundle = {"data_requests": [{"dataRequestId": "getOrder", "webhook": {
         "implementation": "external", "url": "{WEBHOOK_URL}/tools/get_order",
         "headers": [{"key": "x-api-key", "value": "{BackendApiKey:NLX.Secret}"}]}}]}
-    steps = [s["type"] for s in build_manifest(bundle, project_name="selc")["steps"]]
+    steps = [s["type"] for s in build_manifest(bundle, project_name="gaon")["steps"]]
     assert "upsert-secrets" in steps
 
 
@@ -255,7 +255,7 @@ def test_application_name_falls_back_to_the_project_name():
 # --- slot types: one custom slot type per constrained field, never per type name ---
 
 def test_enum_slots_of_different_fields_get_their_own_slot_types():
-    """Live (SELC, 2026-09-11): productType / serviceType / installLocationType were
+    """Live (GAON, 2026-09-11): productType / serviceType / installLocationType were
     all declared `type: enum`, so they collapsed into ONE slot type 'enum' holding
     every value of every field — and D9-4 rejected the bundle field by field."""
     plans = [
@@ -381,12 +381,12 @@ def test_the_manifest_records_when_and_by_what_it_was_generated(monkeypatch):
     ran. The manifest's provenance lets a bundle be checked against the claim."""
     from tools.acxd_manifest_builder import build_manifest, validate_deploy_manifest
     monkeypatch.setenv("AICC_BUILDER_BUILD", "abc1234")
-    manifest = build_manifest({"flows": [{"flowId": "Welcome", "nodes": {}}]}, project_name="selc")
+    manifest = build_manifest({"flows": [{"flowId": "Welcome", "nodes": {}}]}, project_name="gaon")
     assert manifest["generatedAt"].endswith("Z") and manifest["generatedAt"][:2] == "20"
     assert manifest["builder"] == {"name": "aicc-builder", "build": "abc1234"}
     assert validate_deploy_manifest(manifest) == []
     monkeypatch.delenv("AICC_BUILDER_BUILD")
-    assert build_manifest({"flows": []}, project_name="selc")["builder"] == {"name": "aicc-builder"}
+    assert build_manifest({"flows": []}, project_name="gaon")["builder"] == {"name": "aicc-builder"}
 
 
 def test_d9_4_accepts_self_validating_builtins_without_a_regex():

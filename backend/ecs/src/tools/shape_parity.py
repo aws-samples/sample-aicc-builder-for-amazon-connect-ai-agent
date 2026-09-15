@@ -97,7 +97,7 @@ def _get_properties(field: dict) -> Optional[list]:
     """FieldSpec `properties` is a LIST of sub-FieldSpec (not a dict).
 
     Interviews have stored it as a list of names (``["code", "detail"]``) or as a
-    name → spec mapping; live (SELC) the validator then died with
+    name → spec mapping; live (GAON) the validator then died with
     ``'str' object has no attribute 'get'`` and the whole check was refused.
     Normalise both shapes to a list of dicts.
     """

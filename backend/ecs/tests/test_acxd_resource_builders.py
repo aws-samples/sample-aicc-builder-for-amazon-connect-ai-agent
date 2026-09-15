@@ -287,7 +287,7 @@ def test_korean_guardrail_names_get_distinct_files(monkeypatch):
 def test_korean_guardrail_names_are_replaced_with_ascii():
     """The live API rejects non-ASCII guardrail/rule names.
 
-    Live deploy (selc-voice-agent, step 7): '폭언 대응' → "name is not in the
+    Live deploy (gaon-voice-agent, step 7): '폭언 대응' → "name is not in the
     expected format". The policy stays Korean (prompt/messages allow it); only
     the name label must be derived.
     """
@@ -303,13 +303,13 @@ def test_korean_guardrail_names_are_replaced_with_ascii():
 
 
 def test_application_name_is_ascii():
-    """'삼성전자로지텍㈜ (SELC) Assistant' must not ship as the app name."""
-    spec = {"application": {"name": "삼성전자로지텍㈜ (SELC) Assistant"},
+    """'가온물류㈜ (GAON) Assistant' must not ship as the app name."""
+    spec = {"application": {"name": "가온물류㈜ (GAON) Assistant"},
             "business_profile": {}, "flows": []}
     from tools.acxd_resource_builders import build_application
     app = build_application(spec)
     assert not any(ord(c) > 126 for c in app["name"]), app["name"]
-    assert "SELC" in app["name"]
+    assert "GAON" in app["name"]
 
 
 def test_application_language_follows_the_flows_not_en_us():
@@ -321,7 +321,7 @@ def test_application_language_follows_the_flows_not_en_us():
     """
     from tools.acxd_resource_builders import build_application
 
-    spec = {"business_profile": {"company_name": "SELC", "language": "ko-KR"},
+    spec = {"business_profile": {"company_name": "GAON", "language": "ko-KR"},
             "flows": [{"flow_id": "welcomeRouting", "role": "welcome", "language": "ko-KR"}],
             "application": {}}
     app = build_application(spec)

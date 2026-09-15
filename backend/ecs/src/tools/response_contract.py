@@ -1,6 +1,6 @@
 """The response contract every generated asset must share.
 
-Why (live finding, SELC 2026-09-11): the OpenAPI generator (an LLM) declared
+Why (live finding, GAON 2026-09-11): the OpenAPI generator (an LLM) declared
 `success` / `errorCode` / `message` / `missingFields` on every response, the
 Data Requests were built from the spec's `output_fields`, and the parity gate
 then reported 11 mismatches that nobody could fix from either side — the
@@ -181,7 +181,7 @@ def resolve_tool_fields(spec: dict, tool_fields: Any, kind: str) -> list:
     """A tool's field list as FieldSpec dicts.
 
     Interviews store a tool's ``input_fields`` / ``output_fields`` either as
-    FieldSpecs or as the NAMES of the operation's top-level fields. Live (SELC):
+    FieldSpecs or as the NAMES of the operation's top-level fields. Live (GAON):
     the names were taken as-is, projected to nothing, and the OpenAPI request
     schema was rewritten to ``properties: {}`` — thirteen fields gone. A name
     resolves to the top-level field of that name; an unknown name is kept as a

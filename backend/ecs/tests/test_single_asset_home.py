@@ -14,10 +14,10 @@ for _path in (_HERE, os.path.abspath(os.path.join(_HERE, "..", "src"))):
 def test_root_asset_path_redirects_to_the_single_operation_copy(tmp_path):
     from tools.workspace_file_tools import _canonical_asset_path
     root = tmp_path
-    (root / "assets" / "contact_flow" / "selc-inbound-main-flow").mkdir(parents=True)
-    (root / "assets" / "contact_flow" / "selc-inbound-main-flow" / "contact_flow.json").write_text("{}")
+    (root / "assets" / "contact_flow" / "gaon-inbound-main-flow").mkdir(parents=True)
+    (root / "assets" / "contact_flow" / "gaon-inbound-main-flow" / "contact_flow.json").write_text("{}")
     assert _canonical_asset_path(root, "assets/contact_flow/contact_flow.json") == \
-        "assets/contact_flow/selc-inbound-main-flow/contact_flow.json"
+        "assets/contact_flow/gaon-inbound-main-flow/contact_flow.json"
     # an explicit operation path, a non-asset path and an existing root file are untouched
     assert _canonical_asset_path(root, "assets/contact_flow/other/contact_flow.json") == \
         "assets/contact_flow/other/contact_flow.json"
@@ -36,15 +36,15 @@ def test_ambiguous_targets_are_not_guessed(tmp_path):
 
 def test_bundle_keeps_one_contact_flow_per_name():
     from tools.acxd_bundle import _dedupe_contact_flows
-    older = {"Name": "selc-inbound-main-flow", "Version": "2019-10-30", "Actions": [{"Identifier": "a"}]}
-    newer = {"Name": "selc-inbound-main-flow", "Version": "2019-10-30", "Actions": [{"Identifier": "a"}, {"Identifier": "b"}]}
+    older = {"Name": "gaon-inbound-main-flow", "Version": "2019-10-30", "Actions": [{"Identifier": "a"}]}
+    newer = {"Name": "gaon-inbound-main-flow", "Version": "2019-10-30", "Actions": [{"Identifier": "a"}, {"Identifier": "b"}]}
     other = {"Name": "outbound", "Version": "2019-10-30", "Actions": []}
     kept = _dedupe_contact_flows([older, newer, other, json.loads(json.dumps(other))])
     assert kept == [newer, other]
 
 
 def test_flow_slots_are_rebound_to_per_field_slot_types_on_load():
-    """SELC: slots attached as type 'enum' (one shared slot type); after the rebuild
+    """GAON: slots attached as type 'enum' (one shared slot type); after the rebuild
     the bundle holds productType / serviceType instead. The loader rebinds each
     slot — and the user_choice node named after it — to the per-field type."""
     from tools.acxd_bundle import _rebind_slot_types

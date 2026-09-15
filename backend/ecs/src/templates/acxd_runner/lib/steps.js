@@ -82,7 +82,7 @@ function resolveAssetPlaceholders(doc, ctx) {
  * AICC_STACK_NAME before invoking the runner, so both entry points converge on
  * ONE stack. Live (2026-09-13): a bare `node runner.js deploy` used the
  * manifest's default project and created a SECOND stack (`aicc-poc-stack`)
- * beside deploy.sh's `selc-stack` — the Data Requests then called a different
+ * beside deploy.sh's `gaon-stack` — the Data Requests then called a different
  * backend than the one deploy.sh had deployed. A runner-only deploy must pass
  * PROJECT_NAME (or AICC_STACK_NAME) to reuse the stack.
  */

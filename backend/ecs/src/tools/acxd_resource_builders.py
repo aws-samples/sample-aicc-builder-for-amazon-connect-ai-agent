@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 def sanitize_kb_name(raw: str | None, fallback: str = "AICC FAQ") -> str:
     """Coerce a KB name into the ACXD charset (alphanumeric + space/-/_).
 
-    Non-ASCII names (e.g. Korean '삼성전자로지텍 FAQ') are stripped by the
+    Non-ASCII names (e.g. Korean '가온물류 FAQ') are stripped by the
     API's charset rule, which previously produced an empty/invalid name and
     blocked every flow-generation attempt (found in live QA). Transliterate
     what we can, then fall back.
@@ -461,7 +461,7 @@ def build_application(spec: dict) -> dict:
     flow_plans = spec.get("flows") or []
 
     name = app.get("name") or f"{profile.get('company_name', 'AICC')} Assistant"
-    # Live API: the application name must be ASCII too ('삼성전자로지텍㈜ (SELC)
+    # Live API: the application name must be ASCII too ('가온물류㈜ (GAON)
     # Assistant' would die at compose-application the way Korean guardrail
     # names died at upsert-guardrails). Keep the ASCII words if any survive,
     # else fall back to a neutral name.

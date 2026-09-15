@@ -107,7 +107,7 @@ application's replies from the WebSocket (or `GetTranscript`).
 
 `node runner.js deploy` run on its own used the manifest's own `project`
 (`aicc-poc`) and created a second stack, `aicc-poc-stack`, beside the
-`selc-stack` that `deploy.sh` had deployed from the same bundle — with its own
+`gaon-stack` that `deploy.sh` had deployed from the same bundle — with its own
 API Gateway. The Data Requests then pointed at a backend that was not the one
 under test. `deploy.sh` now exports `PROJECT_NAME` and `AICC_STACK_NAME` before
 invoking the runner, the runner honours them (and logs the stack it uses, plus a

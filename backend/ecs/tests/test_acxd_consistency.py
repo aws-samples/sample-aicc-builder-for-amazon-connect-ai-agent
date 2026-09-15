@@ -407,7 +407,7 @@ def test_user_selected_choice_needs_no_conditions():
 
 
 def test_a_planned_redirect_target_must_be_wired():
-    """Live (SELC, 2026-09-14): six regenerations sent the 'order not found →
+    """Live (GAON, 2026-09-14): six regenerations sent the 'order not found →
     search by customer info' step to EscalationFlow; only the plan knows the
     intended target, so the interview records it and the gate checks it."""
     import copy

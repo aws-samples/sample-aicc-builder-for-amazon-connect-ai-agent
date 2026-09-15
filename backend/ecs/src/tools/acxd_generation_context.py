@@ -418,7 +418,7 @@ def builtin_slot_type_for(slot_name: str, declared_type: str, regex: Optional[st
     Order matters: a phone number is a phone number even when its regex is all
     digits. Any value with an explicit format — an order number, a booking
     reference, a 10-digit code — attaches ``NLX.AlphaNumeric`` and carries the
-    regex: that is the shape the live SELC bundle needed (``NLX.Number`` would
+    regex: that is the shape the live GAON bundle needed (``NLX.Number`` would
     parse the value as a quantity, losing leading zeros and the exact length
     the regex enforces). ``NLX.Number`` is for a quantity-like numeric field
     with no format of its own.

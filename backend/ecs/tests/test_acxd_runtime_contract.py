@@ -1,7 +1,7 @@
 """acxd_runtime_contract — the live-proven runtime contract, rule by rule.
 
 Every assertion here is anchored on a real failure. ``tests/fixtures/acxd_live/
-selc_generator_output.json`` is the UNMODIFIED ACXD flow-generator output from a
+gaon_generator_output.json`` is the UNMODIFIED ACXD flow-generator output from a
 sandbox validation (Amazon Connect Customer / Agentic CX Designer, a sandbox
 account in ap-northeast-2, 2026-09-13): those flows passed every schema check, built with
 zero issues, deployed — and then the bot said nothing, skipped its own
@@ -40,7 +40,7 @@ from tools.acxd_runtime_contract import (  # noqa: E402
 )
 from tools.validate_acxd_flow import validate_acxd_asset  # noqa: E402
 
-FIXTURE = os.path.join(_HERE, "fixtures", "acxd_live", "selc_generator_output.json")
+FIXTURE = os.path.join(_HERE, "fixtures", "acxd_live", "gaon_generator_output.json")
 
 with open(FIXTURE, encoding="utf-8") as handle:
     LIVE = json.load(handle)
@@ -164,7 +164,7 @@ def test_s1_unbundled_custom_slot_type_is_a_cross_scope_violation():
 
 
 def test_s1_unbundled_open_value_type_is_resolved_from_the_slot_plan():
-    """Replay of the ORIGINAL SELC output through the fixed generator: the old
+    """Replay of the ORIGINAL GAON output through the fixed generator: the old
     generator had emitted a one-item custom slot type ``orderNumber`` and the
     model attached it; the new slot-type builder no longer emits it, so the
     attached type names nothing. The interview's slot plan knows the value's
@@ -671,7 +671,7 @@ def test_m2_leaves_a_generative_text_a_message_already_follows():
 
 
 def test_m2_without_placeholders_announces_the_data_request_result_fields():
-    """Live (SELC v3, 2026-09-14): '성공 시 배송상태와 예정일을 자연스럽게 안내한다' had
+    """Live (GAON v3, 2026-09-14): '성공 시 배송상태와 예정일을 자연스럽게 안내한다' had
     no placeholders and the generative node said nothing — the caller heard
     "anything else?" right after the order number. The nearest upstream data
     request's result fields make the announcement, labelled from the interview."""
@@ -933,7 +933,7 @@ def test_nothing_is_pruned_without_a_start_node():
 
 
 def test_s8_yes_no_constants_become_the_slot_types_values():
-    """Live (SELC, 2026-09-13): `privacyConsent eq "yes"` against the yesNo type
+    """Live (GAON, 2026-09-13): `privacyConsent eq "yes"` against the yesNo type
     whose values are 예/아니요 — the customer's "네" was treated as a refusal."""
     flow = broken("CreateCleaningReservation")
     flow["slotTypes"] = [s for s in flow["slotTypes"] if s["name"] != "privacyConsent"] + [
@@ -969,7 +969,7 @@ def test_s8_yes_no_constants_become_the_slot_types_values():
 
 
 def test_m3_a_message_node_is_only_a_message():
-    """Live (SELC, 2026-09-13): the price announcement 'basic' carried
+    """Live (GAON, 2026-09-13): the price announcement 'basic' carried
     metadata.redirect and cleared the slots its own message rendered; the
     runtime showed the fallback re-guide instead of the price."""
     flow = broken("GetCleaningPrice")
@@ -1094,7 +1094,7 @@ def test_m2_prompt_labels_do_not_leak_fragments_of_earlier_placeholders():
 
 
 def test_m2_result_labels_stay_in_the_callers_language():
-    """Live (SELC v4): 'Air conditioner product type {…}' was read to a Korean
+    """Live (GAON v4): 'Air conditioner product type {…}' was read to a Korean
     caller because the interview described the field in English."""
     flow = broken("DeliveryStatusByOrderNumber")
     generative = next(n for n in flow["nodes"].values() if n["type"] == "generative_text")
@@ -1131,7 +1131,7 @@ def test_d4_failure_edge_to_a_silent_followup_is_sent_to_the_escalation():
 
 
 def test_m2_after_the_answer_was_already_given_is_a_silent_pass_through():
-    """Live (SELC, 2026-09-14): the flow's own message said '예약이 접수되었습니다.
+    """Live (GAON, 2026-09-14): the flow's own message said '예약이 접수되었습니다.
     예약번호는 …' and a trailing generative node then produced a second
     '조회 결과: …' from raw field descriptions."""
     flow = broken("DeliveryStatusByOrderNumber")

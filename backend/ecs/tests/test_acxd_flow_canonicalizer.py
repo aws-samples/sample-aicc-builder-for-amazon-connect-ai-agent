@@ -54,7 +54,7 @@ def test_slot_capture_in_metadata_userinput_becomes_user_choice_with_choice_conf
 
 
 def test_top_level_slot_object_and_userchoice_options():
-    """SELC: top-level `slot` + metadata.choices / metadata.userChoice.options."""
+    """GAON: top-level `slot` + metadata.choices / metadata.userChoice.options."""
     flow = _flow({
         N[1]: {"nodeId": N[1], "type": "start", "childNodes": [{"nodeId": N[2]}]},
         N[2]: {"nodeId": N[2], "type": "user_choice", "messages": [{"body": "Which type?", "type": "text"}],
@@ -154,7 +154,7 @@ def test_placeholders_become_nlx_syntax_and_unknown_names_are_reported():
 
 
 def test_text_typed_boolean_variables_and_string_constants_become_booleans():
-    """SELC 2-1: `found` typed text, compared with "true" — a branch that can never be taken."""
+    """GAON 2-1: `found` typed text, compared with "true" — a branch that can never be taken."""
     flow = _flow({
         N[1]: {"nodeId": N[1], "type": "start", "childNodes": [{"nodeId": N[2]}]},
         N[2]: {"nodeId": N[2], "type": "choice", "childNodes": [

@@ -318,7 +318,7 @@ def test_non_ascii_kb_name_is_sanitized_and_placeholder_resolves():
     from tools.validate_acxd_flow import validate_acxd_asset
 
     assert sanitize_kb_name("QA일렉트로닉스 FAQ") == "QA FAQ"
-    assert sanitize_kb_name("삼성전자로지텍") == "AICC FAQ"   # nothing keepable → fallback
+    assert sanitize_kb_name("가온물류") == "AICC FAQ"   # nothing keepable → fallback
 
     spec = {"business_profile": {"company_name": "QA Electronics"},
             "data_integrations": [{"data_request_id": "getOrderStatus",
@@ -1030,7 +1030,7 @@ def test_retry_prompt_keeps_the_whole_context():
 def test_message_type_is_defaulted_and_required():
     """The live API requires messages[].type; the SDK schema said optional.
 
-    Live deploy (selc-voice-agent): upsert-flows failed with
+    Live deploy (gaon-voice-agent): upsert-flows failed with
     'nodes.<uuid>.messages[0].type is required' on an escalate node whose
     message was {"body": "..."} — generated, validated, packaged, and shipped
     without the field, then rejected at the customer's machine.
@@ -1146,7 +1146,7 @@ def test_repair_renames_digit_slot_type_ids_and_fills_generative_prompts():
 
 
 def test_model_marked_metadata_untrained_becomes_the_contract_field():
-    """Live (SELC, 2026-09-14): the model wrote metadata.untrained=true for the
+    """Live (GAON, 2026-09-14): the model wrote metadata.untrained=true for the
     call-logging flow; the service reads only the top-level field, so the flow
     stayed routable and the re-guide menu offered it."""
     import copy
@@ -1163,7 +1163,7 @@ def test_model_marked_metadata_untrained_becomes_the_contract_field():
 
 
 def test_a_routing_descriptor_that_says_do_not_route_here_makes_the_flow_untrained():
-    """Live (SELC, 2026-09-14): the plan still said customer_initiated=True, the
+    """Live (GAON, 2026-09-14): the plan still said customer_initiated=True, the
     model did not set metadata.untrained this time, but its aiDescription read
     'System utility flow … not a routing target' — and the menu offered it."""
     import copy

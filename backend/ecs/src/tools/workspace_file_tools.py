@@ -229,8 +229,8 @@ def _get_session_root(session_id: str) -> Path:
 def _canonical_asset_path(session_root: Path, relative_path: str) -> str:
     """Redirect `assets/<type>/<file>` to the one `assets/<type>/<op>/<file>` that exists.
 
-    Live (SELC): the Contact Flow was generated at
-    `assets/contact_flow/selc-inbound-main-flow/contact_flow.json`; the model
+    Live (GAON): the Contact Flow was generated at
+    `assets/contact_flow/gaon-inbound-main-flow/contact_flow.json`; the model
     then wrote `assets/contact_flow/contact_flow.json` (the bundle's layout,
     not the workspace's), so the session had two flows to keep in sync and the
     bundle shipped both. An asset file has one home: when the root path does

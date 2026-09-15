@@ -242,7 +242,7 @@ def _check_backend_for_live_data_requests(
     ``{WEBHOOK_URL}/tools/<operation>``, which only exists if the Classic
     pipeline generated the Lambda handlers, the OpenAPI spec and the
     CloudFormation that fronts them. When that step is skipped the bundle still
-    validates, deploys, and then answers nothing — a live SELC run produced an
+    validates, deploys, and then answers nothing — a live GAON run produced an
     agent whose lookups pointed at an API Gateway that was never created.
     """
     if not spec:
@@ -494,7 +494,7 @@ def validate_acxd_consistency(
                     _v(out, "DETERMINISM_UNAUTHORIZED_GENERATIVE", f"flows[{flow_id}]",
                        f"flow contains generative node type {nt!r} that the user "
                        f"never confirmed in the interview")
-            # A planned hand-off names its target flow. Live (SELC): six
+            # A planned hand-off names its target flow. Live (GAON): six
             # regenerations in a row sent the "order not found → search by
             # customer info" step to EscalationFlow while the message promised a
             # customer-info search; only the plan knows the intended target.

@@ -24,7 +24,7 @@ def test_explicit_name_is_kept_and_non_dicts_pass_through():
 
 
 def test_rebind_never_touches_an_nlx_builtin_slot():
-    """Live (SELC, 2026-09-13): the normalizer had turned the order-number slot
+    """Live (GAON, 2026-09-13): the normalizer had turned the order-number slot
     into NLX.AlphaNumeric + regex, but a stale one-item custom slot type named
     'orderNumber' was still in the bundle and the loader rebound the slot back
     to it — re-creating the auto-selecting one-item menu at packaging time."""
@@ -43,7 +43,7 @@ def test_rebind_never_touches_an_nlx_builtin_slot():
 
 
 def test_load_acxd_bundle_leaves_out_slot_types_no_flow_attaches(monkeypatch):
-    """Live (SELC): one-item 'orderNumber'/'phoneNumber' slot types from an
+    """Live (GAON): one-item 'orderNumber'/'phoneNumber' slot types from an
     earlier generation stayed on disk after the contract moved the slots to NLX
     built-ins, and would have been deployed as stray resources."""
     import tools.acxd_bundle as bundle_mod

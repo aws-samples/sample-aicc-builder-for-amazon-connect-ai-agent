@@ -42,7 +42,7 @@ from tools.validate_acxd_consistency import validate_acxd_consistency  # noqa: E
 from tools.validate_acxd_flow import validate_acxd_asset  # noqa: E402
 
 KO_SPEC = {
-    "business_profile": {"company_name": "삼성전자로지텍", "language": "ko-KR"},
+    "business_profile": {"company_name": "가온물류", "language": "ko-KR"},
     "flows": [
         {"flow_id": "DeliveryStatusByOrderNumber", "role": "operation",
          "purpose": "주문번호(10자리)를 받아 배송상태와 예상 배송일을 조회·안내한다.",
@@ -166,7 +166,7 @@ def test_welcome_flow_shape():
     greeting = _node_of_type(flow, "basic")
     # No approved greeting in the spec → company + the operations menu
     assert greeting["messages"][0]["body"] == (
-        "안녕하세요, 삼성전자로지텍입니다. 배송 조회, 에어컨 세척 가격 문의, 세척 예약 등을 "
+        "안녕하세요, 가온물류입니다. 배송 조회, 에어컨 세척 가격 문의, 세척 예약 등을 "
         "도와드릴 수 있어요. 무엇을 도와드릴까요?")
     # the counter is reset on entry, not in FallbackFlow
     assert greeting["metadata"]["stateModifications"] == [{
@@ -312,7 +312,7 @@ def test_follow_up_yes_value_follows_the_language():
 
 
 def test_follow_up_answered_with_a_request_asks_and_listens_instead_of_falling_back():
-    """Live (SELC/GreenCart, 2026-09-14): '더 도와드릴 일이 있을까요?' answered with
+    """Live (GAON/GreenCart, 2026-09-14): '더 도와드릴 일이 있을까요?' answered with
     '반품 신청하고 싶어요' went to the fallback ('잘 이해하지 못했습니다'). A
     user_choice cannot route the utterance — captured_flow is only set by a
     user_input node (live) — so the unrecognised answer is treated as 'yes,
@@ -480,7 +480,7 @@ def _confirmed(plan: dict) -> dict:
 
 
 SYSTEM_ONLY_SPEC = {
-    "business_profile": {"company_name": "삼성전자로지텍", "language": "ko-KR"},
+    "business_profile": {"company_name": "가온물류", "language": "ko-KR"},
     "application": {"locales": ["ko-KR"]},
     "flows": [
         _confirmed({"flow_id": "WelcomeFlow", "role": "welcome", "purpose": "greeting"}),
@@ -609,27 +609,27 @@ def test_generation_prompt_never_offers_bare_text_number_boolean():
 
 
 def test_welcome_flow_speaks_the_approved_greeting_and_never_the_project_slug():
-    """Live (SELC, 2026-09-13): 'selc-aicc' (the project slug) was greeted as the
+    """Live (GAON, 2026-09-13): 'gaon-aicc' (the project slug) was greeted as the
     company because the profile had no company name; the interview had
     recorded the customer's greeting verbatim all along."""
     import copy
     spec = copy.deepcopy(KO_SPEC)
-    spec["business_profile"] = {"project_name": "selc-aicc", "company_name": "selc-aicc", "language": "ko-KR",
-                                "greeting": "안녕하세요, 삼성전자로지텍 고객센터입니다. 무엇을 도와드릴까요?"}
+    spec["business_profile"] = {"project_name": "gaon-aicc", "company_name": "gaon-aicc", "language": "ko-KR",
+                                "greeting": "안녕하세요, 가온물류 고객센터입니다. 무엇을 도와드릴까요?"}
     flow = build_welcome_flow(spec)
     assert _node_of_type(flow, "basic")["messages"][0]["body"] == \
-        "안녕하세요, 삼성전자로지텍 고객센터입니다. 무엇을 도와드릴까요?"
+        "안녕하세요, 가온물류 고객센터입니다. 무엇을 도와드릴까요?"
     spec["business_profile"].pop("greeting")
     flow = build_welcome_flow(spec)
     body = _node_of_type(flow, "basic")["messages"][0]["body"]
-    assert body.startswith("안녕하세요. 배송 조회, ") and "selc-aicc" not in body
+    assert body.startswith("안녕하세요. 배송 조회, ") and "gaon-aicc" not in body
     spec["flows"] = []
     flow = build_welcome_flow(spec)
     assert _node_of_type(flow, "basic")["messages"][0]["body"] == "안녕하세요. 무엇을 도와드릴까요?"
 
 
 def test_operation_labels_leave_out_internal_operations():
-    """Live (SELC, 2026-09-13): the re-guide menu offered '통화 결과 기록'
+    """Live (GAON, 2026-09-13): the re-guide menu offered '통화 결과 기록'
     (call-result logging) — an operation the customer never asks for."""
     import copy
     spec = copy.deepcopy(KO_SPEC)
@@ -642,7 +642,7 @@ def test_operation_labels_leave_out_internal_operations():
 
 
 def test_operation_labels_leave_out_flows_the_generator_marked_untrained():
-    """Live (SELC, 2026-09-14): the plan still said customer_initiated=True for
+    """Live (GAON, 2026-09-14): the plan still said customer_initiated=True for
     call-result logging, the model marked the generated flow untrained, and the
     re-guide offered '통화 결과 기록' — a flow the caller cannot reach."""
     import copy

@@ -466,7 +466,7 @@ def test_envelope_fields_still_checked_if_declared_in_spec():
 
 
 def test_properties_stored_as_names_or_a_mapping_are_compared_not_crashed():
-    """Live (SELC, 2026-09-14): an object field's `properties` was a list of
+    """Live (GAON, 2026-09-14): an object field's `properties` was a list of
     names; the validator died with "'str' object has no attribute 'get'" and the
     whole shape-parity check was refused for the operation."""
     from tools.shape_parity import validate_shape_parity

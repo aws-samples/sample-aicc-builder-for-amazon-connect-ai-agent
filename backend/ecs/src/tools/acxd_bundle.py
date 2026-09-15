@@ -207,7 +207,7 @@ def _dedupe_contact_flows(docs: list[dict]) -> list[dict]:
 
     A session can hold the same flow twice — the generator's copy under the
     flow-name folder and a root-level copy the model wrote by hand (live:
-    SELC shipped `contact_flow.json` and `contact_flow-1.json`, and the deploy
+    GAON shipped `contact_flow.json` and `contact_flow-1.json`, and the deploy
     imported two flows). Identical documents collapse; documents sharing a
     flow name keep the last one read (sorted read order puts the operation
     folder after the root file, i.e. the generator's copy wins).
@@ -235,7 +235,7 @@ def _rebind_slot_types(flow: Any, slot_types: list) -> Any:
     """Point a flow's attached slots at the per-field slot type when the id it
     names is not in the bundle.
 
-    Live (SELC): three slots were attached with `type: "enum"` — one shared
+    Live (GAON): three slots were attached with `type: "enum"` — one shared
     slot type that no longer exists once the slot types are rebuilt per field.
     When the bundle holds a slot type whose id equals the slot's name, the slot
     (and the user_choice node capturing it) is rebound to it; anything else is

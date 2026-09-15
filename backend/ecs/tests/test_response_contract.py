@@ -112,7 +112,7 @@ def test_unknown_operation_is_reported_not_invented():
 
 
 def test_tool_field_names_resolve_to_the_operations_fields():
-    """Live (SELC, 2026-09-14): a tool listed its fields as NAMES of the
+    """Live (GAON, 2026-09-14): a tool listed its fields as NAMES of the
     operation's top-level FieldSpecs; enforce_openapi_contract projected them to
     nothing and rewrote the request schema to properties: {} (13 fields gone),
     and shape parity saw every field as 'string'."""

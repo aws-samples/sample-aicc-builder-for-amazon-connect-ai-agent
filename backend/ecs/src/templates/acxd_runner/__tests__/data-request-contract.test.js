@@ -133,12 +133,12 @@ test('the {Name:NLX.Secret} header survives placeholder resolution in every posi
 test('resolveStackName: AICC_STACK_NAME > PROJECT_NAME > manifest > legacy default', () => {
   const base = { project: 'manifest-proj' };
   assert.equal(
-    resolveStackName({ ...base, env: { AICC_STACK_NAME: 'selc-stack', PROJECT_NAME: 'other' } },
+    resolveStackName({ ...base, env: { AICC_STACK_NAME: 'gaon-stack', PROJECT_NAME: 'other' } },
       { stackName: 'aicc-poc-stack' }),
-    'selc-stack');
+    'gaon-stack');
   assert.equal(
-    resolveStackName({ ...base, env: { PROJECT_NAME: 'selc' } }, { stackName: 'aicc-poc-stack' }),
-    'selc-stack');
+    resolveStackName({ ...base, env: { PROJECT_NAME: 'gaon' } }, { stackName: 'aicc-poc-stack' }),
+    'gaon-stack');
   assert.equal(
     resolveStackName({ ...base, env: {} }, { stackName: 'aicc-poc-stack' }),
     'aicc-poc-stack');
@@ -148,26 +148,26 @@ test('resolveStackName: AICC_STACK_NAME > PROJECT_NAME > manifest > legacy defau
 test('deploy-cfn-backend uses the stack deploy.sh exported, and says when it differs', async () => {
   const dir = tmpBundle({ 'cloudformation/infrastructure.yaml': 'Resources: {}' });
   const ctx = makeCtx(dir, { env: {
-    PROJECT_NAME: 'selc',
-    AICC_STACK_NAME: 'selc-stack',
+    PROJECT_NAME: 'gaon',
+    AICC_STACK_NAME: 'gaon-stack',
     AICC_CFN_ALREADY_DEPLOYED: '1',
     WEBHOOK_URL: 'https://api.example.com/dev',
   }});
   await STEPS['deploy-cfn-backend'].run(ctx, {
     templatePath: 'cloudformation/infrastructure.yaml', stackName: 'aicc-poc-stack',
   });
-  assert.equal(ctx.state.cfnStackName, 'selc-stack');
+  assert.equal(ctx.state.cfnStackName, 'gaon-stack');
   const text = ctx.lines.join('\n');
-  assert.match(text, /CloudFormation stack: selc-stack/);
+  assert.match(text, /CloudFormation stack: gaon-stack/);
   assert.match(text, /manifest names 'aicc-poc-stack'/);
 });
 
 test('the dry-run plan names the stack it would use', () => {
-  const ctx = makeCtx(tmpBundle({}), { env: { PROJECT_NAME: 'selc' } });
+  const ctx = makeCtx(tmpBundle({}), { env: { PROJECT_NAME: 'gaon' } });
   const lines = STEPS['deploy-cfn-backend'].plan(ctx, {
     templatePath: 'cloudformation/infrastructure.yaml', stackName: 'aicc-poc-stack',
   });
-  assert.match(lines.join('\n'), /stack 'selc-stack'/);
+  assert.match(lines.join('\n'), /stack 'gaon-stack'/);
 });
 
 // ---------------------------------------------------------------------------

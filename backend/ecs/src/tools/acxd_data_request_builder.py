@@ -310,7 +310,7 @@ def generate_acxd_data_requests() -> dict:
 # successful build is no evidence.
 #
 # The configuration that is actually DEPLOYED and passed a live multi-turn test
-# (SELC Assistant, build c4d9eeaf — the only deployment on that app) binds each
+# (GAON Assistant, build c4d9eeaf — the only deployment on that app) binds each
 # data request as an **mcpFlow** pointing at a tiny helper flow that wraps it:
 #
 #     start -> data_request (the id survives here) -> basic message -> end

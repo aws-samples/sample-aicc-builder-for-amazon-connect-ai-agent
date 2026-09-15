@@ -192,7 +192,7 @@ def test_real_agentic_cx_block_replaces_placeholder_and_wisdom_session_is_splice
 
 
 def test_authored_agentic_cx_branches_are_preserved_not_bypassed():
-    """Live (SELC, 2026-09-11): the generator wired Default → call-outcome logger
+    """Live (GAON, 2026-09-11): the generator wired Default → call-outcome logger
     and Escalation → business-hours check → set queue → transfer; the binder
     replaced both with fixed disconnect / queue targets, so the logger and the
     hours check became unreachable (review: 'escalation unreachable')."""
@@ -236,7 +236,7 @@ def test_authored_agentic_cx_branches_are_preserved_not_bypassed():
 
 
 def test_speech_ownership_contact_flow_stays_silent_except_telephony_states():
-    """Live (SELC): the Contact Flow greeted before the block and the app's
+    """Live (GAON): the Contact Flow greeted before the block and the app's
     WelcomeFlow greeted again with the same sentence; the fallback was English in
     a Korean flow. The app owns greeting/closing; the flow keeps a recording
     notice, the escalation-path announcements and the (localised) fallback."""
@@ -248,7 +248,7 @@ def test_speech_ownership_contact_flow_stays_silent_except_telephony_states():
              "Parameters": {"Text": "서비스 품질 향상을 위해 통화가 녹음됩니다."},
              "Transitions": {"NextAction": "welcome"}},
             {"Identifier": "welcome", "Type": "MessageParticipant",
-             "Parameters": {"Text": "안녕하세요, 삼성전자로지텍입니다. 무엇을 도와드릴까요?"},
+             "Parameters": {"Text": "안녕하세요, 가온물류입니다. 무엇을 도와드릴까요?"},
              "Transitions": {"NextAction": AGENTIC_CX_PLACEHOLDER_ID}},
             {"Identifier": AGENTIC_CX_PLACEHOLDER_ID, "Type": AGENTIC_CX_ACTION_TYPE,
              "Parameters": {"AgentConfiguration": {}},

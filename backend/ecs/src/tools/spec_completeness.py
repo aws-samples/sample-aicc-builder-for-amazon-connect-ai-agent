@@ -1,7 +1,7 @@
 """Spec completeness — what generation must not be asked to invent.
 
 Every gap the interview leaves is filled independently by each generator (an
-LLM), and the fills disagree: SELC's spec had no `success`, no error envelope
+LLM), and the fills disagree: GAON's spec had no `success`, no error envelope
 and no escalation payload, so the OpenAPI, Lambda and Data Request generators
 each chose their own. The envelope is now a contract constant
 (tools/response_contract.py); the rest must be in the spec before the

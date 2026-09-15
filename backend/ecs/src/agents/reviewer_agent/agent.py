@@ -865,7 +865,7 @@ Begin now."""
         # Blocking = deterministic gates (stable ids), computed here in code —
         # not what the model wrote. Its ❌ items are advisory: real, worth
         # offering, but a list that changes on every run cannot be the exit
-        # condition of a fix loop (SELC: 13 → 21 "critical" after fixing 5).
+        # condition of a fix loop (GAON: 13 → 21 "critical" after fixing 5).
         blocking = {"findings": [], "gates": {}, "count": 0}
         blocking_diff = {"fixed": [], "new": [], "remaining": []}
         try:

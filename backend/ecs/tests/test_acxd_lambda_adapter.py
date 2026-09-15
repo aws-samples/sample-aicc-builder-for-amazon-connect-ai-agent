@@ -52,7 +52,7 @@ def test_injected_wrapper_restores_the_payload_and_is_idempotent():
 
 
 def test_injected_wrapper_normalises_the_response_for_acxd():
-    """Live (SELC v4): the create handler answered 201 with errorCode null; ACXD
+    """Live (GAON v4): the create handler answered 201 with errorCode null; ACXD
     took the failure branch and the caller never heard the reservation number."""
     handler = ("import json\n"
                "def lambda_handler(event, context):\n"

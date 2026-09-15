@@ -229,7 +229,7 @@ def _company(spec: dict) -> str:
     profile = spec.get("business_profile") or {}
     for key in ("company_name", "companyName"):
         value = str(profile.get(key) or "").strip()
-        # A project slug ("selc-aicc") is not a name to greet a customer with.
+        # A project slug ("gaon-aicc") is not a name to greet a customer with.
         if value and value != str(profile.get("project_name") or "").strip():
             return value
     return ""
@@ -394,7 +394,7 @@ def build_welcome_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict:
     company = _company(spec)
     # The interview records the greeting the customer approved verbatim
     # (SessionFlowConfig.common_greeting / ContactFlowSpec.welcome_message).
-    # Live (SELC): composing one from the profile said "안녕하세요, selc-aicc입니다"
+    # Live (GAON): composing one from the profile said "안녕하세요, gaon-aicc입니다"
     # — the project slug — because the profile had no company name.
     greeting = _approved_greeting(spec) or _composed_greeting(spec, text, company)
 

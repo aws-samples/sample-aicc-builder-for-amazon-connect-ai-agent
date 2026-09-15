@@ -668,7 +668,7 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 # build succeeds either way, so a build is no evidence.
                 #
                 # The configuration that is actually deployed and passed a live
-                # multi-turn test (SELC Assistant, build c4d9eeaf, the only
+                # multi-turn test (GAON Assistant, build c4d9eeaf, the only
                 # deployment on that app) binds each data request as an
                 # **mcpFlow** pointing at a helper flow that wraps it. mcpFlow
                 # is a first-class GenerativeJourneyToolType and keeps the agent

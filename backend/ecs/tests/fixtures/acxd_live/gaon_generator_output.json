@@ -847,7 +847,7 @@
     "EscalationFlow": {
       "flowId": "EscalationFlow",
       "description": "Passes collected customer info and failReason to contact attributes, checks operating hours, and transfers to a human agent queue. Outside hours, plays a message and ends.",
-      "aiDescription": "Escalation flow for selc-aicc. Announces the handoff to the customer, forwards previously collected information and the failure reason to the contact flow via context state modifications, then transfers the conversation to a human agent queue. Used when the customer requests an agent, after repeated failures, complaints, refund or claim requests, when the AI cannot handle the request, on system errors, when order info is not found, or when the customer declines the personal information consent.",
+      "aiDescription": "Escalation flow for gaon-aicc. Announces the handoff to the customer, forwards previously collected information and the failure reason to the contact flow via context state modifications, then transfers the conversation to a human agent queue. Used when the customer requests an agent, after repeated failures, complaints, refund or claim requests, when the AI cannot handle the request, on system errors, when order info is not found, or when the customer declines the personal information consent.",
       "mainLanguageCode": "ko-KR",
       "languageCodes": [
         "ko-KR"
@@ -1590,7 +1590,7 @@
     "WelcomeFlow": {
       "flowId": "WelcomeFlow",
       "description": "Greets the customer and routes to delivery status lookup or air-conditioner cleaning reservation based on detected intent.",
-      "aiDescription": "Welcome flow for selc-aicc. Greets the customer, then uses a generative journey to understand the customer's intent from free speech and route to either the delivery status lookup flow or the air-conditioner cleaning reservation flow. The application handles the greeting and conversation.",
+      "aiDescription": "Welcome flow for gaon-aicc. Greets the customer, then uses a generative journey to understand the customer's intent from free speech and route to either the delivery status lookup flow or the air-conditioner cleaning reservation flow. The application handles the greeting and conversation.",
       "mainLanguageCode": "ko-KR",
       "languageCodes": [
         "ko-KR"
@@ -1620,7 +1620,7 @@
           "messages": [
             {
               "type": "text",
-              "body": "안녕하세요, 삼성전자로지텍입니다. 무엇을 도와드릴까요?"
+              "body": "안녕하세요, 가온물류입니다. 무엇을 도와드릴까요?"
             }
           ],
           "childNodes": [
@@ -1636,7 +1636,7 @@
           "type": "generative_journey",
           "metadata": {
             "generativeJourney": {
-              "prompt": "당신은 삼성전자로지텍 고객 응대 에이전트입니다. 고객의 자유로운 발화에서 의도를 파악하세요. 의도가 배송 조회(주문/택배/배송 상태 문의)라면 DeliveryStatusByOrderNumber 도구를 호출하여 배송 조회 플로우로 이동하세요. 의도가 에어컨 세척 예약(청소/세척/방문 예약 문의)이라면 CreateCleaningReservation 도구를 호출하여 세척 예약 플로우로 이동하세요. 의도가 모호하면 정중히 다시 질문하여 명확히 하세요. 라우팅이 완료되면 대화를 마칩니다.",
+              "prompt": "당신은 가온물류 고객 응대 에이전트입니다. 고객의 자유로운 발화에서 의도를 파악하세요. 의도가 배송 조회(주문/택배/배송 상태 문의)라면 DeliveryStatusByOrderNumber 도구를 호출하여 배송 조회 플로우로 이동하세요. 의도가 에어컨 세척 예약(청소/세척/방문 예약 문의)이라면 CreateCleaningReservation 도구를 호출하여 세척 예약 플로우로 이동하세요. 의도가 모호하면 정중히 다시 질문하여 명확히 하세요. 라우팅이 완료되면 대화를 마칩니다.",
               "modelType": "anthropic.claude-haiku-4-5",
               "tools": [
                 {

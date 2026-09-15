@@ -168,14 +168,14 @@ def test_acxd_filter_downloads_the_application_in_its_bundle_layout(monkeypatch)
 
 
 def test_identical_duplicate_copy_is_packaged_once(monkeypatch):
-    """Live (SELC, 2026-09-13): the preview stream had saved research.json twice
-    (research/research.json and research/selc-research/research.json); both map
+    """Live (GAON, 2026-09-13): the preview stream had saved research.json twice
+    (research/research.json and research/gaon-research/research.json); both map
     to aicc-poc/research/research.json and the packager refused the bundle as
     ambiguous. An identical copy is the same file — only differing content is."""
     doc = '{"topic": "cleaning"}'
     result, client = _package(monkeypatch, acxd=True, extra_contents={
         "assets/session-1/research/research.json": doc,
-        "assets/session-1/research/selc-research/research.json": doc,
+        "assets/session-1/research/gaon-research/research.json": doc,
     })
     assert result["success"] is True, result
     with zipfile.ZipFile(io.BytesIO(client.payload)) as archive:
@@ -185,7 +185,7 @@ def test_identical_duplicate_copy_is_packaged_once(monkeypatch):
 def test_differing_duplicate_copy_is_refused(monkeypatch):
     result, _client = _package(monkeypatch, acxd=True, extra_contents={
         "assets/session-1/research/research.json": '{"v": 1}',
-        "assets/session-1/research/selc-research/research.json": '{"v": 2}',
+        "assets/session-1/research/gaon-research/research.json": '{"v": 2}',
     })
     assert result["success"] is False
     assert "different content" in (result.get("error") or "")

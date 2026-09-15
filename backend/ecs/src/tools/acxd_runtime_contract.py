@@ -553,7 +553,7 @@ class _RuntimeContract:
     def _rule_s1_yes_no_by_value(self) -> None:
         """A text slot compared only against yes/no values IS a yesNo slot.
 
-        Extension of S1 (documented, not silent): the live SELC bundle needed
+        Extension of S1 (documented, not silent): the live GAON bundle needed
         ``privacyConsent`` moved from ``text`` to ``yesNo``, and the only
         deterministic evidence in the document is that every constant the flow
         compares the slot against is a yesNo value or synonym. Gated on the
@@ -795,7 +795,7 @@ class _RuntimeContract:
     # ==================================================================
 
     def rule_s8(self) -> None:
-        """Live (SELC, 2026-09-13): the model wrote `privacyConsent eq "yes"`
+        """Live (GAON, 2026-09-13): the model wrote `privacyConsent eq "yes"`
         while the yesNo slot type's values are 예 / 아니요, so the customer's
         "네" matched 예, failed the comparison and was treated as a refusal
         (straight to escalation). Any yes/no-ish constant compared with a slot
@@ -913,7 +913,7 @@ class _RuntimeContract:
     # ==================================================================
 
     def rule_m3(self) -> None:
-        """Live (SELC, 2026-09-13): the price announcement was a ``basic`` node
+        """Live (GAON, 2026-09-13): the price announcement was a ``basic`` node
         that also carried ``metadata.redirect`` (the next node was the real
         redirect) and cleared the very slots its own message rendered. The
         runtime never showed the message — the contact fell into the fallback
@@ -971,7 +971,7 @@ class _RuntimeContract:
                 continue
             prompt = ((node.get("metadata") or {}).get("generativeText") or {}).get("prompt")
             if self._result_already_announced(node_id):
-                # Live (SELC): the flow's own basic node had already said
+                # Live (GAON): the flow's own basic node had already said
                 # "예약이 접수되었습니다. 예약번호는 …" and a trailing generative
                 # node then produced a second "조회 결과: …" built from raw field
                 # descriptions. A node that would only repeat the answer is
@@ -989,7 +989,7 @@ class _RuntimeContract:
                 continue
             body = self._template_from_prompt(prompt if isinstance(prompt, str) else "")
             if not body:
-                # Live (SELC v3): "성공 시 배송상태와 예정일을 자연스럽게 안내한다" has no
+                # Live (GAON v3): "성공 시 배송상태와 예정일을 자연스럽게 안내한다" has no
                 # placeholders and the node said nothing — the caller heard
                 # "anything else?" right after giving the order number. Announce
                 # the data request's own result fields instead.

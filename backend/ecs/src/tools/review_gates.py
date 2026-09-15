@@ -1,6 +1,6 @@
 """Deterministic review gates → the *blocking* finding set.
 
-Why: the reviewer is an LLM and each run surfaces a different list (SELC:
+Why: the reviewer is an LLM and each run surfaces a different list (GAON:
 13 critical, five fixed, then 21). A loop whose blocking set moves on every
 run never converges. The deterministic gates — cross-asset consistency
 (D1–D8 + IAM), spec↔OpenAPI shape parity, ACXD D9 — are stable, so they are
@@ -155,7 +155,7 @@ def _orphan_operation_findings(session_id: str) -> list[dict]:
 
 def _missing_asset_findings(session_id: str) -> list[dict]:
     """The mirror image of the orphan gate: a spec operation whose Lambda folder,
-    OpenAPI operationId or (ACXD) Data Request does not exist. Live (SELC,
+    OpenAPI operationId or (ACXD) Data Request does not exist. Live (GAON,
     2026-09-12): the orchestrator went from infrastructure to OpenAPI and on to
     the ACXD application without ever calling the Lambda generator; the review
     reported 0 blocking and only the packager refused ('manifest references

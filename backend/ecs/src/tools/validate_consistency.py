@@ -1044,7 +1044,7 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
                 lambda_all_code[op_id] = content
         elif asset_type == "lambda" and (key.endswith("index.py") or key.endswith("index.js")) \
                 and len(parts) > 4 and _is_spec_operation_folder(parts[3], specs):
-            # Live (SELC, 2026-09-12): the generator wrote index.py for the four
+            # Live (GAON, 2026-09-12): the generator wrote index.py for the four
             # business operations (matching the template's Handler: index.lambda_handler),
             # and the field checks silently skipped them as "supporting" Lambdas.
             # A folder named after a spec operation is a business Lambda whatever

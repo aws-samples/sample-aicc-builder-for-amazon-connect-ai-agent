@@ -742,7 +742,7 @@ When user mentions specific APIs (address-lookup, KakaoTalk, Twilio, etc.):
 
 **Example triggers (any language, the orchestrator recognizes intent):**
 - "우리 회사 웹사이트에서 FAQ를 가져와줘"
-- "삼성전자 고객센터 정보를 찾아봐줘"
+- "가온전자 고객센터 정보를 찾아봐줘"
 - "카카오톡 알림톡 API 사양을 조사해줘"
 - "주소 검색 API 연동 방법을 알아봐줘"
 - "Research our company website for FAQ content"
