@@ -93,6 +93,16 @@ def edge_named(node: dict, name: str) -> dict:
     return next(e for e in node["childNodes"] if e.get("name") == name)
 
 
+def past_agent_gate(flow: dict, node_id: str) -> str:
+    """E2 puts an agent-request gate in front of every 'not captured' target;
+    return the node the gate falls through to (or ``node_id`` when ungated)."""
+    node = flow["nodes"][node_id]
+    edges = node.get("childNodes") or []
+    if node.get("type") == "choice" and edges and str(edges[0].get("name") or "").startswith("agentRequest:"):
+        return edges[-1]["nodeId"]
+    return node_id
+
+
 def redirect_to(flow: dict, flow_id: str) -> dict:
     return next(n for n in nodes_of(flow, "redirect")
                 if (n.get("metadata") or {}).get("redirect", {}).get("flowId") == flow_id)
@@ -393,7 +403,7 @@ def test_r6_self_loop_becomes_a_recovery_basic_that_clears_the_slot():
     assert len(asks) == 2, "the retry must NOT be a second capture node"
     for ask in asks:
         slot = ask["metadata"]["choice"]["slotTypeId"]
-        recovery = flow["nodes"][edge_named(ask, "notCaptured")["nodeId"]]
+        recovery = flow["nodes"][past_agent_gate(flow, edge_named(ask, "notCaptured")["nodeId"])]
         assert recovery["type"] == "basic"
         assert clears(recovery) == [slot]
         assert recovery["messages"][0]["body"] == (
@@ -405,7 +415,7 @@ def test_r6_self_loop_becomes_a_recovery_basic_that_clears_the_slot():
 def test_r6_reuses_the_flows_own_retry_wording_and_node():
     flow, _ = normalized("DeliveryStatusByOrderNumber")
     ask = nodes_of(flow, "user_choice")[0]
-    recovery = flow["nodes"][edge_named(ask, "notCaptured")["nodeId"]]
+    recovery = flow["nodes"][past_agent_gate(flow, edge_named(ask, "notCaptured")["nodeId"])]
     assert recovery["type"] == "basic"
     assert "10자리 숫자로 된 주문번호를 다시 말씀해 주세요" in recovery["messages"][0]["body"]
     assert clears(recovery) == ["orderNumber"]
@@ -419,7 +429,7 @@ def test_r6_english_flow_gets_english_recovery_wording():
     flow["mainLanguageCode"] = "en-US"
     out, _ = apply_runtime_contract(flow, **context("GetCleaningPrice"))
     ask = nodes_of(out, "user_choice")[0]
-    recovery = out["nodes"][edge_named(ask, "notCaptured")["nodeId"]]
+    recovery = out["nodes"][past_agent_gate(out, edge_named(ask, "notCaptured")["nodeId"])]
     assert recovery["messages"][0]["body"] == (
         "Sorry, I could not catch that. Please say it again.")
 
@@ -477,9 +487,10 @@ def test_r3_success_paths_go_through_one_follow_up_redirect():
     assert clears(handback) == ["productType", "serviceType"]
     end_id = nodes_of(flow, "end")[0]["nodeId"]
     assert [e["nodeId"] for e in handback["childNodes"]] == [end_id]
-    into_end = [n["nodeId"] for n in flow["nodes"].values()
+    into_end = [n for n in flow["nodes"].values()
                 if any(e["nodeId"] == end_id for e in n.get("childNodes") or [])]
-    assert into_end == [handback["nodeId"]], "nothing else may end the session"
+    assert handback["nodeId"] in [n["nodeId"] for n in into_end]
+    assert all(n["type"] == "redirect" for n in into_end), "only a redirect out of the flow may end it"
     assert any("R3" in note for note in notes)
 
 
@@ -1497,7 +1508,7 @@ def test_r8_a_missed_value_the_request_needs_is_re_asked_not_skipped():
     nodes = out["nodes"]
     missing = next(e for e in nodes["askO"]["childNodes"]
                    if any(c.get("operator") == "not_exists" for c in e.get("conditions") or []))
-    recovery = nodes[missing["nodeId"]]
+    recovery = nodes[past_agent_gate(out, missing["nodeId"])]
     assert recovery["type"] == "basic" and recovery["childNodes"] == [{"nodeId": "askO", "name": "retry"}]
     assert {"type": "slot", "name": "orderNumber", "modification": "clear"} in recovery["metadata"]["stateModifications"]
     assert recovery["messages"][0]["body"]
@@ -1510,7 +1521,7 @@ def test_r8_a_missed_value_the_request_needs_is_re_asked_not_skipped():
     # a missed phone number goes to the escalation — that path sends nothing, so it is left alone
     phone_missing = next(e for e in nodes["askP"]["childNodes"]
                          if any(c.get("operator") == "not_exists" for c in e.get("conditions") or []))
-    assert phone_missing["nodeId"] == "esc"
+    assert past_agent_gate(out, phone_missing["nodeId"]) == "esc"
     # F1's give-up for the order number is the fallback flow, not the next question
     guard = nodes[next(e for e in nodes["askO"]["childNodes"]
                        if any(c.get("operator") == "exists" for c in e.get("conditions") or []))["nodeId"]]
@@ -1528,7 +1539,7 @@ def test_r8_leaves_an_alternative_identifier_path_alone():
                                         slot_type_ids={"yesNo"})
     missing = next(e for e in out["nodes"]["askR"]["childNodes"]
                    if any(c.get("operator") == "not_exists" for c in e.get("conditions") or []))
-    assert missing["nodeId"] == "askO"
+    assert past_agent_gate(out, missing["nodeId"]) == "askO"
     assert not any("(R8)" in n for n in notes)
 
 
@@ -1582,3 +1593,40 @@ def test_d6_leaves_a_correct_success_branch_alone():
     by_name = {e["name"]: e for e in out["nodes"]["branch"]["childNodes"]}
     assert by_name["accepted"]["conditions"][0]["operator"] == "eq"
     assert not any("(D6)" in n for n in notes)
+
+
+def test_e2_a_not_captured_answer_is_first_checked_for_an_agent_request():
+    """Live (2026-09-16): '상담원 연결해 주세요' at the order-number prompt reached
+    the escalation in one turn only when the raw utterance was tested with
+    {"type": "system", "name": "System.utterance"} contains <word>; the other
+    operand spellings were stored but never matched."""
+    out, notes = apply_runtime_contract(_intake_flow(), role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+                                        flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
+                                        escalation_flow_id="Escalation", slot_type_ids={"yesNo"})
+    nodes = out["nodes"]
+    missing = next(e for e in nodes["askO"]["childNodes"]
+                   if any(c.get("operator") == "not_exists" for c in e.get("conditions") or []))
+    gate = nodes[missing["nodeId"]]
+    assert gate["type"] == "choice"
+    word_edges, rest = gate["childNodes"][:-1], gate["childNodes"][-1]
+    assert word_edges and all(e["name"].startswith("agentRequest:") for e in word_edges)
+    assert all(e["conditions"] == [{"left": {"type": "system", "name": "System.utterance"}, "operator": "contains",
+                                    "right": {"type": "constant", "value": e["name"].split(":", 1)[1]}}] for e in word_edges)
+    assert "상담원" in {e["name"].split(":", 1)[1] for e in word_edges}          # ko-KR flow → Korean words
+    redirect = nodes[word_edges[0]["nodeId"]]
+    assert redirect["type"] == "redirect" and redirect["metadata"]["redirect"]["flowId"] == "RequestAgentFlow"
+    assert len({e["nodeId"] for e in word_edges}) == 1                         # one redirect per flow
+    # anything else still goes to the node's own recovery (R8 made it re-ask)
+    recovery = nodes[rest["nodeId"]]
+    assert rest["name"] == "notAgentRequest" and recovery["type"] == "basic"
+    assert recovery["childNodes"] == [{"nodeId": "askO", "name": "retry"}]
+    assert sum("(E2)" in n for n in notes) == 2                                # both capture nodes gated
+    # not applied to system flows, and the gate is not duplicated on a second pass
+    again, notes2 = apply_runtime_contract(out, role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+                                           flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
+                                           escalation_flow_id="Escalation", slot_type_ids={"yesNo"})
+    assert not any("(E2)" in n for n in notes2)
+    _, sys_notes = apply_runtime_contract(_intake_flow(), role="followup", data_requests={"requestReturn": _INTAKE_DOC},
+                                          flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
+                                          escalation_flow_id="Escalation", slot_type_ids={"yesNo"})
+    assert not any("(E2)" in n for n in sys_notes)

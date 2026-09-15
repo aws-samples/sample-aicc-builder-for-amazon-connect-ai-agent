@@ -118,7 +118,7 @@ SYSTEM_FLOW_PLACEHOLDERS = frozenset({
 #: checks, not by RX, whose job is catching a near-miss on an operation flow id.
 SYSTEM_FLOW_IDS = frozenset({
     "WelcomeFlow", "FallbackFlow", "FollowUpFlow", "EscalationFlow",
-    "UnknownFlow",
+    "UnknownFlow", "RequestAgentFlow",
 })
 
 #: Recovery wording used when the flow has none of its own (R6).
@@ -254,6 +254,16 @@ def _slot_condition(slot: str, operator: str) -> dict:
 #: asking a fourth time.
 FORMAT_RETRIES_VAR = "formatRetries"
 MAX_FORMAT_RETRIES = 2
+#: E2 — words in a raw utterance that mean "connect me to a human", per
+#: language. Matched with ``contains`` on ``{System.utterance}`` only on a
+#: capture node's 'not captured' path, so a value that happens to contain one
+#: of these is unaffected as long as the slot recognised it.
+AGENT_REQUEST_WORDS = {
+    "ko": ["상담원", "상담사", "직원 연결", "담당자 연결", "사람과", "사람이랑", "사람하고", "사람 연결"],
+    "en": ["agent", "Agent", "representative", "Representative", "human", "Human", "operator", "Operator",
+           "real person", "speak to someone", "talk to someone"],
+    "ja": ["オペレーター", "担当者", "人と話", "係の人", "有人"],
+}
 _OPTIONAL_SEPARATOR = "[-. /:]?"
 
 
@@ -1575,6 +1585,85 @@ class _RuntimeContract:
                 f"[{str(give_up)[:8]}] (F1)")
 
     # ==================================================================
+    # E2 — "connect me to a human" said while a value is being collected
+    # ==================================================================
+
+    def _agent_request_words(self) -> list[str]:
+        code = str(self.flow.get("mainLanguageCode") or "").lower()
+        if code.startswith("ja"):
+            return list(AGENT_REQUEST_WORDS["ja"])
+        if code.startswith("en"):
+            return list(AGENT_REQUEST_WORDS["en"])
+        return list(AGENT_REQUEST_WORDS["ko"])
+
+    def _agent_request_redirect(self) -> str:
+        """A redirect to the routable agent-request system flow (created once per
+        flow); falls back to the escalation flow when the bundle has none."""
+        node_id = _derived_id("4e2a0001", f"{self.flow_id}#agentRequest")
+        if node_id not in self.nodes:
+            target = next((fid for fid in sorted(self.flow_ids or [])
+                           if str(fid).lower().startswith("requestagent")), None) or self.escalation_flow_id
+            end_id = next((nid for nid, _ in self.nodes_of_type("end")), None)
+            self.nodes[node_id] = {
+                "nodeId": node_id, "type": "redirect",
+                "metadata": {"redirect": {"type": "flow", "flowId": target}},
+                **({"childNodes": [{"nodeId": end_id, "name": "next"}]} if end_id else {}),
+            }
+        return node_id
+
+    def rule_e2(self) -> None:
+        """Live (2026-09-15/16): '상담원 연결해 주세요' at a capture prompt was answered
+        with 'I could not catch the order number' — a ``user_choice`` node only
+        captures, the documented flow routing from a User choice node did not
+        fire, ``associatedSlotTypeIds`` is discarded by the service, and a
+        ``user_input`` listen in front of the capture does not fill the slot (so
+        it would cost every caller a second question). What does work, verified
+        live, is testing the raw utterance: the 'not captured' edge of every
+        capture node first passes a choice whose edges check
+        ``{System.utterance}`` (operand ``{"type": "system", "name":
+        "System.utterance"}``) for an agent-request word and redirect to the
+        agent-request flow; anything else continues to the node's own recovery."""
+        if self.role != "operation":
+            return
+        words = self._agent_request_words()
+        if not words:
+            return
+        for node_id, node in list(self.nodes_of_type("user_choice")):
+            slot = self.choice_slot(node)
+            if not slot:
+                continue
+            for edge in _edges(node):
+                conds = [c for c in (edge.get("conditions") or []) if isinstance(c, dict)]
+                not_captured = any((c.get("left") or {}).get("type") == "slot"
+                                   and (c.get("left") or {}).get("name") == slot
+                                   and c.get("operator") == "not_exists" for c in conds)
+                if not not_captured:
+                    continue
+                target_id = edge.get("nodeId")
+                if not isinstance(target_id, str) or target_id not in self.nodes:
+                    continue
+                if self.nodes[target_id].get("type") == "choice" and any(
+                        str(e.get("name") or "").startswith("agentRequest:") for e in _edges(self.nodes[target_id])):
+                    continue  # already gated
+                gate_id = _derived_id("4e2a0000", f"{self.flow_id}#agentGate#{node_id}#{slot}")
+                redirect_id = self._agent_request_redirect()
+                self.nodes[gate_id] = {
+                    "nodeId": gate_id, "type": "choice",
+                    "childNodes": [
+                        *[{"nodeId": redirect_id, "name": f"agentRequest:{word}",
+                           "conditions": [{"left": {"type": "system", "name": "System.utterance"},
+                                           "operator": "contains",
+                                           "right": {"type": "constant", "value": word}}]} for word in words],
+                        {"nodeId": target_id, "name": "notAgentRequest"},
+                    ],
+                }
+                edge["nodeId"] = gate_id
+                self.change(
+                    f"{_label(node_id, node)}: an answer that is not a {slot!r} is first checked for an "
+                    f"agent request ({len(words)} words in the utterance) → [{redirect_id[:8]}]; "
+                    f"otherwise the node's own recovery [{target_id[:8]}] (E2)")
+
+    # ==================================================================
     # R3 — operation flows hand back, they never end the session
     # ==================================================================
 
@@ -2356,6 +2445,7 @@ class _RuntimeContract:
         self.rule_d3()
         self.rule_r8()
         self.rule_f1()
+        self.rule_e2()
         self.rule_r3()
         self.rule_s6()
         self.rule_p1()
