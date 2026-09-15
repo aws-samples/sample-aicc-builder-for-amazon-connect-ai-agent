@@ -1265,6 +1265,54 @@ def backend_computed_input_warnings(input_fields) -> list[str]:
     return warnings
 
 
+def _field_key(name: str) -> str:
+    """camelCase / snake_case / spaced spellings of one field compare equal."""
+    return re.sub(r"[\s_\-]+", "", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name or ""))).lower()
+
+
+def _field_keys(fields) -> list[str]:
+    return [_field_key(getattr(f, "name", None) or (f.get("name") if isinstance(f, dict) else "")) for f in (fields or [])]
+
+
+def reconcile_tool_fields(tools, old_inputs, new_inputs, old_outputs, new_outputs):
+    """Keep each ToolSpec's field lists consistent with the operation's after an
+    update of `input_fields` / `output_fields`.
+
+    The Data Request, OpenAPI operation and Lambda are generated from the TOOL's
+    lists, so a field moved out of the operation's inputs but left on the tool
+    still reaches the request contract (live: the interview moved `refundAmount`
+    to the outputs, the tool kept it as a required input, and the generated
+    Data Request demanded a slot no flow collected).
+
+    A tool whose list mirrored the operation's keeps mirroring it (the normal
+    primary-tool case); any other tool only loses fields the operation no
+    longer has. Returns (tools, notes)."""
+    notes: list[str] = []
+    for tool in tools or []:
+        tool_id = getattr(tool, "tool_id", "?")
+        for side, old_op, new_op in (("input_fields", old_inputs, new_inputs),
+                                     ("output_fields", old_outputs, new_outputs)):
+            if new_op is None:
+                continue
+            tool_fields = list(getattr(tool, side, None) or [])
+            if not tool_fields and not old_op:
+                continue
+            new_keys = set(_field_keys(new_op))
+            old_keys = set(_field_keys(old_op))
+            if set(_field_keys(tool_fields)) == old_keys:
+                if set(_field_keys(tool_fields)) != new_keys:
+                    setattr(tool, side, [f.model_copy() if hasattr(f, "model_copy") else f for f in new_op])
+                    notes.append(f"{tool_id}.{side} now mirrors the operation ({', '.join(_field_keys(new_op)) or 'none'})")
+                continue
+            removed = old_keys - new_keys
+            kept = [f for f in tool_fields if _field_key(getattr(f, "name", "")) not in removed]
+            if len(kept) != len(tool_fields):
+                dropped = [getattr(f, "name", "") for f in tool_fields if _field_key(getattr(f, "name", "")) in removed]
+                setattr(tool, side, kept)
+                notes.append(f"{tool_id}.{side}: dropped {', '.join(dropped)} (no longer an operation field)")
+    return tools, notes
+
+
 def _exact_length_pattern(text: str, n: int) -> Optional[str]:
     """Regex for an exact-length phrase: alphanumeric beats digits ("영숫자 12자리"
     contains the substring "숫자" but means letters AND digits)."""
@@ -1952,6 +2000,13 @@ def update_operation_spec(
                 serialized[k] = v
 
         updated_spec = _safe_parse_model(OperationSpec, serialized)
+        tool_notes: list[str] = []
+        if "tools" not in updates and ("input_fields" in updates or "output_fields" in updates):
+            _, tool_notes = reconcile_tool_fields(
+                updated_spec.tools,
+                spec.input_fields, updated_spec.input_fields if "input_fields" in updates else None,
+                spec.output_fields, updated_spec.output_fields if "output_fields" in updates else None,
+            )
         _specs_bucket()[operation_id] = updated_spec
 
         # Persist to NFS (fast-path) + S3
@@ -1974,12 +2029,19 @@ def update_operation_spec(
         except Exception:
             pass  # Preview failure must not block update
 
-        return {
+        result = {
             "success": True,
             "operation_id": operation_id,
             "updated_fields": updated_fields,
             "message": f"Operation '{operation_id}' updated: {', '.join(updated_fields)}",
         }
+        if tool_notes:
+            result["tool_fields_reconciled"] = tool_notes
+            result["message"] += (
+                "; the tools' field lists were aligned with the operation (" + "; ".join(tool_notes) + ")"
+                " — regenerate the OpenAPI spec, the Lambda and the ACXD application from this spec."
+            )
+        return result
     except Exception as e:
         return {
             "success": False,
