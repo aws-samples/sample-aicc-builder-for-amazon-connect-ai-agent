@@ -176,7 +176,7 @@ over chat. What the fresh path exposed was on the builder side and is fixed:
 | The primary tool's hand-written field list was a subset of the operation's (`orderDate`, `errorCode` missing): OpenAPI and Data Request came from the tool, the Lambda from the operation, and review blocked on D9-3 / parity | the primary tool's contract is the operation's field list, at save time and at projection time |
 | A branch on `status == "rejected"` (a value the enum never holds) passed review with zero blocking findings | the spec's enum values now reach the D9 gate as well as the generator (D5 reports it in both places) |
 | The `unknown` default behaviour was the only path to the knowledge base, so "what is your return policy?" was routed to the return-request flow | a knowledge base gets a routable `FaqFlow` unless the interview planned one |
-| The regex attached to a built-in slot does **not** gate capture: an order number typed at the return-number prompt was accepted into `returnId` (as `GC20260902`) and the lookup escalated | the Lambda boundary adapter moves a value that fits exactly one other empty field's shape onto that field; a flow-level format check is a follow-up |
+| The regex attached to a built-in slot does **not** gate capture: an order number typed at the return-number prompt was accepted into `returnId` (as `GC20260902`) and the lookup escalated | rule F1 follows every capture of a pattern-bearing slot with a `matches_regex` check — a wrong shape clears the slot, says so and re-asks; when the flow has another question to fall back to it moves on after one miss, otherwise after two (verified live: the same input now gets "말씀하신 값이 형식에 맞지 않습니다" and the re-ask, and a valid value passes). The Lambda boundary adapter still moves a value that fits exactly one other empty field's shape onto that field |
 
 Two facts about the deploy step are documented rather than changed:
 
@@ -189,6 +189,15 @@ Two facts about the deploy step are documented rather than changed:
   the yes/no capture recognises the intent (the conversation history shows it)
   but cannot route from a `user_choice` node; only the `user_input` listen that
   follows can.
+- "Connect me to an agent" said **while a value is being collected** is not
+  routed either: a `user_choice` node only captures, and the service discards
+  `choice.associatedSlotTypeIds` (verified by a `GetFlow` readback after
+  `UpdateFlow`, by slot name and by identifier), so a second slot cannot listen
+  alongside. Today the platform's incomprehension threshold (2) hands the
+  caller to the Fallback flow, whose menu routes "상담원" on the next turn — three
+  turns instead of one. A capture preceded by a `user_input` listen would fix it
+  only if the runtime also fills the flow's slots from that utterance, which is
+  untested.
 
 ## Service contract facts (not in the SDK types, learned from the API)
 
@@ -223,7 +232,8 @@ Two facts about the deploy step are documented rather than changed:
 | `captured_flow` | Populated by `user_input` only, never by a `user_choice` over the flow-choice slot | FollowUp flow re-listens through `user_input` |
 | Generative / KB nodes | Need a generative model configured on the workspace; without one the node is silent although the deployment and knowledge base succeed | documented prerequisite (`WIRING-GUIDE.md`) |
 | Routing text | `description` / `aiDescription` are ASCII-only; non-ASCII is rejected on create | system flows and the generator write English routing text; the bundle loader strips non-ASCII |
-| Slot regex | The `regex` attached to a built-in slot is not enforced at capture: a value of the wrong shape is stored (an order number in the return-number slot) and reaches the Data Request | adapter reassigns a value that fits exactly one other field; flow-level `matches_regex` check pending |
+| Slot regex | The `regex` attached to a built-in slot is not enforced at capture: a value of the wrong shape is stored (an order number in the return-number slot) and reaches the Data Request. A `matches_regex` condition on the slot IS evaluated, against the delivered (separator-stripped) value | runtime contract F1: a `matches_regex` guard after every pattern-bearing capture, separators optional, letters either case; adapter reassigns a value that fits exactly one other field |
+| Associated slots | `choice.associatedSlotTypeIds` is accepted by the API and silently discarded (by slot name and by identifier); a capture node listens on one slot only | no second slot per node; the Fallback flow's menu remains the path for a mid-capture agent request |
 | Routing utterance | The utterance that routes to a flow also fills that flow's slots when a built-in type accepts it — into the first matching slot, regardless of its regex | keep alternative identifiers on distinct paths and let the backend accept either |
 
 ## Cross-asset contract facts
