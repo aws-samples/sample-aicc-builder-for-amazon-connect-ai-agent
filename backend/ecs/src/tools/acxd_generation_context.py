@@ -340,20 +340,45 @@ def _field_constraint(field: dict, *keys: str):
     return None
 
 
+#: Constraint keys the OperationSpec knows that an OpenAPI-derived field may
+#: lack: the deployed schema is the spelling authority, the spec the meaning.
+_SPEC_ENRICHMENT_KEYS = ("enum_values", "regex", "description", "min_length", "max_length", "example", "sensitive")
+
+
 def _merge_fields(primary: Optional[list], secondary: Optional[list]) -> list[dict]:
     """``primary`` (the OpenAPI contract) first, then every ``secondary`` field
     (the OperationSpec) whose name — in any camel/snake spelling — is not
-    already present. Never drops a field either side knows about."""
+    already present. Never drops a field either side knows about, and a field
+    both sides know keeps the contract's spelling but gains the constraints the
+    spec carries and the contract lacks (live: a response ``status`` reached the
+    flow generator without its enum because the OpenAPI schema had none, so D5
+    could not see that ``status == "rejected"`` was an impossible constant)."""
     out: list[dict] = []
-    seen: set[str] = set()
-    for field in list(primary or []) + list(secondary or []):
+    seen: dict[str, dict] = {}
+    for field in list(primary or []):
         if not isinstance(field, dict) or not field.get("name"):
             continue
         variants = _name_variants(field["name"])
-        if variants & seen:
+        if variants & set(seen):
             continue
-        seen |= variants
-        out.append(dict(field))
+        merged = dict(field)
+        out.append(merged)
+        for variant in variants:
+            seen[variant] = merged
+    for field in list(secondary or []):
+        if not isinstance(field, dict) or not field.get("name"):
+            continue
+        variants = _name_variants(field["name"])
+        existing = next((seen[v] for v in variants if v in seen), None)
+        if existing is None:
+            merged = dict(field)
+            out.append(merged)
+            for variant in variants:
+                seen[variant] = merged
+            continue
+        for key in _SPEC_ENRICHMENT_KEYS:
+            if existing.get(key) is None and field.get(key) is not None:
+                existing[key] = field[key]
     return out
 
 

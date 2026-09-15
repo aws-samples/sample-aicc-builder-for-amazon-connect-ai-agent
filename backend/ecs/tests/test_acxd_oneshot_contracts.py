@@ -312,6 +312,17 @@ def test_data_request_fields_merge_openapi_contract_with_the_spec():
                            [{"name": "order_number", "type": "string"},
                             {"name": "address", "type": "string"}])
     assert [f["name"] for f in merged] == ["orderNumber", "address"]
+    # ... but a constraint only the spec knows is carried onto the contract's field.
+    # Live (2026-09-15): `status` arrived without its enum, so D5 could not tell that
+    # `status == "rejected"` was a value the API never returns.
+    merged = _merge_fields([{"name": "status", "type": "string"},
+                           {"name": "orderNumber", "type": "string", "regex": "^GC-[0-9]{8}$"}],
+                          [{"name": "status", "type": "enum", "enum_values": ["자동승인", "승인대기"],
+                            "description": "반품 승인 상태"},
+                           {"name": "order_number", "type": "string", "regex": "^[0-9]{8}$"}])
+    assert merged[0] == {"name": "status", "type": "string", "enum_values": ["자동승인", "승인대기"],
+                         "description": "반품 승인 상태"}
+    assert merged[1]["regex"] == "^GC-[0-9]{8}$"      # the contract's own value is kept
 
 
 def test_data_request_and_slot_type_descriptions_are_ascii_by_construction():
