@@ -60,3 +60,47 @@ def test_tool_fields_follow_an_operation_field_update():
     # an update that names only output_fields leaves the inputs alone
     _, notes2 = reconcile_tool_fields([helper], old_in, None, old_out, new_out)
     assert [f.name for f in helper.input_fields] == ["orderNumber"] and notes2 == []
+
+
+def test_primary_tool_contract_is_the_operations_field_list():
+    """Live (2026-09-15, review): the primary tool's hand-written output list left
+    out `orderDate` / `errorCode`, so the OpenAPI response (from the tool) and the
+    Lambda + Data Request (from the operation) disagreed — D9-3 and the parity gate
+    both fired. The primary tool's contract is the operation's list; a helper with
+    its own fields is untouched."""
+    from tools.spec_manager import OperationSpec, ToolSpec, align_primary_tool_fields
+    from tools.response_contract import operation_bundles, tool_contract_fields
+
+    spec = OperationSpec(
+        operation_id="get_order_status", operation_type="read", http_method="POST",
+        path="/get_order_status", summary="s", description="d",
+        input_fields=[_f("orderNumber")],
+        output_fields=[_f("orderNumber"), _f("status"), _f("orderDate"), _f("carrier")],
+        data_source={"db_type": "dynamodb", "table_name": "orders"},
+        tools=[
+            ToolSpec(tool_id="get_order_status", role="primary",
+                     input_fields=[_f("order_number")], output_fields=[_f("orderNumber"), _f("status")]),
+            ToolSpec(tool_id="notify_sms", role="helper",
+                     input_fields=[_f("contactPhone")], output_fields=[_f("sent")]),
+        ],
+    )
+    # projection-time rule (also covers specs saved before the alignment existed)
+    dumped = spec.model_dump()
+    primary, helper = dumped["tools"]
+    assert [f["name"] for f in tool_contract_fields(dumped, primary, "output_fields")] == \
+        ["orderNumber", "status", "orderDate", "carrier"]
+    assert [f["name"] for f in tool_contract_fields(dumped, primary, "input_fields")] == ["orderNumber"]
+    assert [f["name"] for f in tool_contract_fields(dumped, helper, "output_fields")] == ["sent"]
+    assert [f["name"] for f in operation_bundles(dumped)[0]["output_fields"]] == \
+        ["orderNumber", "status", "orderDate", "carrier"]
+    # a primary tool that declares a field of its own keeps its own contract
+    own = dict(primary, output_fields=[{"name": "status"}, {"name": "etaHours"}])
+    assert [f["name"] for f in tool_contract_fields(dumped, own, "output_fields")] == ["status", "etaHours"]
+
+    # save-time rule: the stored spec itself becomes consistent
+    notes = align_primary_tool_fields(spec)
+    assert [f.name for f in spec.tools[0].output_fields] == ["orderNumber", "status", "orderDate", "carrier"]
+    assert [f.name for f in spec.tools[0].input_fields] == ["orderNumber"]
+    assert [f.name for f in spec.tools[1].input_fields] == ["contactPhone"]
+    assert len(notes) == 2
+    assert align_primary_tool_fields(spec) == []

@@ -1313,6 +1313,34 @@ def reconcile_tool_fields(tools, old_inputs, new_inputs, old_outputs, new_output
     return tools, notes
 
 
+def align_primary_tool_fields(spec) -> list[str]:
+    """Make each PRIMARY tool's field lists the operation's own.
+
+    The primary tool's Lambda is generated from the operation's fields while its
+    OpenAPI operation and Data Request are generated from the tool's lists; an
+    interview-written subset ("orderDate" left out) or a stale entry makes the
+    three disagree at review time. A primary tool whose names are all operation
+    fields is stored with the operation's list; a primary tool that declares a
+    field of its own, and every helper, is left as written. Returns notes."""
+    notes: list[str] = []
+    for tool in getattr(spec, "tools", None) or []:
+        if str(getattr(tool, "role", "primary") or "primary").lower() != "primary":
+            continue
+        for side in ("input_fields", "output_fields"):
+            op_fields = list(getattr(spec, side, None) or [])
+            if not op_fields:
+                continue
+            tool_fields = list(getattr(tool, side, None) or [])
+            op_keys = set(_field_keys(op_fields))
+            tool_keys = set(_field_keys(tool_fields))
+            same_spelling = [getattr(f, "name", "") for f in tool_fields] == [getattr(f, "name", "") for f in op_fields]
+            if same_spelling or (tool_keys - op_keys):
+                continue
+            setattr(tool, side, [f.model_copy() if hasattr(f, "model_copy") else f for f in op_fields])
+            notes.append(f"{getattr(tool, 'tool_id', '?')}.{side} aligned with the operation's fields")
+    return notes
+
+
 def _exact_length_pattern(text: str, n: int) -> Optional[str]:
     """Regex for an exact-length phrase: alphanumeric beats digits ("영숫자 12자리"
     contains the substring "숫자" but means letters AND digits)."""
@@ -1573,6 +1601,7 @@ def save_operation_spec(
             conversation_steps=parsed_conversation_steps,
             flow_type=flow_type,
         )
+        aligned_tools = align_primary_tool_fields(spec)
 
         _specs_bucket()[operation_id] = spec
 
@@ -1639,6 +1668,8 @@ def save_operation_spec(
                 " Review the warnings: confirm with the customer in this turn whether the caller "
                 "really supplies these values, or move them to output_fields with update_operation_spec."
             )
+        if aligned_tools:
+            result["tool_fields_aligned"] = aligned_tools
         return result
     except Exception as e:
         return {
@@ -2007,6 +2038,7 @@ def update_operation_spec(
                 spec.input_fields, updated_spec.input_fields if "input_fields" in updates else None,
                 spec.output_fields, updated_spec.output_fields if "output_fields" in updates else None,
             )
+        tool_notes += align_primary_tool_fields(updated_spec)
         _specs_bucket()[operation_id] = updated_spec
 
         # Persist to NFS (fast-path) + S3

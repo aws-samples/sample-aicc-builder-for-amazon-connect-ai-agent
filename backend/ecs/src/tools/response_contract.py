@@ -18,6 +18,7 @@ contract was being decided three times. Here it is decided once:
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Optional
 
 #: Root-level fields of every operation response, on top of `output_fields`.
@@ -143,10 +144,37 @@ def operation_bundles(spec: Any) -> list[dict]:
         t_id = t.get("tool_id") or op_id
         bundles.append({"id": t_id, "method": str(t.get("http_method") or method),
                         "path": t.get("path") or f"/tools/{t_id}",
-                        "input_fields": resolve_tool_fields(s, t.get("input_fields"), "input_fields"),
-                        "output_fields": resolve_tool_fields(s, t.get("output_fields"), "output_fields"),
+                        "input_fields": tool_contract_fields(s, t, "input_fields"),
+                        "output_fields": tool_contract_fields(s, t, "output_fields"),
                         "status": str(t.get("success_status_code") or status)})
     return bundles
+
+
+def _field_key(name: Any) -> str:
+    return re.sub(r"[\s_\-]+", "", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name or ""))).lower()
+
+
+def tool_contract_fields(spec: dict, tool: dict, kind: str) -> list:
+    """The field list a tool's API contract is generated from.
+
+    The PRIMARY tool is the operation's own handler: its Lambda is generated
+    from the operation's ``input_fields`` / ``output_fields``, so its OpenAPI
+    operation and Data Request must carry the same fields. Interviews write
+    the tool's lists by hand and they drift — a subset that drops ``orderDate``
+    or ``errorCode`` (live: gate D9-3 and the parity gate fired on both), or a
+    stale field the operation no longer has (live: ``refundAmount`` moved to the
+    outputs, the Data Request still demanded it). So a primary tool whose names
+    are all operation fields takes the operation's list verbatim; a primary tool
+    with a field of its own, and every helper tool, keeps its own list
+    (resolved through :func:`resolve_tool_fields`).
+    """
+    resolved = resolve_tool_fields(spec, tool.get(kind), kind)
+    top = [_dump(f) for f in (spec.get(kind) or []) if f is not None]
+    if str(tool.get("role") or "primary").lower() != "primary" or not top:
+        return resolved
+    top_keys = {_field_key(f.get("name")) for f in top if isinstance(f, dict)}
+    own = [f for f in resolved if isinstance(f, dict) and _field_key(f.get("name")) not in top_keys]
+    return resolved if own else top
 
 
 def resolve_tool_fields(spec: dict, tool_fields: Any, kind: str) -> list:
