@@ -1110,8 +1110,12 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
                 labels[str(field["name"])] = field["description"].strip()
         if labels:
             field_labels[str(integration["data_request_id"])] = labels
-    from tools.acxd_runtime_contract import field_enums_from_integrations
-    field_enums = field_enums_from_integrations(spec.get("data_integrations"))
+    try:
+        from tools.acxd_runtime_contract import field_enums_from_integrations
+    except ImportError:  # a stubbed normalizer without the helper: no enum knowledge, no crash
+        field_enums_from_integrations = None
+    field_enums = (field_enums_from_integrations(spec.get("data_integrations"))
+                   if field_enums_from_integrations else {})
     return {
         "role": plan.get("role") or "operation",
         "slot_type_ids": sorted(slot_type_docs),
