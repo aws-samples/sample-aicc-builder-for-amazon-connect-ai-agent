@@ -66,6 +66,10 @@ EN_SPEC = {
     "application": {"locales": ["en-US"]},
 }
 
+#: KO_SPEC plus a knowledge base — the case in which the FAQ system flow ships.
+KB_SPEC = {**KO_SPEC, "knowledge_base": {"name": "gaon-faq", "description": "FAQ knowledge base", "articles": [
+    {"question": "반품 기간은 며칠인가요?", "answer": "배송완료 후 14일 이내입니다."}]}}
+
 
 def _types(flow: dict) -> dict:
     return {nid: node["type"] for nid, node in flow["nodes"].items()}
@@ -143,7 +147,7 @@ def test_node_ids_are_v4_shaped_and_deterministic(role):
 
 @pytest.mark.parametrize("role,untrained", [
     ("welcome", True), ("fallback", True), ("followup", True),
-    ("escalation", True), ("agent_request", False),
+    ("escalation", True), ("agent_request", False), ("faq", False),
 ])
 def test_untrained_flags(role, untrained):
     """R2: system flows are not routing targets, so they are untrained. The one
@@ -420,16 +424,19 @@ def test_language_precedence_and_role_predicate():
 
 
 def test_system_flows_and_yes_no_are_cross_consistent():
-    """All five together, with the slot type they need — no dangling refs."""
-    flows = [build_system_flow(role, KO_SPEC) for role in sorted(SYSTEM_FLOW_BUILDERS)]
+    """All six together, with the slot type and knowledge base they need — no dangling refs."""
+    from tools.acxd_resource_builders import build_knowledge_base
+
+    flows = [build_system_flow(role, KB_SPEC) for role in sorted(SYSTEM_FLOW_BUILDERS)]
     flows += [{"flowId": p["flow_id"], "nodes": {
         "a0000000-0000-4000-8000-000000000001": {
             "nodeId": "a0000000-0000-4000-8000-000000000001", "type": "start",
             "childNodes": [{"nodeId": "a0000000-0000-4000-8000-000000000002"}]},
         "a0000000-0000-4000-8000-000000000002": {
             "nodeId": "a0000000-0000-4000-8000-000000000002", "type": "end"},
-    }} for p in KO_SPEC["flows"] if p["role"] == "operation"]
-    bundle = {"flows": flows, "slot_types": [build_yes_no_slot_type(KO_SPEC)]}
+    }} for p in KB_SPEC["flows"] if p["role"] == "operation"]
+    bundle = {"flows": flows, "slot_types": [build_yes_no_slot_type(KB_SPEC)],
+              "knowledge_bases": [build_knowledge_base(KB_SPEC)]}
     assert [str(v) for v in validate_acxd_consistency(bundle)] == []
 
 
@@ -653,3 +660,47 @@ def test_operation_labels_leave_out_flows_the_generator_marked_untrained():
     spec["untrained_flow_ids"] = ["LogCallResult"]
     labels = operation_labels(spec)
     assert "통화 결과 기록" not in labels and "배송 조회" in labels
+
+
+# ---------------------------------------------------------------------------
+# FaqFlow — a routable entry to the knowledge base
+# ---------------------------------------------------------------------------
+
+
+def test_faq_flow_is_built_only_when_a_knowledge_base_ships():
+    """Live (2026-09-15): the application carried a knowledge base only behind
+    its `unknown` default behaviour; 'what is your return policy?' resembled the
+    return-request flow and was routed there. A knowledge base gets a routable
+    FAQ flow unless the interview planned one."""
+    from tools.acxd_system_flows import (
+        build_faq_flow, conditional_system_roles, operation_labels, plans_cover_faq)
+
+    assert conditional_system_roles(KO_SPEC) == ()                       # no knowledge base → no flow
+    assert conditional_system_roles(KB_SPEC) == ("faq",)
+    planned = {**KB_SPEC, "flows": KB_SPEC["flows"] + [
+        {"flow_id": "FaqInfo", "role": "operation", "purpose": "faq", "display_name": "병원 안내",
+         "steps": [{"step": 1, "node_type": "knowledge_base", "determinism": "deterministic"}]}]}
+    assert plans_cover_faq(planned["flows"]) and conditional_system_roles(planned) == ()
+
+    flow = build_faq_flow(KB_SPEC)
+    assert flow["flowId"] == "FaqFlow" and flow["untrained"] is False
+    assert _walk(flow) == ["start", "knowledge_base", "redirect", "end"]
+    kb_node = _node_of_type(flow, "knowledge_base")
+    assert kb_node["metadata"]["knowledgeBase"] == {"knowledgeBaseId": "{KB:gaon-faq}", "name": "gaon-faq"}
+    assert kb_node["messages"][0]["body"] == "문의하신 내용을 안내해 드릴게요."
+    assert _redirect_targets(flow) == ["FollowUpFlow"]
+    assert "policies" in flow["aiDescription"] and all(ord(c) < 128 for c in flow["aiDescription"])
+    assert validate_acxd_asset("flow", flow) == []
+
+    # the re-guide menu offers it by a short name in the project language
+    assert operation_labels(KB_SPEC)[-1] == "자주 묻는 질문"
+    assert "자주 묻는 질문" not in operation_labels(KO_SPEC)
+
+
+def test_application_attaches_the_faq_flow_with_the_knowledge_base():
+    from tools.acxd_resource_builders import build_application
+
+    with_kb = [f["flowId"] for f in build_application(KB_SPEC)["flows"]]
+    without = [f["flowId"] for f in build_application(KO_SPEC)["flows"]]
+    assert "FaqFlow" in with_kb and "FaqFlow" not in without
+    assert with_kb.index("FaqFlow") > with_kb.index("RequestAgentFlow")

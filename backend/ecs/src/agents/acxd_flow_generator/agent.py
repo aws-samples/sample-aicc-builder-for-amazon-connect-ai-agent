@@ -1433,6 +1433,7 @@ def _system_flow_jobs(spec: dict, plans: list, flow_ids: Optional[list]) -> list
     """
     from tools.acxd_system_flows import (
         ALWAYS_GENERATED_SYSTEM_ROLES,
+        conditional_system_roles,
         is_system_flow_role,
         resolve_system_flow_ids,
     )
@@ -1445,7 +1446,10 @@ def _system_flow_jobs(spec: dict, plans: list, flow_ids: Optional[list]) -> list
         if is_system_flow_role(role):
             jobs.append((role, plan))
             seen_roles.add(role)
-    for role in ALWAYS_GENERATED_SYSTEM_ROLES:
+    # The FAQ flow is added when the application ships a knowledge base and no
+    # planned flow answers from it (live: a policy question was routed to the
+    # return-request flow because the knowledge base had no routable entry).
+    for role in ALWAYS_GENERATED_SYSTEM_ROLES + conditional_system_roles(spec, spec.get("flows") or []):
         if role in seen_roles:
             continue
         flow_id = resolved[role]

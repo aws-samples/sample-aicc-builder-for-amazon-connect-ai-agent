@@ -427,7 +427,7 @@ DEFAULT_FLOW_EVENTS = frozenset({
 })
 
 
-def _attached_flows(flow_plans: list) -> list[dict]:
+def _attached_flows(flow_plans: list, spec: Optional[dict] = None) -> list[dict]:
     """Every flow the bundle ships, in plan order, system flows included.
 
     A flow that is not attached to the application is not routable and cannot be
@@ -436,17 +436,21 @@ def _attached_flows(flow_plans: list) -> list[dict]:
     RequestAgentFlow (R2, the routable "connect me to a human" entry) whether or
     not the interview planned them, so the application must attach them too —
     otherwise the deployment drops exactly the two flows that make the
-    conversation multi-turn.
+    conversation multi-turn. The same holds for the FAQ flow the generator adds
+    when the application ships a knowledge base.
     """
     from tools.acxd_system_flows import (
         ALWAYS_GENERATED_SYSTEM_ROLES,
+        conditional_system_roles,
         resolve_system_flow_ids,
     )
 
     attached = [p["flow_id"] for p in flow_plans if isinstance(p, dict) and p.get("flow_id")]
     if attached:
         resolved = resolve_system_flow_ids({"flows": flow_plans})
-        for role in ALWAYS_GENERATED_SYSTEM_ROLES:
+        roles = ALWAYS_GENERATED_SYSTEM_ROLES + (
+            conditional_system_roles(spec, flow_plans) if isinstance(spec, dict) else ())
+        for role in roles:
             flow_id = resolved.get(role)
             if flow_id and flow_id not in attached:
                 attached.append(flow_id)
@@ -580,7 +584,7 @@ def build_application(spec: dict) -> dict:
         "name": name[:100],
         "description": (app.get("description")
                         or profile.get("description") or "")[:200],
-        "flows": _attached_flows(flow_plans),
+        "flows": _attached_flows(flow_plans, spec),
         "settings": settings,
         "deploymentSettings": {
             "oneClickDeployEnabled": False,

@@ -48,6 +48,7 @@ FALLBACK_FLOW_ID = "FallbackFlow"
 ESCALATION_FLOW_ID = "EscalationFlow"
 FOLLOW_UP_FLOW_ID = "FollowUpFlow"
 REQUEST_AGENT_FLOW_ID = "RequestAgentFlow"
+FAQ_FLOW_ID = "FaqFlow"
 
 #: NLX placeholder for "whichever flow the application just recognized".
 CAPTURED_FLOW_PLACEHOLDER = "{System.capturedFlow:NLX.System}"
@@ -65,7 +66,7 @@ FAIL_REASON_VAR = "failReason"
 MAX_FALLBACK_ATTEMPTS = 3
 
 #: Flow roles produced by this module instead of by the LLM.
-SYSTEM_FLOW_ROLES = ("welcome", "fallback", "escalation", "followup", "agent_request")
+SYSTEM_FLOW_ROLES = ("welcome", "fallback", "escalation", "followup", "agent_request", "faq")
 
 #: Roles that must exist in EVERY generated application, planned or not: the
 #: conversation cannot continue after an answer without FollowUpFlow, and a
@@ -78,7 +79,47 @@ DEFAULT_SYSTEM_FLOW_IDS = {
     "escalation": ESCALATION_FLOW_ID,
     "followup": FOLLOW_UP_FLOW_ID,
     "agent_request": REQUEST_AGENT_FLOW_ID,
+    "faq": FAQ_FLOW_ID,
 }
+
+
+def knowledge_base_name(spec: dict) -> Optional[str]:
+    """Name of the knowledge base the application ships, or None."""
+    try:
+        from tools.acxd_resource_builders import build_knowledge_base  # lazy: that module imports this one
+        kb = build_knowledge_base(spec)
+    except Exception:  # pragma: no cover - resource builders unavailable in a stub
+        return None
+    return str(kb["name"]) if isinstance(kb, dict) and kb.get("name") else None
+
+
+def plans_cover_faq(plans) -> bool:
+    """True when the interview already planned a flow that answers from the knowledge base."""
+    for plan in plans or []:
+        if not isinstance(plan, dict):
+            continue
+        if str(plan.get("role") or "") == "faq":
+            return True
+        for step in plan.get("steps") or []:
+            if isinstance(step, dict) and str(step.get("node_type") or "").lower() in ("knowledge_base", "knowledgebase", "kb"):
+                return True
+    return False
+
+
+def conditional_system_roles(spec: dict, plans=None) -> tuple[str, ...]:
+    """System roles the application needs because of what it ships.
+
+    Live (2026-09-15): an application had a knowledge base, and the greeting
+    promised policy questions, but no flow reached the knowledge base — the only
+    path was the application's `unknown` default behaviour, and the NLU sent
+    "what is your return policy?" to the return-request flow instead. A
+    knowledge base therefore gets a routable FAQ flow unless the interview
+    planned one itself.
+    """
+    plans = plans if plans is not None else (spec.get("flows") or [])
+    if knowledge_base_name(spec) and not plans_cover_faq(plans):
+        return ("faq",)
+    return ()
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +153,8 @@ _TEXTS: dict[str, dict] = {
         "no": "아니요",
         "no_synonyms": ["아니오", "아뇨", "아니", "싫어요", "없어요", "없습니다",
                         "괜찮아요", "동의하지 않아요", "동의 안 해요", "안 해요", "됐어요"],
+        "faq_intro": "문의하신 내용을 안내해 드릴게요.",
+        "faq_label": "자주 묻는 질문",
     },
     "en": {
         "greeting": "Hello, this is {company}. How can I help you today?",
@@ -138,6 +181,8 @@ _TEXTS: dict[str, dict] = {
         "no_synonyms": ["nope", "nah", "no thanks", "no thank you", "not now",
                         "that is all", "thats all", "nothing else", "i am done",
                         "im good", "no i dont"],
+        "faq_intro": "Here is what I found on that.",
+        "faq_label": "general questions",
     },
     "ja": {
         "greeting": "こんにちは、{company}です。ご用件をお伺いします。",
@@ -163,6 +208,8 @@ _TEXTS: dict[str, dict] = {
         "no": "いいえ",
         "no_synonyms": ["いや", "いえ", "ありません", "大丈夫です", "結構です",
                         "いらない", "不要です", "以上です"],
+        "faq_intro": "お問い合わせの内容についてご案内します。",
+        "faq_label": "よくあるご質問",
     },
 }
 
@@ -297,6 +344,10 @@ def operation_labels(spec: dict) -> list[str]:
         labels.append(label)
         if len(labels) >= _MAX_LISTED_OPERATIONS:
             break
+    # The deterministic FAQ flow is a routing target too: offer it by its own
+    # short name so a caller with a policy question knows it is on the menu.
+    if labels and "faq" in conditional_system_roles(spec) and len(labels) < _MAX_LISTED_OPERATIONS:
+        labels.append(_texts(system_flow_language(spec))["faq_label"])
     return labels
 
 
@@ -663,6 +714,63 @@ def build_request_agent_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> 
 
 
 # ---------------------------------------------------------------------------
+# FaqFlow — routable entry to the knowledge base
+# ---------------------------------------------------------------------------
+
+#: Routing description of the FAQ flow. It has to WIN against the transactional
+#: flows for an information question ("what is your return policy?" was routed to
+#: the return-request flow, live), so it names the question kinds explicitly and
+#: says what it is not.
+FAQ_AI_DESCRIPTION = (
+    "Use this flow when the customer asks a general information question that is "
+    "answered from the FAQ: policies and rules, fees and prices in general, "
+    "opening hours, delivery areas and times, membership benefits, receipts and "
+    "documents, how something works or what is allowed. Do not use it when the "
+    "customer asks to look up, create, change or cancel their own order, booking, "
+    "return or account — those have their own flows."
+)
+
+
+def build_faq_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict:
+    """Routable FAQ entry: one knowledge_base node, then FollowUpFlow.
+
+    A knowledge base attached only to the application's `unknown` default
+    behaviour is reached solely when NO flow matches; an information question
+    that resembles an operation is routed to that operation instead. A trained
+    flow with its own routing description gives the NLU a target to prefer.
+    """
+    ids = _ids(spec, flow_ids)
+    flow_id = ids.get("faq", FAQ_FLOW_ID)
+    language = system_flow_language(spec)
+    text = _texts(language)
+    kb_name = knowledge_base_name(spec) or "FAQ"
+
+    start = _node_id(flow_id, "start")
+    answer = _node_id(flow_id, "knowledgeBase")
+    follow_up = _node_id(flow_id, "redirectFollowUp")
+    end = _node_id(flow_id, "end")
+
+    flow = _flow_shell(
+        flow_id, language,
+        untrained=False,
+        description=f"Routable FAQ entry; answers from knowledge base {kb_name} and hands over to {ids['followup']}.",
+        ai_description=FAQ_AI_DESCRIPTION,
+        context_variables=[],
+    )
+    flow["nodes"] = {
+        start: {"nodeId": start, "type": "start",
+                "childNodes": [_child(answer, "toKnowledgeBase")]},
+        answer: {"nodeId": answer, "type": "knowledge_base",
+                 "messages": [_message(text["faq_intro"])],
+                 "metadata": {"knowledgeBase": {"knowledgeBaseId": f"{{KB:{kb_name}}}", "name": kb_name}},
+                 "childNodes": [_child(follow_up, "toFollowUp")]},
+        follow_up: _redirect_node(follow_up, ids["followup"], end),
+        end: {"nodeId": end, "type": "end"},
+    }
+    return flow
+
+
+# ---------------------------------------------------------------------------
 # EscalationFlow (R7)
 # ---------------------------------------------------------------------------
 
@@ -744,6 +852,7 @@ SYSTEM_FLOW_BUILDERS: dict[str, Callable[..., dict]] = {
     "escalation": build_escalation_flow,
     "followup": build_follow_up_flow,
     "agent_request": build_request_agent_flow,
+    "faq": build_faq_flow,
 }
 
 
