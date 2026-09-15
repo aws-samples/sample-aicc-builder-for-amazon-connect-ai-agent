@@ -66,10 +66,26 @@ _PLAN_CONTEXT = 300
 _EXECUTED_CLAIM = re.compile(
     r"(?:실제로\s*(?:실행|호출|수행)(?:했|됐|되었|완료)|(?:실행|호출|수행)(?:했습니다|했어요|을 완료|이 완료|했고)|"
     r"(?:재생성|재검증|검증)(?:을|를)?\s*(?:모두\s*)?(?:실제로\s*)?(?:실행|완료)(?:했|됐)|"
+    # "ACXD 재생성 완료." / "검증 완료" — a bare completion, no verb ending at all
+    r"(?:재생성|재검증|검증|생성|배포|호출|실행|패키징)\s*완료|"
+    # "도구 반환값 그대로 전달합니다" / "결과를 그대로 보고합니다" — presenting output as a tool's
+    r"(?:도구|툴|tool)\s*(?:의\s*)?(?:반환값|반환 값|결과|출력|응답)(?:을|를|은|는)?\s*(?:그대로\s*)?(?:전달|보고|공유|정리)|"
+    r"(?:반환값|반환 값)(?:을|를|은|는)?\s*그대로|"
     r"\b(?:I|we)\s+(?:actually\s+)?(?:ran|executed|invoked|called)\b|\b(?:was|were|has been|have been)\s+(?:actually\s+)?(?:executed|run|invoked|called)\b|"
-    r"\bexecuted successfully\b)",
+    r"\bexecuted successfully\b|\b(?:the\s+)?tool(?:'s)?\s+(?:returned|output|result)s?\b|\breturned values?\b)",
     re.I,
 )
+
+# The keys our generation/validation tools answer with. Two or more of them
+# with numbers, in a turn that called no tool, is a fabricated tool result even
+# when no verb claims anything (live: "- flows: 9 / slot_types: 2 / problems: 0
+# / mismatches: 0" after a turn with zero tool calls).
+_TOOL_OUTPUT_KEY = re.compile(
+    r"\b(?:flows?|slot_types?|data_requests?|problems?|mismatches|blocking|advisory|violations?|findings?)\b"
+    r"\**\s*[:：]\s*\**\s*\d+",
+    re.I,
+)
+_MIN_OUTPUT_KEYS = 2
 
 
 def _strong_claim(pattern: str, text: str) -> bool:
@@ -118,10 +134,15 @@ def unbacked_tool_claims(text: str, tools_called: Iterable[str]) -> list[str]:
 
 
 def unbacked_execution_claim(text: str, tools_called: Iterable[str]) -> bool:
-    """True when the turn called NO tool yet the text asserts something was executed."""
+    """True when the turn called NO tool yet the text asserts something was executed
+    — by a verb, by presenting "the tool's return value", or by listing two or more
+    of the tools' own output keys with numbers."""
     if any(str(t) for t in tools_called if t) or not text:
         return False
-    return any(not _PLAN_MARKERS.search(m.group(0)) for m in _EXECUTED_CLAIM.finditer(text))
+    if any(not _PLAN_MARKERS.search(m.group(0)) for m in _EXECUTED_CLAIM.finditer(text)):
+        return True
+    keys = {m.group(0).split(":")[0].split("：")[0].strip("* ").lower() for m in _TOOL_OUTPUT_KEY.finditer(text)}
+    return len(keys) >= _MIN_OUTPUT_KEYS
 
 
 def audit_notice(text: str, tools_called: Iterable[str], language: str = "ko") -> str | None:
