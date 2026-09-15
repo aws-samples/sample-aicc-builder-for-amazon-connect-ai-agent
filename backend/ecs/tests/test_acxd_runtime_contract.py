@@ -1290,3 +1290,61 @@ def test_p1_a_single_path_request_drops_slots_the_path_never_captures():
                                         flow_ids=["ReturnStatus"], escalation_flow_id="Escalation")
     assert out["nodes"]["dr"]["dataRequests"][0]["payload"] == {"returnId": "{returnId:NLX.Slot}"}
     assert any("payload dropped ['orderNumber']" in n for n in notes)
+
+
+def test_review_gate_sees_impossible_enum_constants_through_the_spec():
+    """Live (2026-09-15, review): a RequestReturn choice branched on
+    ``requestReturn.status == "rejected"`` while the API's status enum is
+    자동승인/승인대기. The reply schema carries types only, and the D9 gate ran the
+    runtime contract without the spec's enum values, so the dead branch was
+    invisible at review and download time (the reviewer LLM saw it as advisory).
+    The gate now derives the enums from the spec's data integrations."""
+    from tools.validate_acxd_consistency import validate_acxd_consistency
+    from tools.acxd_runtime_contract import field_enums_from_integrations
+
+    def nid(n):
+        return f"a0000000-0000-4000-8000-{n:012d}"
+
+    flow = {
+        "flowId": "RequestReturn", "name": "RequestReturn", "type": "flow",
+        "description": "Return request", "aiDescription": "Customer wants to return an order",
+        "startNodeId": nid(1),
+        "nodes": {
+            nid(1): {"nodeId": nid(1), "type": "start", "childNodes": [{"nodeId": nid(2), "name": "next"}]},
+            nid(2): {"nodeId": nid(2), "type": "data_request",
+                     "dataRequests": [{"dataRequestId": "requestReturn", "payload": {}}],
+                     "childNodes": [
+                         {"nodeId": nid(3), "name": "success", "conditions": [
+                             {"left": {"type": "node_status"}, "operator": "eq",
+                              "right": {"type": "constant", "value": "success"}}]},
+                         {"nodeId": nid(5), "name": "failure", "conditions": [
+                             {"left": {"type": "node_status"}, "operator": "eq",
+                              "right": {"type": "constant", "value": "failure"}}]}]},
+            nid(3): {"nodeId": nid(3), "type": "choice", "childNodes": [
+                {"nodeId": nid(5), "name": "rejected", "conditions": [
+                    {"left": {"type": "variable", "name": "requestReturn.status"}, "operator": "eq",
+                     "right": {"type": "constant", "value": "rejected"}}]},
+                {"nodeId": nid(4), "name": "accepted"}]},
+            nid(4): {"nodeId": nid(4), "type": "basic",
+                     "messages": [{"body": "Return {requestReturn.returnId:NLX.Variable} accepted"}],
+                     "childNodes": [{"nodeId": nid(6), "name": "next"}]},
+            nid(5): {"nodeId": nid(5), "type": "redirect",
+                     "metadata": {"redirect": {"type": "flow", "flowId": "Escalation"}}, "childNodes": []},
+            nid(6): {"nodeId": nid(6), "type": "end"},
+        },
+    }
+    data_request = {"dataRequestId": "requestReturn", "name": "requestReturn",
+                    "responseSchema": {"type": "object", "properties": {
+                        "success": {"type": "boolean"}, "errorCode": {"type": "string"},
+                        "returnId": {"type": "string"}, "status": {"type": "string"}}}}
+    spec = {"data_integrations": [{"data_request_id": "requestReturn", "response_fields": [
+        {"name": "status", "type": "enum", "enum_values": ["자동승인", "승인대기"]},
+        {"name": "returnId", "type": "string"}]}]}
+    assert field_enums_from_integrations(spec["data_integrations"]) == {
+        "requestReturn": {"status": ["자동승인", "승인대기"]}}
+
+    bundle = {"flows": [flow], "slot_types": [], "data_requests": [data_request]}
+    with_spec = [v.message for v in validate_acxd_consistency(bundle, spec) if v.code == "RUNTIME_CONTRACT"]
+    assert any("D5" in m and "'rejected'" in m and "never returns" in m for m in with_spec), with_spec
+    without_spec = [v.message for v in validate_acxd_consistency(bundle) if v.code == "RUNTIME_CONTRACT"]
+    assert not any("'rejected'" in m for m in without_spec)

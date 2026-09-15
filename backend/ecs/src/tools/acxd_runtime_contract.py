@@ -2017,6 +2017,28 @@ class _RuntimeContract:
 # public API
 # --------------------------------------------------------------------------
 
+def field_enums_from_integrations(integrations) -> dict:
+    """``{data request id: {field: [allowed values]}}`` from an ACXDFlowSpec's
+    ``data_integrations``. The deployed reply schema carries types only, so this
+    is the one place D5 can learn which constants a result field can hold — the
+    generator passes it at build time and the D9 gate at review/download time,
+    so an impossible constant is reported in both places, not just one."""
+    enums: dict = {}
+    for integration in integrations or []:
+        if not isinstance(integration, dict) or not integration.get("data_request_id"):
+            continue
+        per_field = {}
+        for field in integration.get("response_fields") or []:
+            if not isinstance(field, dict) or not field.get("name"):
+                continue
+            values = field.get("enum_values") or field.get("enum")
+            if isinstance(values, (list, tuple)) and values:
+                per_field[str(field["name"])] = [str(v) for v in values]
+        if per_field:
+            enums[str(integration["data_request_id"])] = per_field
+    return enums
+
+
 def apply_runtime_contract(
     flow: dict,
     *,

@@ -1099,24 +1099,19 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
     # document keeps ASCII-only descriptions; the interview's wording lives on
     # the spec's response_fields). M2 announces results with these.
     field_labels: dict = {}
-    field_enums: dict = {}
     for integration in spec.get("data_integrations") or []:
         if not isinstance(integration, dict) or not integration.get("data_request_id"):
             continue
         labels = {}
-        enums = {}
         for field in integration.get("response_fields") or []:
             if not isinstance(field, dict) or not field.get("name"):
                 continue
             if isinstance(field.get("description"), str):
                 labels[str(field["name"])] = field["description"].strip()
-            values = field.get("enum_values") or field.get("enum")
-            if isinstance(values, (list, tuple)) and values:
-                enums[str(field["name"])] = [str(v) for v in values]
         if labels:
             field_labels[str(integration["data_request_id"])] = labels
-        if enums:
-            field_enums[str(integration["data_request_id"])] = enums
+    from tools.acxd_runtime_contract import field_enums_from_integrations
+    field_enums = field_enums_from_integrations(spec.get("data_integrations"))
     return {
         "role": plan.get("role") or "operation",
         "slot_type_ids": sorted(slot_type_docs),

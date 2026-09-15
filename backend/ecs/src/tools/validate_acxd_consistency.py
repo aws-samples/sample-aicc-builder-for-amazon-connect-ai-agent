@@ -512,7 +512,7 @@ def validate_acxd_consistency(
                        f"targets it (redirects found: {sorted(t for t in actual_targets if t)})")
 
     _check_backend_for_live_data_requests(bundle, spec, out)
-    _check_runtime_contract(bundle, out)
+    _check_runtime_contract(bundle, out, spec)
 
     return out
 
@@ -540,17 +540,23 @@ def _flow_roles(bundle: dict, follow_up_flow_id: str) -> dict[str, str]:
     return roles
 
 
-def _check_runtime_contract(bundle: dict, out: list) -> None:
-    """The cross-asset half of the live runtime contract (S5, D3, M1, RX).
+def _check_runtime_contract(bundle: dict, out: list, spec: Optional[dict] = None) -> None:
+    """The cross-asset half of the live runtime contract (S5, D3, D5, M1, RX).
 
     The flow-scope half (S1 vocabulary, S2/S3, R6/R7, D4, A2) already ran per
     flow inside ``validate_acxd_asset``; these rules need the slot type
     documents, the data requests, the bundle's flow ids and the workspace
-    context variables, which only exist here.
+    context variables, which only exist here. The allowed values of enum result
+    fields come from the spec's data integrations (the deployed reply schema
+    carries types only), so D5 can report a branch on a value the API never
+    returns at review time and not only inside the generator.
     """
     flows = [f for f in (bundle.get("flows") or []) if isinstance(f, dict)]
     if not flows:
         return
+    from tools.acxd_runtime_contract import field_enums_from_integrations
+    field_enums = field_enums_from_integrations(
+        (spec or {}).get("data_integrations") if isinstance(spec, dict) else None)
     slot_type_docs = {
         str(doc["slotTypeId"]): doc
         for doc in (bundle.get("slot_types") or [])
@@ -594,6 +600,7 @@ def _check_runtime_contract(bundle: dict, out: list) -> None:
             follow_up_flow_id=follow_up_flow_id,
             escalation_flow_id=escalation_flow_id,
             scope="cross",
+            field_enums=field_enums,
         ):
             _v(out, "RUNTIME_CONTRACT", f"flows[{index}]", problem)
 
