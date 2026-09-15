@@ -254,8 +254,6 @@ def _slot_condition(slot: str, operator: str) -> dict:
 #: asking a fourth time.
 FORMAT_RETRIES_VAR = "formatRetries"
 MAX_FORMAT_RETRIES = 2
-#: E1 — the slot every capture node also listens on for "connect me to a human".
-AGENT_REQUEST_SLOT = "agentRequest"
 _OPTIONAL_SEPARATOR = "[-. /:]?"
 
 
@@ -1445,7 +1443,11 @@ class _RuntimeContract:
             check_id = _derived_id("4f1a0003", seed)
             target_id = capture_edge.get("nodeId")
             give_up = self._no_match_target(node_id, node, slot) or self._fallback_redirect()
-            prompt = self._first_body(node) or ""
+            # When the flow already has another question to fall back to (return
+            # number → order number) one wrong-shaped answer is enough to move on;
+            # only a node with no alternative re-asks before giving up.
+            give_up_node = self.nodes.get(give_up) or {}
+            threshold = 1 if give_up_node.get("type") == "user_choice" else MAX_FORMAT_RETRIES
             self.nodes[guard_id] = {
                 "nodeId": guard_id, "type": "choice",
                 "childNodes": [
@@ -1462,7 +1464,7 @@ class _RuntimeContract:
                 "childNodes": [{"nodeId": target_id, "name": "next"}]}
             self.nodes[retry_id] = {
                 "nodeId": retry_id, "type": "basic",
-                "messages": [{"type": "text", "body": format_retry_message(language, prompt)}],
+                "messages": [{"type": "text", "body": format_retry_message(language)}],
                 "metadata": {"stateModifications": [
                     _clear_modification(slot),
                     {"type": "context", "name": FORMAT_RETRIES_VAR, "modification": "increment"}]},
@@ -1472,71 +1474,15 @@ class _RuntimeContract:
                 "childNodes": [
                     {"nodeId": give_up, "name": "formatGiveUp", "conditions": [{
                         "left": {"type": "context", "name": FORMAT_RETRIES_VAR}, "operator": "gte",
-                        "right": {"type": "constant", "value": MAX_FORMAT_RETRIES}}]},
+                        "right": {"type": "constant", "value": threshold}}]},
                     {"nodeId": node_id, "name": "askAgain"},
                 ]}
             capture_edge["nodeId"] = guard_id
             self._declare_context(FORMAT_RETRIES_VAR, "number")
             self.change(
                 f"{_label(node_id, node)}: captured {slot!r} is checked against {pattern} before use; "
-                f"a wrong shape clears the slot and re-asks, {MAX_FORMAT_RETRIES} misses → "
+                f"a wrong shape clears the slot and re-asks, {threshold} miss(es) → "
                 f"[{str(give_up)[:8]}] (F1)")
-
-    # ==================================================================
-    # E1 — "connect me to a human" said while a value is being collected
-    # ==================================================================
-
-    def rule_e1(self) -> None:
-        """Live (2026-09-15): '상담원 연결해 주세요' at the order-number prompt was
-        treated as a bad order number. A ``user_choice`` node routes nothing, so
-        every operation capture node also listens on the ``agentRequest`` slot
-        (associated slot type) and hands the caller to the escalation when it is
-        captured."""
-        if self.role != "operation":
-            return
-        captures = [(nid, n) for nid, n in self.nodes_of_type("user_choice")
-                    if self.choice_slot(n) and self.choice_slot(n) != AGENT_REQUEST_SLOT]
-        if not captures:
-            return
-        if self.slot_type_ids is not None and AGENT_REQUEST_SLOT not in self.slot_type_ids:
-            return  # the bundle does not ship the slot type; nothing to associate
-        if AGENT_REQUEST_SLOT not in self.slot_names:
-            slots = self.flow.get("slotTypes")
-            if not isinstance(slots, list):
-                slots = []
-                self.flow["slotTypes"] = slots
-            slots.append({"name": AGENT_REQUEST_SLOT, "type": AGENT_REQUEST_SLOT, "sensitive": False,
-                          "aiDescription": "The customer asks for a human agent instead of continuing."})
-            self.change(f"attached slot {AGENT_REQUEST_SLOT!r} for mid-capture agent requests (E1)")
-        escalate_id = self.escalation_target()
-        if escalate_id is None:
-            escalate_id = _derived_id("4e1a0000", f"{self.flow_id}#agentEscape")
-            end_id = next((nid for nid, _ in self.nodes_of_type("end")), None)
-            self.nodes[escalate_id] = {
-                "nodeId": escalate_id, "type": "redirect",
-                "metadata": {"redirect": {"type": "flow", "flowId": self.escalation_flow_id},
-                             "stateModifications": [{"type": "context", "name": "failReason",
-                                                     "modification": "set",
-                                                     "value": {"type": "constant",
-                                                               "value": "customer_requested_agent"}}]},
-                **({"childNodes": [{"nodeId": end_id, "name": "next"}]} if end_id else {}),
-            }
-            self._declare_context("failReason", "text")
-        for node_id, node in captures:
-            choice = _meta(node).setdefault("choice", {})
-            associated = choice.get("associatedSlotTypeIds")
-            if not isinstance(associated, list):
-                associated = []
-                choice["associatedSlotTypeIds"] = associated
-            if AGENT_REQUEST_SLOT not in associated:
-                associated.append(AGENT_REQUEST_SLOT)
-            edges = _edges(node)
-            if any(_captures_slot(e, AGENT_REQUEST_SLOT) for e in edges):
-                continue
-            node["childNodes"] = [{"nodeId": escalate_id, "name": "agentRequested",
-                                   "conditions": [_slot_condition(AGENT_REQUEST_SLOT, "exists")]}] + edges
-            self.change(f"{_label(node_id, node)}: also listens for {AGENT_REQUEST_SLOT!r} → "
-                        f"escalation [{escalate_id[:8]}] (E1)")
 
     # ==================================================================
     # R3 — operation flows hand back, they never end the session
@@ -2232,7 +2178,6 @@ class _RuntimeContract:
         self.rule_r7()
         self.rule_r6()
         self.rule_f1()
-        self.rule_e1()
         self.rule_r3()
         self.rule_s6()
         self.rule_d3()

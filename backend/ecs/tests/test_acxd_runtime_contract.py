@@ -1411,7 +1411,7 @@ def test_f1_guards_a_pattern_slot_with_a_matches_regex_check_and_a_bounded_retry
     escalated. The captured value is now checked before use."""
     out, notes = apply_runtime_contract(_capture_flow(), role="operation", data_requests={"getReturnStatus": _DR_DOC},
                                         flow_ids=["ReturnStatus", "Fallback", "Escalation"], escalation_flow_id="Escalation",
-                                        slot_type_ids={"agentRequest", "yesNo"})
+                                        slot_type_ids={"yesNo"})
     nodes = out["nodes"]
     ask = nodes["askR"]
     capture = next(e for e in ask["childNodes"] if any(c.get("operator") == "exists" and c["left"]["name"] == "returnId"
@@ -1425,54 +1425,30 @@ def test_f1_guards_a_pattern_slot_with_a_matches_regex_check_and_a_bounded_retry
     assert ok["type"] == "basic" and ok["metadata"]["stateModifications"][0]["name"] == "formatRetries"
     assert nodes[ok["childNodes"][0]["nodeId"]]["type"] == "data_request"
     retry = nodes[invalid["nodeId"]]
-    assert retry["messages"][0]["body"] == "말씀하신 값이 형식에 맞지 않습니다. 반품번호를 알려주세요."
+    assert retry["messages"][0]["body"] == "말씀하신 값이 형식에 맞지 않습니다."
     assert {"type": "slot", "name": "returnId", "modification": "clear"} in retry["metadata"]["stateModifications"]
     check = nodes[retry["childNodes"][0]["nodeId"]]
     give_up, again = check["childNodes"]
-    assert give_up["conditions"][0]["left"] == {"type": "context", "name": "formatRetries"} and give_up["conditions"][0]["right"]["value"] == 2
+    assert give_up["conditions"][0]["left"] == {"type": "context", "name": "formatRetries"}
+    assert give_up["conditions"][0]["right"]["value"] == 1       # another question exists → move on at once
     assert give_up["nodeId"] == "askO"           # the node's own 'not captured' path: ask for the order number
     assert again["nodeId"] == "askR"
     assert {"name": "formatRetries", "type": "number"} in out["contextVariables"]
-    # the order-number node has no further question to fall back to → the fallback flow
+    # the order-number node has no further question to fall back to → two misses, then the fallback flow
     order_guard = nodes[next(e for e in nodes["askO"]["childNodes"]
                              if any(c.get("operator") == "exists" and c["left"]["name"] == "orderNumber"
                                     for c in e.get("conditions") or []))["nodeId"]]
     order_check = nodes[nodes[order_guard["childNodes"][1]["nodeId"]]["childNodes"][0]["nodeId"]]
+    assert order_check["childNodes"][0]["conditions"][0]["right"]["value"] == 2
     give_up_target = nodes[order_check["childNodes"][0]["nodeId"]]
-    assert give_up_target["type"] == "redirect" and give_up_target["metadata"]["redirect"]["flowId"] == "Escalation" \
-        or give_up_target["metadata"]["redirect"]["flowId"] == "Fallback"
+    assert give_up_target["type"] == "redirect" and give_up_target["metadata"]["redirect"]["flowId"] in ("Escalation", "Fallback")
     assert sum("(F1)" in n for n in notes) == 2
     # idempotent: a second pass adds nothing
     again_out, again_notes = apply_runtime_contract(out, role="operation", data_requests={"getReturnStatus": _DR_DOC},
                                                     flow_ids=["ReturnStatus", "Fallback", "Escalation"],
-                                                    escalation_flow_id="Escalation", slot_type_ids={"agentRequest", "yesNo"})
+                                                    escalation_flow_id="Escalation", slot_type_ids={"yesNo"})
     assert not any("(F1)" in n for n in again_notes) and len(again_out["nodes"]) == len(nodes)
     import re
     v4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
     added = [nid for nid in nodes if nid not in _capture_flow()["nodes"]]
     assert added and all(v4.match(nid) for nid in added), added      # every node the rule adds is v4-shaped
-
-
-def test_e1_every_capture_node_also_listens_for_an_agent_request():
-    """Live (2026-09-15): '상담원 연결해 주세요' at the order-number prompt was
-    treated as a bad order number — a user_choice node routes nothing. Every
-    capture node now associates the agentRequest slot and escalates on it."""
-    out, notes = apply_runtime_contract(_capture_flow(), role="operation", data_requests={"getReturnStatus": _DR_DOC},
-                                        flow_ids=["ReturnStatus", "Fallback", "Escalation"], escalation_flow_id="Escalation",
-                                        slot_type_ids={"agentRequest", "yesNo"})
-    nodes = out["nodes"]
-    assert {"name": "agentRequest", "type": "agentRequest", "sensitive": False,
-            "aiDescription": "The customer asks for a human agent instead of continuing."} in out["slotTypes"]
-    for node_id in ("askR", "askO"):
-        node = nodes[node_id]
-        assert node["metadata"]["choice"]["associatedSlotTypeIds"] == ["agentRequest"]
-        first = node["childNodes"][0]
-        assert first["name"] == "agentRequested"
-        assert first["conditions"] == [{"left": {"type": "slot", "name": "agentRequest"}, "operator": "exists"}]
-        assert nodes[first["nodeId"]]["metadata"]["redirect"]["flowId"] == "Escalation"   # the flow's own escalation
-    assert sum("(E1)" in n for n in notes) == 3
-    # without the slot type in the bundle nothing is associated
-    plain, plain_notes = apply_runtime_contract(_capture_flow(), role="operation", data_requests={"getReturnStatus": _DR_DOC},
-                                                flow_ids=["ReturnStatus"], escalation_flow_id="Escalation", slot_type_ids={"yesNo"})
-    assert not any("(E1)" in n for n in plain_notes)
-    assert "associatedSlotTypeIds" not in plain["nodes"]["askR"]["metadata"]["choice"]

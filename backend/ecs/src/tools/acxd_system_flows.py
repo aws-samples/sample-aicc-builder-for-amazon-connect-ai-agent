@@ -58,12 +58,6 @@ CAPTURED_FLOW_PLACEHOLDER = "{System.capturedFlow:NLX.System}"
 YES_NO_SLOT_TYPE_ID = "yesNo"
 MORE_HELP_SLOT_NAME = "moreHelp"
 
-#: Custom slot type every operation capture node ALSO listens for, so a caller
-#: who asks for a human while a value is being collected is escalated instead of
-#: being told the value was not understood (live: '상담원 연결해 주세요' at the
-#: order-number prompt was answered with 'I could not catch the order number').
-AGENT_REQUEST_SLOT_TYPE_ID = "agentRequest"
-
 #: Context variables the system flows declare and use.
 FALLBACK_ATTEMPTS_VAR = "fallbackAttempts"
 FAIL_REASON_VAR = "failReason"
@@ -161,12 +155,7 @@ _TEXTS: dict[str, dict] = {
                         "괜찮아요", "동의하지 않아요", "동의 안 해요", "안 해요", "됐어요"],
         "faq_intro": "문의하신 내용을 안내해 드릴게요.",
         "faq_label": "자주 묻는 질문",
-        "agent": "상담원",
-        "agent_synonyms": ["상담원 연결", "상담원 연결해 주세요", "상담원이랑 이야기할게요", "상담사", "상담사 연결",
-                           "사람과 이야기하고 싶어요", "사람 연결해 주세요", "직원 연결", "담당자 연결", "고객센터 직원"],
-        "continue": "계속",
-        "continue_synonyms": ["계속 진행", "계속할게요", "계속해 주세요"],
-        "format_retry": "말씀하신 값이 형식에 맞지 않습니다. {prompt}",
+        "format_retry": "말씀하신 값이 형식에 맞지 않습니다.",
     },
     "en": {
         "greeting": "Hello, this is {company}. How can I help you today?",
@@ -195,12 +184,7 @@ _TEXTS: dict[str, dict] = {
                         "im good", "no i dont"],
         "faq_intro": "Here is what I found on that.",
         "faq_label": "general questions",
-        "agent": "agent",
-        "agent_synonyms": ["talk to an agent", "connect me to an agent", "human agent", "speak to a person",
-                           "representative", "real person", "customer service agent", "operator"],
-        "continue": "continue",
-        "continue_synonyms": ["keep going", "go on", "carry on"],
-        "format_retry": "That does not look like the right format. {prompt}",
+        "format_retry": "That does not look like the right format.",
     },
     "ja": {
         "greeting": "こんにちは、{company}です。ご用件をお伺いします。",
@@ -228,11 +212,7 @@ _TEXTS: dict[str, dict] = {
                         "いらない", "不要です", "以上です"],
         "faq_intro": "お問い合わせの内容についてご案内します。",
         "faq_label": "よくあるご質問",
-        "agent": "オペレーター",
-        "agent_synonyms": ["オペレーターにつないで", "担当者", "担当者と話したい", "人と話したい", "係の人", "有人対応"],
-        "continue": "続ける",
-        "continue_synonyms": ["続けてください", "そのまま進めて"],
-        "format_retry": "入力された値の形式が正しくありません。{prompt}",
+        "format_retry": "入力された値の形式が正しくありません。",
     },
 }
 
@@ -865,27 +845,10 @@ def build_yes_no_slot_type(spec: dict) -> dict:
     }
 
 
-def build_agent_request_slot_type(spec: dict) -> dict:
-    """The slot type operation capture nodes associate so 'connect me to a
-    human' said mid-capture is recognised. Two values on purpose: a one-value
-    custom type is auto-selected by the runtime without asking (live), and the
-    second value is a harmless 'continue'."""
-    text = _texts(system_flow_language(spec))
-    return {
-        "slotTypeId": AGENT_REQUEST_SLOT_TYPE_ID,
-        "values": [
-            {"value": text["agent"], "synonyms": list(text["agent_synonyms"])},
-            {"value": text["continue"], "synonyms": list(text["continue_synonyms"])},
-        ],
-        "sensitive": False,
-        "metadata": {},
-    }
-
-
-def format_retry_message(language: str, prompt: str) -> str:
-    """'That value does not fit the format' + the node's own prompt, in the project language."""
-    text = _texts(language)
-    return text["format_retry"].format(prompt=str(prompt or "").strip()).strip()
+def format_retry_message(language: str) -> str:
+    """'That value does not fit the format', in the project language. The capture
+    node re-asks with its own prompt right after, so the hint is not repeated."""
+    return _texts(language)["format_retry"]
 
 
 # ---------------------------------------------------------------------------
