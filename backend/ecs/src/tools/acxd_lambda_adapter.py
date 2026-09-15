@@ -129,6 +129,42 @@ def restorable_patterns(field_patterns: dict) -> dict:
             if isinstance(name, str) and isinstance(pat, str) and skeleton(pat) is not None}
 
 
+def _fits(value: str, pattern: str) -> Optional[str]:
+    """``value`` as it matches ``pattern`` (as is, or with separators restored), or None."""
+    try:
+        if isinstance(value, str) and re.fullmatch(pattern, value):
+            return value
+    except re.error:
+        return None
+    return restore(value, pattern)
+
+
+def reassign_misfiled(data: dict, field_patterns: dict) -> bool:
+    """Move a value that fits ANOTHER field's shape, and only that one, onto it.
+
+    Live (2026-09-15): a return-status flow collects a return number or an order
+    number, both ``NLX.AlphaNumeric``; the runtime does not enforce the attached
+    regex and put the order number the caller gave (``GC-20260902`` → ``GC20260902``)
+    into the return-number slot, so the lookup ran on a return id that cannot
+    exist and the caller was escalated. When the value fits none of its own
+    field's shape but exactly one other empty field's, it is that field's value.
+    Returns True when ``data`` changed."""
+    changed = False
+    for name, pattern in list((field_patterns or {}).items()):
+        value = data.get(name)
+        if not isinstance(value, str) or not value.strip() or _fits(value, pattern) is not None:
+            continue
+        targets = [(other, fixed) for other, other_pattern in field_patterns.items()
+                   if other != name and data.get(other) in (None, "")
+                   and (fixed := _fits(value, other_pattern)) is not None]
+        if len(targets) == 1:
+            other, fixed = targets[0]
+            data[other] = fixed
+            del data[name]
+            changed = True
+    return changed
+
+
 _WRAPPER = '''
 
 {marker}
@@ -205,6 +241,39 @@ def _aicc_restore(value, pattern):
     return candidate if _aicc_re.fullmatch(pattern, candidate) else None
 
 
+def _aicc_fits(value, pattern):
+    try:
+        if isinstance(value, str) and _aicc_re.fullmatch(pattern, value):
+            return value
+    except Exception:
+        return None
+    return _aicc_restore(value, pattern)
+
+
+def _aicc_reassign_misfiled(data):
+    # The runtime does not enforce a slot's regex: an order number given where a
+    # return number was asked lands in the return-number field (live). A value
+    # that fits none of its own field's shape but exactly one other empty
+    # field's is that field's value.
+    changed = False
+    for name, pattern in list(_AICC_FIELD_PATTERNS.items()):
+        value = data.get(name)
+        if not isinstance(value, str) or not value.strip() or _aicc_fits(value, pattern) is not None:
+            continue
+        targets = []
+        for other, other_pattern in _AICC_FIELD_PATTERNS.items():
+            if other == name or data.get(other) not in (None, ""):
+                continue
+            fixed = _aicc_fits(value, other_pattern)
+            if fixed is not None:
+                targets.append((other, fixed))
+        if len(targets) == 1:
+            data[targets[0][0]] = targets[0][1]
+            del data[name]
+            changed = True
+    return changed
+
+
 def _aicc_restore_formats(event):
     try:
         body = event.get("body") if isinstance(event, dict) else None
@@ -217,6 +286,8 @@ def _aicc_restore_formats(event):
             if fixed is not None:
                 data[name] = fixed
                 changed = True
+        if _aicc_reassign_misfiled(data):
+            changed = True
         if changed:
             event = dict(event)
             event["body"] = _aicc_json.dumps(data, ensure_ascii=False) if isinstance(body, str) else data

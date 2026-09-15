@@ -136,3 +136,31 @@ def test_a_reply_without_the_success_flag_gets_it_derived():
     assert missing["success"] is False
     err = _json.loads(ns["lambda_handler"]({"body": _json.dumps({"returnId": "x"})}, None)["body"])
     assert err["success"] is False
+
+
+def test_a_value_that_fits_only_another_field_is_moved_there():
+    """Live (2026-09-15): the return-status flow asks for a return number
+    (^RT-\\d{6}$) and then an order number (^GC-\\d{8}$), both NLX.AlphaNumeric. The
+    runtime does not enforce the attached regex, so an order number typed at the
+    return-number prompt arrived as returnId="GC20260902" and the lookup escalated
+    the caller. The wrapper moves it onto orderNumber (separators restored)."""
+    from tools.acxd_lambda_adapter import reassign_misfiled
+
+    patterns = {"returnId": r"^RT-\d{6}$", "orderNumber": r"^GC-\d{8}$", "contactPhone": r"^010-\d{4}-\d{4}$"}
+    data = {"returnId": "GC20260902"}
+    assert reassign_misfiled(data, patterns) is True
+    assert data == {"orderNumber": "GC-20260902"}
+    # a value that fits its own field, or fits nothing, or fits two candidates, stays put
+    for payload in ({"returnId": "RT100001"}, {"returnId": "hello"},
+                    {"returnId": "GC20260902", "orderNumber": "GC-20260901"}):
+        before = dict(payload)
+        assert reassign_misfiled(payload, patterns) is False and payload == before
+
+    handler = ("import json\n"
+               "def lambda_handler(event, context):\n"
+               "    return {'statusCode': 200, 'body': event['body']}\n")
+    code, _ = inject(handler, patterns)
+    module = types.ModuleType("h")
+    exec(compile(code, "h.py", "exec"), module.__dict__)
+    out = module.lambda_handler({"body": json.dumps({"returnId": "GC20260902", "nlx_context": {}})}, None)
+    assert json.loads(out["body"]) == {"orderNumber": "GC-20260902", "nlx_context": {}, "success": True}
