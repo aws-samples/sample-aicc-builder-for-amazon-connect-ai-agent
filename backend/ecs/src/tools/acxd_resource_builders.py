@@ -174,15 +174,18 @@ def build_slot_types(spec: dict) -> tuple[list[dict], list[str]]:
     # bare {"slot_types": [...]} with no language, and guessing English there
     # would overwrite a Korean project's yesNo values.
     if any(spec.get(key) for key in ("flows", "application", "business_profile")):
-        from tools.acxd_system_flows import build_yes_no_slot_type
+        from tools.acxd_system_flows import build_agent_request_slot_type, build_yes_no_slot_type
 
-        yes_no = build_yes_no_slot_type(spec)
-        if yes_no["slotTypeId"] not in seen:
-            errors = validate_acxd_asset("slot_type", yes_no)
+        for builder, label in ((build_yes_no_slot_type, "yesNo"),
+                               (build_agent_request_slot_type, "agentRequest")):
+            doc = builder(spec)
+            if doc["slotTypeId"] in seen:
+                continue
+            errors = validate_acxd_asset("slot_type", doc)
             if errors:  # pragma: no cover - deterministic document
-                problems.extend(f"slot_types[yesNo]: {error}" for error in errors)
+                problems.extend(f"slot_types[{label}]: {error}" for error in errors)
             else:
-                docs.append(yes_no)
+                docs.append(doc)
     return docs, problems
 
 

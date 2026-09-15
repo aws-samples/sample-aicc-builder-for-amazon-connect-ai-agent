@@ -218,7 +218,10 @@ def stub_bundle_for_validation(spec: dict, flow: dict) -> dict:
         if _needs_slot_type_stub(st):
             planned.add(st)
 
-    from tools.acxd_system_flows import YES_NO_SLOT_TYPE_ID, build_yes_no_slot_type
+    from tools.acxd_system_flows import (
+        AGENT_REQUEST_SLOT_TYPE_ID, YES_NO_SLOT_TYPE_ID,
+        build_agent_request_slot_type, build_yes_no_slot_type,
+    )
 
     slot_types = []
     for st in sorted(declared | planned):
@@ -227,6 +230,8 @@ def stub_bundle_for_validation(spec: dict, flow: dict) -> dict:
             # document's own values, so a placeholder value would make a correct
             # comparison look wrong.
             slot_types.append(build_yes_no_slot_type(spec))
+        elif st == AGENT_REQUEST_SLOT_TYPE_ID:
+            slot_types.append(build_agent_request_slot_type(spec))
         else:
             slot_types.append({"slotTypeId": st, "values": [{"value": "stub"}]})
     # Real documents, not placeholders: build_data_request is deterministic and
@@ -1062,6 +1067,7 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
     rules are checked against.
     """
     from tools.acxd_system_flows import (
+        AGENT_REQUEST_SLOT_TYPE_ID,
         YES_NO_SLOT_TYPE_ID,
         resolve_system_flow_ids,
     )
@@ -1072,6 +1078,10 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
         # build_slot_types always emits it, so the normalizer may rely on it.
         from tools.acxd_system_flows import build_yes_no_slot_type
         slot_type_docs[YES_NO_SLOT_TYPE_ID] = build_yes_no_slot_type(spec)
+    if AGENT_REQUEST_SLOT_TYPE_ID not in slot_type_docs:
+        # ...and the slot type every capture node associates for agent requests (E1).
+        from tools.acxd_system_flows import build_agent_request_slot_type
+        slot_type_docs[AGENT_REQUEST_SLOT_TYPE_ID] = build_agent_request_slot_type(spec)
 
     data_requests: dict = {}
     for integration in spec.get("data_integrations") or []:

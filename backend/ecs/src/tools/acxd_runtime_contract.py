@@ -249,6 +249,50 @@ def _slot_condition(slot: str, operator: str) -> dict:
     return {"left": {"type": "slot", "name": slot}, "operator": operator}
 
 
+#: F1 — the context counter a flow keeps of wrong-format answers, and how many
+#: in a row send the caller down the node's own "not captured" path instead of
+#: asking a fourth time.
+FORMAT_RETRIES_VAR = "formatRetries"
+MAX_FORMAT_RETRIES = 2
+#: E1 — the slot every capture node also listens on for "connect me to a human".
+AGENT_REQUEST_SLOT = "agentRequest"
+_OPTIONAL_SEPARATOR = "[-. /:]?"
+
+
+def runtime_regex(pattern: Any) -> Optional[str]:
+    """The regex a ``matches_regex`` condition must use for a captured slot value.
+
+    The runtime delivers built-in slot values without their separators
+    (``GC-20260902`` → ``GC20260902``) — but not always (a phone number arrived
+    with dashes in one deployment and without in another) — so every separator
+    of a fixed-shape pattern becomes optional and literal letters match either
+    case. A pattern with no fixed shape is used as written when it compiles.
+    """
+    if not isinstance(pattern, str) or not pattern.strip():
+        return None
+    try:
+        from tools.acxd_lambda_adapter import skeleton
+        parts = skeleton(pattern)
+    except Exception:  # pragma: no cover - adapter unavailable in a stub
+        parts = None
+    if parts is None:
+        try:
+            re.compile(pattern)
+        except re.error:
+            return None
+        return pattern
+    out = ["^"]
+    for kind, text in parts:
+        if kind == "sep":
+            out.append(_OPTIONAL_SEPARATOR)
+        elif kind == "lit":
+            out.append("".join(f"[{c.upper()}{c.lower()}]" if c.isalpha() else re.escape(c) for c in text))
+        else:
+            out.append(("[0-9]" if text[0] == "d" else "[A-Za-z0-9]") + "{" + str(len(text)) + "}")
+    out.append("$")
+    return "".join(out)
+
+
 def _has_status(edge: dict, status: str) -> bool:
     for condition in edge.get("conditions") or []:
         if not isinstance(condition, dict):
@@ -1308,6 +1352,193 @@ class _RuntimeContract:
         return None
 
     # ==================================================================
+    # F1 — a captured value of the wrong shape is re-asked, not sent
+    # ==================================================================
+
+    def _attached_regexes(self) -> dict:
+        """slot name -> regex, for attached built-in slots that carry one."""
+        out: dict = {}
+        for slot in self.attached:
+            regex = slot.get("regex")
+            if str(slot.get("type") or "").startswith("NLX.") and isinstance(regex, str) and regex.strip():
+                out[str(slot["name"])] = regex
+        return out
+
+    def _no_match_target(self, node_id: str, node: dict, slot: str) -> Optional[str]:
+        """Where the node's own 'not captured' edge goes — unless that is a
+        recovery loop back to the same node, which would ask a fourth time."""
+        for edge in _edges(node):
+            if _captures_slot(edge, slot):
+                continue
+            conds = [c for c in (edge.get("conditions") or []) if isinstance(c, dict)]
+            not_captured = any((c.get("left") or {}).get("type") == "slot"
+                               and (c.get("left") or {}).get("name") == slot
+                               and c.get("operator") == "not_exists" for c in conds)
+            if conds and not not_captured:
+                continue  # some other guarded edge (e.g. the E1 agent escape)
+            target_id = edge.get("nodeId")
+            if not isinstance(target_id, str) or target_id == node_id:
+                return None
+            target = self.nodes.get(target_id)
+            if isinstance(target, dict) and any(e.get("nodeId") == node_id for e in _edges(target)):
+                return None  # the R6 recovery loop
+            return target_id
+        return None
+
+    def _fallback_flow_id(self) -> str:
+        for flow_id in sorted(self.flow_ids or []):
+            if str(flow_id).lower().startswith("fallback"):
+                return str(flow_id)
+        return "Fallback"
+
+    def _fallback_redirect(self) -> str:
+        """A redirect to the application's fallback flow (created once per flow)."""
+        node_id = _derived_id("4f1a00ff", f"{self.flow_id}#formatGiveUp")
+        if node_id not in self.nodes:
+            end_id = next((nid for nid, _ in self.nodes_of_type("end")), None)
+            self.nodes[node_id] = {
+                "nodeId": node_id, "type": "redirect",
+                "metadata": {"redirect": {"type": "flow", "flowId": self._fallback_flow_id()}},
+                **({"childNodes": [{"nodeId": end_id, "name": "next"}]} if end_id else {}),
+            }
+        return node_id
+
+    def _declare_context(self, name: str, var_type: str) -> None:
+        declared = self.flow.get("contextVariables")
+        if not isinstance(declared, list):
+            declared = []
+            self.flow["contextVariables"] = declared
+        if not any(isinstance(v, dict) and v.get("name") == name for v in declared):
+            declared.append({"name": name, "type": var_type})
+
+    def rule_f1(self) -> None:
+        """Live (2026-09-15): the regex attached to a built-in slot does NOT gate
+        capture — an order number typed at the return-number prompt was stored in
+        ``returnId`` and the lookup escalated the caller. Every capture of a
+        pattern-bearing slot is followed by a ``matches_regex`` check: a value of
+        the wrong shape clears the slot, tells the caller and re-asks; after
+        MAX_FORMAT_RETRIES wrong answers the node's own 'not captured' path (or
+        the fallback flow) takes over."""
+        if self.role != "operation":
+            return
+        regexes = self._attached_regexes()
+        if not regexes:
+            return
+        from tools.acxd_system_flows import format_retry_message
+        language = "ko" if self.is_korean() else str(self.flow.get("mainLanguageCode") or "en")[:2]
+        for node_id, node in list(self.nodes_of_type("user_choice")):
+            slot = self.choice_slot(node)
+            if not slot or slot not in regexes:
+                continue
+            pattern = runtime_regex(regexes[slot])
+            if not pattern:
+                continue
+            capture_edge = next((e for e in _edges(node) if _captures_slot(e, slot)), None)
+            if capture_edge is None:
+                continue
+            seed = f"{self.flow_id}#fmt#{node_id}#{slot}"
+            guard_id = _derived_id("4f1a0000", seed)
+            if capture_edge.get("nodeId") == guard_id or guard_id in self.nodes:
+                continue  # already guarded (idempotent re-run)
+            ok_id = _derived_id("4f1a0001", seed)
+            retry_id = _derived_id("4f1a0002", seed)
+            check_id = _derived_id("4f1a0003", seed)
+            target_id = capture_edge.get("nodeId")
+            give_up = self._no_match_target(node_id, node, slot) or self._fallback_redirect()
+            prompt = self._first_body(node) or ""
+            self.nodes[guard_id] = {
+                "nodeId": guard_id, "type": "choice",
+                "childNodes": [
+                    {"nodeId": ok_id, "name": "formatValid", "conditions": [{
+                        "left": {"type": "slot", "name": slot}, "operator": "matches_regex",
+                        "right": {"type": "constant", "value": pattern}}]},
+                    {"nodeId": retry_id, "name": "formatInvalid"},
+                ]}
+            self.nodes[ok_id] = {
+                "nodeId": ok_id, "type": "basic",
+                "metadata": {"stateModifications": [{
+                    "type": "context", "name": FORMAT_RETRIES_VAR, "modification": "set",
+                    "value": {"type": "constant", "value": 0}}]},
+                "childNodes": [{"nodeId": target_id, "name": "next"}]}
+            self.nodes[retry_id] = {
+                "nodeId": retry_id, "type": "basic",
+                "messages": [{"type": "text", "body": format_retry_message(language, prompt)}],
+                "metadata": {"stateModifications": [
+                    _clear_modification(slot),
+                    {"type": "context", "name": FORMAT_RETRIES_VAR, "modification": "increment"}]},
+                "childNodes": [{"nodeId": check_id, "name": "next"}]}
+            self.nodes[check_id] = {
+                "nodeId": check_id, "type": "choice",
+                "childNodes": [
+                    {"nodeId": give_up, "name": "formatGiveUp", "conditions": [{
+                        "left": {"type": "context", "name": FORMAT_RETRIES_VAR}, "operator": "gte",
+                        "right": {"type": "constant", "value": MAX_FORMAT_RETRIES}}]},
+                    {"nodeId": node_id, "name": "askAgain"},
+                ]}
+            capture_edge["nodeId"] = guard_id
+            self._declare_context(FORMAT_RETRIES_VAR, "number")
+            self.change(
+                f"{_label(node_id, node)}: captured {slot!r} is checked against {pattern} before use; "
+                f"a wrong shape clears the slot and re-asks, {MAX_FORMAT_RETRIES} misses → "
+                f"[{str(give_up)[:8]}] (F1)")
+
+    # ==================================================================
+    # E1 — "connect me to a human" said while a value is being collected
+    # ==================================================================
+
+    def rule_e1(self) -> None:
+        """Live (2026-09-15): '상담원 연결해 주세요' at the order-number prompt was
+        treated as a bad order number. A ``user_choice`` node routes nothing, so
+        every operation capture node also listens on the ``agentRequest`` slot
+        (associated slot type) and hands the caller to the escalation when it is
+        captured."""
+        if self.role != "operation":
+            return
+        captures = [(nid, n) for nid, n in self.nodes_of_type("user_choice")
+                    if self.choice_slot(n) and self.choice_slot(n) != AGENT_REQUEST_SLOT]
+        if not captures:
+            return
+        if self.slot_type_ids is not None and AGENT_REQUEST_SLOT not in self.slot_type_ids:
+            return  # the bundle does not ship the slot type; nothing to associate
+        if AGENT_REQUEST_SLOT not in self.slot_names:
+            slots = self.flow.get("slotTypes")
+            if not isinstance(slots, list):
+                slots = []
+                self.flow["slotTypes"] = slots
+            slots.append({"name": AGENT_REQUEST_SLOT, "type": AGENT_REQUEST_SLOT, "sensitive": False,
+                          "aiDescription": "The customer asks for a human agent instead of continuing."})
+            self.change(f"attached slot {AGENT_REQUEST_SLOT!r} for mid-capture agent requests (E1)")
+        escalate_id = self.escalation_target()
+        if escalate_id is None:
+            escalate_id = _derived_id("4e1a0000", f"{self.flow_id}#agentEscape")
+            end_id = next((nid for nid, _ in self.nodes_of_type("end")), None)
+            self.nodes[escalate_id] = {
+                "nodeId": escalate_id, "type": "redirect",
+                "metadata": {"redirect": {"type": "flow", "flowId": self.escalation_flow_id},
+                             "stateModifications": [{"type": "context", "name": "failReason",
+                                                     "modification": "set",
+                                                     "value": {"type": "constant",
+                                                               "value": "customer_requested_agent"}}]},
+                **({"childNodes": [{"nodeId": end_id, "name": "next"}]} if end_id else {}),
+            }
+            self._declare_context("failReason", "text")
+        for node_id, node in captures:
+            choice = _meta(node).setdefault("choice", {})
+            associated = choice.get("associatedSlotTypeIds")
+            if not isinstance(associated, list):
+                associated = []
+                choice["associatedSlotTypeIds"] = associated
+            if AGENT_REQUEST_SLOT not in associated:
+                associated.append(AGENT_REQUEST_SLOT)
+            edges = _edges(node)
+            if any(_captures_slot(e, AGENT_REQUEST_SLOT) for e in edges):
+                continue
+            node["childNodes"] = [{"nodeId": escalate_id, "name": "agentRequested",
+                                   "conditions": [_slot_condition(AGENT_REQUEST_SLOT, "exists")]}] + edges
+            self.change(f"{_label(node_id, node)}: also listens for {AGENT_REQUEST_SLOT!r} → "
+                        f"escalation [{escalate_id[:8]}] (E1)")
+
+    # ==================================================================
     # R3 — operation flows hand back, they never end the session
     # ==================================================================
 
@@ -2000,6 +2231,8 @@ class _RuntimeContract:
         self.rule_m2()
         self.rule_r7()
         self.rule_r6()
+        self.rule_f1()
+        self.rule_e1()
         self.rule_r3()
         self.rule_s6()
         self.rule_d3()

@@ -1252,10 +1252,20 @@ def test_p1_a_request_reached_by_alternative_captures_sends_only_the_slots_each_
     requests = {nid: n["dataRequests"][0]["payload"] for nid, n in out["nodes"].items() if n["type"] == "data_request"}
     payloads = sorted(tuple(sorted(p)) for p in requests.values())
     assert payloads == [("orderNumber",), ("returnId",)]          # one request per capture path, one slot each
-    by_return = out["nodes"]["askR"]["childNodes"][0]["nodeId"]
-    by_order = out["nodes"]["askO"]["childNodes"][0]["nodeId"]
-    assert requests[by_return] == {"returnId": "{returnId:NLX.Slot}"}
-    assert requests[by_order] == {"orderNumber": "{orderNumber:NLX.Slot}"}
+
+    def _request_after_capture(node_id, slot):
+        # the capture edge (slot exists) → F1 format guard → its 'formatValid' basic → the data request
+        edge = next(e for e in out["nodes"][node_id]["childNodes"]
+                    if any(c.get("operator") == "exists" and c["left"].get("name") == slot for c in e.get("conditions") or []))
+        nid = edge["nodeId"]
+        for _ in range(4):
+            if out["nodes"][nid]["type"] == "data_request":
+                return nid
+            nid = out["nodes"][nid]["childNodes"][0]["nodeId"]
+        raise AssertionError(f"no data request after {node_id}")
+
+    assert requests[_request_after_capture("askR", "returnId")] == {"returnId": "{returnId:NLX.Slot}"}
+    assert requests[_request_after_capture("askO", "orderNumber")] == {"orderNumber": "{orderNumber:NLX.Slot}"}
     assert sum("P1)" in n for n in notes) == 2
 
 
@@ -1348,3 +1358,121 @@ def test_review_gate_sees_impossible_enum_constants_through_the_spec():
     assert any("D5" in m and "'rejected'" in m and "never returns" in m for m in with_spec), with_spec
     without_spec = [v.message for v in validate_acxd_consistency(bundle) if v.code == "RUNTIME_CONTRACT"]
     assert not any("'rejected'" in m for m in without_spec)
+
+
+def _capture_flow():
+    """Return-status lookup: return number, else order number, else escalate."""
+    def uc(nid, slot, prompt, captured_to, missing_to):
+        return {"nodeId": nid, "type": "user_choice", "messages": [{"type": "text", "body": prompt}],
+                "metadata": {"choice": {"source": "slotType", "slotTypeId": slot}},
+                "childNodes": [{"nodeId": captured_to, "name": "captured",
+                                "conditions": [{"left": {"type": "slot", "name": slot}, "operator": "exists"}]},
+                               {"nodeId": missing_to, "name": "missing",
+                                "conditions": [{"left": {"type": "slot", "name": slot}, "operator": "not_exists"}]}]}
+    return {"flowId": "ReturnStatus", "mainLanguageCode": "ko-KR", "nodes": {
+        "s": {"nodeId": "s", "type": "start", "childNodes": [{"nodeId": "askR", "name": "ask"}]},
+        "askR": uc("askR", "returnId", "반품번호를 알려주세요.", "dr", "askO"),
+        "askO": uc("askO", "orderNumber", "주문번호를 알려주세요.", "dr", "esc"),
+        "dr": {"nodeId": "dr", "type": "data_request",
+               "dataRequests": [{"dataRequestId": "getReturnStatus", "payload": {"returnId": "{returnId:NLX.Slot}"}}],
+               "childNodes": [{"nodeId": "say", "name": "success",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "success"}}]},
+                              {"nodeId": "esc", "name": "failure",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "failure"}}]}]},
+        "say": {"nodeId": "say", "type": "basic", "messages": [{"type": "text", "body": "상태 {getReturnStatus.status:NLX.Variable}"}],
+                "childNodes": [{"nodeId": "end", "name": "done"}]},
+        "esc": {"nodeId": "esc", "type": "redirect", "metadata": {"redirect": {"type": "flow", "flowId": "Escalation"}},
+                "childNodes": [{"nodeId": "end", "name": "next"}]},
+        "end": {"nodeId": "end", "type": "end"},
+    }, "slotTypes": [{"name": "returnId", "type": "NLX.AlphaNumeric", "sensitive": False, "regex": "^RT-[0-9]{6}$"},
+                     {"name": "orderNumber", "type": "NLX.AlphaNumeric", "sensitive": False, "regex": "^GC-[0-9]{8}$"}]}
+
+
+_DR_DOC = {"dataRequestId": "getReturnStatus", "webhook": {"url": "{WEBHOOK_URL}/tools/get_return_status"},
+           "requestSchema": {"type": "object", "properties": {"returnId": {"type": "string"}, "orderNumber": {"type": "string"}}},
+           "responseSchema": {"type": "object", "properties": {"success": {"type": "boolean"}, "status": {"type": "string"}}}}
+
+
+def test_runtime_regex_makes_separators_optional_and_letters_case_insensitive():
+    import re
+    from tools.acxd_runtime_contract import runtime_regex
+    assert runtime_regex(r"^GC-\d{8}$") == "^[Gg][Cc][-. /:]?[0-9]{8}$"
+    assert runtime_regex(r"^010-\d{4}-\d{4}$") == "^010[-. /:]?[0-9]{4}[-. /:]?[0-9]{4}$"
+    for delivered in ("GC20260902", "GC-20260902", "gc 20260902"):
+        assert re.fullmatch(runtime_regex(r"^GC-\d{8}$"), delivered)
+    assert not re.fullmatch(runtime_regex(r"^RT-\d{6}$"), "GC20260902")
+    assert runtime_regex(r"^[0-9]{8}$") == r"^[0-9]{8}$"        # already compact: used as written
+    assert runtime_regex("(") is None and runtime_regex(None) is None
+
+
+def test_f1_guards_a_pattern_slot_with_a_matches_regex_check_and_a_bounded_retry():
+    """Live (2026-09-15): the attached regex did not gate capture — an order number
+    typed at the return-number prompt was stored in returnId and the lookup
+    escalated. The captured value is now checked before use."""
+    out, notes = apply_runtime_contract(_capture_flow(), role="operation", data_requests={"getReturnStatus": _DR_DOC},
+                                        flow_ids=["ReturnStatus", "Fallback", "Escalation"], escalation_flow_id="Escalation",
+                                        slot_type_ids={"agentRequest", "yesNo"})
+    nodes = out["nodes"]
+    ask = nodes["askR"]
+    capture = next(e for e in ask["childNodes"] if any(c.get("operator") == "exists" and c["left"]["name"] == "returnId"
+                                                       for c in e.get("conditions") or []))
+    guard = nodes[capture["nodeId"]]
+    assert guard["type"] == "choice"
+    valid, invalid = guard["childNodes"]
+    assert valid["conditions"] == [{"left": {"type": "slot", "name": "returnId"}, "operator": "matches_regex",
+                                    "right": {"type": "constant", "value": "^[Rr][Tt][-. /:]?[0-9]{6}$"}}]
+    ok = nodes[valid["nodeId"]]
+    assert ok["type"] == "basic" and ok["metadata"]["stateModifications"][0]["name"] == "formatRetries"
+    assert nodes[ok["childNodes"][0]["nodeId"]]["type"] == "data_request"
+    retry = nodes[invalid["nodeId"]]
+    assert retry["messages"][0]["body"] == "말씀하신 값이 형식에 맞지 않습니다. 반품번호를 알려주세요."
+    assert {"type": "slot", "name": "returnId", "modification": "clear"} in retry["metadata"]["stateModifications"]
+    check = nodes[retry["childNodes"][0]["nodeId"]]
+    give_up, again = check["childNodes"]
+    assert give_up["conditions"][0]["left"] == {"type": "context", "name": "formatRetries"} and give_up["conditions"][0]["right"]["value"] == 2
+    assert give_up["nodeId"] == "askO"           # the node's own 'not captured' path: ask for the order number
+    assert again["nodeId"] == "askR"
+    assert {"name": "formatRetries", "type": "number"} in out["contextVariables"]
+    # the order-number node has no further question to fall back to → the fallback flow
+    order_guard = nodes[next(e for e in nodes["askO"]["childNodes"]
+                             if any(c.get("operator") == "exists" and c["left"]["name"] == "orderNumber"
+                                    for c in e.get("conditions") or []))["nodeId"]]
+    order_check = nodes[nodes[order_guard["childNodes"][1]["nodeId"]]["childNodes"][0]["nodeId"]]
+    give_up_target = nodes[order_check["childNodes"][0]["nodeId"]]
+    assert give_up_target["type"] == "redirect" and give_up_target["metadata"]["redirect"]["flowId"] == "Escalation" \
+        or give_up_target["metadata"]["redirect"]["flowId"] == "Fallback"
+    assert sum("(F1)" in n for n in notes) == 2
+    # idempotent: a second pass adds nothing
+    again_out, again_notes = apply_runtime_contract(out, role="operation", data_requests={"getReturnStatus": _DR_DOC},
+                                                    flow_ids=["ReturnStatus", "Fallback", "Escalation"],
+                                                    escalation_flow_id="Escalation", slot_type_ids={"agentRequest", "yesNo"})
+    assert not any("(F1)" in n for n in again_notes) and len(again_out["nodes"]) == len(nodes)
+    import re
+    v4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+    added = [nid for nid in nodes if nid not in _capture_flow()["nodes"]]
+    assert added and all(v4.match(nid) for nid in added), added      # every node the rule adds is v4-shaped
+
+
+def test_e1_every_capture_node_also_listens_for_an_agent_request():
+    """Live (2026-09-15): '상담원 연결해 주세요' at the order-number prompt was
+    treated as a bad order number — a user_choice node routes nothing. Every
+    capture node now associates the agentRequest slot and escalates on it."""
+    out, notes = apply_runtime_contract(_capture_flow(), role="operation", data_requests={"getReturnStatus": _DR_DOC},
+                                        flow_ids=["ReturnStatus", "Fallback", "Escalation"], escalation_flow_id="Escalation",
+                                        slot_type_ids={"agentRequest", "yesNo"})
+    nodes = out["nodes"]
+    assert {"name": "agentRequest", "type": "agentRequest", "sensitive": False,
+            "aiDescription": "The customer asks for a human agent instead of continuing."} in out["slotTypes"]
+    for node_id in ("askR", "askO"):
+        node = nodes[node_id]
+        assert node["metadata"]["choice"]["associatedSlotTypeIds"] == ["agentRequest"]
+        first = node["childNodes"][0]
+        assert first["name"] == "agentRequested"
+        assert first["conditions"] == [{"left": {"type": "slot", "name": "agentRequest"}, "operator": "exists"}]
+        assert nodes[first["nodeId"]]["metadata"]["redirect"]["flowId"] == "Escalation"   # the flow's own escalation
+    assert sum("(E1)" in n for n in notes) == 3
+    # without the slot type in the bundle nothing is associated
+    plain, plain_notes = apply_runtime_contract(_capture_flow(), role="operation", data_requests={"getReturnStatus": _DR_DOC},
+                                                flow_ids=["ReturnStatus"], escalation_flow_id="Escalation", slot_type_ids={"yesNo"})
+    assert not any("(E1)" in n for n in plain_notes)
+    assert "associatedSlotTypeIds" not in plain["nodes"]["askR"]["metadata"]["choice"]
