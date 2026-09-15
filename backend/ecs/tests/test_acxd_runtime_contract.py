@@ -1452,3 +1452,81 @@ def test_f1_guards_a_pattern_slot_with_a_matches_regex_check_and_a_bounded_retry
     v4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
     added = [nid for nid in nodes if nid not in _capture_flow()["nodes"]]
     assert added and all(v4.match(nid) for nid in added), added      # every node the rule adds is v4-shaped
+
+
+def _intake_flow():
+    """Fresh generation (2026-09-15): every 'not captured' edge went on to the NEXT
+    question, so a missed order number reached the intake request unasked."""
+    def uc(nid, slot, prompt, captured_to, missing_to):
+        return {"nodeId": nid, "type": "user_choice", "messages": [{"type": "text", "body": prompt}],
+                "metadata": {"choice": {"source": "slotType", "slotTypeId": slot}},
+                "childNodes": [{"nodeId": captured_to, "name": f"{slot} captured",
+                                "conditions": [{"left": {"type": "slot", "name": slot}, "operator": "exists"}]},
+                               {"nodeId": missing_to, "name": f"{slot} not captured",
+                                "conditions": [{"left": {"type": "slot", "name": slot}, "operator": "not_exists"}]}]}
+    return {"flowId": "RequestReturn", "mainLanguageCode": "ko-KR", "nodes": {
+        "s": {"nodeId": "s", "type": "start", "childNodes": [{"nodeId": "askO", "name": "ask"}]},
+        "askO": uc("askO", "orderNumber", "반품하실 주문번호를 알려주세요.", "askP", "askP"),
+        "askP": uc("askP", "contactPhone", "연락처를 알려주세요.", "dr", "esc"),
+        "dr": {"nodeId": "dr", "type": "data_request",
+               "dataRequests": [{"dataRequestId": "requestReturn",
+                                 "payload": {"orderNumber": "{orderNumber:NLX.Slot}", "contactPhone": "{contactPhone:NLX.Slot}"}}],
+               "childNodes": [{"nodeId": "say", "name": "success",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "success"}}]},
+                              {"nodeId": "esc", "name": "failure",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "failure"}}]}]},
+        "say": {"nodeId": "say", "type": "basic", "messages": [{"type": "text", "body": "접수 {requestReturn.returnId:NLX.Variable}"}],
+                "childNodes": [{"nodeId": "end", "name": "done"}]},
+        "esc": {"nodeId": "esc", "type": "redirect", "metadata": {"redirect": {"type": "flow", "flowId": "Escalation"}},
+                "childNodes": [{"nodeId": "end", "name": "next"}]},
+        "end": {"nodeId": "end", "type": "end"},
+    }, "slotTypes": [{"name": "orderNumber", "type": "NLX.AlphaNumeric", "sensitive": False, "regex": "^GC-[0-9]{8}$"},
+                     {"name": "contactPhone", "type": "NLX.PhoneNumber", "sensitive": False}]}
+
+
+_INTAKE_DOC = {"dataRequestId": "requestReturn", "webhook": {"url": "{WEBHOOK_URL}/tools/request_return"},
+               "requestSchema": {"type": "object", "required": ["orderNumber", "contactPhone"],
+                                 "properties": {"orderNumber": {"type": "string"}, "contactPhone": {"type": "string"}}},
+               "responseSchema": {"type": "object", "properties": {"success": {"type": "boolean"}, "returnId": {"type": "string"}}}}
+
+
+def test_r8_a_missed_value_the_request_needs_is_re_asked_not_skipped():
+    out, notes = apply_runtime_contract(_intake_flow(), role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+                                        flow_ids=["RequestReturn", "Fallback", "Escalation"], escalation_flow_id="Escalation",
+                                        slot_type_ids={"yesNo"})
+    nodes = out["nodes"]
+    missing = next(e for e in nodes["askO"]["childNodes"]
+                   if any(c.get("operator") == "not_exists" for c in e.get("conditions") or []))
+    recovery = nodes[missing["nodeId"]]
+    assert recovery["type"] == "basic" and recovery["childNodes"] == [{"nodeId": "askO", "name": "retry"}]
+    assert {"type": "slot", "name": "orderNumber", "modification": "clear"} in recovery["metadata"]["stateModifications"]
+    assert recovery["messages"][0]["body"]
+    assert any("(R8)" in n and "orderNumber" in n for n in notes), notes
+    # the request keeps its full payload: no path reaches it without the order number any more
+    request = next(n for n in nodes.values() if n.get("type") == "data_request")
+    assert set(request["dataRequests"][0]["payload"]) == {"orderNumber", "contactPhone"}
+    assert sum(n.get("type") == "data_request" for n in nodes.values()) == 1
+    assert not any("(P1)" in n for n in notes)
+    # a missed phone number goes to the escalation — that path sends nothing, so it is left alone
+    phone_missing = next(e for e in nodes["askP"]["childNodes"]
+                         if any(c.get("operator") == "not_exists" for c in e.get("conditions") or []))
+    assert phone_missing["nodeId"] == "esc"
+    # F1's give-up for the order number is the fallback flow, not the next question
+    guard = nodes[next(e for e in nodes["askO"]["childNodes"]
+                       if any(c.get("operator") == "exists" for c in e.get("conditions") or []))["nodeId"]]
+    check = nodes[nodes[guard["childNodes"][1]["nodeId"]]["childNodes"][0]["nodeId"]]
+    give_up = nodes[check["childNodes"][0]["nodeId"]]
+    assert give_up["type"] == "redirect" and give_up["metadata"]["redirect"]["flowId"] == "Fallback"
+    assert check["childNodes"][0]["conditions"][0]["right"]["value"] == 2
+
+
+def test_r8_leaves_an_alternative_identifier_path_alone():
+    """Return number OR order number: the request reached without the return
+    number does not send it, so 'not captured → ask the order number' stands."""
+    out, notes = apply_runtime_contract(_capture_flow(), role="operation", data_requests={"getReturnStatus": _DR_DOC},
+                                        flow_ids=["ReturnStatus", "Fallback", "Escalation"], escalation_flow_id="Escalation",
+                                        slot_type_ids={"yesNo"})
+    missing = next(e for e in out["nodes"]["askR"]["childNodes"]
+                   if any(c.get("operator") == "not_exists" for c in e.get("conditions") or []))
+    assert missing["nodeId"] == "askO"
+    assert not any("(R8)" in n for n in notes)

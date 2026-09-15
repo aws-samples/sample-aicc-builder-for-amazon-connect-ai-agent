@@ -1350,6 +1350,96 @@ class _RuntimeContract:
         return None
 
     # ==================================================================
+    # R8 — a "not captured" path must not skip a value a request needs
+    # ==================================================================
+
+    def _required_payload_slots(self, node: dict) -> set[str]:
+        """Slot names a data request node sends in a payload field the request's
+        schema lists as ``required``. A field the schema leaves optional (a return
+        number OR an order number) may legitimately be absent on some path."""
+        out: set[str] = set()
+        entries = node.get("dataRequests") if isinstance(node.get("dataRequests"), list) else []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            document = self.data_requests.get(str(entry.get("dataRequestId") or ""))
+            schema = (document or {}).get("requestSchema") if isinstance(document, dict) else None
+            required = schema.get("required") if isinstance(schema, dict) else None
+            if not isinstance(required, list):
+                continue
+            required_fields = {str(r) for r in required}
+            payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+            for field, value in payload.items():
+                match = _PLACEHOLDER_SLOT.fullmatch(str(value or ""))
+                if match and str(field) in required_fields:
+                    out.add(match.group(1))
+            # a payload the generator left out is mapped by D3 field-name → slot-name
+            for field in required_fields - {str(f) for f in payload}:
+                if field in self.slot_names:
+                    out.add(field)
+        return out
+
+    def _request_needing_slot_from(self, start_id: str, slot: str) -> Optional[str]:
+        """The first data request reachable from ``start_id`` that requires
+        ``slot`` on a path that never captures it again."""
+        seen: set[str] = set()
+        stack = [start_id]
+        while stack:
+            current = stack.pop()
+            if current in seen or current not in self.nodes:
+                continue
+            seen.add(current)
+            node = self.nodes[current]
+            if node.get("type") == "data_request" and slot in self._required_payload_slots(node):
+                return current
+            for edge in _edges(node):
+                if _captures_slot(edge, slot):
+                    continue  # re-captured from here on
+                target = edge.get("nodeId")
+                if isinstance(target, str):
+                    stack.append(target)
+        return None
+
+    def rule_r8(self) -> None:
+        """Generated (2026-09-15): the order-number node's 'not captured' edge led
+        to the *next* question, so an unrecognised answer skipped the order number
+        and the intake request was later sent without it (P1 then trimmed the
+        payload — a request the backend cannot serve). A capture whose value a
+        later request needs is re-asked when it is missed, like R6; a path that
+        genuinely does without the value (a return number OR an order number)
+        is left alone."""
+        if self.role != "operation":
+            return
+        for node_id, node in list(self.nodes_of_type("user_choice")):
+            slot = self.choice_slot(node)
+            if not slot:
+                continue
+            for edge in _edges(node):
+                if _captures_slot(edge, slot):
+                    continue
+                conds = [c for c in (edge.get("conditions") or []) if isinstance(c, dict)]
+                not_captured = any((c.get("left") or {}).get("type") == "slot"
+                                   and (c.get("left") or {}).get("name") == slot
+                                   and c.get("operator") == "not_exists" for c in conds)
+                if conds and not not_captured:
+                    continue
+                target_id = edge.get("nodeId")
+                if not isinstance(target_id, str) or target_id == node_id or target_id not in self.nodes:
+                    continue
+                target = self.nodes[target_id]
+                if any(e.get("nodeId") == node_id for e in _edges(target)):
+                    continue  # already a recovery loop (R6)
+                request_id = self._request_needing_slot_from(target_id, slot)
+                if request_id is None:
+                    continue
+                recovery_id = self._recovery_basic(node_id, slot, self.retry_message())
+                edge["nodeId"] = recovery_id
+                self.change(
+                    f"{_label(node_id, node)} notCaptured went on to [{target_id[:8]}] although "
+                    f"request [{request_id[:8]}] still needs {slot!r} → recovery basic "
+                    f"[{recovery_id[:8]}] clearing the slot and re-asking (R8)")
+
+    # ==================================================================
     # F1 — a captured value of the wrong shape is re-asked, not sent
     # ==================================================================
 
@@ -2177,10 +2267,11 @@ class _RuntimeContract:
         self.rule_m2()
         self.rule_r7()
         self.rule_r6()
+        self.rule_d3()
+        self.rule_r8()
         self.rule_f1()
         self.rule_r3()
         self.rule_s6()
-        self.rule_d3()
         self.rule_p1()
         self.rule_d4()
         self.rule_d5()
