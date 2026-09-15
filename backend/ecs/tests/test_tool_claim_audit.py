@@ -33,3 +33,19 @@ def test_the_live_greencart_narration_is_caught():
             "**`reviewer_agent` (실제 호출):**\n```json\n{\"success\": true, \"blocking\": []}\n```\n")
     assert unbacked_tool_claims(text, []) == ["generate_acxd_application", "reviewer_agent"]
     assert unbacked_tool_claims(text, ["generate_acxd_application", "reviewer_agent"]) == []
+
+
+def test_a_plan_that_names_the_call_is_not_a_claim():
+    """A Classic turn that lists its next steps ('1. reviewer_agent 호출: 전체 리뷰')
+    or announces a call ('I'll run generate_lambda; its output ...') has not
+    narrated a result — no notice. The narrated outcome that follows an
+    announcement is still caught."""
+    plan_ko = ("확인해 주시면 다음 단계로 진행하겠습니다.\n"
+               "1. `reviewer_agent` 호출: 여섯 에셋 전체 리뷰\n"
+               "2. `validate_parameter_consistency` 호출: 교차 검증 결과 확인")
+    assert unbacked_tool_claims(plan_ko, []) == []
+    plan_en = "Next step: I'll run `generate_lambda`; its output will be checked against the spec."
+    assert unbacked_tool_claims(plan_en, []) == []
+    announced_then_narrated = ("`reviewer_agent`를 호출하겠습니다.\n"
+                               "`reviewer_agent` 호출 결과: blocking 0건, advisory 2건.")
+    assert unbacked_tool_claims(announced_then_narrated, []) == ["reviewer_agent"]

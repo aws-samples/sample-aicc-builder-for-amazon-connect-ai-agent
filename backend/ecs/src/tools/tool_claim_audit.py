@@ -27,13 +27,46 @@ _WATCHED = (
 # "<tool> returned / was called / 호출 / 반환 / 실행" — a claim that the tool ran.
 _CLAIM_VERBS = (
     r"(?:returned|was (?:actually )?(?:called|invoked|run|executed)|(?:has been|have been) (?:called|invoked|executed)|"
-    r"result(?:s)?(?: JSON)?(?: was| were| is| are)?|output|"
-    r"호출\s*(?:했|됐|되었|됨|완료|되어|한 결과|결과|\)|:|：)|반환|실행\s*(?:했|됐|되었|됨|완료|결과|되어))"
+    r"result(?:s)?(?: JSON| was| were| is| are)|"
+    r"호출\s*(?:했|됐|되었|됨|완료|되어|한 결과|결과)|반환|실행\s*(?:했|됐|되었|됨|완료|결과|되어))"
 )
+
+# Weaker spellings that also appear in plans and step lists ("1. reviewer_agent
+# 호출: 전체 리뷰", "run generate_lambda; its output ..."). They count as a claim
+# only when nothing in the preceding context reads as an intention.
+_WEAK_VERBS = r"(?:호출\s*(?:\)|:|：)|output|result(?:s)?)"
 
 # A tool name followed closely by a result-shaped block is a narrated result
 # even without a verb: "`generate_acxd_application` (실제 호출):\n```json {…}".
 _RESULT_BLOCK = r"(?:```json|\{\s*\"(?:status|success|blocking|counts)\")"
+
+# Phrasing that marks an intention rather than an outcome. A strong verb
+# ("호출 완료", "returned") is a claim even after such an announcement — the
+# live narrations opened with "호출하겠습니다" and then reported a result.
+_PLAN_MARKERS = re.compile(
+    r"(?:\bwill\b|\bwould\b|\bgoing to\b|\bplan(?:ning)? to\b|\bnext step|\blet me\b|\bI'?ll\b|\bshall\b|"
+    r"\bonce you\b|\bif you\b|예정|하겠|할게|할 것|하려|드릴게|드리겠|다음 단계|진행할|승인|해 ?주시면|주시면)",
+    re.I,
+)
+_PLAN_CONTEXT = 300
+
+
+def _strong_claim(pattern: str, text: str) -> bool:
+    """A match that is not itself phrased as a plan."""
+    return any(not _PLAN_MARKERS.search(m.group(0)) for m in re.finditer(pattern, text, re.I))
+
+
+def _weak_claim(pattern: str, text: str) -> bool:
+    """A weak spelling counts only when the preceding context carries no intention."""
+    return any(
+        not _PLAN_MARKERS.search(text[max(0, m.start() - _PLAN_CONTEXT):m.end()])
+        for m in re.finditer(pattern, text, re.I)
+    )
+
+
+def _name_verb_pattern(name: str, verbs: str) -> str:
+    # `name` ... verb within ~80 chars, or verb ... `name` (Korean puts the verb last)
+    return rf"`?{re.escape(name)}`?[^\n`]{{0,80}}?{verbs}|{verbs}[^\n`]{{0,40}}?`?{re.escape(name)}`?"
 
 
 def _claimed_tools(text: str) -> set[str]:
@@ -41,9 +74,10 @@ def _claimed_tools(text: str) -> set[str]:
     if not text:
         return claimed
     for name in _WATCHED:
-        # `name` ... verb within ~80 chars, or verb ... `name` (Korean puts the verb last)
-        pattern = rf"`?{re.escape(name)}`?[^\n`]{{0,80}}?{_CLAIM_VERBS}|{_CLAIM_VERBS}[^\n`]{{0,40}}?`?{re.escape(name)}`?"
-        if re.search(pattern, text, re.I):
+        if _strong_claim(_name_verb_pattern(name, _CLAIM_VERBS), text):
+            claimed.add(name)
+            continue
+        if _weak_claim(_name_verb_pattern(name, _WEAK_VERBS), text):
             claimed.add(name)
             continue
         block = rf"`?{re.escape(name)}`?[^`]{{0,120}}?{_RESULT_BLOCK}"
