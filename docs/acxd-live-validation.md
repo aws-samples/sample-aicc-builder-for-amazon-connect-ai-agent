@@ -158,6 +158,38 @@ Also observed, and not something a bundle can fix:
   alias key (see above); `./deploy.sh --rebind-alias <key>` was needed after
   each of the redeploys in this round.
 
+## 2026-09-15 — a brand-new session, interview to chat
+
+The earlier rounds regenerated sessions that were days old. This one started
+from an empty session with a requirements document for the e-commerce returns
+desk, went through the interview, generation and review, and deployed the
+bundle untouched: order lookup, a change-of-mind return (fee consent, refund
+amount computed by the backend, auto-approval), a high-value defective-item
+return (approval pending, no fee question) and an out-of-window return
+(rejected with the backend's reason, then the agent hand-off) all completed
+over chat. What the fresh path exposed was on the builder side and is fixed:
+
+| Finding | Fix |
+|---------|-----|
+| A requirements document that lists a backend-computed value (the refund amount) as an input was followed as written, so the caller was asked for it | the interview proposes the derivation instead and `save_operation_spec` warns about amount / price / status / decision inputs |
+| Moving a field out of an operation's inputs left it on the primary tool, so the Data Request demanded a slot no flow collected (D3) | `update_operation_spec` aligns the tools' field lists with the operation |
+| The primary tool's hand-written field list was a subset of the operation's (`orderDate`, `errorCode` missing): OpenAPI and Data Request came from the tool, the Lambda from the operation, and review blocked on D9-3 / parity | the primary tool's contract is the operation's field list, at save time and at projection time |
+| A branch on `status == "rejected"` (a value the enum never holds) passed review with zero blocking findings | the spec's enum values now reach the D9 gate as well as the generator (D5 reports it in both places) |
+| The `unknown` default behaviour was the only path to the knowledge base, so "what is your return policy?" was routed to the return-request flow | a knowledge base gets a routable `FaqFlow` unless the interview planned one |
+| The regex attached to a built-in slot does **not** gate capture: an order number typed at the return-number prompt was accepted into `returnId` (as `GC20260902`) and the lookup escalated | the Lambda boundary adapter moves a value that fits exactly one other empty field's shape onto that field; a flow-level format check is a follow-up |
+
+Two facts about the deploy step are documented rather than changed:
+
+- ACXD resource names (application, secret, guardrails) come from the company
+  slug fixed at generation time; the deployment name given to `./deploy.sh`
+  prefixes the CloudFormation stack and the Contact Flow only. Deploying the
+  same company twice into one workspace under different deployment names
+  therefore updates the same application in place — the newest stack wins.
+- A request named directly in answer to "anything else?" still costs one turn:
+  the yes/no capture recognises the intent (the conversation history shows it)
+  but cannot route from a `user_choice` node; only the `user_input` listen that
+  follows can.
+
 ## Service contract facts (not in the SDK types, learned from the API)
 
 | Area | Fact | Where it is enforced now |
@@ -191,6 +223,8 @@ Also observed, and not something a bundle can fix:
 | `captured_flow` | Populated by `user_input` only, never by a `user_choice` over the flow-choice slot | FollowUp flow re-listens through `user_input` |
 | Generative / KB nodes | Need a generative model configured on the workspace; without one the node is silent although the deployment and knowledge base succeed | documented prerequisite (`WIRING-GUIDE.md`) |
 | Routing text | `description` / `aiDescription` are ASCII-only; non-ASCII is rejected on create | system flows and the generator write English routing text; the bundle loader strips non-ASCII |
+| Slot regex | The `regex` attached to a built-in slot is not enforced at capture: a value of the wrong shape is stored (an order number in the return-number slot) and reaches the Data Request | adapter reassigns a value that fits exactly one other field; flow-level `matches_regex` check pending |
+| Routing utterance | The utterance that routes to a flow also fills that flow's slots when a built-in type accepts it — into the first matching slot, regardless of its regex | keep alternative identifiers on distinct paths and let the backend accept either |
 
 ## Cross-asset contract facts
 
