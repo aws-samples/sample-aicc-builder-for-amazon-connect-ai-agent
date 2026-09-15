@@ -2030,6 +2030,92 @@ class _RuntimeContract:
                     f"{constant['value']!r} (not in enum {enum}) → {request_id}.{success} "
                     f"{operator} true (D5)")
 
+    # ==================================================================
+    # D6 — the "success" branch must be the one that announces the result
+    # ==================================================================
+
+    @staticmethod
+    def _success_polarity(edge: dict, request_id: str) -> Optional[bool]:
+        """True for ``<request>.success eq true`` (or ``neq false``), False for the
+        negation, None when the edge is not a success test on that request."""
+        conds = [c for c in (edge.get("conditions") or []) if isinstance(c, dict)]
+        if len(conds) != 1:
+            return None
+        cond = conds[0]
+        left = cond.get("left") or {}
+        name = str(left.get("name") or "")
+        match = _PLACEHOLDER.fullmatch(name)
+        if match:
+            name = match.group(1)
+        if left.get("type") != "variable" or name != f"{request_id}.success":
+            return None
+        right = (cond.get("right") or {}).get("value")
+        if isinstance(right, str):
+            if right.lower() in ("true", "false"):
+                right = right.lower() == "true"
+            else:
+                return None
+        if not isinstance(right, bool):
+            return None
+        operator = str(cond.get("operator") or "")
+        if operator == "eq":
+            return right
+        if operator in ("neq", "ne"):
+            return not right
+        return None
+
+    def _announces_result(self, start_id: str, request_id: str) -> Optional[bool]:
+        """Walk the branch from ``start_id`` up to its first customer-facing
+        message: True when that message names a ``<request>.<field>`` result,
+        False when it is a plain message or an escalation, None when the branch
+        reaches no message at all."""
+        seen: set[str] = set()
+        stack = [start_id]
+        while stack:
+            current = stack.pop()
+            if current in seen or current not in self.nodes:
+                continue
+            seen.add(current)
+            node = self.nodes[current]
+            bodies = [str(m.get("body") or "") for m in node.get("messages") or [] if isinstance(m, dict)]
+            if any(b.strip() for b in bodies):
+                return any(m.group(1).startswith(f"{request_id}.") for b in bodies for m in _PLACEHOLDER.finditer(b))
+            redirect = (_meta(node).get("redirect") or {}) if node.get("type") == "redirect" else {}
+            if str(redirect.get("flowId") or "") == self.escalation_flow_id or node.get("type") == "escalate":
+                return False
+            for edge in _edges(node):
+                target = edge.get("nodeId")
+                if isinstance(target, str):
+                    stack.append(target)
+        return None
+
+    def rule_d6(self) -> None:
+        """Generated (2026-09-16): the branch after the intake request had its
+        conditions crossed — ``success eq true`` led to the failure message and
+        the escalation, ``success neq true`` to the result announcement — so a
+        return the backend accepted was reported to the caller as refused. The
+        two conditions are swapped back when the branch that names the request's
+        result fields is the one guarded by the negative test."""
+        for node_id, node in list(self.nodes_of_type("choice")):
+            edges = _edges(node)
+            for request_id in self.data_requests or {}:
+                positive = [e for e in edges if self._success_polarity(e, request_id) is True]
+                negative = [e for e in edges if self._success_polarity(e, request_id) is False]
+                if len(positive) != 1 or len(negative) != 1:
+                    continue
+                pos_edge, neg_edge = positive[0], negative[0]
+                pos_target, neg_target = pos_edge.get("nodeId"), neg_edge.get("nodeId")
+                if not isinstance(pos_target, str) or not isinstance(neg_target, str):
+                    continue
+                pos_announces = self._announces_result(pos_target, request_id)
+                neg_announces = self._announces_result(neg_target, request_id)
+                if pos_announces is False and neg_announces is True:
+                    pos_edge["conditions"], neg_edge["conditions"] = neg_edge["conditions"], pos_edge["conditions"]
+                    self.change(
+                        f"{_label(node_id, node)}: '{request_id}.success' tests were crossed — the branch "
+                        f"announcing the result [{neg_target[:8]}] sat behind the negative test and the "
+                        f"failure branch [{pos_target[:8]}] behind the positive one; conditions swapped (D6)")
+
     def rule_m1(self) -> None:
         slots = set(self.slot_names)
         for node_id, node in self.nodes.items():
@@ -2275,6 +2361,7 @@ class _RuntimeContract:
         self.rule_p1()
         self.rule_d4()
         self.rule_d5()
+        self.rule_d6()
         self.rule_m1()
         self.rule_rx()
         self.rule_j()

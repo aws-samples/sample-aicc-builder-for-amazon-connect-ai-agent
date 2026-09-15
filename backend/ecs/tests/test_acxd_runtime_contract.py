@@ -1530,3 +1530,55 @@ def test_r8_leaves_an_alternative_identifier_path_alone():
                    if any(c.get("operator") == "not_exists" for c in e.get("conditions") or []))
     assert missing["nodeId"] == "askO"
     assert not any("(R8)" in n for n in notes)
+
+
+def _crossed_success_flow(crossed=True):
+    """After the intake request: 'accepted' announces the result, 'rejected'
+    escalates — but the LLM put ``success neq true`` on 'accepted' and
+    ``success eq true`` on 'rejected' (live 2026-09-16: an accepted return was
+    reported as refused)."""
+    pos = {"left": {"type": "variable", "name": "requestReturn.success"}, "operator": "eq", "right": {"type": "constant", "value": True}}
+    neg = {"left": {"type": "variable", "name": "requestReturn.success"}, "operator": "neq", "right": {"type": "constant", "value": True}}
+    return {"flowId": "RequestReturn", "mainLanguageCode": "ko-KR", "nodes": {
+        "s": {"nodeId": "s", "type": "start", "childNodes": [{"nodeId": "askO", "name": "ask"}]},
+        "askO": {"nodeId": "askO", "type": "user_choice", "messages": [{"type": "text", "body": "주문번호를 알려주세요."}],
+                 "metadata": {"choice": {"source": "slotType", "slotTypeId": "orderNumber"}},
+                 "childNodes": [{"nodeId": "dr", "name": "captured", "conditions": [{"left": {"type": "slot", "name": "orderNumber"}, "operator": "exists"}]},
+                                {"nodeId": "esc", "name": "missing", "conditions": [{"left": {"type": "slot", "name": "orderNumber"}, "operator": "not_exists"}]}]},
+        "dr": {"nodeId": "dr", "type": "data_request",
+               "dataRequests": [{"dataRequestId": "requestReturn", "payload": {"orderNumber": "{orderNumber:NLX.Slot}"}}],
+               "childNodes": [{"nodeId": "branch", "name": "success",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "success"}}]},
+                              {"nodeId": "esc", "name": "failure",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq", "right": {"type": "constant", "value": "failure"}}]}]},
+        "branch": {"nodeId": "branch", "type": "choice", "childNodes": [
+            {"nodeId": "ok", "name": "accepted", "conditions": [neg if crossed else pos]},
+            {"nodeId": "no", "name": "rejected", "conditions": [pos if crossed else neg]}]},
+        "ok": {"nodeId": "ok", "type": "basic", "messages": [{"type": "text", "body": "반품번호 {requestReturn.returnId:NLX.Variable}, 상태 {requestReturn.status:NLX.Variable}"}],
+               "childNodes": [{"nodeId": "end", "name": "done"}]},
+        "no": {"nodeId": "no", "type": "basic", "messages": [{"type": "text", "body": "죄송해요. 이 주문은 반품 접수가 어려워요."}],
+               "childNodes": [{"nodeId": "esc", "name": "next"}]},
+        "esc": {"nodeId": "esc", "type": "redirect", "metadata": {"redirect": {"type": "flow", "flowId": "Escalation"}},
+                "childNodes": [{"nodeId": "end", "name": "next"}]},
+        "end": {"nodeId": "end", "type": "end"},
+    }, "slotTypes": [{"name": "orderNumber", "type": "NLX.AlphaNumeric", "sensitive": False, "regex": "^GC-[0-9]{8}$"}]}
+
+
+def test_d6_crossed_success_conditions_are_swapped_back():
+    out, notes = apply_runtime_contract(_crossed_success_flow(True), role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+                                        flow_ids=["RequestReturn", "Fallback", "Escalation"], escalation_flow_id="Escalation",
+                                        slot_type_ids={"yesNo"})
+    branch = out["nodes"]["branch"]
+    by_name = {e["name"]: e for e in branch["childNodes"]}
+    assert by_name["accepted"]["conditions"][0]["operator"] == "eq" and by_name["accepted"]["nodeId"] == "ok"
+    assert by_name["rejected"]["conditions"][0]["operator"] == "neq" and by_name["rejected"]["nodeId"] == "no"
+    assert any("(D6)" in n and "crossed" in n for n in notes), notes
+
+
+def test_d6_leaves_a_correct_success_branch_alone():
+    out, notes = apply_runtime_contract(_crossed_success_flow(False), role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+                                        flow_ids=["RequestReturn", "Fallback", "Escalation"], escalation_flow_id="Escalation",
+                                        slot_type_ids={"yesNo"})
+    by_name = {e["name"]: e for e in out["nodes"]["branch"]["childNodes"]}
+    assert by_name["accepted"]["conditions"][0]["operator"] == "eq"
+    assert not any("(D6)" in n for n in notes)
