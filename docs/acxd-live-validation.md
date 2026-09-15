@@ -189,15 +189,63 @@ Two facts about the deploy step are documented rather than changed:
   the yes/no capture recognises the intent (the conversation history shows it)
   but cannot route from a `user_choice` node; only the `user_input` listen that
   follows can.
-- "Connect me to an agent" said **while a value is being collected** is not
-  routed either: a `user_choice` node only captures, and the service discards
-  `choice.associatedSlotTypeIds` (verified by a `GetFlow` readback after
-  `UpdateFlow`, by slot name and by identifier), so a second slot cannot listen
-  alongside. Today the platform's incomprehension threshold (2) hands the
-  caller to the Fallback flow, whose menu routes "상담원" on the next turn — three
-  turns instead of one. A capture preceded by a `user_input` listen would fix it
-  only if the runtime also fills the flow's slots from that utterance, which is
-  untested.
+- "Connect me to an agent" said **while a value is being collected** is
+  handled by rule E2, after four other designs were tried live: the User choice
+  node did not route the utterance although the documentation says it can;
+  `choice.associatedSlotTypeIds` is accepted and discarded by the service (a
+  `GetFlow` readback after `UpdateFlow`, by slot name and by identifier); a
+  `user_input` listen in front of the capture routes the agent request but does
+  not fill the flow's slot from a plain value, so every caller would answer twice
+  (and with unconditional edges the listen does not even wait for input); and a
+  `contains` test on the utterance matched only with the operand
+  `{"type": "system", "name": "System.utterance"}` — the spellings
+  `system/utterance`, `variable/System.utterance` and the `{…:NLX.System}`
+  template were stored but never matched. E2 therefore puts a choice on every
+  capture node's 'not captured' edge that checks the utterance for a
+  language-specific agent-request word and redirects to the agent-request flow;
+  anything else continues to the node's own recovery.
+
+## 2026-09-16 — a second, empty account: from nothing to a working chat
+
+The sandbox account was replaced overnight, so the same bundle lineage was
+deployed into an account that had **no Connect instance, no agentic CX designer
+workspace and no API key**. Setting the account up took the console only:
+create a Connect Customer instance (about four minutes to `ACTIVE`), open the
+instance's emergency-access admin site, create a workspace, and in *Admin Hub →
+Users → API access* create a programmatic user (account admin) and generate its
+one-time `acxd_live_…` key (63 characters, contains dots). With
+`CONNECT_INSTANCE_ID`, `ACXD_WORKSPACE_ID` and `ACXD_API_KEY` exported, the
+downloaded bundle's untouched `./deploy.sh` created the CloudFormation backend,
+the application with all of its resources, the build, the deployment and the
+published Contact Flow in twelve minutes; after `--rebind-alias` the first chat
+worked (order lookup → templated result → follow-up → end).
+
+Two generator defects showed up in the regenerated flows and were fixed at the
+source, then re-proven live:
+
+- **A missed value was skipped, not re-asked.** The regenerated `RequestReturn`
+  wired every capture node's 'not captured' edge to the *next* question, so an
+  unrecognised order number went straight to the return reason and the intake
+  request was later sent without it (P1 then trimmed the payload — a request the
+  backend cannot serve). Rule **R8** re-asks when the request's schema lists the
+  slot as required; the alternative-identifier pattern (return number OR order
+  number) is left alone because that request requires neither. Live: "글쎄요 잘
+  모르겠어요" at the order-number prompt → the flow's own recovery wording → the
+  prompt again → the value → the next question.
+- **Crossed success tests.** The choice after the intake request carried
+  `requestReturn.success neq true` on the branch that announces the result and
+  `eq true` on the failure branch; the backend accepted the return (the record
+  was written) while the caller heard "this order cannot be returned" and was
+  escalated. Rule **D6** walks each branch to its first customer-facing message
+  and swaps the two conditions when the result-naming branch sits behind the
+  negative test. Live after the fix: "반품이 접수되었습니다. 반품번호는 RT-…,
+  승인 상태는 자동승인, … 128000원".
+
+And the mid-capture agent request was solved by design (rule **E2** above)
+after the probes listed there: "상담원 연결해 주세요" at the order-number prompt
+and "사람이랑 이야기하고 싶어요" at the delivery-lookup prompt both reached the
+Contact Flow's Escalation branch in one turn, while a plain value at the same
+prompt was captured as before.
 
 ## Service contract facts (not in the SDK types, learned from the API)
 
@@ -233,7 +281,10 @@ Two facts about the deploy step are documented rather than changed:
 | Generative / KB nodes | Need a generative model configured on the workspace; without one the node is silent although the deployment and knowledge base succeed | documented prerequisite (`WIRING-GUIDE.md`) |
 | Routing text | `description` / `aiDescription` are ASCII-only; non-ASCII is rejected on create | system flows and the generator write English routing text; the bundle loader strips non-ASCII |
 | Slot regex | The `regex` attached to a built-in slot is not enforced at capture: a value of the wrong shape is stored (an order number in the return-number slot) and reaches the Data Request. A `matches_regex` condition on the slot IS evaluated, against the delivered (separator-stripped) value | runtime contract F1: a `matches_regex` guard after every pattern-bearing capture, separators optional, letters either case; adapter reassigns a value that fits exactly one other field |
-| Associated slots | `choice.associatedSlotTypeIds` is accepted by the API and silently discarded (by slot name and by identifier); a capture node listens on one slot only | no second slot per node; the Fallback flow's menu remains the path for a mid-capture agent request |
+| Associated slots | `choice.associatedSlotTypeIds` is accepted by the API and silently discarded (by slot name and by identifier); a capture node listens on one slot only | no second slot per node; E2 tests the utterance instead |
+| Utterance conditions | `{System.utterance}` is testable in a condition only as `{"left": {"type": "system", "name": "System.utterance"}, "operator": "contains", …}`; `system/utterance`, `variable/System.utterance` and the `{System.utterance:NLX.System}` template are stored but never match | E2 uses the working operand |
+| User choice routing | The documented fallback from a User choice node to another flow's routing description did not fire (ko-KR, two accounts): an unmatched answer takes the No match path | E2 on the No match path |
+| user_input semantics | A `user_input` whose edges are `captured_flow exists / not_exists` waits for the next utterance; one with an unconditional edge is evaluated at once against the utterance that entered the flow. Routing by a `user_input` does NOT fill the current flow's attached slots from a plain value | no listen in front of a capture |
 | Routing utterance | The utterance that routes to a flow also fills that flow's slots when a built-in type accepts it — into the first matching slot, regardless of its regex | keep alternative identifiers on distinct paths and let the backend accept either |
 
 ## Cross-asset contract facts
