@@ -5,15 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AICC Builder — Runtime Architecture</title>
 <style>
-  /* FONTS = ~/.kiro/skills/aws-diagram-design/assets/fonts/woff2 */
+  /* Amazon Ember is used when installed locally; the rendering falls back to the
+     system sans-serif stack otherwise. Source for docs/images/aicc-builder-architecture.png. */
   @font-face { font-family: 'Amazon Ember'; font-weight: 400; font-style: normal;
-    src: local('Amazon Ember'), url('/Users/sukwonie/.kiro/skills/aws-diagram-design/assets/fonts/woff2/AmazonEmber_W_Rg.woff2') format('woff2'); }
+    src: local('Amazon Ember'); }
   @font-face { font-family: 'Amazon Ember'; font-weight: 600; font-style: normal;
-    src: local('Amazon Ember Medium'), local('Amazon Ember'), url('/Users/sukwonie/.kiro/skills/aws-diagram-design/assets/fonts/woff2/AmazonEmber_W_SBd.woff2') format('woff2'); }
+    src: local('Amazon Ember Medium'), local('Amazon Ember'); }
   @font-face { font-family: 'Amazon Ember'; font-weight: 700; font-style: normal;
-    src: local('Amazon Ember Bold'), local('Amazon Ember'), url('/Users/sukwonie/.kiro/skills/aws-diagram-design/assets/fonts/woff2/AmazonEmber_W_Bd.woff2') format('woff2'); }
+    src: local('Amazon Ember Bold'), local('Amazon Ember'); }
   @font-face { font-family: 'Amazon Ember Mono'; font-weight: 400; font-style: normal;
-    src: local('Amazon Ember Mono'), url('/Users/sukwonie/.kiro/skills/aws-diagram-design/assets/fonts/woff2/AmazonEmberMono_W_Rg.woff2') format('woff2'); }
+    src: local('Amazon Ember Mono'); }
 
   :root {
     --paper: #ffffff; --ink: #232F3E; --muted: #545B64; --soft: #7D8998;
