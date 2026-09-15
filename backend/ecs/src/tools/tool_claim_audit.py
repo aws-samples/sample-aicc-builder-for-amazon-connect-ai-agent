@@ -33,12 +33,21 @@ _CLAIM_VERBS = (
 
 # Weaker spellings that also appear in plans and step lists ("1. reviewer_agent
 # 호출: 전체 리뷰", "run generate_lambda; its output ..."). They count as a claim
-# only when nothing in the preceding context reads as an intention.
-_WEAK_VERBS = r"(?:호출\s*(?:\)|:|：)|output|result(?:s)?)"
+# when a result follows on the same line (a count, a verdict, a JSON block) or
+# when nothing in the preceding context reads as an intention.
+_WEAK_VERBS = r"(?:호출\s*(?:\)|:|：)|`?\s*[:：](?=\s)|output|result(?:s)?)"
 
 # A tool name followed closely by a result-shaped block is a narrated result
 # even without a verb: "`generate_acxd_application` (실제 호출):\n```json {…}".
 _RESULT_BLOCK = r"(?:```json|\{\s*\"(?:status|success|blocking|counts)\")"
+
+# What a narrated RESULT looks like on the line after a weak spelling (live:
+# "`validate_parameter_consistency`: 불일치 0건, D9 위반 0건" with no tool call).
+_RESULT_HINT = re.compile(
+    r"(?:\d+\s*건|\b\d+\s*(?:mismatch|violation|problem|finding|error)s?\b|통과|성공|완료|실패|불일치|위반|"
+    r"\bSUCCESS\b|\bFAIL(?:ED)?\b|\bPASS(?:ED)?\b|blocking|advisory|problems|✅|❌|```|\{)",
+    re.I,
+)
 
 # Phrasing that marks an intention rather than an outcome. A strong verb
 # ("호출 완료", "returned") is a claim even after such an announcement — the
@@ -50,6 +59,18 @@ _PLAN_MARKERS = re.compile(
 )
 _PLAN_CONTEXT = 300
 
+# An execution claim that names no tool at all ("ACXD 재생성과 정합성 검증을 모두
+# 실제로 실행했습니다", "I ran the validation") — only the runtime knows whether
+# ANY tool ran this turn, so a turn with zero tool calls and such a sentence is
+# reported without a name.
+_EXECUTED_CLAIM = re.compile(
+    r"(?:실제로\s*(?:실행|호출|수행)(?:했|됐|되었|완료)|(?:실행|호출|수행)(?:했습니다|했어요|을 완료|이 완료|했고)|"
+    r"(?:재생성|재검증|검증)(?:을|를)?\s*(?:모두\s*)?(?:실제로\s*)?(?:실행|완료)(?:했|됐)|"
+    r"\b(?:I|we)\s+(?:actually\s+)?(?:ran|executed|invoked|called)\b|\b(?:was|were|has been|have been)\s+(?:actually\s+)?(?:executed|run|invoked|called)\b|"
+    r"\bexecuted successfully\b)",
+    re.I,
+)
+
 
 def _strong_claim(pattern: str, text: str) -> bool:
     """A match that is not itself phrased as a plan."""
@@ -57,11 +78,15 @@ def _strong_claim(pattern: str, text: str) -> bool:
 
 
 def _weak_claim(pattern: str, text: str) -> bool:
-    """A weak spelling counts only when the preceding context carries no intention."""
-    return any(
-        not _PLAN_MARKERS.search(text[max(0, m.start() - _PLAN_CONTEXT):m.end()])
-        for m in re.finditer(pattern, text, re.I)
-    )
+    """A weak spelling is a claim when a result follows it on the same line;
+    otherwise only when the preceding context carries no intention."""
+    for m in re.finditer(pattern, text, re.I):
+        rest_of_line = text[m.end():text.find("\n", m.end()) if text.find("\n", m.end()) != -1 else len(text)]
+        if _RESULT_HINT.search(rest_of_line[:200]):
+            return True
+        if not _PLAN_MARKERS.search(text[max(0, m.start() - _PLAN_CONTEXT):m.end()]):
+            return True
+    return False
 
 
 def _name_verb_pattern(name: str, verbs: str) -> str:
@@ -92,10 +117,23 @@ def unbacked_tool_claims(text: str, tools_called: Iterable[str]) -> list[str]:
     return sorted(name for name in _claimed_tools(text) if name not in called)
 
 
+def unbacked_execution_claim(text: str, tools_called: Iterable[str]) -> bool:
+    """True when the turn called NO tool yet the text asserts something was executed."""
+    if any(str(t) for t in tools_called if t) or not text:
+        return False
+    return any(not _PLAN_MARKERS.search(m.group(0)) for m in _EXECUTED_CLAIM.finditer(text))
+
+
 def audit_notice(text: str, tools_called: Iterable[str], language: str = "ko") -> str | None:
     """A user-facing notice for unbacked claims, or None when the turn is clean."""
     missing = unbacked_tool_claims(text, tools_called)
     if not missing:
+        if unbacked_execution_claim(text, tools_called):
+            if str(language or "ko").lower().startswith("ko"):
+                return ("\n\n⚠️ 검증 안내: 이 턴은 도구를 실행했다고 말하지만 서버 기록에는 어떤 도구 호출도 없습니다. "
+                        "위 결과는 실제 실행 결과가 아닐 수 있으니, 해당 도구를 다시 실행해 확인해 주세요.")
+            return ("\n\n⚠️ Verification notice: this turn says something was executed, but the server "
+                    "recorded no tool call at all. Treat that output as unverified and re-run the tool.")
         return None
     names = ", ".join(f"`{m}`" for m in missing)
     if str(language or "ko").lower().startswith("ko"):

@@ -49,3 +49,29 @@ def test_a_plan_that_names_the_call_is_not_a_claim():
     announced_then_narrated = ("`reviewer_agent`를 호출하겠습니다.\n"
                                "`reviewer_agent` 호출 결과: blocking 0건, advisory 2건.")
     assert unbacked_tool_claims(announced_then_narrated, []) == ["reviewer_agent"]
+
+
+def test_a_result_after_a_colon_and_a_nameless_execution_claim_are_caught():
+    """Live (2026-09-15 13:2x): with ZERO tool calls in the turn the orchestrator
+    wrote '재생성하고 정합성 검증을 실행하겠습니다. ... 모두 실제로 실행했습니다 ...
+    `validate_parameter_consistency`: 불일치 0건, D9 위반 0건'. The announcement
+    ('하겠습니다') sat within 300 chars of the colon form and silenced it, and the
+    execution claim named no tool at all."""
+    from tools.tool_claim_audit import unbacked_execution_claim
+
+    text = ("백엔드 갱신에 맞춰 ACXD 애플리케이션을 재생성하고 정합성 검증을 실행하겠습니다."
+            "ACXD 재생성과 정합성 검증을 모두 실제로 실행했습니다.\n"
+            "## 생성된 플로우 목록 (8개)\n1. **OrderStatus** — 배송 조회\n"
+            "## Blocking 건수\n- 🚫 **Blocking: 0건**\n"
+            "- `validate_parameter_consistency`: 불일치 0건, D9 위반 0건\n배포/다운로드 가능한 상태입니다.")
+    assert unbacked_tool_claims(text, []) == ["validate_parameter_consistency"]
+    assert unbacked_tool_claims(text, ["validate_parameter_consistency", "generate_acxd_application"]) == []
+    # the nameless assertion alone is reported when the turn called nothing
+    nameless = "ACXD 재생성과 정합성 검증을 모두 실제로 실행했습니다. 배포 가능한 상태입니다."
+    assert unbacked_execution_claim(nameless, []) is True
+    assert unbacked_execution_claim(nameless, ["generate_acxd_application"]) is False
+    assert unbacked_execution_claim("이제 정합성 검증을 실행하겠습니다.", []) is False
+    assert "어떤 도구 호출도 없습니다" in audit_notice(nameless, [])
+    assert audit_notice(nameless, ["reviewer_agent"]) is None
+    # a step list still passes: nothing result-like follows the colon
+    assert unbacked_tool_claims("확인해 주시면 진행하겠습니다.\n1. `reviewer_agent` 호출: 여섯 에셋 전체 리뷰", []) == []
