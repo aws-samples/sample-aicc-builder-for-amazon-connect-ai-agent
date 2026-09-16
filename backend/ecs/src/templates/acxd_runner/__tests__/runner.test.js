@@ -311,6 +311,60 @@ test('upsert-knowledge-bases: create → articles → publish (poll to published
   assert.ok(pubChecks >= 2);
 });
 
+// Live (2026-09-16): a 'modify' rule hand-edited without behavior.message
+// passed packaging, the runner created two guardrails, and the third failed
+// with the service's vague "enforcement.action is not a supported value".
+test('upsert-guardrails: a modify rule without message/prompt fails pre-flight, before any create', async () => {
+  const dir = tmpBundle({
+    'a.json': { name: 'Consent', trigger: 'output',
+      rules: [{ name: 'r', detection: { method: 'llmJudge', prompt: 'consent?' }, enforcement: { action: 'flag' } }] },
+    'b.json': { name: 'No Date Promise', trigger: 'output',
+      rules: [{ name: 'r', detection: { method: 'llmJudge', prompt: 'promises a date?' }, enforcement: { action: 'modify' } }] },
+  });
+  const ctx = makeCtx(dir, { handlers: {
+    ListGuardrailsCommand: { items: [] },
+    CreateGuardrailCommand: { guardrailId: 'g-1' },
+  }});
+  await assert.rejects(
+    () => STEPS['upsert-guardrails'].run(ctx, { files: ['a.json', 'b.json'] }),
+    (err) => /guardrail b\.json cannot be deployed/.test(err.message) &&
+             /requires behavior\.message or behavior\.prompt/.test(err.message));
+  assert.equal(ctx.client.sent.filter((c) => c.__type === 'CreateGuardrailCommand').length, 0,
+    'nothing is created when any guardrail file fails pre-flight');
+});
+
+test('upsert-guardrails: modify with a message, route with a flowId and mask deploy', async () => {
+  const dir = tmpBundle({
+    'm.json': { name: 'No Date Promise', trigger: 'output',
+      rules: [{ name: 'r', detection: { method: 'llmJudge', prompt: 'promises a date?' },
+                enforcement: { action: 'modify', behavior: { message: '배송일은 확정 후 안내드립니다.' } } }] },
+    'r.json': { name: 'Complaints', trigger: 'input',
+      rules: [{ name: 'r', detection: { method: 'keyword', keywords: ['환불'] },
+                enforcement: { action: 'route', behavior: { flowId: 'EscalationFlow' } } }] },
+    'k.json': { name: 'PII', trigger: 'output',
+      rules: [{ name: 'r', detection: { method: 'regex', pattern: '01[0-9]-?[0-9]{3,4}-?[0-9]{4}' },
+                enforcement: { action: 'mask', behavior: { maskText: '[REDACTED]' } } }] },
+  });
+  const ctx = makeCtx(dir, { handlers: {
+    ListGuardrailsCommand: { items: [] },
+    CreateGuardrailCommand: { guardrailId: 'g-1' },
+  }});
+  await STEPS['upsert-guardrails'].run(ctx, { files: ['m.json', 'r.json', 'k.json'] });
+  assert.equal(ctx.client.sent.filter((c) => c.__type === 'CreateGuardrailCommand').length, 3);
+});
+
+test('upsert-guardrails: a service error names the guardrail and its file', async () => {
+  const dir = tmpBundle({ 'g.json': { name: 'Consent', trigger: 'output',
+    rules: [{ name: 'r', detection: { method: 'llmJudge', prompt: 'consent?' }, enforcement: { action: 'flag' } }] } });
+  const ctx = makeCtx(dir, { handlers: {
+    ListGuardrailsCommand: { items: [] },
+    CreateGuardrailCommand: () => { const e = new Error('rules[0].detection.prompt is too long.'); e.name = 'ValidationException'; throw e; },
+  }});
+  await assert.rejects(
+    () => STEPS['upsert-guardrails'].run(ctx, { files: ['g.json'] }),
+    /guardrail 'Consent' \(g\.json\): rules\[0\]\.detection\.prompt is too long\./);
+});
+
 test('upsert-guardrails: smoke test failure aborts', async () => {
   const dir = tmpBundle({ 'g.json': {
     name: 'PII', trigger: 'output',

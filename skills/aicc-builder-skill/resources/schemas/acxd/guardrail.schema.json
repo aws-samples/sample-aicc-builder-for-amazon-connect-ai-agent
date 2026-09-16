@@ -93,6 +93,21 @@
             "required": ["behavior"],
             "properties": { "behavior": { "required": ["flowId"] } }
           }
+        },
+        {
+          "$comment": "Live (2026-09-16): a 'modify' rule without behavior.message/prompt is rejected by the service as 'rules[0].enforcement.action is not a supported value'. The SDK documents message and prompt as mutually exclusive.",
+          "if": { "properties": { "action": { "const": "modify" } } },
+          "then": {
+            "required": ["behavior"],
+            "properties": {
+              "behavior": {
+                "oneOf": [
+                  { "required": ["message"], "not": { "required": ["prompt"] } },
+                  { "required": ["prompt"], "not": { "required": ["message"] } }
+                ]
+              }
+            }
+          }
         }
       ]
     },

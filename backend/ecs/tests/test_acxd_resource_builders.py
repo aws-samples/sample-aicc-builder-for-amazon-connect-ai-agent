@@ -401,6 +401,23 @@ def test_guardrails_generalise_literal_regex_and_localise_the_modify_message():
     assert by_name["medical"]["enforcement"] == {"action": "flag"}
     assert by_name["pii"]["enforcement"] == {"action": "flag"}
     assert by_name["explicit_mask"]["enforcement"]["action"] == "mask"
+    # Live (2026-09-16): the reviewer read that flag as a defect and the action
+    # was hand-edited back to modify without a message — the service rejected
+    # it at deploy. The reason now travels on the rule, and the schema refuses
+    # the bare modify the edit produced.
+    from tools.validate_acxd_flow import validate_acxd_asset
+    for name in ("medical", "pii"):
+        assert by_name[name]["description"].startswith("AICC: derived output rule kept as flag")
+    for doc in docs:
+        assert validate_acxd_asset("guardrail", doc) == []
+    bare = {"name": "medical", "trigger": "output",
+            "rules": [{"name": "r", "detection": {"method": "llmJudge", "prompt": "p"},
+                       "enforcement": {"action": "modify"}}]}
+    assert any("behavior" in p for p in validate_acxd_asset("guardrail", bare))
+    bare["rules"][0]["enforcement"]["behavior"] = {"message": "m", "prompt": "p"}   # SDK: mutually exclusive
+    assert validate_acxd_asset("guardrail", bare) != []
+    bare["rules"][0]["enforcement"]["behavior"] = {"prompt": "p"}
+    assert validate_acxd_asset("guardrail", bare) == []
     # the localised replacement message is still what an INPUT modify rule says
     spec["guardrails"] = [{"name": "abuse", "trigger": "input", "policy": "욕설 금지", "detection_method": "llmJudge",
                            "action": "modify", "examples": ["…"]}]

@@ -477,25 +477,83 @@ const upsertKnowledgeBases = {
   },
 };
 
+const GUARDRAIL_ACTIONS = new Set(['flag', 'mask', 'modify', 'route']);
+
+/**
+ * Shape checks the ACXD service enforces on a guardrail but reports vaguely.
+ * Mirrors the SDK's EnforcementBehavior contract: "modify" needs message OR
+ * prompt (mutually exclusive), "route" needs flowId; detection needs the field
+ * its method reads. Returns human-readable problems, empty when deployable.
+ */
+function guardrailPreflightProblems(doc) {
+  const problems = [];
+  const rules = Array.isArray(doc && doc.rules) ? doc.rules : [];
+  if (!rules.length) problems.push('rules: at least one rule is required');
+  rules.forEach((rule, i) => {
+    const at = `rules[${i}]`;
+    const enforcement = (rule && rule.enforcement) || {};
+    const behavior = enforcement.behavior || {};
+    const action = enforcement.action;
+    if (!GUARDRAIL_ACTIONS.has(action)) {
+      problems.push(`${at}.enforcement.action '${action}' is not one of ${[...GUARDRAIL_ACTIONS].join('/')}`);
+    } else if (action === 'modify') {
+      const hasMessage = typeof behavior.message === 'string' && behavior.message.trim() !== '';
+      const hasPrompt = typeof behavior.prompt === 'string' && behavior.prompt.trim() !== '';
+      if (hasMessage === hasPrompt) {
+        problems.push(`${at}.enforcement: action 'modify' requires behavior.message or behavior.prompt ` +
+          '(exactly one); the service rejects it as "enforcement.action is not a supported value"');
+      }
+    } else if (action === 'route' && !(typeof behavior.flowId === 'string' && behavior.flowId)) {
+      problems.push(`${at}.enforcement: action 'route' requires behavior.flowId`);
+    }
+    const detection = (rule && rule.detection) || {};
+    const needs = { regex: 'pattern', keyword: 'keywords', llmJudge: 'prompt' }[detection.method];
+    if (!needs) {
+      problems.push(`${at}.detection.method '${detection.method}' is not one of regex/keyword/llmJudge`);
+    } else if (detection[needs] === undefined || detection[needs] === null || detection[needs].length === 0) {
+      problems.push(`${at}.detection: method '${detection.method}' requires ${needs}`);
+    }
+  });
+  return problems;
+}
+
 const upsertGuardrails = {
   plan(ctx, params) {
     return listFiles(ctx, params).map((f) => `upsert guardrail from ${path.relative(ctx.bundleDir, f)} (+ smoke tests if present)`);
   },
   async run(ctx, params) {
-    for (const file of listFiles(ctx, params)) {
+    const files = listFiles(ctx, params);
+    // Pre-flight EVERY file before touching the workspace: the service rejects
+    // a malformed rule with a message that does not name the guardrail
+    // ("rules[0].enforcement.action is not a supported value" — live, a
+    // 'modify' rule without behavior.message), and by then earlier guardrails
+    // were already created. Fail here, with the file and the reason.
+    for (const file of files) {
+      const problems = guardrailPreflightProblems(readJson(file));
+      if (problems.length) {
+        throw new Error(`guardrail ${path.relative(ctx.bundleDir, file)} cannot be deployed:\n` +
+          problems.map((p) => `  - ${p}`).join('\n'));
+      }
+    }
+    for (const file of files) {
       const doc = readJson(file);
       const { smokeTests = [], ...payload } = doc;
       const existing = await listAll(ctx, 'ListGuardrailsCommand');
       const match = existing.find((g) => g.name === payload.name);
       let guardrailId;
-      if (match) {
-        guardrailId = match.guardrailId;
-        await send(ctx, 'UpdateGuardrailCommand', { guardrailIdentifier: guardrailId, ...payload });
-        ctx.log(`  ~ updated guardrail ${payload.name}`);
-      } else {
-        const created = await send(ctx, 'CreateGuardrailCommand', payload);
-        guardrailId = created.guardrailId;
-        ctx.log(`  + created guardrail ${payload.name}`);
+      try {
+        if (match) {
+          guardrailId = match.guardrailId;
+          await send(ctx, 'UpdateGuardrailCommand', { guardrailIdentifier: guardrailId, ...payload });
+          ctx.log(`  ~ updated guardrail ${payload.name}`);
+        } else {
+          const created = await send(ctx, 'CreateGuardrailCommand', payload);
+          guardrailId = created.guardrailId;
+          ctx.log(`  + created guardrail ${payload.name}`);
+        }
+      } catch (err) {
+        err.message = `guardrail '${payload.name}' (${path.relative(ctx.bundleDir, file)}): ${err.message}`;
+        throw err;
       }
       ctx.state.guardrails[payload.name] = { guardrailId };
       recordResource(ctx.state, 'guardrail', guardrailId, { name: payload.name });
