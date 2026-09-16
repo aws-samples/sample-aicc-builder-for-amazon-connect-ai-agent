@@ -1619,7 +1619,10 @@ def lint_contact_flow_asset(session_id: str = "", flow_name: str = "", file_name
 
 # Matches an Amazon Connect AI-prompt interpolation token: {{ $.something }} or
 # {{ foo }}. Captures the inner expression (trimmed) so we can detect duplicates.
-_AI_PROMPT_VAR_RE = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+#: ``{{ $.name }}`` — the body may not contain braces, so an unterminated run of
+#: ``{{{{`` and spaces fails in linear time (surrounding whitespace is stripped
+#: by the caller, not by the pattern).
+_AI_PROMPT_VAR_RE = re.compile(r"\{\{([^{}]*)\}\}")
 
 #: Variables the Amazon Connect AI prompt (qconnect CreateAIPrompt, ORCHESTRATION)
 #: resolves. Verified live: any other `$.name` is rejected with

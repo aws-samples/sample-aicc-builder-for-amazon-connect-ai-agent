@@ -71,8 +71,9 @@ def validate_deploy_manifest(manifest: dict) -> list[str]:
     """
     try:
         schema = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return [f"could not load deploy manifest schema: {exc}"]
+    except (OSError, json.JSONDecodeError):
+        logger.exception("[ACXDManifest] could not load the deploy manifest schema")
+        return ["could not load the deploy manifest schema (see the server log)"]
     validator = jsonschema.Draft202012Validator(schema)
     return [
         "$" + "".join(f"[{part!r}]" for part in error.absolute_path)

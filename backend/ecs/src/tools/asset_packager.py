@@ -666,11 +666,12 @@ def package_assets_impl(
             try:
                 acxd_bundle, acxd_manifest, acxd_problems = _prepare_acxd_package(
                     session_id, project_name)
-            except Exception as exc:
+            except Exception:
                 logger.exception("[packager] unable to prepare ACXD package")
                 return {
                     "success": False,
-                    "error": f"ACXD packaging refused: unable to run D9/manifest validation: {exc}",
+                    "error": "ACXD packaging refused: the D9/manifest validation could not run; "
+                             "see the server log for details.",
                     "session_id": session_id,
                 }
             if acxd_problems:
@@ -900,15 +901,21 @@ def package_assets_impl(
             "message": f"Assets packaged successfully! {len(file_list)} files, {round(total_size / 1024, 1)} KB"
         }
 
+    except ACXDPackagingError as e:
+        # A refusal this module raised on purpose, worded for the user.
+        return {"success": False, "error": str(e)}
     except ClientError as e:
+        logger.exception("[packager] S3 operation failed")
         return {
             "success": False,
-            "error": f"S3 operation failed: {str(e)}"
+            "error": f"S3 operation failed ({e.response.get('Error', {}).get('Code', 'error')}); "
+                     "see the server log for details."
         }
-    except Exception as e:
+    except Exception:
+        logger.exception("[packager] failed to package assets")
         return {
             "success": False,
-            "error": f"Failed to package assets: {str(e)}"
+            "error": "Failed to package assets; see the server log for details."
         }
 
 

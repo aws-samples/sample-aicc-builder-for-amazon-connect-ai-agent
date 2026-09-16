@@ -156,8 +156,11 @@ def _state_dir(session_id: Optional[str]) -> Optional[Path]:
     mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
     if not session_id or not os.path.isdir(mount):
         return None
-    safe = session_id.replace("..", "_").replace("/", "_")
-    return Path(mount) / "sessions" / safe / "state"
+    from tools.path_safety import path_under
+    state = path_under(Path(mount) / "sessions", session_id, "state")
+    if state is None:
+        logger.warning("[ACXDFlowSpec] rejected session id %r as a path segment", session_id)
+    return state
 
 
 def _current_session_id() -> Optional[str]:
