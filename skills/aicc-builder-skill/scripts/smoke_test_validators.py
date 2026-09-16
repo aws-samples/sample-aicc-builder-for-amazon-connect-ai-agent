@@ -240,6 +240,33 @@ def main() -> int:
         else:
             print("PASS  shape_parity clean on the fixed fixture (201 response found)")
 
+        # ---- acxd_local: compiles, documents itself, refuses a workspace without a flow spec ----
+        import py_compile
+        acxd_cli = SCRIPTS / "acxd_local.py"
+        try:
+            py_compile.compile(str(acxd_cli), doraise=True)
+            print("PASS  acxd_local.py compiles")
+        except py_compile.PyCompileError as exc:
+            failures.append(f"acxd_local.py does not compile: {exc}")
+        helped = subprocess.run([sys.executable, str(acxd_cli), "--help"], capture_output=True, text=True)
+        if helped.returncode == 0 and "normalize" in helped.stdout and "package" in helped.stdout:
+            print("PASS  acxd_local.py --help lists the ACXD commands")
+        else:
+            failures.append(f"acxd_local.py --help failed: {helped.stderr[-300:]}")
+        repo = SKILL_ROOT.parent.parent
+        if (repo / "backend/ecs/src/tools/acxd_runtime_contract.py").is_file():
+            empty = Path(td) / "acxd-empty"
+            (empty / "state").mkdir(parents=True)
+            refused = subprocess.run([sys.executable, str(acxd_cli), "check", "--output-dir", str(empty),
+                                      "--repo", str(repo)], capture_output=True, text=True)
+            if refused.returncode != 0 and "acxd_flow_spec.json is missing" in (refused.stderr + refused.stdout):
+                print("PASS  acxd_local.py check refuses a workspace without state/acxd_flow_spec.json")
+            else:
+                failures.append("acxd_local.py check did not refuse a workspace without a flow spec: "
+                                f"rc={refused.returncode} {refused.stderr[-300:]}")
+        else:
+            print("SKIP  acxd_local.py check (no AICC Builder checkout above the skill)")
+
     if failures:
         print("\nFAILURES:")
         for f in failures:

@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aicc-builder/acxd/deploy_manifest.schema.json",
+  "title": "ACXD Deploy Manifest",
+  "description": "Contract between the LLM Deploy Manifest Generator and the static Node.js deploy runner (decision D2). The LLM only declares WHICH steps run in WHAT order with WHAT parameters; the runner code is static and tested. Step types run-scenario / run-simulation / run-evaluation are RESERVED (D4): schema-valid but the runner rejects them until the ACXD SDK exposes test-asset APIs.",
+  "type": "object",
+  "required": [
+    "manifestVersion",
+    "project",
+    "sdk",
+    "steps"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "manifestVersion": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
+      "description": "Kebab-case project name (used for stack names)"
+    },
+    "region": {
+      "type": "string"
+    },
+    "sdk": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "package": {
+          "type": "string",
+          "const": "amazon-connect-acxd-sdk"
+        },
+        "version": {
+          "type": "string",
+          "const": "0.1.0"
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "generatedAt": {
+      "type": "string",
+      "description": "UTC time the manifest was built (ISO 8601); evidence of when the application assets were last generated"
+    },
+    "builder": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "build": {
+          "type": "string"
+        }
+      },
+      "description": "The AICC Builder build that produced this bundle, when known"
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "deploy-cfn-backend",
+            "wire-webhook-urls",
+            "upsert-secrets",
+            "upsert-slot-types",
+            "upsert-context-variables",
+            "upsert-data-requests",
+            "upsert-flows",
+            "upsert-knowledge-bases",
+            "upsert-guardrails",
+            "compose-application",
+            "build-application",
+            "deploy-application",
+            "import-contact-flows",
+            "run-scenario",
+            "run-simulation",
+            "run-evaluation"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "deploy-cfn-backend"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "required": [
+                  "templatePath"
+                ],
+                "properties": {
+                  "templatePath": {
+                    "type": "string"
+                  },
+                  "stackName": {
+                    "type": "string"
+                  },
+                  "lambdaDirs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "params"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "wire-webhook-urls"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "outputKey": {
+                    "type": "string",
+                    "default": "ApiEndpoint"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "upsert-secrets",
+                  "upsert-slot-types",
+                  "upsert-context-variables",
+                  "upsert-data-requests",
+                  "upsert-flows",
+                  "upsert-knowledge-bases",
+                  "upsert-guardrails",
+                  "import-contact-flows"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "required": [
+                  "files"
+                ],
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Bundle-relative JSON asset paths (globs allowed)"
+                  }
+                }
+              }
+            },
+            "required": [
+              "params"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "compose-application"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "required": [
+              "params"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "build-application"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "version": {
+                    "type": "string",
+                    "maxLength": 16
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "deploy-application"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "environment": {
+                    "type": "string",
+                    "enum": [
+                      "development",
+                      "qa",
+                      "staging",
+                      "production"
+                    ]
+                  },
+                  "languageCodes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -8,9 +8,15 @@
 # Every decision point is an interactive multiple-choice prompt.
 #
 # Commands:
-#   ./deploy.sh           Deploy all workshop assets (default)
+#   ./deploy.sh           Deploy all workshop assets (default; the runtime target —
+#                         classic or acxd — is read from the bundle, --target overrides)
 #   ./deploy.sh cleanup   Tear down ALL deployed resources (reverse order)
 #   ./deploy.sh status    Show current deployment status
+#   ./deploy.sh --rebind-alias <deploymentKey>
+#                         (acxd) Re-point the published Contact Flow's Agentic CX
+#                         block at <deploymentKey> — needed after a deployment was
+#                         replaced, because that rotates the key while the old one
+#                         still resolves to the OLD build.
 #
 # Phases:
 #    1. CloudFormation stack (S3 upload for large templates)
@@ -34,13 +40,74 @@
 #   CONNECT_INSTANCE_ID  - Skip Connect instance selection
 #   AI_ASSISTANT_ID      - Skip Q in Connect assistant creation
 #   AUTO_CONFIRM=1       - Non-interactive: accept all defaults, skip phone
+#   ACXD_ALIAS_ID        - (acxd) application alias id for the Agentic CX block; else pick it in the console
+#                          This is the ACXD *deploymentKey*, not the deployment id, and it is not
+#                          in the public SDK: read it from the console-internal endpoint
+#                          GET /acxd/api/cxn/flowResources?workspaceId=…&applicationId=…&type=deployments
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMMAND="${1:-deploy}"
+# Per-run scratch directory. Fixed /tmp file names made two deploy.sh runs on
+# one machine overwrite each other's Lambda zip (live, 2026-09-13: project A's
+# function received project B's handler code). Cleaned up on exit.
+DEPLOY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/aicc_deploy.XXXXXX")"
+trap 'rm -rf "$DEPLOY_TMP"' EXIT
+# Runtime target. Resolution order: --target flag → DEPLOY_TARGET env → the
+# bundle itself. An ACXD bundle always carries assets/acxd/application.json and
+# deploy-manifest.json (written by the packager), a Classic bundle never does —
+# so a plain `./deploy.sh` does the right thing without anyone remembering a flag.
+TARGET="${DEPLOY_TARGET:-}"
+TARGET_SOURCE="env"
+[ -n "$TARGET" ] || TARGET_SOURCE="auto"
+DRY_RUN=false
+COMMAND="deploy"
+REBIND_ALIAS=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target)
+            [ "$#" -gt 1 ] || { echo "ERROR: --target requires classic or acxd" >&2; exit 2; }
+            TARGET="$2"; TARGET_SOURCE="flag"; shift 2 ;;
+        --target=*)
+            TARGET="${1#--target=}"; TARGET_SOURCE="flag"; shift ;;
+        --rebind-alias)
+            [ "$#" -gt 1 ] || { echo "ERROR: --rebind-alias requires a deploymentKey" >&2; exit 2; }
+            REBIND_ALIAS="$2"; COMMAND="rebind-alias"; shift 2 ;;
+        --rebind-alias=*)
+            REBIND_ALIAS="${1#--rebind-alias=}"; COMMAND="rebind-alias"; shift ;;
+        --dry-run)
+            DRY_RUN=true; shift ;;
+        deploy|cleanup|clean|destroy|delete|status)
+            COMMAND="$1"; shift ;;
+        *)
+            echo "Usage: $0 [deploy|cleanup|status] [--target classic|acxd] [--dry-run]" >&2
+            echo "       $0 --rebind-alias <deploymentKey>   (acxd: re-point the Agentic CX block)" >&2
+            exit 2 ;;
+    esac
+done
+detect_runtime_target() {
+    if [ -f "$SCRIPT_DIR/assets/acxd/application.json" ] || [ -f "$SCRIPT_DIR/deploy-manifest.json" ]; then
+        echo "acxd"
+    else
+        echo "classic"
+    fi
+}
+if [ -z "$TARGET" ]; then
+    TARGET="$(detect_runtime_target)"
+fi
+case "$TARGET" in
+    classic|acxd) ;;
+    *) echo "ERROR: --target must be classic or acxd (got '$TARGET')" >&2; exit 2 ;;
+esac
+if [ "$TARGET_SOURCE" != "auto" ] && [ "$TARGET" != "$(detect_runtime_target)" ]; then
+    echo "⚠️  --target $TARGET requested, but the bundle looks like a $(detect_runtime_target) bundle (assets/acxd/ $( [ -d "$SCRIPT_DIR/assets/acxd" ] && echo present || echo absent ))." >&2
+fi
 STATE_FILE="$SCRIPT_DIR/.aicc_deploy_state"
+RUNNER_STATE_FILE="$SCRIPT_DIR/.deploy-state.json"
+# Set from the runner's state when a deploy REPLACED the application deployment
+# (see runner_alias_rotated): the Agentic CX block's alias is then stale.
+ACXD_ALIAS_ROTATED=""
 
 # Auto-detect project name from CloudFormation template directory
 DETECTED_PROJECT_NAME=""
@@ -169,6 +236,52 @@ state_set() {
     mv "$STATE_FILE.tmp" "$STATE_FILE"
 }
 
+runner_application_id() {
+    [ -f "$RUNNER_STATE_FILE" ] || return 0
+    python3 - "$RUNNER_STATE_FILE" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("applicationId", "") or "")
+except Exception:
+    pass
+PYEOF
+}
+
+# The runner sets aliasRotated when it had to REPLACE the application deployment
+# (UpdateApplicationDeployment fails server-side for some applications). Replacing
+# rotates the deploymentKey the Agentic CX block stores as its Alias, and the old
+# key still resolves — to the OLD build. Read the flag so Phase 11 and the summary
+# never claim the alias is bound when it is stale.
+runner_alias_rotated() {
+    [ -f "$RUNNER_STATE_FILE" ] || return 0
+    python3 - "$RUNNER_STATE_FILE" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    state = json.load(open(sys.argv[1]))
+    if state.get("aliasRotated"):
+        rotation = state.get("aliasRotation") or {}
+        print("%s %s %s" % (rotation.get("environment", "development"),
+                            rotation.get("previousDeploymentId", "?"),
+                            rotation.get("deploymentId", state.get("deploymentId", "?"))))
+except Exception:
+    pass
+PYEOF
+}
+
+runner_contact_flow_id() {
+    [ -f "$RUNNER_STATE_FILE" ] || return 0
+    python3 - "$RUNNER_STATE_FILE" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    for resource in json.load(open(sys.argv[1])).get("resources", []):
+        if resource.get("kind") == "contact-flow":
+            print(resource.get("id", ""))
+            break
+except Exception:
+    pass
+PYEOF
+}
+
 # =============================================================================
 # JSON helpers (python3 is preinstalled on CloudShell)
 # =============================================================================
@@ -287,7 +400,16 @@ do_preflight() {
     [ -n "$OPENAPI_FILE" ]  && echo "     ✅ OpenAPI:         ${OPENAPI_FILE#$SCRIPT_DIR/}"
     [ -n "$FLOW_JSON" ]     && echo "     ✅ Contact Flow:    ${FLOW_JSON#$SCRIPT_DIR/}"
     [ -n "$PROMPT_FILE" ]   && echo "     ✅ AI Prompt:       ${PROMPT_FILE#$SCRIPT_DIR/}"
-    [ -d "$SCRIPT_DIR/faq" ] && echo "     ✅ FAQ:             faq/"
+    if [ -d "$SCRIPT_DIR/knowledge-base" ]; then echo "     ✅ FAQ:             knowledge-base/"
+    elif [ -d "$SCRIPT_DIR/faq" ]; then echo "     ✅ FAQ:             faq/"; fi
+    if [ "$TARGET" = "acxd" ]; then
+        echo "     ✅ ACXD assets:     assets/acxd/ ($(find "$SCRIPT_DIR/assets/acxd/flows" -name '*.json' 2>/dev/null | wc -l | tr -d ' ') flows) + deploy-manifest.json"
+    fi
+    case "$TARGET_SOURCE" in
+        auto) echo "     🎯 Runtime target:  $TARGET (auto-detected from the bundle; override with --target)" ;;
+        flag) echo "     🎯 Runtime target:  $TARGET (--target)" ;;
+        *)    echo "     🎯 Runtime target:  $TARGET (DEPLOY_TARGET)" ;;
+    esac
 
     # Detect language from contact flow set-voice metadata or flow_config
     DETECTED_LANG=""
@@ -574,11 +696,11 @@ phase_lambda_code() {
         fi
 
         echo -n "   $aws_func <- $func_name/$entry_file ... "
-        (cd "$func_dir" && zip -qj /tmp/_deploy.zip "$entry_file")
+        (cd "$func_dir" && zip -qj $DEPLOY_TMP/_deploy.zip "$entry_file")
         retry=0
         while [ $retry -lt 3 ]; do
             if aws lambda update-function-code --function-name "$aws_func" \
-                --zip-file fileb:///tmp/_deploy.zip --region "$REGION" \
+                --zip-file fileb://$DEPLOY_TMP/_deploy.zip --region "$REGION" \
                 --output text --query 'FunctionName' &>/dev/null; then
                 aws lambda wait function-updated --function-name "$aws_func" --region "$REGION" 2>/dev/null || true
                 echo "✅"; break
@@ -587,7 +709,7 @@ phase_lambda_code() {
                 [ $retry -lt 3 ] && { echo -n "⏳ "; sleep 5; } || echo "⚠️ failed"
             fi
         done
-        rm -f /tmp/_deploy.zip
+        rm -f $DEPLOY_TMP/_deploy.zip
 
         # ── Reconcile the Handler config with the code's actual entry point ──
         #    The CFN placeholder may declare index.lambda_handler while the
@@ -653,17 +775,90 @@ phase_openapi() {
 # =============================================================================
 # Phase 4: FAQ upload
 # =============================================================================
+# The packager writes the FAQ articles under knowledge-base/knowledge_base/
+# (older bundles used faq/). Resolve the directory once; empty when the bundle
+# ships no FAQ documents.
+resolve_faq_dir() {
+    FAQ_DIR=""
+    for candidate in "$SCRIPT_DIR/knowledge-base/knowledge_base" "$SCRIPT_DIR/knowledge-base" \
+                     "$SCRIPT_DIR/faq/knowledge_base" "$SCRIPT_DIR/faq"; do
+        if [ -d "$candidate" ] && [ -n "$(find "$candidate" -maxdepth 1 -type f \( -name '*.md' -o -name '*.txt' \) | head -1)" ]; then
+            FAQ_DIR="$candidate"; return 0
+        fi
+    done
+    return 1
+}
+
+# Load every FAQ document into a Q in Connect CUSTOM knowledge base. A CUSTOM
+# knowledge base has no data source of its own: an S3 copy alone is never
+# searched. Each document goes through StartContentUpload (a presigned PUT to
+# the service) and is registered with CreateContent; names are ASCII and
+# index-based so a re-run recognises what is already there. Markdown is
+# uploaded as text/plain.
+kb_upload_faq_documents() {
+    local kb_id="$1"
+    [ -n "${FAQ_DIR:-}" ] || return 0
+    local existing uploaded=0 skipped=0 failed=0 index=0
+    existing=$(aws qconnect list-contents --knowledge-base-id "$kb_id" --region "$REGION" --output json 2>/dev/null \
+        | python3 -c "import sys, json
+try:
+    print('\n'.join(c.get('name', '') for c in json.load(sys.stdin).get('contentSummaries', [])))
+except Exception:
+    pass" 2>/dev/null)
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        index=$((index+1))
+        local base name title upload url upload_id
+        base=$(basename "$f")
+        name=$(printf 'faq-%02d-%s.txt' "$index" "$(printf '%s' "${base%.*}" | python3 -c "import sys, re; s = re.sub(r'[^A-Za-z0-9._-]+', '-', sys.stdin.read()).strip('-.'); print(s[:40] or 'doc')")")
+        title=$(head -1 "$f" | sed 's/^#* *//' | cut -c1-200); [ -n "$title" ] || title="$base"
+        if printf '%s\n' "$existing" | grep -qx "$name"; then skipped=$((skipped+1)); continue; fi
+        upload=$(aws qconnect start-content-upload --knowledge-base-id "$kb_id" --content-type text/plain \
+            --region "$REGION" --output json 2>&1) || { warn "start-content-upload failed for $base"; failed=$((failed+1)); continue; }
+        url=$(jget "$upload" "url"); upload_id=$(jget "$upload" "uploadId")
+        # The presigned PUT must carry exactly the headers the service returned.
+        if ! J="$upload" F="$f" U="$url" python3 - <<'PY'
+import json, os, sys, urllib.request
+up = json.loads(os.environ["J"])
+with open(os.environ["F"], "rb") as handle:
+    body = handle.read()
+req = urllib.request.Request(os.environ["U"], data=body, method="PUT",
+                             headers=up.get("headersToInclude") or {})
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        sys.exit(0 if 200 <= resp.status < 300 else 1)
+except Exception as exc:  # noqa: BLE001
+    print(f"   upload error: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+        then
+            warn "upload failed for $base"; failed=$((failed+1)); continue
+        fi
+        if aws qconnect create-content --knowledge-base-id "$kb_id" --name "$name" --title "$title" \
+            --upload-id "$upload_id" --region "$REGION" >/dev/null 2>&1; then
+            uploaded=$((uploaded+1))
+        else
+            warn "create-content failed for $base"; failed=$((failed+1))
+        fi
+    done <<EOF_FAQ
+$(find "$FAQ_DIR" -maxdepth 1 -type f \( -name '*.md' -o -name '*.txt' \) | sort)
+EOF_FAQ
+    ok "Knowledge Base documents: $uploaded uploaded, $skipped already present, $failed failed"
+    [ "$failed" -eq 0 ]
+}
+
 phase_faq() {
     echo ""
     echo "📚 Phase 4: Uploading FAQ documents..."
-    FAQ_DIR="$SCRIPT_DIR/faq/knowledge_base"
-    [ -d "$FAQ_DIR" ] || FAQ_DIR="$SCRIPT_DIR/faq"
-    if [ -d "$FAQ_DIR" ] && [ -n "${KB_BUCKET:-}" ]; then
-        count=$(find "$FAQ_DIR" -name "*.txt" | wc -l | tr -d ' ')
-        aws s3 sync "$FAQ_DIR" "s3://$KB_BUCKET/faq/" --exclude "*.DS_Store" --region "$REGION" >/dev/null
+    resolve_faq_dir || true
+    if [ -n "$FAQ_DIR" ] && [ -n "${KB_BUCKET:-}" ]; then
+        count=$(find "$FAQ_DIR" -maxdepth 1 -type f \( -name '*.md' -o -name '*.txt' \) | wc -l | tr -d ' ')
+        aws s3 sync "$FAQ_DIR" "s3://$KB_BUCKET/faq/" --exclude "*.DS_Store" --exclude "*.json" --region "$REGION" >/dev/null
         ok "$count documents -> s3://$KB_BUCKET/faq/"
+    elif [ -z "${KB_BUCKET:-}" ]; then
+        info "No KB bucket in the stack outputs, skipping FAQ upload"
     else
-        info "No FAQ directory or KB bucket, skipping"
+        info "No FAQ documents in the bundle (knowledge-base/ or faq/), skipping"
     fi
 }
 
@@ -683,6 +878,11 @@ phase_connect_instance() {
         INSTANCE_COUNT=$(jget "$INSTANCES_JSON" "InstanceSummaryList" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
 
         if [ "$INSTANCE_COUNT" -eq 0 ]; then
+            if [ "$TARGET" = "acxd" ]; then
+                echo "❌ ACXD requires an existing Connect Customer instance; this script will not create a generic Connect instance." >&2
+                echo "   Create/select a Connect Customer instance in the console, export CONNECT_INSTANCE_ID, then retry." >&2
+                exit 1
+            fi
             info "No Connect instance found. Creating a new one..."
             # Instance aliases are GLOBALLY unique (like S3 buckets) — retry
             # with a random suffix if the deterministic name is taken.
@@ -729,6 +929,10 @@ for inst in json.load(sys.stdin)['InstanceSummaryList']:
             menu+=("Create a new instance")
             choose "Which Connect instance do you want to deploy to?" "$default_idx" "${menu[@]}"
             if [ "$CHOICE_VALUE" = "Create a new instance" ]; then
+                if [ "$TARGET" = "acxd" ]; then
+                    echo "❌ Select an existing Connect Customer instance for ACXD; generic instance creation is unsupported." >&2
+                    exit 1
+                fi
                 ask_text "New instance alias" "aicc-workshop-${ACCOUNT_ID: -4}"
                 ALIAS="$ANSWER"
                 CREATE_RESULT=$(aws connect create-instance \
@@ -838,7 +1042,8 @@ phase_assistant() {
     ok "Assistant: $AI_ASSISTANT_ID"
 
     # Knowledge Base (only when FAQ assets exist)
-    if [ -d "$SCRIPT_DIR/faq" ] && [ -n "${AI_ASSISTANT_ID:-}" ]; then
+    resolve_faq_dir || true
+    if [ -n "$FAQ_DIR" ] && [ -n "${AI_ASSISTANT_ID:-}" ]; then
         info "Setting up FAQ Knowledge Base..."
         EXISTING_KB=$(aws qconnect list-knowledge-bases --region "$REGION" --output json 2>/dev/null || echo '{"knowledgeBaseSummaries":[]}')
         KB_ID=$(echo "$EXISTING_KB" | python3 -c "
@@ -863,6 +1068,7 @@ for kb in json.load(sys.stdin).get('knowledgeBaseSummaries', []):
                 --association "knowledgeBaseId=$KB_ID" \
                 --region "$REGION" >/dev/null 2>&1 || info "(KB already associated)"
             ok "Knowledge Base associated"
+            kb_upload_faq_documents "$KB_ID" || warn "Some FAQ documents did not load — the FAQ intent will answer without them"
         fi
     fi
 }
@@ -873,6 +1079,10 @@ for kb in json.load(sys.stdin).get('knowledgeBaseSummaries', []):
 phase_env_vars() {
     echo ""
     echo "🔑 Phase 7: Injecting Lambda environment variables..."
+    if [ "$TARGET" = "acxd" ]; then
+        info "ACXD uses the runner's WEBHOOK_URL wiring; no Q in Connect session variables are required"
+        return 0
+    fi
     # Prefer the exported ARN; fall back to fuzzy-matching the stack's Lambdas
     # (many generated templates don't export UpdateQSessionFunctionArn)
     if [ -z "${UPDATE_Q_SESSION_ARN:-}" ]; then
@@ -960,6 +1170,36 @@ QPEOF
 #   whose omission made the old script's audience update always fail — the
 #   workshop's "Chapter 3 manual fix" is now automated correctly)
 # =============================================================================
+# Register every Lambda the Contact Flow invokes with the Connect instance.
+# Runs for BOTH runtime targets: the ACXD path used to skip Phase 9 where this
+# lived, and the flow's Lambda block (customer lookup / API key retriever)
+# answered 403 AccessDeniedException on every contact (live, 2026-09-13).
+associate_flow_lambdas() {
+    _load_stack_lambda_names
+    local flow_lambda_arns=""
+    if [ -n "$FLOW_JSON" ]; then
+        # functions referenced by the flow's {{X_LAMBDA_ARN}} placeholders
+        flow_lambda_arns=$(python3 - "$FLOW_JSON" <<'PYEOF' 2>/dev/null || true
+import sys, json, re
+tokens = set(re.findall(r'\{\{([A-Z_]+?)_LAMBDA(?:_ARN)?\}\}', open(sys.argv[1]).read()))
+for t in tokens: print(t.lower())
+PYEOF
+)
+    fi
+    ASSOCIATED=0
+    for stem in $flow_lambda_arns; do
+        fn=$(resolve_stack_function "$stem")
+        [ -z "$fn" ] && continue
+        fn_arn="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${fn}"
+        aws connect associate-lambda-function \
+            --instance-id "$CONNECT_INSTANCE_ID" \
+            --function-arn "$fn_arn" \
+            --region "$REGION" 2>/dev/null && info "Lambda associated: $fn" || info "Lambda already associated: $fn"
+        ASSOCIATED=$((ASSOCIATED+1))
+    done
+    [ "$ASSOCIATED" -gt 0 ] && ok "Associated $ASSOCIATED flow-referenced Lambda(s) with Connect" || info "No flow-referenced Lambdas"
+}
+
 phase_gateway() {
     echo ""
     echo "🌐 Phase 8: Setting up AgentCore Gateway (MCP Server)..."
@@ -1267,29 +1507,7 @@ for a in json.load(sys.stdin).get('Applications', []):
     fi
 
     # 9.2 Lambda associations (register flow-invoked functions with Connect)
-    _load_stack_lambda_names
-    local flow_lambda_arns=""
-    if [ -n "$FLOW_JSON" ]; then
-        # functions referenced by the flow's {{X_LAMBDA_ARN}} placeholders
-        flow_lambda_arns=$(python3 - "$FLOW_JSON" <<'PYEOF' 2>/dev/null || true
-import sys, json, re
-tokens = set(re.findall(r'\{\{([A-Z_]+?)_LAMBDA(?:_ARN)?\}\}', open(sys.argv[1]).read()))
-for t in tokens: print(t.lower())
-PYEOF
-)
-    fi
-    ASSOCIATED=0
-    for stem in $flow_lambda_arns; do
-        fn=$(resolve_stack_function "$stem")
-        [ -z "$fn" ] && continue
-        fn_arn="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${fn}"
-        aws connect associate-lambda-function \
-            --instance-id "$CONNECT_INSTANCE_ID" \
-            --function-arn "$fn_arn" \
-            --region "$REGION" 2>/dev/null && info "Lambda associated: $fn" || info "Lambda already associated: $fn"
-        ASSOCIATED=$((ASSOCIATED+1))
-    done
-    [ "$ASSOCIATED" -gt 0 ] && ok "Associated $ASSOCIATED flow-referenced Lambda(s) with Connect" || info "No flow-referenced Lambdas"
+    associate_flow_lambdas
 }
 
 # =============================================================================
@@ -1687,8 +1905,63 @@ phase_contact_flow() {
     echo "📋 Phase 11: Preparing & importing Contact Flow..."
     [ -z "$FLOW_JSON" ] && { info "No contact-flow/ directory, skipping"; return 0; }
 
-    local WORK_FLOW="/tmp/${PROJECT_NAME}_flow_resolved.json"
+    local WORK_FLOW="$DEPLOY_TMP/${PROJECT_NAME}_flow_resolved.json"
     cp "$FLOW_JSON" "$WORK_FLOW"
+
+    # ── ACXD: bind the Agentic CX block to what the runner just deployed ─────
+    #    The runner knows workspace/application ids but not Connect's queues,
+    #    hours of operation or Lambda ARNs, so the {{...}} placeholders below
+    #    (HOURS_ARN, QUEUE_ARN, *_LAMBDA_ARN) are resolved HERE, on the same
+    #    path the Classic target uses — a live 2026-09-12 import failed with
+    #    "Not a supported id format: {{HOURS_ARN}}" when the runner imported.
+    if [ "$TARGET" = "acxd" ]; then
+        local ACXD_APPLICATION_ID
+        ACXD_APPLICATION_ID=$(runner_application_id)
+        if [ -z "$ACXD_APPLICATION_ID" ]; then
+            warn "ACXD application id not found in $RUNNER_STATE_FILE — run the ACXD runner first; Contact Flow not imported"
+            return 0
+        fi
+        FLOW_LANG="${FLOW_LANG:-$DETECTED_LANG}"
+        ACXD_ALIAS_ROTATED="$(runner_alias_rotated)"
+        # A re-run without ACXD_ALIAS_ID must not regress a working flow to the
+        # placeholder (live: every redeploy reset the alias the operator had
+        # already bound). Reuse the alias recorded by --rebind-alias, else the
+        # one the published flow carries today.
+        if [ -z "${ACXD_ALIAS_ID:-}" ]; then
+            local prev_alias
+            prev_alias="$(state_get ACXD_ALIAS_ID)"
+            [ -z "$prev_alias" ] && prev_alias="$(published_flow_alias)"
+            if [ -n "$prev_alias" ] && [ "$prev_alias" != "SELECT_ALIAS_IN_CONSOLE" ]; then
+                ACXD_ALIAS_ID="$prev_alias"
+                info "Reusing the Agentic CX alias already bound to this flow ($prev_alias)"
+            fi
+        fi
+        local ACXD_ALIAS_VALUE="${ACXD_ALIAS_ID:-SELECT_ALIAS_IN_CONSOLE}"
+        python3 - "$WORK_FLOW" "${ACXD_WORKSPACE_ID:-}" "$ACXD_APPLICATION_ID" "$ACXD_ALIAS_VALUE" <<'PYEOF'
+import sys
+path, ws, app, alias = sys.argv[1:5]
+s = open(path, encoding="utf-8").read()
+for token, value in (("{ACXD_WORKSPACE_ID}", ws), ("{ACXD_APPLICATION_ID}", app), ("{ACXD_ALIAS_ID}", alias)):
+    if value:
+        s = s.replace(token, value)
+open(path, "w", encoding="utf-8").write(s)
+PYEOF
+        info "Agentic CX block bound: workspace ${ACXD_WORKSPACE_ID:-?} / application $ACXD_APPLICATION_ID / alias $ACXD_ALIAS_VALUE"
+        if [ -z "${ACXD_ALIAS_ID:-}" ]; then
+            warn "ACXD_ALIAS_ID not set — the block is imported with alias SELECT_ALIAS_IN_CONSOLE; a contact reaching it takes the Error branch until the alias is picked in the flow designer (or re-run with ACXD_ALIAS_ID=...)."
+        elif [ -n "$ACXD_ALIAS_ROTATED" ]; then
+            # "<environment> <previousDeploymentId> <newDeploymentId>", from the
+            # runner's .deploy-state.json
+            local ROT_REST="${ACXD_ALIAS_ROTATED#* }"
+            local ROT_ENV="${ACXD_ALIAS_ROTATED%% *}"
+            local ROT_PREV="${ROT_REST%% *}"
+            local ROT_NEW="${ROT_REST##* }"
+            warn "This deploy REPLACED the '$ROT_ENV' deployment ($ROT_PREV → $ROT_NEW), which rotates the deploymentKey."
+            warn "ACXD_ALIAS_ID=$ACXD_ALIAS_ID is therefore the OLD key — it still resolves, to the OLD build."
+            warn "Re-select the alias in the block (flow designer → Agentic CX block → Alias → Save → Publish)"
+            warn "or run: ./deploy.sh --rebind-alias <new deploymentKey>"
+        fi
+    fi
 
     # ── Collect placeholders ────────────────────────────────────────────────
     local placeholders
@@ -1702,6 +1975,47 @@ import sys
 path, token, value = sys.argv[1], sys.argv[2], sys.argv[3]
 s = open(path).read()
 open(path, 'w').write(s.replace('{{%s}}' % token, value))
+PYEOF
+    }
+    # A Lambda block whose function this stack does not have (live: an ACXD
+    # bundle's flow kept a customer-lookup block while the backend had no such
+    # function; the auto-picked first Lambda answered 403 on every contact).
+    # Remove the block and route its callers to its own success transition.
+    bypass_lambda_block() { # placeholder name
+        python3 - "$WORK_FLOW" "$1" <<'PYEOF'
+import sys, json
+path, name = sys.argv[1], sys.argv[2]
+doc = json.load(open(path))
+marker = '{{%s}}' % name
+victims = {a['Identifier']: a for a in doc.get('Actions', [])
+           if marker in json.dumps(a.get('Parameters', {}), ensure_ascii=False)}
+if not victims:
+    sys.exit(0)
+remap = {ident: (a.get('Transitions') or {}).get('NextAction') for ident, a in victims.items()}
+def resolve(target, seen=()):
+    while target in remap and target not in seen:
+        seen += (target,); target = remap[target]
+    return target
+def rewrite(obj):
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            if k == 'NextAction' and isinstance(v, str) and v in remap:
+                obj[k] = resolve(v)
+            else:
+                rewrite(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            rewrite(v)
+doc['Actions'] = [a for a in doc['Actions'] if a['Identifier'] not in victims]
+rewrite(doc)
+if doc.get('StartAction') in remap:
+    doc['StartAction'] = resolve(doc['StartAction'])
+meta = doc.get('Metadata') or {}
+if isinstance(meta.get('ActionMetadata'), dict):
+    for ident in victims:
+        meta['ActionMetadata'].pop(ident, None)
+json.dump(doc, open(path, 'w'), ensure_ascii=False, indent=2)
+print('   bypassed %d Lambda block(s) for {{%s}} (function not in this stack)' % (len(victims), name))
 PYEOF
     }
 
@@ -1720,16 +2034,19 @@ PYEOF
                     value="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${fn}"
                     info "$token -> $fn (auto-resolved from stack)"
                 else
-                    # multiple choice: pick from stack Lambdas
+                    # multiple choice: pick from stack Lambdas. The default is to
+                    # SKIP: guessing a function is what bound an API-key retriever
+                    # to a customer-lookup block (live). Skipping removes the block.
                     _load_stack_lambda_names
-                    local menu=() arns=()
+                    local menu=("Skip — this stack has no '$stem' function; remove the block from the flow") arns=("")
                     for f in $STACK_LAMBDA_NAMES; do
                         menu+=("$f"); arns+=("arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:$f")
                     done
-                    menu+=("Skip (configure manually in console)")
                     choose "Select the Lambda to map to placeholder {{$token}}" 1 "${menu[@]}"
-                    if [ "$CHOICE_VALUE" != "Skip (configure manually in console)" ]; then
+                    if [ "$CHOICE" -gt 1 ]; then
                         value="${arns[$((CHOICE-1))]}"
+                    else
+                        bypass_lambda_block "$token"
                     fi
                 fi
                 ;;
@@ -1790,6 +2107,7 @@ for h in json.load(sys.stdin).get('HoursOfOperationSummaryList', []):
     #    controls are Lex session attributes on the Get customer input block.
     #    https://docs.aws.amazon.com/connect/latest/adminguide/agentic-voice-best-practices.html
     local ASR_CONFIDENCE="" ASR_TIMEOUT="" ALLOW_INTERRUPT=""
+    [ "$TARGET" = "acxd" ] && CHOICE=5 || \
     choose "Select a conversation tuning preset (ASR turn-taking & barge-in, applied to the Get customer input block)" 1 \
         "Natural conversation      (defaults: confidence 0.7 / 640ms, barge-in ON — recommended)" \
         "Pause-tolerant            (confidence 0.9 / 3000ms — for dictated digits, noisy or slow speakers)" \
@@ -1823,7 +2141,7 @@ meta = d.setdefault('Metadata', {}).setdefault('ActionMetadata', {})
 #    (printed in the summary). Converting/removing the block here would leave
 #    the flow without a proper voice configuration block, which is worse UX.
 for a in actions:
-    if a.get('Type') == 'UpdateContactTextToSpeechVoice':
+    if voice and a.get('Type') == 'UpdateContactTextToSpeechVoice':
         a['Parameters']['TextToSpeechVoice'] = voice
         a['Parameters']['TextToSpeechEngine'] = engine.capitalize()
         # also refresh the display language code in metadata
@@ -1984,6 +2302,24 @@ if 'AnalyticsLanguage' in problems:
            and str(vab.get('AnalyticsLanguage','')) not in REDACTION_OK:
             vab['ConversationalAnalyticsRedactionConfiguration'] = {'Enabled': 'False'}
 
+# Chat analytics on the recording block. Verified against CreateContactFlow
+# (2026-09-14): every ChatBehavior.ChatAnalyticsBehavior shape the generator
+# produced was rejected ("Invalid Action property value ... Parameters"), it
+# demands an InFlightRedactionConfigurationFailed error branch that is itself
+# invalid without ChatBehavior, and the voice-only block imports cleanly. Drop
+# the chat analytics and its error branch rather than loop on it.
+if 'Actions[' in problems and 'Parameters' in problems:
+    for a in d.get('Actions', []):
+        if a.get('Type') != 'UpdateContactRecordingAndAnalyticsBehavior':
+            continue
+        params = a.get('Parameters') or {}
+        if 'ChatBehavior' in params:
+            params.pop('ChatBehavior', None)
+        errors = (a.get('Transitions') or {}).get('Errors')
+        if isinstance(errors, list):
+            a['Transitions']['Errors'] = [e for e in errors
+                                          if e.get('ErrorType') != 'InFlightRedactionConfigurationFailed']
+
 # Generic: drop the property the API called invalid. Two things matter here.
 #  1. Delete the LEAF named in the path, not the top-level branch. The old code
 #     matched only the first path segment, so a complaint about
@@ -2014,7 +2350,11 @@ PYEOF
     done
 
     if [ -z "$CONTACT_FLOW_ID" ]; then
-        warn "Contact Flow import failed. Import manually in the console: $WORK_FLOW"
+        # The scratch directory is removed on exit; keep the resolved flow where
+        # the operator can find it (live: the printed path no longer existed).
+        local KEPT_FLOW="$SCRIPT_DIR/contact-flow/${PROJECT_NAME}_flow_resolved.json"
+        cp "$WORK_FLOW" "$KEPT_FLOW" 2>/dev/null || KEPT_FLOW="$WORK_FLOW"
+        warn "Contact Flow import failed. Import manually in the console: $KEPT_FLOW"
         return 0
     fi
     if [ -z "$CONTACT_FLOW_ARN" ]; then
@@ -2071,16 +2411,35 @@ req = {
   "visibilityStatus": "PUBLISHED",
   "templateConfiguration": {"textFullAIPromptEditTemplateConfiguration": {"text": text}}
 }
-json.dump(req, open('/tmp/_ai_prompt_req.json', 'w'), ensure_ascii=False)
+json.dump(req, open('$DEPLOY_TMP/_ai_prompt_req.json', 'w'), ensure_ascii=False)
 PYEOF
         PROMPT_RESULT=$(aws qconnect create-ai-prompt \
-            --cli-input-json file:///tmp/_ai_prompt_req.json \
+            --cli-input-json file://$DEPLOY_TMP/_ai_prompt_req.json \
             --region "$REGION" --output json 2>&1) || true
-        rm -f /tmp/_ai_prompt_req.json
+        rm -f $DEPLOY_TMP/_ai_prompt_req.json
         AI_PROMPT_ID=$(jget "$PROMPT_RESULT" "aiPrompt.aiPromptId" | cut -d: -f1)
         if [ -z "$AI_PROMPT_ID" ]; then
-            warn "AI Prompt creation failed: $(echo "$PROMPT_RESULT" | head -3)"
-            return 0
+            # Without the prompt there is no AI agent, and the Lex bot's
+            # AMAZON.QInConnectIntent falls back to whatever agent the shared
+            # assistant already has (live: another project's agent answered).
+            # Finishing with a green banner here hid that; fail loudly instead.
+            echo ""
+            echo "   ❌ AI Prompt creation failed:"
+            echo "$PROMPT_RESULT" | head -3 | sed 's/^/      /'
+            if echo "$PROMPT_RESULT" | grep -q "unknown variable"; then
+                echo "      The prompt uses a {{\$.name}} variable the AI prompt API does not know."
+                echo "      Known: \$.toolConfigurationList \$.conversationHistory \$.locale \$.contactId"
+                echo "             \$.sessionId \$.dateTime \$.instanceId and \$.Custom.<attribute>."
+                echo "      Offending variables:"
+                grep -o '{{\$\.[A-Za-z_.]*}}' "$PROMPT_FILE" | sort -u \
+                    | grep -v -E '^\{\{\$\.(toolConfigurationList|conversationHistory|locale|contactId|sessionId|dateTime|instanceId|Custom\.)' \
+                    | sed 's/^/         /' || true
+                echo "      Fix them in $PROMPT_FILE (e.g. {{\$.channel}} → {{\$.Custom.channel}} plus a"
+                echo "      'Set contact attributes' block in the flow, or state the condition in words) and re-run ./deploy.sh"
+            fi
+            echo ""
+            echo "   Deployment is INCOMPLETE: no AI agent was created for this project."
+            exit 1
         fi
     else
         info "Reusing existing AI Prompt: $PROMPT_NAME"
@@ -2139,10 +2498,10 @@ for a in json.load(sys.stdin).get('aiAgentSummaries', []):
     if [ -z "$AI_AGENT_ID" ]; then
         info "Creating AI Agent: $AGENT_NAME (base: $SYS_AGENT_NAME)"
         aws qconnect list-ai-agents --assistant-id "$AI_ASSISTANT_ID" \
-            --origin SYSTEM --region "$REGION" --output json > /tmp/_sys_agents.json
+            --origin SYSTEM --region "$REGION" --output json > $DEPLOY_TMP/_sys_agents.json
         python3 - <<PYEOF
 import json, re
-sys_agents = json.load(open('/tmp/_sys_agents.json'))['aiAgentSummaries']
+sys_agents = json.load(open('$DEPLOY_TMP/_sys_agents.json'))['aiAgentSummaries']
 base = next(a for a in sys_agents if a['name'] == '${SYS_AGENT_NAME}')
 cfg = base['configuration']['orchestrationAIAgentConfiguration']
 
@@ -2182,13 +2541,13 @@ req = {
   "visibilityStatus": "PUBLISHED",
   "configuration": {"orchestrationAIAgentConfiguration": cfg}
 }
-json.dump(req, open('/tmp/_ai_agent_req.json', 'w'), ensure_ascii=False)
+json.dump(req, open('$DEPLOY_TMP/_ai_agent_req.json', 'w'), ensure_ascii=False)
 PYEOF
         AGENT_RESULT=""
         # MCP tools may take a moment to propagate after integration registration
         for attempt in 1 2 3 4; do
             AGENT_RESULT=$(aws qconnect create-ai-agent \
-                --cli-input-json file:///tmp/_ai_agent_req.json \
+                --cli-input-json file://$DEPLOY_TMP/_ai_agent_req.json \
                 --region "$REGION" --output json 2>&1) || true
             if echo "$AGENT_RESULT" | grep -q '"aiAgentId"'; then
                 break
@@ -2199,7 +2558,7 @@ PYEOF
                 break
             fi
         done
-        rm -f /tmp/_ai_agent_req.json /tmp/_sys_agents.json
+        rm -f $DEPLOY_TMP/_ai_agent_req.json $DEPLOY_TMP/_sys_agents.json
         AI_AGENT_ID=$(jget "$AGENT_RESULT" "aiAgent.aiAgentId" | cut -d: -f1)
         AI_AGENT_ARN=$(jget "$AGENT_RESULT" "aiAgent.aiAgentArn")
         if [ -z "$AI_AGENT_ID" ]; then
@@ -2523,9 +2882,351 @@ do_summary() {
 }
 
 # =============================================================================
+# ACXD target helpers
+# =============================================================================
+verify_acxd_connect_customer() {
+    local instance_type normalized
+    instance_type=$(aws connect describe-instance --instance-id "$CONNECT_INSTANCE_ID" --region "$REGION" \
+        --query 'Instance.InstanceType' --output text 2>/dev/null || echo "")
+    normalized=$(echo "$instance_type" | tr '[:upper:]-' '[:lower:]_')
+    case "$normalized" in
+        connect_customer|customer|customer_instance)
+            ok "Verified Connect Customer instance: $CONNECT_INSTANCE_ID ($instance_type)" ;;
+        ""|none|null)
+            # Live (2026-09-10, us-east-1): describe-instance on a working Connect
+            # Customer instance returned no InstanceType at all, and the whole
+            # deploy stopped here after CloudFormation had already succeeded.
+            # The field is not a reliable signal — the Agentic CX block wiring
+            # step (WIRING-GUIDE.md) is where a non-customer instance shows up.
+            warn "describe-instance exposes no InstanceType for $CONNECT_INSTANCE_ID — cannot confirm it is a Connect Customer instance; continuing (the Agentic CX block needs one)." ;;
+        *)
+            echo "❌ ACXD requires a Connect Customer instance for the Agentic CX block." >&2
+            echo "   describe-instance reported InstanceType='${instance_type}'." >&2
+            exit 1 ;;
+    esac
+}
+
+ensure_acxd_runner() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "❌ Node.js 20+ is required for ACXD deployment." >&2
+        exit 1
+    fi
+    local node_major
+    node_major=$(node -p "process.versions.node.split('.')[0]")
+    if [ "$node_major" -lt 20 ]; then
+        echo "❌ Node.js 20+ is required (found $(node --version))." >&2
+        exit 1
+    fi
+    if [ ! -d "$SCRIPT_DIR/node_modules/amazon-connect-acxd-sdk" ]; then
+        info "Installing pinned ACXD runner dependency..."
+        (cd "$SCRIPT_DIR" && npm install --omit=dev --no-fund --no-audit)
+    fi
+}
+
+ensure_acxd_credentials() {
+    [ "$DRY_RUN" = "true" ] && return 0
+    if [ -z "${ACXD_WORKSPACE_ID:-}" ]; then
+        if [ "$IS_TTY" = "false" ]; then
+            echo "❌ ACXD_WORKSPACE_ID must be exported for a non-interactive deploy." >&2
+            exit 1
+        fi
+        read -r -p "   ACXD workspace ID: " ACXD_WORKSPACE_ID
+        export ACXD_WORKSPACE_ID
+    fi
+    if [ -z "${ACXD_API_KEY:-}" ]; then
+        if [ "$IS_TTY" = "false" ]; then
+            echo "❌ ACXD_API_KEY must be exported for a non-interactive deploy." >&2
+            exit 1
+        fi
+        read -r -s -p "   ACXD API key (input hidden): " ACXD_API_KEY
+        echo ""
+        export ACXD_API_KEY
+    fi
+    # Optional: the application alias id the Agentic CX block binds to. The ACXD
+    # SDK cannot list aliases, so it is asked for once; leaving it empty imports
+    # the block with a visible placeholder to pick in the Connect designer.
+    if [ -z "${ACXD_ALIAS_ID:-}" ] && [ "$IS_TTY" = "true" ] && [ "${AUTO_CONFIRM:-0}" != "1" ]; then
+        read -r -p "   ACXD application alias ID (Enter to pick it in the console later): " ACXD_ALIAS_ID
+        [ -n "$ACXD_ALIAS_ID" ] && export ACXD_ALIAS_ID
+    fi
+}
+
+run_acxd_runner() {
+    ensure_acxd_runner
+    if [ -n "${API_ENDPOINT:-}" ]; then
+        export WEBHOOK_URL="${WEBHOOK_URL:-$API_ENDPOINT}"
+        export AICC_CFN_ALREADY_DEPLOYED=1
+        info "WEBHOOK_URL sourced from CloudFormation ApiEndpoint"
+    fi
+    # The generated API Gateway requires its key in the ACXD target; the Data
+    # Requests send it as x-api-key from the BackendApiKey secret. Fill that
+    # secret from the stack output so the runner's upsert-secrets step creates
+    # it — the value never touches the bundle.
+    if [ -z "${ACXD_SECRET_BACKENDAPIKEY:-}" ]; then
+        if [ -n "${API_KEY:-}" ] && [ "$API_KEY" != "RETRIEVE_FAILED" ] && [ "$API_KEY" != "None" ]; then
+            export ACXD_SECRET_BACKENDAPIKEY="$API_KEY"
+            info "BackendApiKey secret sourced from CloudFormation ApiKeyValue"
+        else
+            info "ApiKeyValue not known yet — the runner reads it from the stack output after deploy-cfn-backend (or export ACXD_SECRET_BACKENDAPIKEY to override)"
+        fi
+    fi
+    ensure_acxd_credentials
+    # deploy.sh imports the Contact Flow in Phase 11 (placeholders + Agentic CX
+    # binding); tell the runner to leave its import-contact-flows step alone.
+    export AICC_FLOW_IMPORT_BY_DEPLOY_SH=1
+    # One backend, one stack. Live (2026-09-13): the runner fell back to the
+    # manifest's default project and created a SECOND CloudFormation stack next
+    # to this script's, so the Data Requests called a different API than the one
+    # deployed here. Hand it the names this script actually used.
+    export PROJECT_NAME
+    export AICC_STACK_NAME="$STACK_NAME"
+    local args=(deploy --manifest deploy-manifest.json)
+    [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+    (cd "$SCRIPT_DIR" && node runner.js "${args[@]}")
+}
+
+do_acxd_summary() {
+    echo ""
+    hr
+    if [ -n "${CONTACT_FLOW_ID:-}" ]; then
+        echo "  ✅ ACXD deployment complete"
+    else
+        echo "  ⚠️  ACXD deployment complete — Contact Flow NOT imported (see Phase 11 above)"
+    fi
+    hr
+    echo "  Project:          $PROJECT_NAME"
+    echo "  Connect instance: ${CONNECT_INSTANCE_ID:-N/A}"
+    echo "  Stack:            $STACK_NAME"
+    echo "  API endpoint:     ${API_ENDPOINT:-N/A}"
+    echo "  Contact flow:     ${CONTACT_FLOW_ID:-NOT IMPORTED}"
+    echo ""
+    (cd "$SCRIPT_DIR" && node runner.js status) || true
+    echo ""
+    ACXD_ALIAS_ROTATED="${ACXD_ALIAS_ROTATED:-$(runner_alias_rotated)}"
+    if [ -n "$ACXD_ALIAS_ROTATED" ]; then
+        # The alias in the block — whatever it is — predates the deployment this
+        # run replaced, so it resolves to the OLD build. Do not claim it is bound.
+        echo "  ⚠️  ALIAS STALE — the application deployment was REPLACED during this run, which"
+        echo "      rotates its deploymentKey. The Agentic CX block still holds the previous key"
+        echo "      and it still resolves, so Connect will serve the PREVIOUS build."
+        echo "      Fix it before testing:"
+        echo "        1. Connect flow designer → open the flow → click the Agentic CX block"
+        echo "        2. Alias dropdown → re-select the environment alias → Save → Publish"
+        echo "      Or non-interactively, with the new key:"
+        echo "        ./deploy.sh --rebind-alias <deploymentKey>"
+        echo "      The deploymentKey is not in the public SDK — read it from the console-internal"
+        echo "      GET /acxd/api/cxn/flowResources?workspaceId=…&applicationId=…&type=deployments"
+    elif [ -n "${ACXD_ALIAS_ID:-}" ]; then
+        echo "  Agentic CX block bound to alias $ACXD_ALIAS_ID. Attach a phone number / chat widget to the flow (WIRING-GUIDE.md)."
+    else
+        echo "  Pick the application alias in the Agentic CX block (flow designer) or re-run with ACXD_ALIAS_ID=... — until then contacts take the block's Error branch. See WIRING-GUIDE.md."
+    fi
+    hr
+}
+
+do_acxd_deploy() {
+    if [ "$DRY_RUN" = "true" ]; then
+        info "ACXD dry run: passing through to the static runner; no AWS or ACXD resources will change"
+        run_acxd_runner
+        return 0
+    fi
+    if [ -z "$CFN_TEMPLATE" ]; then
+        echo "❌ No CloudFormation template found under cloudformation/." >&2
+        exit 1
+    fi
+    do_preflight
+    phase_cloudformation
+    phase_lambda_code
+    phase_openapi
+    info "Phase 4 skipped for ACXD: knowledge-base articles deploy through the runner"
+    phase_connect_instance
+    verify_acxd_connect_customer
+    info "Phase 6 skipped for ACXD: Q in Connect is not used"
+    phase_env_vars
+    info "Phases 8–10: deploying ACXD resources with the static runner"
+    run_acxd_runner
+    phase_contact_flow
+    associate_flow_lambdas
+    CONTACT_FLOW_ID="${CONTACT_FLOW_ID:-$(runner_contact_flow_id)}"
+    [ -n "$CONTACT_FLOW_ID" ] && state_set CONTACT_FLOW_ID "$CONTACT_FLOW_ID"
+    info "Phase 12 skipped for ACXD: AI Prompt, AI Agent, and security profile are not used"
+    phase_phone_number
+    do_acxd_summary
+}
+
+# Re-point the published Contact Flow's Agentic CX block at a deploymentKey.
+# Needed whenever the runner had to REPLACE the application deployment: that
+# rotates the key, the block keeps the previous one, and the previous one still
+# resolves — to the previous build. Patches AgentConfiguration.Alias in place
+# (aws connect update-contact-flow-content), then reads the flow back.
+# The Agentic CX alias the already-imported Contact Flow carries (empty when
+# there is no imported flow yet, or the block still holds the placeholder).
+published_flow_alias() {
+    local flow_id="${CONTACT_FLOW_ID:-$(state_get CONTACT_FLOW_ID)}"
+    [ -z "$flow_id" ] && flow_id="$(runner_contact_flow_id 2>/dev/null || true)"
+    [ -z "${CONNECT_INSTANCE_ID:-}" ] && { echo ""; return; }
+    if [ -z "$flow_id" ]; then
+        # A fresh bundle directory has no state yet — the flow this project
+        # published earlier is still there under its name.
+        flow_id=$(aws connect list-contact-flows --instance-id "$CONNECT_INSTANCE_ID" \
+            --region "$REGION" --output json 2>/dev/null | python3 -c "
+import sys, json
+for f in json.load(sys.stdin).get('ContactFlowSummaryList', []):
+    if f.get('Name') == '${FLOW_NAME}': print(f['Id']); break
+" 2>/dev/null || echo "")
+    fi
+    [ -z "$flow_id" ] && { echo ""; return; }
+    aws connect describe-contact-flow \
+        --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$flow_id" \
+        --region "$REGION" --query 'ContactFlow.Content' --output text 2>/dev/null | python3 -c '
+import json, sys
+try:
+    content = json.loads(sys.stdin.read() or "{}")
+except ValueError:
+    content = {}
+for action in content.get("Actions", []):
+    if action.get("Type") == "ConnectParticipantWithAgenticCX":
+        alias = ((action.get("Parameters") or {}).get("AgentConfiguration") or {}).get("Alias") or ""
+        if alias and alias != "SELECT_ALIAS_IN_CONSOLE":
+            print(alias)
+        break
+' 2>/dev/null || true
+}
+
+do_acxd_rebind_alias() {
+    local alias_value="$1"
+    hr
+    echo "  AICC Builder - ACXD Agentic CX alias rebind"
+    hr
+    if [ -z "$alias_value" ]; then
+        echo "❌ --rebind-alias requires the deploymentKey to bind." >&2
+        exit 2
+    fi
+    CONNECT_INSTANCE_ID="${CONNECT_INSTANCE_ID:-$(state_get CONNECT_INSTANCE_ID)}"
+    if [ -z "$CONNECT_INSTANCE_ID" ]; then
+        echo "❌ CONNECT_INSTANCE_ID is unknown (not in $STATE_FILE) — export it and retry." >&2
+        exit 1
+    fi
+    CONTACT_FLOW_ID="${CONTACT_FLOW_ID:-$(state_get CONTACT_FLOW_ID)}"
+    [ -z "$CONTACT_FLOW_ID" ] && CONTACT_FLOW_ID="$(runner_contact_flow_id)"
+    if [ -z "$CONTACT_FLOW_ID" ]; then
+        echo "❌ No imported Contact Flow recorded — deploy first, or export CONTACT_FLOW_ID." >&2
+        exit 1
+    fi
+    info "Instance: $CONNECT_INSTANCE_ID | flow: $CONTACT_FLOW_ID | alias: $alias_value"
+    info "Region: $REGION (from AWS_DEFAULT_REGION; export it if the instance lives elsewhere)"
+
+    local CUR_CONTENT="$DEPLOY_TMP/${PROJECT_NAME}_rebind_current.json"
+    local NEW_CONTENT="$DEPLOY_TMP/${PROJECT_NAME}_rebind_new.json"
+    aws connect describe-contact-flow \
+        --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$CONTACT_FLOW_ID" \
+        --region "$REGION" --query 'ContactFlow.Content' --output text > "$CUR_CONTENT"
+    if ! python3 - "$CUR_CONTENT" "$NEW_CONTENT" "$alias_value" <<'PYEOF'; then
+import json, sys
+src, dst, alias = sys.argv[1:4]
+content = json.load(open(src, encoding="utf-8"))
+changed = []
+for action in content.get("Actions", []):
+    if action.get("Type") != "ConnectParticipantWithAgenticCX":
+        continue
+    cfg = action.setdefault("Parameters", {}).setdefault("AgentConfiguration", {})
+    changed.append(cfg.get("Alias"))
+    cfg["Alias"] = alias
+if not changed:
+    sys.stderr.write("no ConnectParticipantWithAgenticCX block in this flow\n")
+    raise SystemExit(3)
+json.dump(content, open(dst, "w", encoding="utf-8"), ensure_ascii=False)
+print("   previous alias: %s" % ", ".join(str(a) for a in changed))
+PYEOF
+        echo "❌ Could not patch the flow content (see above)." >&2
+        rm -f "$CUR_CONTENT" "$NEW_CONTENT"
+        exit 1
+    fi
+    aws connect update-contact-flow-content \
+        --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$CONTACT_FLOW_ID" \
+        --content "file://$NEW_CONTENT" --region "$REGION" >/dev/null
+    # Read back: a successful call is not evidence the value was stored.
+    aws connect describe-contact-flow \
+        --instance-id "$CONNECT_INSTANCE_ID" --contact-flow-id "$CONTACT_FLOW_ID" \
+        --region "$REGION" --query 'ContactFlow.Content' --output text > "$CUR_CONTENT"
+    python3 - "$CUR_CONTENT" "$alias_value" <<'PYEOF'
+import json, sys
+content = json.load(open(sys.argv[1], encoding="utf-8"))
+stored = [a.get("Parameters", {}).get("AgentConfiguration", {}).get("Alias")
+          for a in content.get("Actions", [])
+          if a.get("Type") == "ConnectParticipantWithAgenticCX"]
+print("   stored alias:   %s" % ", ".join(str(s) for s in stored))
+if any(s != sys.argv[2] for s in stored):
+    sys.stderr.write("   readback MISMATCH — the alias was not stored\n")
+    raise SystemExit(1)
+PYEOF
+    rm -f "$CUR_CONTENT" "$NEW_CONTENT"
+    ok "Agentic CX block rebound to $alias_value (published content updated)"
+    state_set ACXD_ALIAS_ID "$alias_value"
+    info "Place a test contact now; the flow serves the build behind this deploymentKey."
+    hr
+}
+
+do_acxd_status() {
+    hr
+    echo "  AICC Builder - ACXD Deployment Status"
+    echo "  Project: $PROJECT_NAME | Region: $REGION"
+    hr
+    STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+        --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NOT_FOUND")
+    echo "  Shared CloudFormation: $STACK_STATUS"
+    [ "$STACK_STATUS" != "NOT_FOUND" ] && echo "     API Endpoint: $(get_output ApiEndpoint)"
+    echo "  Classic/shared state (.aicc_deploy_state):"
+    for kv in CONNECT_INSTANCE_ID CONTACT_FLOW_ID PHONE_NUMBER_ID; do
+        v=$(state_get "$kv")
+        [ -n "$v" ] && echo "  🔹 $kv: $v"
+    done
+    echo "  ACXD runner state (.deploy-state.json):"
+    if [ -f "$RUNNER_STATE_FILE" ]; then
+        (cd "$SCRIPT_DIR" && node runner.js status) || true
+    else
+        echo "  (not created yet)"
+    fi
+    hr
+}
+
+do_acxd_cleanup() {
+    hr
+    echo "  AICC Builder - ACXD Cleanup"
+    echo "  Project: $PROJECT_NAME | Region: $REGION"
+    hr
+    echo "  This reads .aicc_deploy_state and .deploy-state.json, then removes only"
+    echo "  resources recorded by the ACXD runner (including the imported contact flow)."
+    do_acxd_status
+    if [ -z "$AUTO" ]; then
+        read -r -p "  Type 'delete' to remove the recorded ACXD resources: " CONFIRM
+        [ "$CONFIRM" = "delete" ] || { echo "  Cancelled."; return 0; }
+    fi
+    CONNECT_INSTANCE_ID="${CONNECT_INSTANCE_ID:-$(state_get CONNECT_INSTANCE_ID)}"
+    export CONNECT_INSTANCE_ID
+    ensure_acxd_runner
+    ensure_acxd_credentials
+    (cd "$SCRIPT_DIR" && node runner.js cleanup --yes)
+    if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" &>/dev/null; then
+        info "Deleting shared CloudFormation stack: $STACK_NAME"
+        aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
+        aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" || true
+    fi
+    rm -f "$STATE_FILE"
+}
+
+# =============================================================================
 # DEPLOY: phase runner
 # =============================================================================
 do_deploy() {
+    if [ "$TARGET" = "acxd" ]; then
+        do_acxd_deploy
+        return
+    fi
+    if [ "$DRY_RUN" = "true" ]; then
+        echo "❌ --dry-run is currently supported only with --target acxd." >&2
+        exit 2
+    fi
     if [ -z "$CFN_TEMPLATE" ]; then
         echo "❌ No CloudFormation template found under cloudformation/."
         exit 1
@@ -2574,6 +3275,10 @@ do_deploy() {
 # CLEANUP (reverse order — phone/flow/AI agent/bot/MCP/Gateway/Assistant/CFN)
 # =============================================================================
 do_cleanup() {
+    if [ "$TARGET" = "acxd" ]; then
+        do_acxd_cleanup
+        return
+    fi
     hr
     echo "  AICC Builder - Resource Cleanup"
     echo "  Project: $PROJECT_NAME | Region: $REGION | Account: $ACCOUNT_ID"
@@ -2891,6 +3596,10 @@ for p in json.load(sys.stdin).get('credentialProviders', []):
 # STATUS
 # =============================================================================
 do_status() {
+    if [ "$TARGET" = "acxd" ]; then
+        do_acxd_status
+        return
+    fi
     hr
     echo "  AICC Builder - Deployment Status"
     echo "  Project: $PROJECT_NAME | Region: $REGION"
@@ -2936,8 +3645,15 @@ case "$COMMAND" in
     deploy)                     do_deploy ;;
     cleanup|clean|destroy|delete) do_cleanup ;;
     status)                     do_status ;;
+    rebind-alias)
+        if [ "$TARGET" != "acxd" ]; then
+            echo "❌ --rebind-alias applies to the ACXD target only (the Agentic CX block)." >&2
+            exit 2
+        fi
+        do_acxd_rebind_alias "$REBIND_ALIAS"
+        ;;
     *)
-        echo "Usage: $0 {deploy|cleanup|status}"
+        echo "Usage: $0 {deploy|cleanup|status} | $0 --rebind-alias <deploymentKey>"
         exit 1
         ;;
 esac

@@ -445,6 +445,14 @@ SomeMethod:
 
 The API Key is still created for optional MCP Gateway use, but methods themselves should NOT require it.
 
+**Exception — ACXD runtime target:** the ACXD application's Data Requests call
+this API Gateway directly (no AgentCore Gateway in front), so there every
+non-OPTIONS method has `ApiKeyRequired: true`. You may keep writing `false`;
+the deterministic merge flips it for ACXD sessions and the deploy script feeds
+the `ApiKeyValue` output to the ACXD `BackendApiKey` secret the Data Requests
+send as `x-api-key`. Never remove the ApiKey / UsagePlan / UsagePlanKey /
+ApiKeyRetriever resources or the `ApiKeyValue` output — ACXD depends on them.
+
 ## 🚨 CRITICAL: Lambda `Architectures` PROPERTY FORMAT
 
 CloudFormation spec (`AWS::Lambda::Function`) requires:

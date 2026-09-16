@@ -1,0 +1,43 @@
+{
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "type": {
+      "default": "string",
+      "title": "Type",
+      "type": "string"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "from_contact_attribute": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Connect attribute the contact flow passes in, e.g. '$.CustomerEndpoint.Address'",
+      "title": "From Contact Attribute"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "ACXDContextVariable",
+  "type": "object"
+}
