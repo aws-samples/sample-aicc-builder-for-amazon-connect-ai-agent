@@ -159,7 +159,7 @@ def _state_dir(session_id: Optional[str]) -> Optional[Path]:
     from tools.path_safety import path_under
     state = path_under(Path(mount) / "sessions", session_id, "state")
     if state is None:
-        logger.warning("[ACXDFlowSpec] rejected session id %r as a path segment", session_id)
+        logger.warning("[ACXDFlowSpec] rejected a session id that is not a plain path segment")
     return state
 
 
