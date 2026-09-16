@@ -2680,6 +2680,16 @@ whether it can stand, and wait for explicit user approval before any further edi
 - Money, refund, payment, authorization, eligibility, compliance, and identity
   decisions stay deterministic without exception. A generative step may explain
   a fixed result but may not make that decision.
+- The conversation style (`application.conversation_style`, asked once in the
+  interview) defaults to `generative`: an operation flow is carried by ONE
+  `generative_journey` that collects the values a person explains in their own
+  words and answers side questions from the FAQ, while fixed nodes exist only
+  for mandated wording (`basic`), strict-format values and identity checks
+  (`user_choice`), the backend call (`data_request`), decisions (`choice`) and
+  hand-off. `scripted` — every step a fixed node — is only the customer's
+  explicit choice. When the review reports an operation flow without a journey
+  under the generative style, that is a plan defect to raise with the user,
+  not something to patch in the asset.
 
 ### When the OperationSpec itself is wrong
 D9-4 compares slot types with the OperationSpec, so an asset can never be made

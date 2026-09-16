@@ -88,6 +88,20 @@ DETERMINISTIC_ONLY_CATEGORIES = frozenset({
 })
 DECISION_CATEGORIES = tuple(sorted(DETERMINISTIC_ONLY_CATEGORIES)) + ("general",)
 
+#: How the application talks. 'generative' is the default for an LLM-run agent:
+#: a generative_journey carries each operation's conversation and the flow only
+#: pins down what must be exact. 'scripted' is the customer's explicit choice of
+#: a scenario-driven agent (every step a fixed node).
+CONVERSATION_STYLES = ("generative", "scripted")
+
+#: Slot kinds a generative_journey must NOT capture: a value whose exactness
+#: the runtime checks (regex, phone, identifier). These stay on a user_choice
+#: step so F1 can re-ask on a format miss; an LLM paraphrase of "GC-20260902"
+#: is not a lookup key.
+STRICT_FORMAT_BUILTIN_TYPES = frozenset({
+    "NLX.PhoneNumber", "NLX.AlphaNumeric", "NLX.Email", "NLX.Url",
+})
+
 SPEECH_ENGINES = ("agentic_voice", "transcribe", "speech_to_speech")
 CHANNELS = ("voice", "chat")
 #: The Agentic CX contact-flow block accepts at most 10 context variables.
@@ -369,6 +383,22 @@ class ACXDNodeStep(_Model):
                     "(e.g. the customer-info search flow when the order number is not found). "
                     "The generated flow must redirect there; system hand-offs (follow-up, "
                     "escalation) need not be named.")
+    captures: List[str] = Field(
+        default_factory=list,
+        description="generative_journey steps only: names of the flow's slots the journey "
+                    "collects in free conversation (e.g. ['reason', 'preferredDate']). A value "
+                    "with a strict format — a regex, a phone number, an identifier — is never "
+                    "captured here: it gets its own user_choice step, which the runtime checks "
+                    "character by character.")
+    slot: Optional[str] = Field(
+        default=None,
+        description="user_choice steps: the flow slot this step collects (e.g. 'orderNumber'). "
+                    "Required for a strict-format slot when the flow also has a generative_journey, "
+                    "so the plan shows which values stay deterministic.")
+    journey_tools: List[str] = Field(
+        default_factory=list,
+        description="generative_journey steps only: 'knowledge_base' lets the journey answer "
+                    "side questions from the FAQ knowledge base while it collects values.")
     user_confirmed: bool = Field(default=False)
     confirmation_pending_reason: Optional[str] = Field(
         default=None, description="Set when a re-upsert changed the decision and reset confirmation")
@@ -442,6 +472,14 @@ class ACXDContextVariable(_Model):
 class ACXDApplicationPlan(_Model):
     name: Optional[str] = None
     description: Optional[str] = None
+    conversation_style: str = Field(
+        default="generative",
+        description=f"One of {CONVERSATION_STYLES}. 'generative' (default): each operation is "
+                    "run by a generative_journey that talks freely, with deterministic islands "
+                    "only where they are needed — mandatory wording, strict-format identifiers, "
+                    "money/eligibility/compliance/identity decisions, backend calls, hand-off. "
+                    "'scripted': every step is a fixed node; only when the customer explicitly "
+                    "asks for a scenario-driven agent.")
     channels: List[str] = Field(default_factory=lambda: ["voice"], description=f"Subset of {CHANNELS}")
     locales: List[str] = Field(default_factory=list, description="Full locale codes, e.g. ['ko-KR','en-US']")
     primary_locale: Optional[str] = None
@@ -562,6 +600,61 @@ def enforce_determinism_policy(step: ACXDNodeStep) -> Optional[str]:
     return None
 
 
+def is_strict_format_slot(slot: ACXDSlotPlan) -> bool:
+    """A value the runtime must check exactly — never a journey's to paraphrase."""
+    kind = str(slot.type or "").strip()
+    if slot.regex:
+        return True
+    if kind in STRICT_FORMAT_BUILTIN_TYPES:
+        return True
+    lowered = kind.lower()
+    return lowered in {"phone", "phonenumber", "phone_number", "email", "alphanumeric", "identifier"}
+
+
+def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan]) -> List[str]:
+    """Keep a generative_journey's ``captures`` to values a conversation may
+    collect. Returns notes for every coercion; mutates ``step``.
+
+    - a strict-format slot (regex / phone / identifier) is dropped from the
+      journey: it needs its own user_choice step so F1 can re-ask on a miss
+    - a name that is not one of the flow's slots is dropped (nothing to fill)
+    - a non-journey step carries no captures at all
+    """
+    notes: List[str] = []
+    if step.node_type != "generative_journey":
+        if step.captures or step.journey_tools:
+            step.captures, step.journey_tools = [], []
+            notes.append(f"step {step.step}: captures/journey_tools apply to generative_journey steps only — cleared")
+        return notes
+    by_name = {s.name: s for s in slots}
+    kept: List[str] = []
+    for name in step.captures:
+        name = str(name).strip()
+        if not name or name in kept:
+            continue
+        slot = by_name.get(name)
+        if slot is None:
+            notes.append(f"step {step.step}: captures '{name}' is not one of the flow's slots — dropped")
+            continue
+        if is_strict_format_slot(slot):
+            notes.append(f"step {step.step}: '{name}' has a strict format ({slot.type}"
+                         f"{' + regex' if slot.regex else ''}) — a journey must not capture it; "
+                         "plan a user_choice step for it")
+            continue
+        kept.append(name)
+    step.captures = kept
+    tools = []
+    for tool in step.journey_tools:
+        tool = str(tool).strip()
+        if tool == "knowledge_base":
+            tools.append(tool)
+        elif tool:
+            notes.append(f"step {step.step}: journey tool '{tool}' is not supported — a journey collects values; "
+                         "the flow's data_request step calls the backend")
+    step.journey_tools = tools
+    return notes
+
+
 def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[set] = None) -> List[str]:
     """Deterministic readiness check; a non-empty list blocks generation."""
     problems: List[str] = []
@@ -591,6 +684,24 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
                 problems.append(f"flow '{f.flow_id}' step {s.step}: '{s.decision_category}' step must be deterministic")
             if not s.user_confirmed:
                 problems.append(f"flow '{f.flow_id}' step {s.step}: determinism decision not confirmed by the user")
+        if f.role == "operation":
+            journeys = [s for s in f.steps if s.node_type == "generative_journey"]
+            slot_names = {sl.name for sl in f.slots}
+            for s in journeys:
+                if not s.captures:
+                    problems.append(f"flow '{f.flow_id}' step {s.step}: a generative_journey must name the slots "
+                                    f"it collects in 'captures' (one of {sorted(slot_names)}) — or be a "
+                                    "generative_text step if it only talks")
+                for name in s.captures:
+                    if name not in slot_names:
+                        problems.append(f"flow '{f.flow_id}' step {s.step}: captures '{name}' is not a slot of this flow")
+            captured_by_choice = {s.slot for s in f.steps if s.node_type == "user_choice" and s.slot}
+            if journeys:
+                for sl in f.slots:
+                    if is_strict_format_slot(sl) and sl.name not in captured_by_choice:
+                        problems.append(f"flow '{f.flow_id}': slot '{sl.name}' has a strict format and no "
+                                        f"user_choice step declares slot='{sl.name}' — collect it "
+                                        "deterministically (the journey must not)")
         if not f.confirmed:
             problems.append(f"flow '{f.flow_id}': flow plan not approved by the user")
     roles = spec.system_flows()
@@ -610,6 +721,8 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
         if g.action == "route" and (not g.route_flow_id or g.route_flow_id not in seen):
             problems.append(f"guardrail '{g.name}': route action needs an existing route_flow_id")
     app = spec.application
+    if app.conversation_style not in CONVERSATION_STYLES:
+        problems.append(f"application: conversation_style must be one of {CONVERSATION_STYLES}")
     if len(app.context_variables) > MAX_CONTEXT_VARIABLES:
         problems.append(f"application: at most {MAX_CONTEXT_VARIABLES} context variables (Agentic CX block limit)")
     for ch in app.channels:
@@ -726,6 +839,23 @@ def upsert_acxd_flow_plan(
     decisions (decision_category) are always deterministic; a generative label on
     them is coerced and reported back.
 
+    HOW MUCH IS GENERATIVE follows application.conversation_style (default
+    'generative', saved with save_acxd_application_settings):
+      generative — ONE `generative_journey` step carries the operation's conversation:
+        it collects the values a person would explain in their own words (a reason, a
+        preference, a description, a choice among options) and answers side questions
+        from the FAQ. Name those slots in `captures` and pass
+        journey_tools=['knowledge_base'] when the project has an FAQ. Everything else
+        stays a fixed node ONLY because it must be exact: a `basic` for wording the
+        requirements mandate (consent, legal notice), a `user_choice` (with `slot`) for
+        every strict-format value — order number, phone, id, anything with a regex —
+        and for identity checks, `data_request` for the backend call, `choice` for a
+        money/eligibility/compliance rule, `escalate`/`redirect` for hand-off, and a
+        `generative_text` (or a `basic` when the wording is mandated) to announce the
+        result. A strict-format slot listed in `captures` is removed and reported.
+      scripted — the customer explicitly asked for a scenario-driven agent: every step
+        is a fixed node, one `user_choice` per value.
+
     Args:
         flow_id: Letters only, 3-64 chars (e.g. 'ProcessReturn').
         purpose: What the flow accomplishes.
@@ -733,9 +863,12 @@ def upsert_acxd_flow_plan(
         operation_id: The OperationSpec this flow implements (required for role='operation').
         steps: [{"step":1,"description":"...","node_type":"user_input",
                  "determinism":"deterministic","determinism_rationale":"...",
-                 "decision_category":"general|money|refund|...","data_request_id":"..."}]
+                 "decision_category":"general|money|refund|...","data_request_id":"...",
+                 "slot":"orderNumber" (user_choice), "captures":["reason"] and
+                 "journey_tools":["knowledge_base"] (generative_journey)}]
         slots: [{"name":"orderId","type":"text","field_name":"order_id","sensitive":false,
-                 "examples":[...],"regex":"..."}]
+                 "examples":[...],"regex":"..."}]. Omitting `steps` on a re-upsert keeps
+                 the planned steps; omitting `slots` keeps the slots.
         uses_knowledge_base: True when the flow answers from the FAQ knowledge base.
         escalation_conditions: When this flow hands off to a human, in plain language.
         customer_initiated: False when the customer never asks for this operation
@@ -776,8 +909,19 @@ def upsert_acxd_flow_plan(
             prev_steps = {s.step: s for s in (existing.steps if existing else [])}
 
             notes: List[str] = []
+            new_slots = [ACXDSlotPlan.model_validate(x) for x in _as_list(slots, 'slots')]
+            if slots is None and existing is not None:
+                new_slots = list(existing.slots)          # a steps-only update keeps the slots
+            raw_steps = _as_list(steps, 'steps')
+            if not raw_steps and existing is not None and existing.steps:
+                # Live (2026-09-16): a slots-only re-upsert wiped the flow's
+                # confirmed steps (step_count 0) and cost a restore turn. An
+                # omitted step list means "keep them", never "delete them".
+                raw_steps = [s.model_dump() for s in existing.steps]
+                notes.append(f"steps not given — kept the {len(raw_steps)} planned steps "
+                             "(call remove_acxd_flow_plan to drop a flow)")
             new_steps: List[ACXDNodeStep] = []
-            for raw in _as_list(steps, 'steps'):
+            for raw in raw_steps:
                 raw = dict(raw or {})
                 raw.pop("user_confirmed", None)          # never trust a confirmation from the proposer
                 raw.pop("confirmation_pending_reason", None)
@@ -796,6 +940,7 @@ def upsert_acxd_flow_plan(
                 note = enforce_determinism_policy(s)
                 if note:
                     notes.append(note)
+                notes.extend(enforce_capture_policy(s, new_slots))
                 prev = prev_steps.get(s.step)
                 if prev and prev.user_confirmed and _decision_key(prev) == _decision_key(s):
                     s.user_confirmed = True                # unchanged decision keeps its confirmation
@@ -810,7 +955,7 @@ def upsert_acxd_flow_plan(
                 display_name=(display_name or "").strip() or (existing.display_name if existing else None),
                 customer_initiated=bool(customer_initiated),
                 steps=new_steps,
-                slots=[ACXDSlotPlan.model_validate(x) for x in _as_list(slots, 'slots')],
+                slots=new_slots,
                 uses_knowledge_base=uses_knowledge_base,
                 escalation_conditions=escalation_conditions,
                 # A plan whose every decision the user already confirmed stays approved.
@@ -908,6 +1053,7 @@ def save_acxd_application_settings(
     idle_chat_timeout_seconds: int = None,
     context_variables: Union[list[dict], str] = None,
     environment: str = None,
+    conversation_style: str = None,
 ) -> dict:
     """
     Save ACXD application settings (runtime target acxd only).
@@ -920,6 +1066,11 @@ def save_acxd_application_settings(
         context_variables: at most 10, [{"name":"customerPhone","type":"string",
                             "from_contact_attribute":"$.CustomerEndpoint.Address"}].
         environment: ACXD deployment environment (default 'development').
+        conversation_style: 'generative' (default — a generative_journey runs each
+            operation's conversation; fixed nodes only where exactness is required) or
+            'scripted' (the customer explicitly wants a scenario-driven agent: every
+            step a fixed node). Ask the customer once, early; keep 'generative' unless
+            they clearly say otherwise.
     """
     with _spec_lock(_current_session_id()):
         try:
@@ -929,6 +1080,15 @@ def save_acxd_application_settings(
                 app.name = name
             if description is not None:
                 app.description = description
+            if conversation_style is not None:
+                style = str(conversation_style).strip().lower()
+                aliases = {"generative": "generative", "journey": "generative", "llm": "generative",
+                           "생성형": "generative", "scripted": "scripted", "scenario": "scripted",
+                           "deterministic": "scripted", "시나리오": "scripted"}
+                if style not in aliases:
+                    return {"success": False,
+                            "error": f"conversation_style must be one of {CONVERSATION_STYLES}"}
+                app.conversation_style = aliases[style]
             if channels is not None:
                 app.channels = [str(c) for c in _as_list(channels, 'channels')]
             if locales is not None:

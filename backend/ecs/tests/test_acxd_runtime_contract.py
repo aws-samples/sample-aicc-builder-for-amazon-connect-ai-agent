@@ -654,11 +654,28 @@ def test_m1_slot_placeholder_must_name_an_attached_slot():
     assert any("M1" in p and "orderNumber" in p for p in problems)
 
 
-def test_m2_generative_text_becomes_a_deterministic_templated_basic():
-    """generative_text stores a variable and sends NO message."""
+def m2_fallback_body(out, generative_id):
+    """Live (2026-09-17): the confirmed generative_text is KEPT and a `failure`
+    edge (Error IntegrationNotFound → node_status failure, measured) leads to
+    the templated basic that then speaks. Returns that basic's message."""
+    node = out["nodes"][generative_id]
+    assert node["type"] == "generative_text"
+    failure = next(e for e in node["childNodes"] if any(
+        (c.get("left") or {}).get("type") == "node_status" and (c.get("right") or {}).get("value") == "failure"
+        for c in e.get("conditions") or []))
+    return out["nodes"][failure["nodeId"]]["messages"][0]["body"]
+
+
+def test_m2_generative_text_is_kept_with_a_templated_failure_fallback():
+    """A workspace without a default model answers IntegrationNotFound; the
+    templated sentence rides on the node's failure edge, the generative wording
+    the user confirmed stays for a workspace that has one."""
     flow, notes = normalized("DeliveryStatusByOrderNumber")
-    assert nodes_of(flow, "generative_text") == []
-    answer = next(body for body in bodies(flow) if body.startswith("조회 결과"))
+    generative = nodes_of(flow, "generative_text")
+    assert len(generative) == 1
+    answer = m2_fallback_body(flow, generative[0]["nodeId"])
+    # a prompt that already names its placeholders is left as the user approved it
+    assert "다음 값만 사용해" not in flow["nodes"][generative[0]["nodeId"]]["metadata"]["generativeText"]["prompt"]
     assert answer == (
         "조회 결과: 주문번호 {orderNumber:NLX.Slot}, "
         "배송 상태 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}, "
@@ -695,9 +712,7 @@ def test_m2_without_placeholders_announces_the_data_request_result_fields():
     assert request_id in kwargs["data_requests"]
     kwargs["field_labels"] = {request_id: {"deliveryStatus": "배송 상태"}}
     out, notes = apply_runtime_contract(flow, **kwargs)
-    node = out["nodes"][generative["nodeId"]]
-    assert node["type"] == "basic"
-    body = node["messages"][0]["body"]
+    body = m2_fallback_body(out, generative["nodeId"])
     assert body.startswith("조회 결과: ") and f"{{{request_id}.deliveryStatus:NLX.Variable}}" in body
     assert "배송 상태 {" in body            # the interview's label, not the field name
     assert "success" not in body           # envelope fields are not announced
@@ -1099,7 +1114,7 @@ def test_m2_prompt_labels_do_not_leak_fragments_of_earlier_placeholders():
     generative["metadata"]["generativeText"]["prompt"] = (
         f"상태 {{{rid}.deliveryStatus:NLX.Variable}}, 배송 예정일 {{{rid}.expectedDeliveryDate:NLX.Variable}}를 안내한다")
     out, _ = apply_runtime_contract(flow, **context("DeliveryStatusByOrderNumber"))
-    body = out["nodes"][generative["nodeId"]]["messages"][0]["body"]
+    body = m2_fallback_body(out, generative["nodeId"])
     assert "Variable}" not in body.replace(":NLX.Variable}", "")
     assert "배송 예정일 {" in body and "상태 {" in body
 
@@ -1114,7 +1129,7 @@ def test_m2_result_labels_stay_in_the_callers_language():
     kwargs["field_labels"] = {"getDeliveryStatusByOrderNumber": {"deliveryStatus": "Delivery status in English",
                                                                  "expectedDeliveryDate": "예상 배송일"}}
     out, _ = apply_runtime_contract(flow, **kwargs)
-    body = out["nodes"][generative["nodeId"]]["messages"][0]["body"]
+    body = m2_fallback_body(out, generative["nodeId"])
     assert "Delivery status in English" not in body
     assert "배송 상태 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}" in body   # dictionary word
     assert "예상 배송일 {getDeliveryStatusByOrderNumber.expectedDeliveryDate:NLX.Variable}" in body  # Korean description kept
@@ -1630,3 +1645,126 @@ def test_e2_a_not_captured_answer_is_first_checked_for_an_agent_request():
                                           flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
                                           escalation_flow_id="Escalation", slot_type_ids={"yesNo"})
     assert not any("(E2)" in n for n in sys_notes)
+
+
+# ---------------------------------------------------------------------------
+# J2-J5 — a generative_journey that collects values (live, 2026-09-17)
+# ---------------------------------------------------------------------------
+
+def _journey_flow(journey_edges=None, journey_cfg=None):
+    """RequestReturn with the reason collected by a journey: the model wrote the
+    node and (maybe) its exits; the contract must give it dataCapture, the
+    captured edge, the agent exit, the KB tool and bounds."""
+    cfg = {"prompt": "고객의 반품 사유를 자연스럽게 확인합니다."}
+    if journey_cfg:
+        cfg.update(journey_cfg)
+    edges = journey_edges if journey_edges is not None else [
+        {"nodeId": "askP", "name": "done"},                          # what the model meant as "captured"
+    ]
+    flow = _intake_flow()
+    nodes = flow["nodes"]
+    nodes["askO"]["childNodes"][0]["nodeId"] = "gj"                  # order captured → journey
+    nodes["gj"] = {"nodeId": "gj", "type": "generative_journey",
+                   "metadata": {"generativeJourney": cfg}, "childNodes": edges}
+    nodes["dr"]["dataRequests"][0]["payload"]["reason"] = "{reason:NLX.Slot}"
+    flow["slotTypes"].append({"name": "reason", "type": "reason", "sensitive": False})
+    return flow
+
+
+_REASON_TYPE = {"slotTypeId": "reason", "values": [{"value": v} for v in ("단순변심", "상품불량", "오배송", "파손")]}
+_JOURNEY_STEPS = [{"captures": ["reason"], "journey_tools": ["knowledge_base"], "description": "사유 확인"}]
+
+
+def _apply_journey(flow, **overrides):
+    kwargs = dict(role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+                  flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
+                  escalation_flow_id="Escalation", slot_type_ids={"yesNo", "reason"},
+                  slot_type_docs={"reason": _REASON_TYPE}, journey_steps=_JOURNEY_STEPS,
+                  kb_name="greencart-faq-kb")
+    kwargs.update(overrides)
+    return apply_runtime_contract(flow, **kwargs)
+
+
+def test_j2_journey_gets_data_capture_from_the_plan_with_the_slots_enum_schema():
+    out, notes = _apply_journey(_journey_flow())
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    assert cfg["dataCapture"]["exitEnabled"] is True
+    assert cfg["dataCapture"]["data"] == [{
+        "name": "reason", "type": "slot", "required": True,
+        "schema": {"type": "string", "enum": ["단순변심", "상품불량", "오배송", "파손"]}}]
+    assert any("(J2)" in n for n in notes)
+
+
+def test_j3_captured_edge_tests_the_slot_and_comes_first():
+    """Live: once every required value is captured the journey ends and neither
+    System.gjConditionIndex nor node_status success is set — without a slot
+    test edge the runtime logged Error NoMessages and fell to Fallback."""
+    out, notes = _apply_journey(_journey_flow())
+    edges = out["nodes"]["gj"]["childNodes"]
+    assert edges[0]["name"] == "captured" and edges[0]["nodeId"] == "askP"
+    assert edges[0]["conditions"] == [{"left": {"type": "slot", "name": "reason"}, "operator": "exists"}]
+    assert any("(J3)" in n for n in notes)
+    # a journey the model already wired with a slot test is left alone
+    wired = _journey_flow(journey_edges=[{"nodeId": "askP", "name": "captured",
+                                          "conditions": [{"left": {"type": "slot", "name": "reason"}, "operator": "exists"}]}])
+    _, notes2 = _apply_journey(wired)
+    assert not any("(J3)" in n for n in notes2)
+
+
+def test_j3_multiple_captures_are_one_edge_with_one_condition_per_slot():
+    flow = _journey_flow()
+    flow["slotTypes"].append({"name": "preferredDate", "type": "NLX.Date", "sensitive": False})
+    steps = [{"captures": ["reason", "preferredDate"], "journey_tools": []}]
+    out, _ = _apply_journey(flow, journey_steps=steps)
+    captured = out["nodes"]["gj"]["childNodes"][0]
+    assert [c["left"]["name"] for c in captured["conditions"]] == ["reason", "preferredDate"]
+    schemas = {d["name"]: d["schema"] for d in out["nodes"]["gj"]["metadata"]["generativeJourney"]["dataCapture"]["data"]}
+    assert schemas["preferredDate"] == {"type": "string"}
+
+
+def test_j4_agent_request_exit_condition_is_appended_and_routed():
+    """Live (chat 5): '상담원이랑 이야기할게요' inside the journey → gjConditionIndex 1
+    → RequestAgentFlow → Escalation → queue, in 1.2 s."""
+    out, notes = _apply_journey(_journey_flow(journey_cfg={"exitConditions": [{"name": "reasonCaptured", "prompt": "사유 확정"}]}))
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    assert cfg["exitConditions"][-1]["name"] == "agentRequested" and "상담원" in cfg["exitConditions"][-1]["prompt"]
+    index = len(cfg["exitConditions"]) - 1
+    agent_edge = next(e for e in out["nodes"]["gj"]["childNodes"] if e["name"] == "agentRequested")
+    assert agent_edge["conditions"] == [{"left": {"type": "system", "name": "System.gjConditionIndex"},
+                                        "operator": "eq", "right": {"type": "constant", "value": index}}]
+    assert out["nodes"][agent_edge["nodeId"]]["metadata"]["redirect"]["flowId"] == "RequestAgentFlow"
+    assert any("(J4)" in n for n in notes)
+    # J (existing) still adds the timeout / failure branches to the escalation redirect
+    statuses = {e["name"] for e in out["nodes"]["gj"]["childNodes"]}
+    assert {"timeout", "failure"} <= statuses
+
+
+def test_j5_tools_kb_added_unsupported_dropped_bounds_and_model_defaulted():
+    flow = _journey_flow(journey_cfg={"tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}]})
+    out, notes = _apply_journey(flow)
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    assert cfg["tools"] == [{"type": "knowledgeBase", "knowledgeBaseId": "{KB:greencart-faq-kb}", "scopeTags": []}]
+    assert cfg["maxSteps"] == 8 and cfg["modelType"] == "anthropic.claude-haiku-4-5"
+    violations = runtime_contract_violations(_journey_flow(journey_cfg={"tools": [{"type": "mcpFlow", "flowId": "toolX"}]}),
+                                             role="operation", flow_ids=["RequestReturn", "Escalation"],
+                                             escalation_flow_id="Escalation", slot_type_ids={"yesNo", "reason"},
+                                             slot_type_docs={"reason": _REASON_TYPE}, journey_steps=_JOURNEY_STEPS)
+    assert any("mcpFlow" in v and "J5" in v for v in violations)
+
+
+def test_j2_j5_are_idempotent_and_a_journey_without_a_plan_step_is_left_to_the_model():
+    out, _ = _apply_journey(_journey_flow())
+    again, notes = _apply_journey(out)
+    assert again == out and not any("(J" in n for n in notes)
+    # no plan step: no dataCapture is invented, the agent exit and bounds still apply
+    out2, _ = _apply_journey(_journey_flow(), journey_steps=[])
+    cfg = out2["nodes"]["gj"]["metadata"]["generativeJourney"]
+    assert "dataCapture" not in cfg and cfg["exitConditions"][-1]["name"] == "agentRequested"
+
+
+def test_j3_reports_a_journey_that_captures_but_cannot_continue():
+    flow = _journey_flow(journey_edges=[])
+    violations = runtime_contract_violations(flow, role="operation", flow_ids=["RequestReturn", "Escalation"],
+                                             escalation_flow_id="Escalation", slot_type_ids={"yesNo", "reason"},
+                                             slot_type_docs={"reason": _REASON_TYPE}, journey_steps=_JOURNEY_STEPS)
+    assert any("J3" in v and "no edge to continue" in v for v in violations)

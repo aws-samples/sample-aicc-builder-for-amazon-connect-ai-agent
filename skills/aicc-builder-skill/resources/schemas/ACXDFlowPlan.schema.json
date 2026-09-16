@@ -69,6 +69,35 @@
           "description": "For redirect steps: the flow_id this step hands the conversation to (e.g. the customer-info search flow when the order number is not found). The generated flow must redirect there; system hand-offs (follow-up, escalation) need not be named.",
           "title": "Redirect Flow Id"
         },
+        "captures": {
+          "description": "generative_journey steps only: names of the flow's slots the journey collects in free conversation (e.g. ['reason', 'preferredDate']). A value with a strict format \u2014 a regex, a phone number, an identifier \u2014 is never captured here: it gets its own user_choice step, which the runtime checks character by character.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Captures",
+          "type": "array"
+        },
+        "slot": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "user_choice steps: the flow slot this step collects (e.g. 'orderNumber'). Required for a strict-format slot when the flow also has a generative_journey, so the plan shows which values stay deterministic.",
+          "title": "Slot"
+        },
+        "journey_tools": {
+          "description": "generative_journey steps only: 'knowledge_base' lets the journey answer side questions from the FAQ knowledge base while it collects values.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Journey Tools",
+          "type": "array"
+        },
         "user_confirmed": {
           "default": false,
           "title": "User Confirmed",

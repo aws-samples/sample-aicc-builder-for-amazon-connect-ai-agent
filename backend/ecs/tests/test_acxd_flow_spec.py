@@ -323,3 +323,78 @@ def test_other_sessions_infra_spec_never_answers_for_a_fresh_session():
     assert afs.get_runtime_target_if_set(fresh) == "acxd"
     assert afs.get_runtime_target(fresh) == "acxd"
     afs.clear_runtime_target(fresh)
+
+
+# --- generative journeys: capture policy, steps-only re-upsert, style -------
+
+_JOURNEY_SLOTS = [
+    {"name": "orderNumber", "type": "NLX.AlphaNumeric", "regex": "^GC-[0-9]{8}$"},
+    {"name": "contactPhone", "type": "NLX.PhoneNumber"},
+    {"name": "reason", "type": "reason"},
+    {"name": "note", "type": "text"},
+]
+
+
+def _journey_steps():
+    return [
+        {"step": 1, "description": "주문번호 확인", "node_type": "user_choice", "slot": "orderNumber"},
+        {"step": 2, "description": "사유와 상황을 자유롭게 듣고 정리", "node_type": "generative_journey",
+         "determinism": "generative", "captures": ["reason", "note", "orderNumber", "ghost"],
+         "journey_tools": ["knowledge_base", "requestReturn"]},
+        {"step": 3, "description": "연락처 확인", "node_type": "user_choice", "slot": "contactPhone"},
+        {"step": 4, "description": "접수", "node_type": "data_request"},
+        {"step": 5, "description": "후속", "node_type": "redirect"},
+    ]
+
+
+def test_capture_policy_keeps_journeys_to_conversational_values():
+    res = _upsert(steps=_journey_steps(), slots=_JOURNEY_SLOTS)
+    assert res["success"], res
+    plan = afs.get_acxd_flow_spec().flow("ProcessReturn")
+    journey = next(s for s in plan.steps if s.node_type == "generative_journey")
+    assert journey.captures == ["reason", "note"]            # strict-format and unknown slots dropped
+    assert journey.journey_tools == ["knowledge_base"]       # a data request is not a journey tool here
+    notes = " | ".join(res["coerced"])
+    assert "orderNumber" in notes and "strict format" in notes
+    assert "ghost" in notes and "requestReturn" in notes
+    # a non-journey step never carries captures
+    res2 = _upsert(steps=[{"step": 1, "description": "x", "node_type": "basic", "captures": ["reason"]}],
+                   slots=_JOURNEY_SLOTS)
+    assert afs.get_acxd_flow_spec().flow("ProcessReturn").steps[0].captures == []
+    assert any("generative_journey steps only" in n for n in res2["coerced"])
+
+
+def test_steps_only_and_slots_only_reupserts_keep_the_other_half():
+    """Live (2026-09-16): a slots-only re-upsert wiped the confirmed steps
+    (step_count 0) and the orchestrator spent a turn restoring them."""
+    _upsert(steps=_journey_steps(), slots=_JOURNEY_SLOTS)
+    afs.confirm_acxd_flow_steps("ProcessReturn")
+    res = _upsert(steps=None, slots=_JOURNEY_SLOTS + [{"name": "extra", "type": "text"}])
+    plan = afs.get_acxd_flow_spec().flow("ProcessReturn")
+    assert res["step_count"] == 5 and plan.confirmed is True
+    assert any("kept the 5 planned steps" in n for n in res["coerced"])
+    assert {s.name for s in plan.slots} == {"orderNumber", "contactPhone", "reason", "note", "extra"}
+    res2 = _upsert(steps=_journey_steps(), slots=None)      # steps-only keeps the slots
+    assert {s.name for s in afs.get_acxd_flow_spec().flow("ProcessReturn").slots} >= {"extra"}
+
+
+def test_validate_requires_captures_and_deterministic_strict_slots_next_to_a_journey():
+    steps = _journey_steps()
+    steps[1]["captures"] = []                                # journey with nothing to collect
+    del steps[2]["slot"]                                     # phone capture no longer names its slot
+    _upsert(steps=steps, slots=_JOURNEY_SLOTS)
+    afs.confirm_acxd_flow_steps("ProcessReturn")
+    problems = afs.validate_acxd_flow_spec(afs.get_acxd_flow_spec())
+    assert any("must name the slots it collects in 'captures'" in p for p in problems)
+    assert any("slot 'contactPhone' has a strict format and no user_choice step declares" in p for p in problems)
+    assert not any("slot 'orderNumber'" in p for p in problems)   # step 1 declares it
+
+
+def test_conversation_style_defaults_to_generative_and_accepts_aliases():
+    assert afs.ACXDFlowSpec().application.conversation_style == "generative"
+    res = afs.save_acxd_application_settings(conversation_style="시나리오")
+    assert res["success"] and res["application"]["conversation_style"] == "scripted"
+    res = afs.save_acxd_application_settings(conversation_style="journey")
+    assert res["application"]["conversation_style"] == "generative"
+    bad = afs.save_acxd_application_settings(conversation_style="whatever")
+    assert not bad["success"] and "conversation_style" in bad["error"]

@@ -31,6 +31,28 @@ flow is a routing target only when it is `untrained: false` **and** carries an
 ASCII `aiDescription` ("Use this flow when the user…"); the system flows
 (`Welcome`, `Fallback`, `FollowUp`) are `untrained: true` and are never targets.
 
+**The conversation is generative by default; the flow pins down what must be exact.**
+The interview asks once for the *conversation style* (`application.conversation_style`,
+default `generative`). Under it an operation flow is carried by ONE
+`generative_journey` node that collects the values a person explains in their own
+words (`metadata.generativeJourney.dataCapture.data[{name, type: slot, required,
+schema}]`, built from the plan's `captures` — a free description is classified onto
+the slot's enum) and answers side questions from the FAQ (a `knowledgeBase` tool).
+Fixed nodes remain for what must be exact: `basic` for mandated wording,
+`user_choice` for every strict-format value (regex, phone, identifier) and identity
+check — a journey never captures those — `data_request` for the backend call,
+`choice` for money/eligibility/compliance decisions, `escalate`/`redirect` for
+hand-off. When every required value is captured the journey ends and evaluates its
+edges; that exit sets neither `System.gjConditionIndex` nor `node_status`, so the
+FIRST child edge tests the captured slots with `exists` (without it: `Error
+NoMessages` and the fallback flow). `exitConditions[i]` map to
+`System.gjConditionIndex eq i`; the contract appends an `agentRequested` condition
+routed to the agent-request flow, `timeout`/`failure` edges to the escalation, a
+node-level `modelType` and `maxSteps`. A `dataRequest` or `mcpFlow` tool on a
+journey is refused (the service drops the first, the second fails on invocation).
+`scripted` — one `user_choice` per value, no journey — is only the customer's
+explicit choice. Live record: probes 1–7 of 2026-09-17 in the validation log.
+
 **Continuity is a flow, not a prompt.** An operation that succeeds redirects to
 `FollowUpFlow`, which asks "anything else?" as a `user_choice` over the `yesNo`
 slot type: yes → greeting + `user_input` → redirect to the recognised flow, no →
@@ -73,12 +95,17 @@ is where the runtime resolves the secret from. `dynamic: true` means "the caller
 supplies this value per request" and is never set for a secret. The runner
 substitutes `{WEBHOOK_URL}` in the top-level URL and in both environment blocks.
 
-**Messages are templated, placeholders must exist.** A customer-facing answer is
-a `basic` message; `generative_text` emits nothing to the customer. Every
-`{dr.<field>:NLX.Variable}` placeholder in a message must name a field that
-exists in that data request's `responseSchema` (`price` vs `unitPrice` renders
-empty). `aiDescription` must be ASCII, and a `generative_journey`'s exit edges
-must carry conditions or they are stored disconnected.
+**Messages are templated, placeholders must exist; a generative sentence keeps a
+templated fallback.** A fixed customer-facing answer is a `basic` message. A
+confirmed `generative_text` result step stays a `generative_text` node: it speaks
+the model's sentence when the workspace has a default generative model, and in a
+workspace without one it logs `Error IntegrationNotFound` and sets `node_status`
+failure — so the contract hangs a templated `basic` on its `failure` edge, which
+was measured to speak (2026-09-17). Every `{dr.<field>:NLX.Variable}` placeholder
+in a message or prompt must name a field that exists in that data request's
+`responseSchema` (`price` vs `unitPrice` renders empty). `aiDescription` must be
+ASCII, and a `generative_journey`'s exit edges must carry conditions or they are
+stored disconnected.
 
 ## Deploy
 

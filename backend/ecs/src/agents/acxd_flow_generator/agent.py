@@ -1135,6 +1135,16 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
         # Allowed values of enum result fields (the reply schema no longer
         # carries enums); D5 uses them to spot impossible constants.
         "field_enums": field_enums,
+        # The plan's generative_journey steps, in order: J2-J5 build each journey
+        # node's dataCapture / exits / tools from what the user confirmed.
+        "journey_steps": [
+            {"captures": list(s.get("captures") or []),
+             "journey_tools": list(s.get("journey_tools") or []),
+             "description": s.get("description")}
+            for s in (plan.get("steps") or [])
+            if isinstance(s, dict) and s.get("node_type") == "generative_journey"
+        ],
+        "kb_name": (spec.get("knowledge_base") or {}).get("name"),
     }
 
 

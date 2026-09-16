@@ -753,6 +753,46 @@
             "$ref": "#/$defs/generativeJourneyTool"
           }
         },
+        "dataCapture": {
+          "$comment": "Live (2026-09-17): data[].type=slot fills the flow's attached slot as the journey talks; when every required value is captured the node ends and its edges are evaluated — the captured edge tests the slots with `exists` (no gjConditionIndex / node_status is set for that exit).",
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "slot",
+                      "local"
+                    ]
+                  },
+                  "required": {
+                    "type": "boolean"
+                  },
+                  "schema": {
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "exitEnabled": {
+              "type": "boolean"
+            }
+          }
+        },
         "exitConditions": {
           "type": "array",
           "items": {

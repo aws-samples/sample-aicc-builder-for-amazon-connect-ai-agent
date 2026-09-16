@@ -104,7 +104,8 @@ These node types always have the following edges, whether or not you write them.
   * `{"type": "flow", "flowId": "<helper flow>"}` for every data request. A journey CANNOT call a data request directly: the service drops `dataRequest.dataRequestId` on save. Each data request is wrapped in a generated helper flow (`start -> data_request -> basic message -> end`, emitting exactly `{<dataRequestId>.toolResponse:NLX.Variable}`) and attached as an a `flow` tool. Do NOT use `mcpFlow`: it saves and builds cleanly but fails on invocation with {"error": "Unknown tool type"} (measured in the Canvas debugger).
   * `{"type": "knowledgeBase", "knowledgeBaseId": "{KB:<name>}", "scopeTags": []}` for knowledge lookups.
   NEVER emit a `dataRequest` tool (the service drops its id) and NEVER an `mcpFlow` tool (runtime: "Unknown tool type"). Every id MUST be one this bundle actually creates.
-- `exitConditions`: named prompts describing when the loop is done, so the conversation returns to the deterministic flow. Every exit edge MUST carry conditions (`System.gjConditionIndex eq <i>`, or `node_status` timeout / failure) or it is disconnected.
+- `exitConditions`: named prompts describing when the loop is done, so the conversation returns to the deterministic flow. An exit-condition edge carries `System.gjConditionIndex eq <i>` (i = the condition's position); timeout and failure edges carry `node_status`.
+- `dataCapture` (the contract fills it from the plan's `captures`): `{"data": [{"name": "<slot>", "type": "slot", "required": true, "schema": {...}}], "exitEnabled": true}` makes the journey fill the flow's attached slots as it talks (live: a free description was classified onto the slot's enum). When every required value is captured the journey ENDS and evaluates its edges — neither `System.gjConditionIndex` nor `node_status eq success` is set for that exit (live, 2026-09-17), so the captured edge tests the slots themselves: ONE edge, FIRST in `childNodes`, with `slot <name> exists` for each captured slot. Without it the runtime logs Error NoMessages and the caller lands in the fallback flow.
 - `maxSteps` bounds the loop. Keep it modest (5-10) for a PoC.
 A JOURNEY DOES NOT ROUTE INTENTS. Intent routing is `user_input` + a `redirect` to `{System.capturedFlow:NLX.System}`; a welcome flow that classified intent with a journey recognized nothing and the application never routed a single customer utterance (live, 2026-09-12). Use a journey ONLY for a stretch of conversation the user confirmed as generative, inside an operation flow, and give its prompt the NAME of each attached tool and when to use it — attaching a tool is necessary but not sufficient.
 Do not add `modelType` to any node other than a generative one; `generative_text` has no `modelType` field.
@@ -185,9 +186,28 @@ The plan lists confirmed steps with node_type + determinism. Your flow:
   (e.g. one per branch of a choice) fail the flow. When the wording differs
   per branch, write those branch messages as deterministic `basic` nodes with
   templated text, or route both branches into the single generative node.
-- Prefer a `basic` node with `{dataRequestId.field:NLX.Variable}` placeholders
-  for a result announcement: `generative_text` delivers no message of its own
-  at runtime, so a deterministic template is what the caller actually hears.
+- A confirmed `generative_text` step IS a `generative_text` node — never a
+  `basic` stand-in. Its `metadata.generativeText.prompt` tells the model what
+  to say and names every value it may use as a `{dataRequestId.field:NLX.Variable}`
+  / `{slot:NLX.Slot}` placeholder ("announce the delivery status
+  {getOrder.status:NLX.Variable} and the date {getOrder.eta:NLX.Variable} in one
+  friendly sentence; do not add facts"). A confirmed `basic` step is a `basic`
+  with templated text — the requirements mandated that wording.
+- A confirmed `generative_journey` step (plan fields `captures`, `journey_tools`)
+  is ONE `generative_journey` node that carries that stretch of the
+  conversation. Write `metadata.generativeJourney.prompt` in the project
+  language: who the agent is, what it must find out (each captured slot by name
+  and what counts as a valid value), how to behave (empathise, do not invent
+  prices or policies, answer side questions from the knowledge base and come
+  back), and that it ends once the values are settled. The contract fills
+  `dataCapture` from `captures`, adds the knowledge-base tool, the agent-request
+  exit and bounds. Wire the exits yourself: the FIRST child edge is the
+  "captured" edge — one edge whose conditions test every captured slot
+  (`slot <name> exists`, one condition per slot) — leading to the next
+  deterministic node (the data_request, or a `basic` that confirms the values);
+  then `node_status eq timeout` and `node_status eq failure` edges to the
+  escalation redirect. Do not put a strict-format value (regex, phone,
+  identifier) into a journey: those are `user_choice` nodes before or after it.
 - MUST NOT use `generative_journey` for intent routing, ever — even when the
   plan confirmed a journey, it covers a stretch of conversation INSIDE the
   operation, not the decision about what the customer wants.

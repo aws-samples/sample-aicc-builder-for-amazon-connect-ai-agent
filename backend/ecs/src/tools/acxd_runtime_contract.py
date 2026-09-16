@@ -143,7 +143,7 @@ NO_MATCH_EDGE_NAMES = frozenset({
 #: :func:`apply_runtime_contract` and their residue is reported only to a
 #: caller that asks for every scope — the generator's repair loop — so a
 #: minimal unit fixture is not failed by a rule about conversation shape.
-FLOW_SCOPE_RULES = frozenset({"S1", "S2", "S3", "S8", "M3", "R6", "R7", "D4", "J", "A2"})
+FLOW_SCOPE_RULES = frozenset({"S1", "S2", "S3", "S8", "M3", "R6", "R7", "D4", "J", "J2", "J3", "J4", "J5", "A2"})
 CROSS_SCOPE_RULES = frozenset({"S1", "S5", "D3", "D5", "M1", "RX"})
 NORMALIZER_SCOPE_RULES = frozenset({"M2", "R3", "S6"})
 ALL_SCOPES = ("flow", "cross", "normalizer")
@@ -338,6 +338,8 @@ class _RuntimeContract:
         slot_plans: Optional[dict] = None,
         field_labels: Optional[dict] = None,
         field_enums: Optional[dict] = None,
+        journey_steps: Optional[list] = None,
+        kb_name: Optional[str] = None,
     ) -> None:
         self.flow = flow
         self.role = (role or "").strip().lower() or None
@@ -348,6 +350,12 @@ class _RuntimeContract:
         self.context_variables = set(context_variables or ())
         self.follow_up_flow_id = follow_up_flow_id
         self.escalation_flow_id = escalation_flow_id
+        #: the interview's generative_journey steps of this flow, in plan order
+        #: ({captures: [slot names], journey_tools: [...], description}); the
+        #: n-th journey node in the document realises the n-th step (J2-J5).
+        self.journey_steps = [s for s in (journey_steps or []) if isinstance(s, dict)]
+        #: the bundle's FAQ knowledge base name, for a journey's knowledgeBase tool
+        self.kb_name = str(kb_name).strip() if kb_name else None
         #: slot name -> the interview's slot plan ({type, regex, examples, …}).
         #: The plan carries the FieldSpec constraints (a 10-digit order number)
         #: that the attached slot needs as an NLX built-in + regex (S1/S5).
@@ -1053,16 +1061,43 @@ class _RuntimeContract:
                     f"generative_text sends no message, and neither its prompt nor a "
                     f"preceding data request gives fields to build a sentence from")
                 continue
-            node["type"] = "basic"
-            node["messages"] = [{"type": "text", "body": body}]
-            meta = node.get("metadata")
-            if isinstance(meta, dict):
-                meta.pop("generativeText", None)
-                if not meta:
-                    node.pop("metadata", None)
-            self.change(
-                f"{_label(node_id, node)}: generative_text → basic with a templated "
-                f"message (generative_text sends nothing; M2)")
+            # Live (2026-09-17): in a workspace without a default generative model
+            # the node logs Error IntegrationNotFound, sets node_status failure
+            # and says nothing; a `failure` edge to a templated basic DID speak.
+            # With a model the node speaks the LLM sentence. So the confirmed
+            # generative_text stays — the user approved generative wording —
+            # and the templated sentence rides along as its measured fallback.
+            self._attach_generative_fallback(node_id, node, body)
+
+    def _attach_generative_fallback(self, node_id: str, node: dict, body: str) -> None:
+        edges = _edges(node)
+        if any(_has_status(e, "failure") for e in edges):
+            return
+        continuation = [dict(e) for e in edges if not (_has_status(e, "timeout") or _has_status(e, "failure"))]
+        fallback_id = _derived_id("4f1a00a2", f"{self.flow_id}#{node_id}#m2fallback")
+        self.nodes[fallback_id] = {
+            "nodeId": fallback_id, "type": "basic",
+            "messages": [{"type": "text", "body": body}],
+            **({"childNodes": continuation} if continuation else {}),
+        }
+        node.setdefault("childNodes", []).insert(
+            0, {"nodeId": fallback_id, "name": "modelUnavailable", "conditions": [_status_condition("failure")]})
+        meta = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        node["metadata"] = meta
+        cfg = meta.get("generativeText") if isinstance(meta.get("generativeText"), dict) else {}
+        meta["generativeText"] = cfg
+        prompt = str(cfg.get("prompt") or "").strip()
+        if not _PLACEHOLDER.search(prompt):
+            # the model has to be told which values it may say; the template is
+            # exactly that list, in the flow's language
+            cfg["prompt"] = (prompt + ("\n" if prompt else "")
+                             + ("다음 값만 사용해 한두 문장으로 자연스럽게 안내하세요 (값을 바꾸거나 새 사실을 덧붙이지 마세요): "
+                                if self.is_korean else
+                                "Use only these values, in one or two natural sentences (do not alter them or add facts): ")
+                             + body)
+        self.change(
+            f"{_label(node_id, node)}: kept generative_text; failure (no workspace model) → "
+            f"templated basic [{fallback_id[:8]}] (M2)")
 
     def _result_already_announced(self, node_id: str) -> bool:
         """True when, between the nearest upstream data request and this node, a
@@ -2310,6 +2345,208 @@ class _RuntimeContract:
     # J — generative_journey exit edges need conditions
     # ==================================================================
 
+    # ==================================================================
+    # J2-J5 — a generative_journey that collects values (live, 2026-09-17)
+    # ==================================================================
+    #
+    # Measured on a deployed application over Connect chat:
+    #  * `metadata.generativeJourney.dataCapture.data[{name, type: slot,
+    #    required, schema}]` fills the flow's attached slot (AgenticDataCapture
+    #    {"reason": "상품불량"}) — the model classified a free description
+    #    against the enum schema.
+    #  * once every required value is captured the node ends with
+    #    GenerativeJourneySucceeded and evaluates its edges: no
+    #    `System.gjConditionIndex` matches (those are the exitConditions), so a
+    #    journey without a `node_status eq success` edge logs Error NoMessages
+    #    and the application falls to its default (Fallback) flow.
+    #  * the edges are positional for exitConditions: index i ↔ exitConditions[i].
+    #  * a node-level modelType made the journey speak in a workspace whose
+    #    default model was never checked; the prompt is what the agent follows.
+
+    JOURNEY_MAX_STEPS = 8
+    JOURNEY_DEFAULT_MODEL = "anthropic.claude-haiku-4-5"
+    AGENT_EXIT_NAME = "agentRequested"
+    AGENT_EXIT_PROMPTS = {
+        "ko": "고객이 상담원, 상담사 또는 사람과 직접 통화하기를 원한다",
+        "en": "The customer asks to talk to a human agent or representative",
+        "ja": "お客様がオペレーターや担当者との通話を希望している",
+    }
+
+    def _journey_config(self, node: dict) -> dict:
+        meta = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        node["metadata"] = meta
+        cfg = meta.get("generativeJourney") if isinstance(meta.get("generativeJourney"), dict) else {}
+        meta["generativeJourney"] = cfg
+        return cfg
+
+    def _capture_schema(self, slot_name: str) -> dict:
+        """JSON schema the journey classifies a captured value against."""
+        attached = next((s for s in self.attached if s.get("name") == slot_name), None)
+        slot_type = str((attached or {}).get("type") or "")
+        doc = self.slot_type_docs.get(slot_type) if slot_type else None
+        values = [str(v.get("value")) for v in ((doc or {}).get("values") or [])
+                  if isinstance(v, dict) and v.get("value")]
+        if values:
+            return {"type": "string", "enum": values}
+        regex = (attached or {}).get("regex") or self._plan_constraints(slot_name)[0]
+        if regex:
+            return {"type": "string", "pattern": str(regex)}
+        if slot_type == "NLX.Number":
+            return {"type": "number"}
+        return {"type": "string"}
+
+    def _attach_plan_slot(self, slot_name: str) -> bool:
+        """Attach a slot the plan names but the document does not (S1 shape)."""
+        plan = self.slot_plans.get(slot_name) or {}
+        declared = str(plan.get("type") or "NLX.Text")
+        if not declared.startswith("NLX.") and self.slot_type_ids is not None \
+                and declared not in self.slot_type_ids and declared not in ("text", "string"):
+            return False
+        if declared in ("text", "string"):
+            declared = "NLX.Text"
+        entry = {"name": slot_name, "type": declared, "sensitive": bool(plan.get("sensitive"))}
+        if plan.get("regex"):
+            entry["regex"] = str(plan["regex"])
+        if plan.get("description"):
+            entry["aiDescription"] = str(plan["description"])[:200]
+        slots = self.flow.get("slotTypes")
+        if not isinstance(slots, list):
+            slots = []
+            self.flow["slotTypes"] = slots
+        slots.append(entry)
+        return True
+
+    def _agent_exit_prompt(self) -> str:
+        code = str(self.flow.get("mainLanguageCode") or "").lower()
+        for prefix, prompt in self.AGENT_EXIT_PROMPTS.items():
+            if code.startswith(prefix):
+                return prompt
+        return self.AGENT_EXIT_PROMPTS["ko"]
+
+    def rule_j2(self) -> None:
+        journeys = self.nodes_of_type("generative_journey")
+        if not journeys:
+            return
+        for position, (node_id, node) in enumerate(journeys):
+            step = self.journey_steps[position] if position < len(self.journey_steps) else {}
+            cfg = self._journey_config(node)
+            label = _label(node_id, node)
+
+            # --- data capture from the plan -------------------------------
+            captures = [str(c) for c in (step.get("captures") or []) if str(c).strip()]
+            if captures:
+                capture = cfg.get("dataCapture") if isinstance(cfg.get("dataCapture"), dict) else {}
+                cfg["dataCapture"] = capture
+                data = [d for d in (capture.get("data") or []) if isinstance(d, dict) and d.get("name")]
+                present = {str(d["name"]) for d in data}
+                for name in captures:
+                    if name not in self.slot_names and not self._attach_plan_slot(name):
+                        self.violation(
+                            "J2", "flow",
+                            f"{label} captures {name!r}, which is neither attached to the flow "
+                            f"nor a slot the plan can attach")
+                        continue
+                    if name in present:
+                        continue
+                    data.append({"name": name, "type": "slot", "required": True,
+                                 "schema": self._capture_schema(name)})
+                    self.change(f"{label}: dataCapture collects slot {name!r} (J2)")
+                for entry in data:
+                    entry.setdefault("type", "slot")
+                    entry.setdefault("required", True)
+                    if not isinstance(entry.get("schema"), dict):
+                        entry["schema"] = self._capture_schema(str(entry["name"]))
+                capture["data"] = data
+                if capture.get("exitEnabled") is not True:
+                    capture["exitEnabled"] = True
+                    self.change(f"{label}: dataCapture.exitEnabled (the journey ends when every "
+                                f"required value is captured) (J2)")
+            elif isinstance(cfg.get("dataCapture"), dict) and cfg["dataCapture"].get("data"):
+                for entry in cfg["dataCapture"]["data"]:
+                    if isinstance(entry, dict) and entry.get("name") and entry["name"] not in self.slot_names \
+                            and not self._attach_plan_slot(str(entry["name"])):
+                        self.violation("J2", "flow",
+                                       f"{label} captures {entry['name']!r}, which is not a slot of this flow")
+
+            # --- exits ----------------------------------------------------
+            edges = _edges(node)
+            captured_names = [str(d["name"]) for d in ((cfg.get("dataCapture") or {}).get("data") or [])
+                              if isinstance(d, dict) and d.get("name")]
+            has_captured_edge = any(
+                all(_captures_slot(e, name) for name in captured_names) for e in edges
+            ) if captured_names else True
+            if not has_captured_edge:
+                # the continuation the model meant: the exit-condition-0 edge,
+                # else the first edge that is not a status/agent branch
+                target = None
+                for e in edges:
+                    if self._journey_index(e) == 0:
+                        target = e.get("nodeId")
+                        break
+                if target is None:
+                    for e in edges:
+                        if not (_has_status(e, "timeout") or _has_status(e, "failure")) \
+                                and self._journey_index(e) is None:
+                            target = e.get("nodeId")
+                            break
+                if target is None:
+                    self.violation(
+                        "J3", "flow",
+                        f"{label} captures {captured_names} but has no edge to continue on once they "
+                        f"are captured (an edge testing the captured slots, or an exit-condition edge to reuse)")
+                else:
+                    node.setdefault("childNodes", []).insert(0, {
+                        "nodeId": target, "name": "captured",
+                        "conditions": [_slot_condition(name, "exists") for name in captured_names]})
+                    self.change(f"{label}: added captured branch ({' and '.join(captured_names)} exist) "
+                                f"→ [{str(target)[:8]}] (J3)")
+
+            conditions = [c for c in (cfg.get("exitConditions") or []) if isinstance(c, dict)]
+            has_agent_exit = any(str(c.get("name") or "") == self.AGENT_EXIT_NAME for c in conditions)
+            if not has_agent_exit and self.role == "operation":
+                conditions.append({"name": self.AGENT_EXIT_NAME, "prompt": self._agent_exit_prompt()})
+                cfg["exitConditions"] = conditions
+                index = len(conditions) - 1
+                node.setdefault("childNodes", []).append({
+                    "nodeId": self._agent_request_redirect(), "name": self.AGENT_EXIT_NAME,
+                    "conditions": [{
+                        "left": {"type": "system", "name": "System.gjConditionIndex"},
+                        "operator": "eq",
+                        "right": {"type": "constant", "value": index}}]})
+                self.change(f"{label}: exit condition {index} '{self.AGENT_EXIT_NAME}' → agent request (J4)")
+            elif conditions and cfg.get("exitConditions") is not conditions:
+                cfg["exitConditions"] = conditions
+
+            # --- tools ------------------------------------------------------
+            tools = [t for t in (cfg.get("tools") or []) if isinstance(t, dict)]
+            kept = []
+            for tool in tools:
+                kind = tool.get("type")
+                if kind in ("dataRequest", "mcpFlow"):
+                    self.violation(
+                        "J5", "flow",
+                        f"{label} tool type {kind!r} is not deployable from a bundle (the service drops "
+                        f"a dataRequest tool's id; mcpFlow fails on invocation) — the flow's data_request "
+                        f"node calls the backend after the journey")
+                    continue
+                kept.append(tool)
+            wants_kb = "knowledge_base" in [str(t) for t in (step.get("journey_tools") or [])]
+            if wants_kb and self.kb_name and not any(t.get("type") == "knowledgeBase" for t in kept):
+                kept.append({"type": "knowledgeBase", "knowledgeBaseId": f"{{KB:{self.kb_name}}}",
+                             "scopeTags": []})
+                self.change(f"{label}: knowledgeBase tool {self.kb_name!r} (J5)")
+            if kept or tools:
+                cfg["tools"] = kept
+
+            # --- bounds & model -----------------------------------------------
+            if not isinstance(cfg.get("maxSteps"), int) or cfg["maxSteps"] < 1:
+                cfg["maxSteps"] = self.JOURNEY_MAX_STEPS
+                self.change(f"{label}: maxSteps {self.JOURNEY_MAX_STEPS} (J5)")
+            if not cfg.get("modelType"):
+                cfg["modelType"] = self.JOURNEY_DEFAULT_MODEL
+                self.change(f"{label}: modelType {self.JOURNEY_DEFAULT_MODEL} (a workspace without a "
+                            f"default model runs a silent journey) (J5)")
+
     def rule_j(self) -> None:
         for node_id, node in self.nodes_of_type("generative_journey"):
             edges = _edges(node)
@@ -2454,6 +2691,7 @@ class _RuntimeContract:
         self.rule_d6()
         self.rule_m1()
         self.rule_rx()
+        self.rule_j2()
         self.rule_j()
         self.rule_a2()
         self.prune_disconnected(before)
@@ -2499,6 +2737,8 @@ def apply_runtime_contract(
     slot_plans: Optional[dict] = None,
     field_labels: Optional[dict] = None,
     field_enums: Optional[dict] = None,
+    journey_steps: Optional[list] = None,
+    kb_name: Optional[str] = None,
 ) -> tuple[dict, list[str]]:
     """Normalize ``flow`` onto the live-verified runtime contract.
 
@@ -2534,7 +2774,8 @@ def apply_runtime_contract(
         slot_type_docs=slot_type_docs, data_requests=data_requests,
         flow_ids=flow_ids, context_variables=context_variables,
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
-        slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums)
+        slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
+        journey_steps=journey_steps, kb_name=kb_name)
     engine.run()
     return engine.flow, engine.changes
 
@@ -2554,6 +2795,8 @@ def runtime_contract_violations(
     slot_plans: Optional[dict] = None,
     field_labels: Optional[dict] = None,
     field_enums: Optional[dict] = None,
+    journey_steps: Optional[list] = None,
+    kb_name: Optional[str] = None,
 ) -> list[str]:
     """Report what the runtime contract cannot repair. Never mutates ``flow``.
 
@@ -2582,7 +2825,8 @@ def runtime_contract_violations(
         slot_type_docs=slot_type_docs, data_requests=data_requests,
         flow_ids=flow_ids, context_variables=context_variables,
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
-        slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums)
+        slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
+        journey_steps=journey_steps, kb_name=kb_name)
     engine.run()
     wanted = set(ALL_SCOPES) if scope == "all" else {scope}
     return [message for item_scope, _rule, message in engine.violations
