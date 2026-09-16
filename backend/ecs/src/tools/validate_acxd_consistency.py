@@ -63,14 +63,15 @@ def _capture_family(node_type):
 def _requirement_family(node_type):
     """The node family that SATISFIES a confirmed plan step.
 
-    On top of the capture family, a message step is satisfied by either
-    ``basic`` or ``generative_text``: the runtime contract realises a generative
-    result message as a templated ``basic`` (generative_text sends nothing on
-    its own — M2), and a node MORE deterministic than planned is never a defect.
-    The reverse — a generative node the user never confirmed — is still caught
-    by DETERMINISM_UNAUTHORIZED_GENERATIVE, which compares raw node types."""
-    family = _capture_family(node_type)
-    return "message" if family in ("basic", "generative_text") else family
+    The capture family (user_input / user_choice) is one family. A confirmed
+    ``generative_text`` is satisfied only by a ``generative_text`` node: the user
+    approved generative wording there, and the runtime contract now keeps the
+    node and hangs the templated sentence on its ``failure`` edge for a
+    workspace without a default model (live, 2026-09-17) — so a ``basic``
+    stand-in is a silent downgrade of what was confirmed (the review finding
+    of 2026-09-16). The reverse — a generative node the user never confirmed —
+    is caught by DETERMINISM_UNAUTHORIZED_GENERATIVE, which compares raw types."""
+    return _capture_family(node_type)
 
 
 def _is_builder_owned_plan(plan: dict) -> bool:

@@ -247,6 +247,45 @@ and "사람이랑 이야기하고 싶어요" at the delivery-lookup prompt both 
 Contact Flow's Escalation branch in one turn, while a plain value at the same
 prompt was captured as before.
 
+## 2026-09-17 — a generative journey collects the values (probe series on the sandbox)
+
+The generated applications had carried no generative node at all: the interview
+labelled every step deterministic, the generator preferred a templated `basic`,
+and unconfirmed generative nodes were demoted. Before making `generative_journey`
+the default shape of an operation flow, its mechanics were measured on the
+sandbox account: the greencart return flow was hand-converted so that the return
+*reason* is collected by ONE journey node (order number and phone stay
+`user_choice`), redeployed six times with one change each, and driven over
+Connect chat. Node-level facts come from `QueryLogs` (NodeTraversal,
+GenerativeJourney*, AgenticDataCapture, ConditionEvaluated, Error).
+
+| Probe | Change | Result |
+|---|---|---|
+| 1 | journey with `dataCapture.data=[{reason, slot, required, enum schema}]`, exits `gjConditionIndex 0/1` + timeout/failure, `modelType` haiku | the journey **spoke** and, on the free description "상자가 찌그러져서 왔고 제품도 긁혔어요", `AgenticDataCapture {"reason":"상품불량"}` filled the slot — then `GenerativeJourneySucceeded`, **no edge matched** (`gjConditionIndex` 0/1 false, timeout/failure false), `Error NoMessages`, and the caller landed in the Fallback flow |
+| 2 | + `node_status eq success` edge | also false — the capture exit sets no status |
+| 3 | + `slot reason exists` edge, first | **works end to end**: reason captured → confirmation `basic` → phone (`user_choice`) → data request → result → follow-up |
+| 4 (chat) | side question "반품 배송비는 얼마인가요?" inside the journey | `AgenticToolStart knowledgeBase` + `KbInvoked` — the journey answered from the FAQ and returned to the reason |
+| 5 (chat) | "아 그냥 상담원이랑 이야기할게요" inside the journey | `gjConditionIndex eq 1` (the appended `agentRequested` exit condition) → RequestAgentFlow → Escalation → `escalate`; the contact reached the queue in 1.2 s |
+| 6 | result announcement as `generative_text` | `Error IntegrationNotFound`, nothing spoken — the workspace has no default generative model and `generative_text` has no `modelType` of its own; the flow went on to the follow-up |
+| 7 | result announcement as a zero-turn journey (`enableZeroTurnMode`, `modelType`) | the model wrote the sentence (`AgentEnded response: "반품 신청이 완료되었습니다! 반품번호 RT-…"`, `GenerativeJourneyZeroTurnCompleted`) but the runtime **dropped it**: a journey's reply is delivered only while the journey keeps the turn; the node left on its unconditioned edge and only the follow-up question reached the caller |
+
+What the runtime contract does with this (rules J2–J5, `tools/acxd_runtime_contract.py`):
+the plan's `captures` become the node's `dataCapture` (schema from the slot type's
+values or the field's regex, `exitEnabled: true`); the captured edge is the FIRST
+child edge and tests every captured slot with `exists`; an `agentRequested` exit
+condition is appended and routed to the agent-request flow; a `knowledgeBase` tool
+is attached when the plan asks for it; `dataRequest` / `mcpFlow` tools are refused
+(the service drops the first, the second fails on invocation); `maxSteps` and a
+node-level `modelType` are defaulted. A journey never captures a strict-format
+value — those stay `user_choice` with F1's format re-ask — and the interview drops
+such a slot from `captures` and says so.
+
+Two things a journey does not give: the reply it composes on the turn it exits is
+never delivered (the confirmation "파손으로 접수하는 게 맞나요?" was lost when the
+value was captured on the same turn, so the plan puts a deterministic
+confirmation or the next question right after the journey), and a generative
+*result* sentence still depends on the workspace's default model (`generative_text`).
+
 ## Service contract facts (not in the SDK types, learned from the API)
 
 | Area | Fact | Where it is enforced now |
@@ -272,6 +311,10 @@ prompt was captured as before.
 | Slot values at the webhook | Built-in slot values reach the Data Request without their separators (`010-1111-2222` → `01011112222`, `2026-09-16` → `20260916`, `10:00` → `1000`) | ACXD bundles wrap each Lambda handler with a format restorer built from the OperationSpec patterns |
 | Webhook reply | A Data Request succeeds only on HTTP 200 with a body that matches its `responseSchema`; a `201` from a create operation or `errorCode: null` where the schema says string takes the failure branch | the same wrapper returns 200 and coerces the envelope |
 | Output guardrails | A derived output rule (LLM judge, generalised literal) that rewrites messages fired on the greeting itself and on the bot's own format hint | derived output rules stay advisory (`flag`), and the rule's `description` says why — a reviewer read the flag as a defect once |
+| Journey data capture | `generativeJourney.dataCapture.data[{name, type: slot, required, schema}]` fills the flow's attached slot as the journey talks (a free description was classified onto the enum); when every required value is captured the node ends and evaluates its edges with **no** `System.gjConditionIndex` and **no** `node_status` set — a journey without a slot-test edge logs `Error NoMessages` and the caller lands in the fallback flow | J2/J3: dataCapture from the plan's `captures`, the captured edge (`slot <name> exists` per capture) first |
+| Journey exit conditions | `exitConditions[i]` fire as `System.gjConditionIndex eq i` (an LLM judgement per turn); "상담원이랑 이야기할게요" reached the queue in 1.2 s through an appended `agentRequested` condition; a KB tool call (`AgenticToolStart knowledgeBase`, `KbInvoked`) happens inside the turn | J4/J5: agent exit appended and routed, `knowledgeBase` tool attached, `dataRequest`/`mcpFlow` tools refused |
+| Journey replies on exit | The sentence a journey composes on the turn it exits is not delivered (a zero-turn announcement journey wrote the result and the caller heard only the next node) | the node after a journey speaks; result announcements are not journeys |
+| `generative_text` without a workspace model | `Error IntegrationNotFound`, `node_status` failure, silence — `generative_text` has no `modelType` of its own; a `failure` edge to a templated `basic` speaks | M2 keeps the confirmed node and adds the fallback edge instead of replacing it |
 | `modify` guardrails | `CreateGuardrail` rejects a `modify` rule that has no `behavior.message` or `behavior.prompt` (one of the two, per the SDK) — with `ValidationException: rules[0].enforcement.action is not a supported value`, which names neither the guardrail nor the real cause. Live (2026-09-16): a hand-edited action passed packaging and the deploy died at the third guardrail, after two were created | the guardrail schema requires exactly one of `message`/`prompt` for `modify` (so patching and packaging refuse it), and the runner pre-flights every guardrail file before creating any and names the guardrail in the error |
 | Contact language | The Agentic CX block fails every contact with "NLX Chat Streaming Failed" unless the contact's language has been set (an `UpdateContactData` block with `LanguageCode` matching one of the application's languages) before the block | the Contact Flow binding inserts the block when the flow has none |
 | Workspace-level names | Secrets, guardrails and slot types are keyed by name across the whole workspace: two projects using `BackendApiKey` overwrote each other's API key on every deploy | the backend key secret and guardrails are named per project |

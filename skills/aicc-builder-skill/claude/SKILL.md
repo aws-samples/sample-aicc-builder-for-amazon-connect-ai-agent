@@ -387,6 +387,28 @@ webapp enforces at save time, apply them yourself: a slot must name a real input
 field of the operation; a value the customer cannot know (an id the backend
 computes) is an output, never a slot; every plan carries an escalation rule; an
 operation the customer never asks for directly is `customer_initiated: false`.
+
+**Conversation style first (`application.conversation_style`, default
+`generative`).** Ask once, early, how the agent should talk, and shape every
+operation plan accordingly:
+- `generative` (recommended): ONE `generative_journey` step carries the operation's
+  conversation — it collects the values a person explains in their own words (a
+  reason, a preference, a description, a choice among options) and answers side
+  questions from the FAQ (`journey_tools: ["knowledge_base"]`). List those slot
+  names in the step's `captures`. Fixed nodes exist only where exactness is
+  required: `basic` for wording the requirements mandate, `user_choice` (with
+  `slot`) for every strict-format value — order/booking number, phone, id, any
+  regex — and for identity checks (the runtime re-asks on a format miss; a journey
+  must never capture these), `data_request` for the backend call, `choice` for
+  money / eligibility / compliance / identity decisions, then a result step and a
+  `redirect` to the follow-up flow. Escalation exits (agent request inside the
+  journey, third miss, errors) are added by the contract.
+- `scripted`: only when the customer explicitly asks for a scenario-driven agent —
+  one `user_choice` per value, `basic` messages, no journey.
+The engine turns a journey step into the node's `dataCapture` (slot, required,
+schema from the field's enum/regex), the captured edge (`slot <name> exists` for
+each capture — the journey ends when they are captured and nothing else marks
+that exit), the `agentRequested` exit condition and the knowledge-base tool.
 Then:
 ```bash
 python resources/scripts/acxd_local.py check --output-dir <output_dir>   # readiness: what is still unconfirmed

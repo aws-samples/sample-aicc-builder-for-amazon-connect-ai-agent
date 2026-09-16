@@ -131,9 +131,28 @@ The plan lists confirmed steps with node_type + determinism. Your flow:
   (e.g. one per branch of a choice) fail the flow. When the wording differs
   per branch, write those branch messages as deterministic `basic` nodes with
   templated text, or route both branches into the single generative node.
-- Prefer a `basic` node with `{dataRequestId.field:NLX.Variable}` placeholders
-  for a result announcement: `generative_text` delivers no message of its own
-  at runtime, so a deterministic template is what the caller actually hears.
+- A confirmed `generative_text` step IS a `generative_text` node — never a
+  `basic` stand-in. Its `metadata.generativeText.prompt` tells the model what
+  to say and names every value it may use as a `{dataRequestId.field:NLX.Variable}`
+  / `{slot:NLX.Slot}` placeholder ("announce the delivery status
+  {getOrder.status:NLX.Variable} and the date {getOrder.eta:NLX.Variable} in one
+  friendly sentence; do not add facts"). A confirmed `basic` step is a `basic`
+  with templated text — the requirements mandated that wording.
+- A confirmed `generative_journey` step (plan fields `captures`, `journey_tools`)
+  is ONE `generative_journey` node that carries that stretch of the
+  conversation. Write `metadata.generativeJourney.prompt` in the project
+  language: who the agent is, what it must find out (each captured slot by name
+  and what counts as a valid value), how to behave (empathise, do not invent
+  prices or policies, answer side questions from the knowledge base and come
+  back), and that it ends once the values are settled. The contract fills
+  `dataCapture` from `captures`, adds the knowledge-base tool, the agent-request
+  exit and bounds. Wire the exits yourself: the FIRST child edge is the
+  "captured" edge — one edge whose conditions test every captured slot
+  (`slot <name> exists`, one condition per slot) — leading to the next
+  deterministic node (the data_request, or a `basic` that confirms the values);
+  then `node_status eq timeout` and `node_status eq failure` edges to the
+  escalation redirect. Do not put a strict-format value (regex, phone,
+  identifier) into a journey: those are `user_choice` nodes before or after it.
 - MUST NOT use `generative_journey` for intent routing, ever — even when the
   plan confirmed a journey, it covers a stretch of conversation INSIDE the
   operation, not the decision about what the customer wants.

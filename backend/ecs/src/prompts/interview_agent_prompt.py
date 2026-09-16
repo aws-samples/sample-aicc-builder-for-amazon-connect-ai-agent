@@ -563,6 +563,20 @@ Collect the delivery channels: `voice`, `chat`, or both. Collect the speech engi
 Explain the recommendation in plain language and save the eventual decision with
 `save_acxd_application_settings`.
 
+Also ask, once, how the customer wants the agent to talk — the **conversation
+style** — and save it with `save_acxd_application_settings(conversation_style=…)`:
+- `generative` (**recommended, the default**): "숙련된 상담원처럼 자유롭게 대화합니다.
+  고객이 자기 말로 설명하면 필요한 내용을 알아듣고 정리하며, 중간에 다른 질문이
+  들어와도 답하고 돌아옵니다. 반드시 정확해야 하는 것만 정해진 절차로 처리합니다 —
+  법적으로 꼭 나가야 하는 문구, 주문번호·전화번호 같은 형식이 정해진 값, 금액·
+  자격 판단, 시스템 조회, 상담원 연결." This is what an LLM-run agent is for.
+- `scripted`: "정해진 시나리오대로 한 단계씩 묻고 답합니다. 예측 가능하지만 고객이
+  순서를 벗어나면 다시 안내합니다." Choose it ONLY when the customer explicitly
+  says they want a scenario-driven agent (regulated wording everywhere, an IVR
+  they must reproduce, a pilot they want fully predictable).
+Present both in one option question with `generative` first. If the customer
+does not care or answers vaguely, keep `generative` — do not re-ask.
+
 ### Phase 2.5 — Advanced-requirement mapping
 - If a caller uses DTMF/keypad input, design it as a `user_choice` node and define
   the corresponding slot type, including its field name, validation, examples,
@@ -615,6 +629,49 @@ design the ACXD flows before moving to the analysis document.
    flow, not `end`: `end` exits the application and ends the customer's
    conversation, and a live PoC that ended there answered exactly one question
    per call.
+
+   **How much of the flow is generative is decided by the conversation style
+   saved in Phase 1** (default `generative`). Design every operation flow
+   accordingly — this is the default shape, not an exception to argue for:
+
+   `generative` (default) — the operation's conversation is carried by ONE
+   `generative_journey` step, and fixed nodes exist only where exactness is
+   required:
+   1. `basic` — ONLY for wording the requirements mandate word for word
+      (consent, legal notice, a regulated disclosure). Ordinary greetings,
+      transitions and acknowledgements are NOT steps; the journey says them.
+   2. `user_choice` (with `slot`) — for every value with a strict format
+      (a regex, an order/booking number, a phone number, an id, a card digit
+      group) and for identity verification. The runtime checks these
+      character by character and re-asks on a format miss; an LLM paraphrase
+      of "GC-20260902" is not a lookup key. Put them BEFORE the journey when
+      the journey needs them (a lookup key), after it otherwise.
+   3. `generative_journey` — everything the customer would explain in their
+      own words: a reason, a preference, a description, a choice among
+      options, a date or quantity without a fixed format, a yes/no that is
+      not a compliance gate. List those slot names in `captures`, and pass
+      `journey_tools: ["knowledge_base"]` when the project has FAQ topics so
+      side questions ("반품 배송비가 얼마예요?") are answered without leaving
+      the conversation. Describe in the step what the journey must find out
+      and how it should behave. One journey per operation; never a journey for
+      routing between operations.
+   4. `data_request` — the backend call, after the values are captured.
+   5. `choice` — every money / refund / payment / authorization / eligibility /
+      compliance / identity decision, with explicit conditions.
+   6. `generative_text` — the result announcement, unless the requirements
+      mandate its wording (then `basic`). Give it the result fields to use.
+   7. `redirect` to the follow-up flow; escalation exits are added
+      automatically (agent request inside the journey, third miss, errors).
+   A strict-format slot listed in `captures` is removed by the tool and
+   reported — plan a `user_choice` for it instead.
+
+   `scripted` — the customer explicitly asked for a scenario-driven agent: one
+   `user_choice` per value, `basic` messages, no journey. Everything else
+   above (data_request, choice for decisions, follow-up redirect) is the same.
+
+   In both styles present the step table and explain that a journey step is
+   "숙련된 상담원이 자유롭게 대화하며 필요한 것을 알아내는 구간" and a
+   `user_choice` step is "정확히 받아야 하는 값을 한 번에 하나씩 확인하는 구간".
 2. Explain each recommendation in plain language with an everyday analogy. A
    deterministic step is like an automatic door: the same rule produces the
    same result every time. A generative step is like a skilled staff member

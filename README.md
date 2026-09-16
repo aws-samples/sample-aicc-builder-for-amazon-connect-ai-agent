@@ -51,6 +51,14 @@ With the ACXD target you get:
   knowledge bases and context variables — delivered under `assets/acxd/` next to
   the Lambda, OpenAPI, CloudFormation, FAQ and Contact Flow assets. The AI Prompt
   asset is replaced by the application.
+- **A conversation that is generative by default.** Each operation is carried
+  by one Agentic CX Designer *generative journey* that lets the caller explain
+  in their own words, classifies what it hears onto the fields the backend
+  needs, and answers side questions from the FAQ — while the flow pins down only
+  what must be exact: mandated wording, strict-format values such as an order
+  number or a phone number, money and eligibility decisions, the backend call,
+  and the hand-off to a human. The interview asks once whether the customer
+  wants this or a fully scripted, scenario-driven agent.
 - **Conversation flows you approve as you go.** During the interview, every
   operation gets a flow plan you confirm step by step, with escalation rules
   spelled out before anything is generated.
@@ -733,6 +741,12 @@ ACXD를 선택하면 다음을 받습니다.
   생성된 Lambda/API를 이미 가리키는 데이터 요청, 가드레일, 지식 베이스, 컨텍스트
   변수가 `assets/acxd/` 아래에 Lambda·OpenAPI·CloudFormation·FAQ·Contact Flow와
   함께 담깁니다. AI 프롬프트 에셋 자리를 애플리케이션이 대신합니다.
+- **기본은 생성형 대화.** 업무마다 하나의 Agentic CX Designer *생성형 여정*이
+  대화를 이끕니다 — 고객이 자기 말로 설명하면 백엔드에 필요한 값으로 정리하고,
+  중간의 FAQ 질문에도 답합니다. 플로우가 고정하는 것은 정확해야 하는 부분만입니다:
+  반드시 나가야 하는 문구, 주문번호·전화번호처럼 형식이 정해진 값, 금액·자격 판단,
+  시스템 조회, 상담원 연결. 인터뷰에서 이 방식과 시나리오 중심(전부 고정 절차)
+  중 어느 쪽을 원하는지 한 번 묻습니다.
 - **진행하면서 승인하는 대화 플로우.** 인터뷰 중 업무마다 플로우 계획을 단계별로
   확인하고, 상담원 연결 조건을 생성 전에 명확히 정합니다.
 - **처음부터 끝까지 이어지는 대화.** 애플리케이션이 인사하고, 고객의 말을 듣고,
@@ -1025,6 +1039,12 @@ ACXD を選ぶと次が得られます。
   ガードレール、ナレッジベース、コンテキスト変数が `assets/acxd/` 配下に、
   Lambda・OpenAPI・CloudFormation・FAQ・Contact Flow と一緒に揃います。AI
   プロンプトの代わりにアプリケーションが入ります。
+- **会話は既定で生成型。** 業務ごとに 1 つの Agentic CX Designer *生成型ジャーニー*
+  が会話を進めます — お客様が自分の言葉で説明すればバックエンドに必要な値へ整理し、
+  途中の FAQ 質問にも答えます。フローが固定するのは正確さが必要な部分だけです:
+  必ず伝える文言、注文番号や電話番号のような形式の決まった値、金額・資格の判断、
+  システム照会、担当者への引き継ぎ。インタビューで、この方式かシナリオ中心
+  (すべて固定手順)かを一度だけ確認します。
 - **進めながら承認する会話フロー。** インタビュー中に業務ごとのフロー計画を
   ステップ単位で確認し、エスカレーション条件を生成前に確定します。
 - **最初から最後までつながる会話。** アプリケーションが挨拶し、お客様の発話を聞き、

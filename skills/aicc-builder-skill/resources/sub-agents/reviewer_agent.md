@@ -506,7 +506,20 @@ In addition to the Classic checklist, assess these ACXD dimensions:
 1. **Determinism evidence** — for each generated flow, compare every actual
    node type with the confirmed `ACXDFlowSpec.steps[]` decision and its
    `determinism_rationale`. Flag an unconfirmed step, a missing confirmed node,
-   or a generative node not expressly confirmed by the user.
+   or a generative node not expressly confirmed by the user. Read the
+   application's `conversation_style` first: with `generative` (the default)
+   each operation flow is EXPECTED to carry one `generative_journey` — an
+   operation flow made only of `user_choice`/`basic` nodes is the finding, not
+   the journey. For every journey check that `metadata.generativeJourney.
+   dataCapture.data` names exactly the plan's `captures` (type `slot`,
+   `required`, a schema), that the FIRST child edge tests those slots with
+   `exists` (the journey ends when they are captured and no other condition is
+   set — without that edge the caller lands in the fallback flow), that an
+   `agentRequested` exit condition routes to the agent-request flow, and that
+   no strict-format value (regex / phone / identifier) is captured by the
+   journey instead of a `user_choice`. Do not ask for a `dataRequest` or
+   `mcpFlow` tool on a journey (the service drops the first and fails the
+   second); the flow's `data_request` node makes the call.
 2. **Guardrail coverage** — each stated safety, privacy, policy, refusal, and
    escalation requirement must have a generated guardrail whose trigger,
    detection method, and action cover that policy. Do not claim coverage merely

@@ -284,17 +284,18 @@ def test_determinism_missing_confirmed_node():
     assert "DETERMINISM_MISSING_NODE" in codes(violations)
 
 
-def test_determinism_accepts_a_templated_basic_for_a_generative_text_step():
-    """M2 (live): a generative_text node sends nothing, so the runtime contract
-    realises a confirmed 'generative_text' result message as a deterministic
-    templated basic. A node MORE deterministic than planned is not a missing
-    node — while a generative node nobody confirmed is still unauthorized."""
+def test_determinism_rejects_a_basic_stand_in_for_a_confirmed_generative_text_step():
+    """Live (2026-09-16): a confirmed generative_text result step shipped as a
+    templated basic and the review flagged it — the user had approved generative
+    wording. The runtime contract now keeps the generative node and hangs the
+    template on its failure edge (2026-09-17), so a basic in its place is a
+    silent downgrade: a missing confirmed node, not 'more deterministic'."""
     bundle = coherent_bundle()
     bundle["flows"][0]["nodes"][G]["type"] = "basic"
     bundle["flows"][0]["nodes"][G]["messages"] = [{"body": "Refund: {refund.amount:NLX.Variable}"}]
     bundle["flows"][0]["nodes"][G].pop("metadata", None)
     violations = validate_acxd_consistency(bundle, spec=matching_spec())
-    assert "DETERMINISM_MISSING_NODE" not in codes(violations)
+    assert "DETERMINISM_MISSING_NODE" in codes(violations)
     assert "DETERMINISM_UNAUTHORIZED_GENERATIVE" not in codes(violations)
 
 

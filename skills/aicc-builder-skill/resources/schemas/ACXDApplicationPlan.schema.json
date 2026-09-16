@@ -69,6 +69,12 @@
       "default": null,
       "title": "Description"
     },
+    "conversation_style": {
+      "default": "generative",
+      "description": "One of ('generative', 'scripted'). 'generative' (default): each operation is run by a generative_journey that talks freely, with deterministic islands only where they are needed \u2014 mandatory wording, strict-format identifiers, money/eligibility/compliance/identity decisions, backend calls, hand-off. 'scripted': every step is a fixed node; only when the customer explicitly asks for a scenario-driven agent.",
+      "title": "Conversation Style",
+      "type": "string"
+    },
     "channels": {
       "description": "Subset of ('voice', 'chat')",
       "items": {
