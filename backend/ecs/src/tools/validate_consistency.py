@@ -2594,8 +2594,9 @@ def run_d9_checks(session_id: str, *, classic_mismatches: Optional[list[dict]] =
         return []
     try:
         bundle = load_acxd_bundle(session_id)
-    except Exception as exc:
-        return [_d9_issue("D9-1", f"Could not load ACXD asset bundle: {exc}", asset_type="bundle")]
+    except Exception:
+        logger.exception("[D9] could not load the ACXD asset bundle")
+        return [_d9_issue("D9-1", "Could not load the ACXD asset bundle (see the server log)", asset_type="bundle")]
     flow_spec_model = get_acxd_flow_spec(session_id)
     flow_spec = None
     if hasattr(flow_spec_model, "model_dump"):
