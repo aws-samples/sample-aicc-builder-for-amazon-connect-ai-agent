@@ -190,7 +190,14 @@ _ACXD_RUNNER_DIR = Path(__file__).resolve().parent.parent / "templates" / "acxd_
 
 
 class ACXDPackagingError(ValueError):
-    """Raised when an ACXD bundle cannot safely be handed to a customer."""
+    """Raised when an ACXD bundle cannot safely be handed to a customer.
+
+    ``reason`` is the wording written for the user at the raise site; it is
+    what the download endpoint shows, never the exception's own text."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = str(reason)
 
 
 def _slug(value: Any, fallback: str = "unnamed") -> str:
@@ -903,7 +910,7 @@ def package_assets_impl(
 
     except ACXDPackagingError as e:
         # A refusal this module raised on purpose, worded for the user.
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": e.reason}
     except ClientError as e:
         logger.exception("[packager] S3 operation failed")
         return {

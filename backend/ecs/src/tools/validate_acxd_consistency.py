@@ -26,9 +26,12 @@ reference pre-existing workspace resources.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from tools.validate_acxd_flow import (
     GENERATIVE_NODE_TYPES,
@@ -782,8 +785,10 @@ def validate_acxd_consistency(
         resolved_bundle, resolved_spec = _load_acxd_validation_inputs(
             bundle, spec, session_id,
         )
-    except Exception as exc:  # package gating must fail closed, not crash
-        return [Violation("BUNDLE_LOAD_FAILED", "bundle", str(exc))]
+    except Exception:  # package gating must fail closed, not crash
+        logger.exception("[ACXDConsistency] could not load the bundle for validation")
+        return [Violation("BUNDLE_LOAD_FAILED", "bundle",
+                          "the ACXD bundle could not be loaded for validation (see the server log)")]
 
     violations = _validate_acxd_consistency_bundle(
         resolved_bundle, spec=resolved_spec, strict_subset=strict_subset,

@@ -43,3 +43,13 @@ def test_ai_prompt_variable_pattern_is_linear_on_hostile_input():
     assert _AI_PROMPT_VAR_RE.search(hostile) is None
     assert time.perf_counter() - started < 0.5
     assert [m.group(1).strip() for m in _AI_PROMPT_VAR_RE.finditer("a {{ $.x }} b {{$.Custom.y}}")] == ["$.x", "$.Custom.y"]
+
+
+def test_bundle_load_failure_does_not_leak_the_exception_text(monkeypatch):
+    from tools import validate_acxd_consistency as vac
+    def boom(*a, **k):
+        raise RuntimeError("/mnt/s3/sessions/x: Permission denied (secret path)")
+    monkeypatch.setattr(vac, "_load_acxd_validation_inputs", boom)
+    out = vac.validate_acxd_consistency(session_id="sid-1")
+    assert [v.code for v in out] == ["BUNDLE_LOAD_FAILED"]
+    assert "Permission denied" not in out[0].message and "see the server log" in out[0].message
