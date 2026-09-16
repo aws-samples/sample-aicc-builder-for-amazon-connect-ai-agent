@@ -134,8 +134,8 @@ def _assets_root(session_id: str) -> Optional[Path]:
     mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
     if not session_id or not os.path.isdir(mount):
         return None
-    safe = session_id.replace("..", "_").replace("/", "_")
-    return Path(mount) / "sessions" / safe / "assets"
+    from tools.path_safety import path_under
+    return path_under(Path(mount) / "sessions", session_id, "assets")
 
 
 def _session_keys(session_id: str) -> list[str]:
@@ -153,10 +153,12 @@ def _session_keys(session_id: str) -> list[str]:
 
 def _read_json_docs(session_id: str, asset_type: str) -> list[dict]:
     """All JSON documents of one asset type, via NFS when mounted, else S3."""
+    from tools.path_safety import path_under
     docs: list[dict] = []
     root = _assets_root(session_id)
-    if root is not None and (root / asset_type).is_dir():
-        for path in sorted((root / asset_type).rglob("*.json")):
+    type_dir = path_under(root, asset_type) if root is not None else None
+    if type_dir is not None and type_dir.is_dir():
+        for path in sorted(type_dir.rglob("*.json")):
             try:
                 docs.append(json.loads(path.read_text(encoding="utf-8")))
             except (OSError, json.JSONDecodeError) as e:
@@ -389,8 +391,7 @@ def load_acxd_bundle(session_id: str) -> dict:
                     len(dropped_guardrails), dropped_guardrails)
     if dropped_secrets:
         bundle["dropped_secrets"] = dropped_secrets
-        logger.info("[ACXDBundle] %d secret(s) no data request uses left out: %s",
-                    len(dropped_secrets), dropped_secrets)
+        logger.info("[ACXDBundle] %d secret(s) no data request uses left out", len(dropped_secrets))
 
     inventory = _backend_inventory(session_id)
     bundle["infrastructure"] = inventory["infrastructure"]

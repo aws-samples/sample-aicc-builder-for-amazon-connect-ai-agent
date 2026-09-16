@@ -44,18 +44,19 @@ def _assets_root(session_id: str) -> Optional[Path]:
     mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
     if not os.path.isdir(mount):
         return None
-    safe = session_id.replace("..", "_").replace("/", "_")
-    return Path(mount) / "sessions" / safe / "assets"
+    from tools.path_safety import path_under
+    return path_under(Path(mount) / "sessions", session_id, "assets")
 
 
 def _find_asset_file(root: Path, asset_type: str, file_name: str) -> Optional[Path]:
-    base = root / asset_type
-    if not base.is_dir():
+    from tools.path_safety import path_under, safe_segment
+    base = path_under(root, asset_type)
+    if base is None or not base.is_dir() or safe_segment(file_name) is None:
         return None
-    direct = base / file_name
-    if direct.is_file():
+    direct = path_under(base, file_name)
+    if direct is not None and direct.is_file():
         return direct
-    matches = sorted(base.rglob(file_name))
+    matches = sorted(base.rglob(safe_segment(file_name)))
     return matches[0] if matches else None
 
 
