@@ -2,6 +2,10 @@
 
 ACXD is a runtime target of the Classic Full pipeline. A single download is produced by `tools.asset_packager`: Classic backend assets remain in their normal locations, while ACXD assets are added under `assets/acxd/`. The package omits `prompts/ai_agent_prompt.yaml` for the ACXD target.
 
+![Classic vs ACXD runtime target — same caller, same generated backend; Classic goes Contact Flow → Lex bot → Connect AI agent → AgentCore Gateway MCP tools, ACXD goes Contact Flow (Agentic CX block) → Agentic CX Designer application → Data Request](./images/acxd-vs-classic-architecture.png)
+
+The diagram's source is `docs/images/acxd-vs-classic-architecture.html` (a self-contained page in the AWS diagram design system; the PNG is a render of its `<svg>`).
+
 ## Archive contract
 
 An ACXD archive contains `deploy-manifest.json`, `runner.js`, `package.json`, `lib/*.js`, `WIRING-GUIDE.md`, and these generated resources:
