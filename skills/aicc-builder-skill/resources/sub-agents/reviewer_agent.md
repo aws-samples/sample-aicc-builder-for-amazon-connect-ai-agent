@@ -510,7 +510,17 @@ In addition to the Classic checklist, assess these ACXD dimensions:
 2. **Guardrail coverage** — each stated safety, privacy, policy, refusal, and
    escalation requirement must have a generated guardrail whose trigger,
    detection method, and action cover that policy. Do not claim coverage merely
-   because a similarly named guardrail exists.
+   because a similarly named guardrail exists. Two service facts bound what you
+   may ask for: (a) an output rule whose detection the builder DERIVED (LLM
+   judge, keywords, or a pattern generalised from an example) is deliberately
+   kept at `flag` — its rule `description` says so — because a false positive
+   would replace the assistant's own sentence; report it as a design note and,
+   if the policy truly needs `modify`, ask for an explicit replacement message
+   in the interview plan rather than for the action to be edited. (b) A `modify`
+   rule MUST carry `behavior.message` or `behavior.prompt` (one, not both): the
+   live service rejects a bare `modify` at deploy time with "enforcement.action
+   is not a supported value", so never recommend switching an action to
+   `modify` without naming the message.
 3. **KB/FAQ coverage** — every FAQ topic planned for the ACXD knowledge base
    needs a non-empty generated FAQ source and a KB article with a question and
    answer. Surface missing or empty content as a deployment blocker.

@@ -270,6 +270,13 @@ def _resolve_enforcement(plan: dict, spec: Optional[dict] = None) -> dict:
     return {"action": "flag"}
 
 
+#: Written into a downgraded rule's ``description`` (schema cap: 100 chars) so a
+#: reviewer or a later edit sees the flag is a decision, not an omission.
+_ADVISORY_RULE_NOTE = ("AICC: derived output rule kept as flag (false positive would mute the bot); "
+                       "plan.message => modify")
+assert len(_ADVISORY_RULE_NOTE) <= 100
+
+
 def _keep_derived_output_rules_advisory(doc: dict, plan: dict) -> None:
     """An output guardrail whose detection the builder DERIVED must not rewrite
     what the caller hears.
@@ -299,6 +306,11 @@ def _keep_derived_output_rules_advisory(doc: dict, plan: dict) -> None:
         if isinstance(source, str) and re.search(r"[\\^$.*+?()\[\]{}|]", source):
             return
     rule["enforcement"] = {"action": "flag"}
+    # Leave the reason ON the rule: live (2026-09-16) the reviewer read the
+    # flag as a defect ("the spec says modify"), the orchestrator hand-patched
+    # the action back to modify without a behavior.message, and the service
+    # rejected the guardrail at deploy time.
+    rule["description"] = _ADVISORY_RULE_NOTE
     logger.info("[ACXDGuardrails] %s: output rule with derived %s detection kept advisory "
                 "(flag) instead of %s — a false positive would silence the assistant",
                 doc.get("name"), method, action)

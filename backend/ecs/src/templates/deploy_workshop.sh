@@ -872,15 +872,26 @@ phase_connect_instance() {
     if [ -n "${CONNECT_INSTANCE_ID:-}" ]; then
         info "Using CONNECT_INSTANCE_ID from env: $CONNECT_INSTANCE_ID"
     else
-        local saved
+        local saved list_err=""
         saved=$(state_get CONNECT_INSTANCE_ID)
-        INSTANCES_JSON=$(aws connect list-instances --region "$REGION" --output json 2>/dev/null || echo '{"InstanceSummaryList":[]}')
+        if ! INSTANCES_JSON=$(aws connect list-instances --region "$REGION" --output json 2>&1); then
+            list_err="$INSTANCES_JSON"; INSTANCES_JSON='{"InstanceSummaryList":[]}'
+        fi
         INSTANCE_COUNT=$(jget "$INSTANCES_JSON" "InstanceSummaryList" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
 
         if [ "$INSTANCE_COUNT" -eq 0 ]; then
             if [ "$TARGET" = "acxd" ]; then
-                echo "❌ ACXD requires an existing Connect Customer instance; this script will not create a generic Connect instance." >&2
-                echo "   Create/select a Connect Customer instance in the console, export CONNECT_INSTANCE_ID, then retry." >&2
+                if [ -n "$list_err" ]; then
+                    echo "❌ Could not list Connect instances in $REGION: $(echo "$list_err" | head -1)" >&2
+                    echo "   Grant connect:ListInstances, or export CONNECT_INSTANCE_ID=<id of your Connect Customer instance>." >&2
+                    exit 1
+                fi
+                echo "❌ No Amazon Connect instance in $REGION, and the ACXD target needs a *Connect Customer* instance." >&2
+                echo "   The Agentic CX block only runs on that instance type, and the public create-instance API cannot" >&2
+                echo "   create it — so this script does not create one (a standard instance would not work)." >&2
+                echo "   One-time setup, in the console (WIRING-GUIDE.md, 'Starting from an empty account'): create the" >&2
+                echo "   Connect Customer instance in $REGION, open Agentic CX Designer, create the workspace and an API key," >&2
+                echo "   then re-run and pick the instance from the menu, or export CONNECT_INSTANCE_ID / ACXD_WORKSPACE_ID / ACXD_API_KEY." >&2
                 exit 1
             fi
             info "No Connect instance found. Creating a new one..."
