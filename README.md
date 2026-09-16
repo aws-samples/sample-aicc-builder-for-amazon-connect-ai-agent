@@ -42,6 +42,8 @@ the Classic stack. On the start screen, choose where your agent will run:
 Nothing else changes: the same ~1-hour interview, the same review, the same
 six-asset bundle. Only the last mile is different.
 
+![Classic vs ACXD runtime target — both start at the same caller and end at the same generated backend (API Gateway, Lambda, DynamoDB); Classic goes Contact Flow → Lex bot → Connect AI agent → AgentCore Gateway MCP tools, ACXD goes Contact Flow (Agentic CX block) → Agentic CX Designer application → Data Request](./docs/images/acxd-vs-classic-architecture.png)
+
 With the ACXD target you get:
 
 - **A complete ACXD application from your interview.** Conversation flows, slot
@@ -723,6 +725,8 @@ Contact Flow, CDK 인프라, FAQ)을 자동 생성합니다. 단일 오케스트
 나머지는 똑같습니다. 같은 약 1시간 인터뷰, 같은 리뷰, 같은 6종 에셋 번들. 마지막
 구간만 다릅니다.
 
+![Classic과 ACXD 런타임 타깃 비교 — 같은 고객, 같은 생성 백엔드(API Gateway, Lambda, DynamoDB); Classic은 Contact Flow → Lex 봇 → Connect AI 에이전트 → AgentCore Gateway MCP 도구, ACXD는 Contact Flow(Agentic CX 블록) → Agentic CX Designer 애플리케이션 → Data Request](./docs/images/acxd-vs-classic-architecture.png)
+
 ACXD를 선택하면 다음을 받습니다.
 
 - **인터뷰에서 바로 나오는 완성된 ACXD 애플리케이션.** 대화 플로우, 슬롯 타입,
@@ -1011,6 +1015,8 @@ AICC Builder で、Classic スタックに加えて **Agentic CX Designer** 向�
 
 それ以外は同じです。約 1 時間のインタビュー、レビュー、6 種のアセットバンドル。
 違うのは最後の区間だけです。
+
+![Classic と ACXD ランタイムターゲットの比較 — 同じ発信者、同じ生成済みバックエンド（API Gateway、Lambda、DynamoDB）。Classic は Contact Flow → Lex ボット → Connect AI エージェント → AgentCore Gateway の MCP ツール、ACXD は Contact Flow（Agentic CX ブロック）→ Agentic CX Designer アプリケーション → Data Request](./docs/images/acxd-vs-classic-architecture.png)
 
 ACXD を選ぶと次が得られます。
 
