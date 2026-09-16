@@ -25,6 +25,7 @@ packages them into a downloadable ZIP with the following structure:
         └── *.txt
 """
 
+import contextvars
 import hashlib
 import io
 import json
@@ -190,14 +191,19 @@ _ACXD_RUNNER_DIR = Path(__file__).resolve().parent.parent / "templates" / "acxd_
 
 
 class ACXDPackagingError(ValueError):
-    """Raised when an ACXD bundle cannot safely be handed to a customer.
+    """Raised when an ACXD bundle cannot safely be handed to a customer."""
 
-    ``reason`` is the wording written for the user at the raise site; it is
-    what the download endpoint shows, never the exception's own text."""
 
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = str(reason)
+#: The wording of the last deliberate refusal, written for the user at the
+#: raise site. The download endpoint shows this text, never the exception —
+#: exception text can carry paths and internals that do not belong in a reply.
+_LAST_REFUSAL: "contextvars.ContextVar[str]" = contextvars.ContextVar("acxd_packaging_refusal", default="")
+
+
+def _refuse(reason: str) -> None:
+    """Record ``reason`` for the caller's reply and abort packaging."""
+    _LAST_REFUSAL.set(str(reason))
+    raise ACXDPackagingError(reason)
 
 
 def _slug(value: Any, fallback: str = "unnamed") -> str:
@@ -418,14 +424,14 @@ def build_acxd_zip_entries(
 
     problems = validate_deploy_manifest(manifest) + check_manifest_coverage(manifest, bundle)
     if problems:
-        raise ACXDPackagingError("ACXD manifest is invalid:\n  - " + "\n  - ".join(problems))
+        _refuse("ACXD manifest is invalid:\n  - " + "\n  - ".join(problems))
 
     entries: list[tuple[str, bytes, bool]] = []
     seen: set[str] = set()
 
     def add(relative_path: str, payload: bytes | str, executable: bool = False) -> None:
         if relative_path in seen:
-            raise ACXDPackagingError(
+            _refuse(
                 f"duplicate ACXD bundle path {relative_path!r}; refusing an ambiguous ZIP")
         seen.add(relative_path)
         entries.append((relative_path,
@@ -462,7 +468,7 @@ def build_acxd_zip_entries(
     for relative_path in ACXD_RUNNER_FILES:
         source = _ACXD_RUNNER_DIR / relative_path
         if not source.is_file():
-            raise ACXDPackagingError(f"static ACXD runner file is missing: {source}")
+            _refuse(f"static ACXD runner file is missing: {source}")
         add(relative_path, source.read_bytes(), executable=relative_path == "runner.js")
     return entries
 
@@ -763,7 +769,7 @@ def package_assets_impl(
                             logger.info(f"[packager] identical duplicate copy skipped: {s3_key} -> {zip_path}")
                             continue
                         if acxd_plan:
-                            raise ACXDPackagingError(
+                            _refuse(
                                 f"duplicate archive path {zip_path!r} with different content "
                                 f"({s3_key}); refusing an ambiguous ACXD bundle")
                     zf.writestr(zip_path, content)
@@ -781,7 +787,7 @@ def package_assets_impl(
                         project_name, acxd_bundle, acxd_manifest):
                     zip_path = f"{project_name}/{relative_path}"
                     if zip_path in zip_paths:
-                        raise ACXDPackagingError(
+                        _refuse(
                             f"duplicate archive path {zip_path!r}; refusing an ambiguous ACXD bundle")
                     zf.writestr(zip_path, payload)
                     if executable:
@@ -795,7 +801,7 @@ def package_assets_impl(
                      if item.startswith(f"{project_name}/")},
                 )
                 if backend_problems:
-                    raise ACXDPackagingError(
+                    _refuse(
                         "ACXD bundle is missing manifest-referenced backend assets:\n  - "
                         + "\n  - ".join(backend_problems))
 
@@ -908,15 +914,14 @@ def package_assets_impl(
             "message": f"Assets packaged successfully! {len(file_list)} files, {round(total_size / 1024, 1)} KB"
         }
 
-    except ACXDPackagingError as e:
-        # A refusal this module raised on purpose, worded for the user.
-        return {"success": False, "error": e.reason}
-    except ClientError as e:
+    except ACXDPackagingError:
+        # A refusal this module raised on purpose; its wording was recorded for the user.
+        return {"success": False, "error": _LAST_REFUSAL.get() or "ACXD packaging refused."}
+    except ClientError:
         logger.exception("[packager] S3 operation failed")
         return {
             "success": False,
-            "error": f"S3 operation failed ({e.response.get('Error', {}).get('Code', 'error')}); "
-                     "see the server log for details."
+            "error": "S3 operation failed; see the server log for details."
         }
     except Exception:
         logger.exception("[packager] failed to package assets")
