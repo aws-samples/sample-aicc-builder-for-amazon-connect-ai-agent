@@ -1,0 +1,56 @@
+{
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "trigger": {
+      "default": "input",
+      "description": "'input' or 'output'",
+      "title": "Trigger",
+      "type": "string"
+    },
+    "policy": {
+      "description": "The business policy, in plain language",
+      "title": "Policy",
+      "type": "string"
+    },
+    "detection_method": {
+      "default": "auto",
+      "description": "'regex', 'keyword', 'llmJudge' or 'auto'",
+      "title": "Detection Method",
+      "type": "string"
+    },
+    "action": {
+      "default": "flag",
+      "description": "'mask', 'modify', 'route' or 'flag'",
+      "title": "Action",
+      "type": "string"
+    },
+    "route_flow_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Route Flow Id"
+    },
+    "examples": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Examples",
+      "type": "array"
+    }
+  },
+  "required": [
+    "name",
+    "policy"
+  ],
+  "title": "ACXDGuardrailPlan",
+  "type": "object"
+}

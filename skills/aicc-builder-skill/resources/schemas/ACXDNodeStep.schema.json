@@ -1,0 +1,96 @@
+{
+  "description": "One planned step of a flow, with its determinism decision.",
+  "properties": {
+    "step": {
+      "description": "1-based order within the flow",
+      "title": "Step",
+      "type": "integer"
+    },
+    "description": {
+      "description": "What happens at this step, in plain language",
+      "title": "Description",
+      "type": "string"
+    },
+    "node_type": {
+      "description": "ACXD node type; one of ['basic', 'choice', 'data_request', 'define', 'end', 'escalate', 'generative_journey', 'generative_task', 'generative_text', 'intent_capture', 'knowledge_base', 'loop', 'note', 'redirect', 'split', 'start', 'transform', 'user_choice', 'user_input', 'wait']",
+      "title": "Node Type",
+      "type": "string"
+    },
+    "determinism": {
+      "default": "deterministic",
+      "description": "'deterministic' (fixed) or 'generative' (LLM-driven)",
+      "title": "Determinism",
+      "type": "string"
+    },
+    "determinism_rationale": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Why this label was recommended, in plain language",
+      "title": "Determinism Rationale"
+    },
+    "decision_category": {
+      "default": "general",
+      "description": "What the step decides; one of ('authorization', 'compliance', 'eligibility', 'identity', 'money', 'payment', 'refund', 'general'). Money/refund/payment/authorization/eligibility/compliance/identity steps are always deterministic.",
+      "title": "Decision Category",
+      "type": "string"
+    },
+    "data_request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "For data_request steps: the Data Request to call. Defaults to the flow's operation_id (one Data Request per operation).",
+      "title": "Data Request Id"
+    },
+    "redirect_flow_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "For redirect steps: the flow_id this step hands the conversation to (e.g. the customer-info search flow when the order number is not found). The generated flow must redirect there; system hand-offs (follow-up, escalation) need not be named.",
+      "title": "Redirect Flow Id"
+    },
+    "user_confirmed": {
+      "default": false,
+      "title": "User Confirmed",
+      "type": "boolean"
+    },
+    "confirmation_pending_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Set when a re-upsert changed the decision and reset confirmation",
+      "title": "Confirmation Pending Reason"
+    }
+  },
+  "required": [
+    "step",
+    "description",
+    "node_type"
+  ],
+  "title": "ACXDNodeStep",
+  "type": "object"
+}

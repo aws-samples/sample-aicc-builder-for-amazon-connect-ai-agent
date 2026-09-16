@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aicc-builder/acxd/knowledge_base.schema.json",
+  "title": "ACXD Knowledge Base",
+  "description": "Contract schema for ACXD knowledge bases (AWS devguide acxd-knowledge-bases). AICC Builder contract: the bundled document may embed its articles under the 'articles' key; the deploy runner creates the KB, then each article, then publishes.",
+  "type": "object",
+  "required": ["name", "type"],
+  "additionalProperties": false,
+  "properties": {
+    "knowledgeBaseId": { "type": "string" },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[A-Za-z0-9 _-]+$",
+      "description": "Alphanumeric + spaces/dashes/underscores, 1-100 chars"
+    },
+    "type": { "type": "string", "enum": ["articles", "documents"] },
+    "description": { "type": "string", "maxLength": 200 },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "summarize": { "type": "boolean" },
+        "minConfidenceScore": { "type": "number", "minimum": 0, "maximum": 100 },
+        "temperature": { "type": "number" },
+        "topP": { "type": "number" },
+        "k": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "mainLanguageCode": { "type": "string" },
+    "languageCodes": { "type": "array", "items": { "type": "string" } },
+    "metadataSchema": { "type": "object" },
+    "metadata": { "type": "object" },
+    "articles": {
+      "type": "array",
+      "items": { "$ref": "kb_article.schema.json" },
+      "description": "AICC Builder bundle extension: articles to create after the KB (not part of the CreateKnowledgeBase payload)"
+    },
+    "creationStatus": { "type": "string", "enum": ["PENDING", "SUCCEEDED"] },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" },
+    "lastUpdatedBy": { "type": "string" }
+  }
+}

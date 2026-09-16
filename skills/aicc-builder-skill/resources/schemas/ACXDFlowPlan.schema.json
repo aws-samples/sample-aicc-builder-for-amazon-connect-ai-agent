@@ -1,0 +1,260 @@
+{
+  "$defs": {
+    "ACXDNodeStep": {
+      "description": "One planned step of a flow, with its determinism decision.",
+      "properties": {
+        "step": {
+          "description": "1-based order within the flow",
+          "title": "Step",
+          "type": "integer"
+        },
+        "description": {
+          "description": "What happens at this step, in plain language",
+          "title": "Description",
+          "type": "string"
+        },
+        "node_type": {
+          "description": "ACXD node type; one of ['basic', 'choice', 'data_request', 'define', 'end', 'escalate', 'generative_journey', 'generative_task', 'generative_text', 'intent_capture', 'knowledge_base', 'loop', 'note', 'redirect', 'split', 'start', 'transform', 'user_choice', 'user_input', 'wait']",
+          "title": "Node Type",
+          "type": "string"
+        },
+        "determinism": {
+          "default": "deterministic",
+          "description": "'deterministic' (fixed) or 'generative' (LLM-driven)",
+          "title": "Determinism",
+          "type": "string"
+        },
+        "determinism_rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why this label was recommended, in plain language",
+          "title": "Determinism Rationale"
+        },
+        "decision_category": {
+          "default": "general",
+          "description": "What the step decides; one of ('authorization', 'compliance', 'eligibility', 'identity', 'money', 'payment', 'refund', 'general'). Money/refund/payment/authorization/eligibility/compliance/identity steps are always deterministic.",
+          "title": "Decision Category",
+          "type": "string"
+        },
+        "data_request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For data_request steps: the Data Request to call. Defaults to the flow's operation_id (one Data Request per operation).",
+          "title": "Data Request Id"
+        },
+        "redirect_flow_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For redirect steps: the flow_id this step hands the conversation to (e.g. the customer-info search flow when the order number is not found). The generated flow must redirect there; system hand-offs (follow-up, escalation) need not be named.",
+          "title": "Redirect Flow Id"
+        },
+        "user_confirmed": {
+          "default": false,
+          "title": "User Confirmed",
+          "type": "boolean"
+        },
+        "confirmation_pending_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Set when a re-upsert changed the decision and reset confirmation",
+          "title": "Confirmation Pending Reason"
+        }
+      },
+      "required": [
+        "step",
+        "description",
+        "node_type"
+      ],
+      "title": "ACXDNodeStep",
+      "type": "object"
+    },
+    "ACXDSlotPlan": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "default": "text",
+          "title": "Type",
+          "type": "string"
+        },
+        "sensitive": {
+          "default": false,
+          "title": "Sensitive",
+          "type": "boolean"
+        },
+        "examples": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Examples",
+          "type": "array"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "regex": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Regex"
+        },
+        "field_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "OperationSpec input field this slot fills (constraints come from its FieldSpec)",
+          "title": "Field Name"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ACXDSlotPlan",
+      "type": "object"
+    }
+  },
+  "description": "Interview-level plan for one ACXD flow (before node-graph generation).",
+  "properties": {
+    "flow_id": {
+      "description": "Letters only, 3-64 chars (ACXD constraint)",
+      "title": "Flow Id",
+      "type": "string"
+    },
+    "purpose": {
+      "title": "Purpose",
+      "type": "string"
+    },
+    "display_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Short customer-facing name of the operation in the project language (2-4 words, e.g. '\ubc30\uc1a1 \uc870\ud68c'); spoken verbatim when the assistant lists what it can help with",
+      "title": "Display Name"
+    },
+    "role": {
+      "default": "operation",
+      "description": "One of ('operation', 'welcome', 'fallback', 'unknown', 'escalation', 'frustration', 'help', 'repeat', 'resume', 'followup', 'agent_request')",
+      "title": "Role",
+      "type": "string"
+    },
+    "customer_initiated": {
+      "default": true,
+      "description": "False for an operation the customer never asks for by itself \u2014 e.g. recording the call result after a conversation \u2014 that other flows reach by redirect. Such a flow is left out of the greeting/re-guide menu and is not an intent-routing target",
+      "title": "Customer Initiated",
+      "type": "boolean"
+    },
+    "operation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "OperationSpec this flow implements (required when role='operation')",
+      "title": "Operation Id"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/ACXDNodeStep"
+      },
+      "title": "Steps",
+      "type": "array"
+    },
+    "slots": {
+      "items": {
+        "$ref": "#/$defs/ACXDSlotPlan"
+      },
+      "title": "Slots",
+      "type": "array"
+    },
+    "uses_knowledge_base": {
+      "default": false,
+      "title": "Uses Knowledge Base",
+      "type": "boolean"
+    },
+    "escalation_conditions": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Escalation Conditions"
+    },
+    "confirmed": {
+      "default": false,
+      "description": "User approved the whole flow plan",
+      "title": "Confirmed",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "flow_id",
+    "purpose"
+  ],
+  "title": "ACXDFlowPlan",
+  "type": "object"
+}

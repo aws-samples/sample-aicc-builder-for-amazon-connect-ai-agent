@@ -1179,6 +1179,57 @@ def validate_generated_flow(flow: dict, plan: dict, spec: dict) -> list[str]:
     return problems
 
 
+def finalize_generated_flow(flow: dict, plan: dict, spec: dict) -> tuple[dict, list[str], list[str], list[str]]:
+    """Everything that happens to a model-written flow before it is accepted.
+
+    Order matters and is shared by the generator loop and by the CLI skill
+    (``skills/aicc-builder-skill/resources/scripts/acxd_local.py``): mechanical
+    repairs, canonicalization of the encoding, the live-verified runtime
+    contract (after canonicalization, before validation, so what it repairs is
+    never reported as a failure), the internal-operation ``untrained`` flag,
+    schema pruning, then validation.
+
+    Returns ``(flow, problems, contract_notes, canonical_changes)``.
+    """
+    flow = normalize_generated_flow(flow, spec)
+    flow = repair_generated_flow(flow, plan, spec)
+    # Representation is decided by code, not by the model: slot capture
+    # → user_choice + metadata.choice, messages on the node, define
+    # {name, value}, NLX placeholders, boolean typing. Whatever the model
+    # encoded is mapped onto the SDK contract here; only things that would
+    # change behaviour come back as problems.
+    canonical = canonicalize_flow(flow)
+    flow = canonical.flow
+    flow, contract_notes = apply_runtime_contract_if_available(flow, plan, spec)
+    # An operation the customer never asks for by itself (the plan says
+    # customer_initiated=false — e.g. call-result logging reached by
+    # redirect) must not be an intent-routing target: live, such a flow
+    # was offered in the re-guide menu and routable by utterance.
+    if isinstance(flow, dict):
+        metadata = flow.get("metadata") if isinstance(flow.get("metadata"), dict) else {}
+        # The contract field is top-level ``untrained`` (what the system
+        # flows use); the model tends to put it under metadata, where the
+        # service ignores it — live, such a flow stayed routable.
+        model_marked = metadata.pop("untrained", None) is True
+        # The model may say it in words instead: a routing descriptor
+        # that tells the router not to route here is the same signal.
+        described_internal = bool(_INTERNAL_DESCRIPTION.search(str(flow.get("aiDescription") or "")))
+        if (plan.get("customer_initiated") is False or model_marked or described_internal
+                or flow.get("untrained") is True):
+            if flow.get("untrained") is not True:
+                flow["untrained"] = True
+                logger.info("[ACXDFlowGen] %s: internal operation → untrained (not routable)",
+                            plan.get("flow_id"))
+        if not metadata and "metadata" in flow and isinstance(flow.get("metadata"), dict) and not flow["metadata"]:
+            flow.pop("metadata", None)
+    # Extra keys the model invents are the second most common failure
+    # and carry no contract meaning, so drop them instead of spending an
+    # attempt on them.
+    flow = prune_to_schema(flow, "flow")
+    problems = validate_generated_flow(flow, plan, spec) + list(dict.fromkeys(canonical.problems))
+    return flow, problems, list(contract_notes or []), list(canonical.changes or [])
+
+
 def _acxd_progress(status: str, message: str = "", flow_id: str = "") -> None:
     """Emit `subagent_progress` so the UI shows movement during generation.
 
@@ -1279,52 +1330,15 @@ def run_flow_generation(
                 stripped[:60], _describe_response(stripped),
             )
         else:
-            flow = normalize_generated_flow(flow, spec)
-            flow = repair_generated_flow(flow, plan, spec)
-            # Representation is decided by code, not by the model: slot capture
-            # → user_choice + metadata.choice, messages on the node, define
-            # {name, value}, NLX placeholders, boolean typing. Whatever the model
-            # encoded is mapped onto the SDK contract here; only things that would
-            # change behaviour come back as problems.
-            canonical = canonicalize_flow(flow)
-            flow = canonical.flow
-            if canonical.changes:
+            flow, problems, contract_notes, canonical_changes = finalize_generated_flow(flow, plan, spec)
+            if canonical_changes:
                 logger.info("[ACXDFlowGen] %s attempt %d: canonicalized %d encoding(s): %s",
-                            flow_id, attempt, len(canonical.changes),
-                            "; ".join(canonical.changes[:6]))
-            # The live-verified runtime contract runs AFTER canonicalization
-            # — it reasons about the canonical shapes — and BEFORE validation, so
-            # anything it repairs is not reported back to the model as a failure.
-            flow, contract_notes = apply_runtime_contract_if_available(flow, plan, spec)
+                            flow_id, attempt, len(canonical_changes),
+                            "; ".join(canonical_changes[:6]))
             if contract_notes:
                 logger.info("[ACXDFlowGen] %s attempt %d: runtime contract applied "
                             "%d change(s): %s", flow_id, attempt, len(contract_notes),
                             "; ".join(str(n) for n in contract_notes[:6]))
-            # An operation the customer never asks for by itself (the plan says
-            # customer_initiated=false — e.g. call-result logging reached by
-            # redirect) must not be an intent-routing target: live, such a flow
-            # was offered in the re-guide menu and routable by utterance.
-            if isinstance(flow, dict):
-                metadata = flow.get("metadata") if isinstance(flow.get("metadata"), dict) else {}
-                # The contract field is top-level ``untrained`` (what the system
-                # flows use); the model tends to put it under metadata, where the
-                # service ignores it — live, such a flow stayed routable.
-                model_marked = metadata.pop("untrained", None) is True
-                # The model may say it in words instead: a routing descriptor
-                # that tells the router not to route here is the same signal.
-                described_internal = bool(_INTERNAL_DESCRIPTION.search(str(flow.get("aiDescription") or "")))
-                if (plan.get("customer_initiated") is False or model_marked or described_internal
-                        or flow.get("untrained") is True):
-                    if flow.get("untrained") is not True:
-                        flow["untrained"] = True
-                        logger.info("[ACXDFlowGen] %s: internal operation → untrained (not routable)", flow_id)
-                if not metadata and "metadata" in flow and isinstance(flow.get("metadata"), dict) and not flow["metadata"]:
-                    flow.pop("metadata", None)
-            # Extra keys the model invents are the second most common failure
-            # and carry no contract meaning, so drop them instead of spending an
-            # attempt on them.
-            flow = prune_to_schema(flow, "flow")
-            problems = validate_generated_flow(flow, plan, spec) + list(dict.fromkeys(canonical.problems))
         attempts.append({"attempt": attempt, "problems": list(problems)})
         if not problems:
             _acxd_progress("completed", f"{flow_id}: generated on attempt {attempt}",

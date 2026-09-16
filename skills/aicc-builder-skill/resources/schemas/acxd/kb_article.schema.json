@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aicc-builder/acxd/kb_article.schema.json",
+  "title": "ACXD Knowledge Base Article",
+  "description": "Contract schema for ACXD KB articles (AWS devguide acxd-knowledge-base-articles).",
+  "type": "object",
+  "required": ["question", "responses"],
+  "additionalProperties": false,
+  "properties": {
+    "knowledgeBaseId": { "type": "string" },
+    "articleId": { "type": "string" },
+    "question": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "messageId": { "type": "string" },
+        "skipTranslation": { "type": "boolean" },
+        "translated": { "type": "boolean" }
+      }
+    },
+    "responses": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["body"],
+        "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string", "enum": ["text"] },
+          "body": { "type": "string", "minLength": 1 },
+          "messageId": { "type": "string" }
+        }
+      }
+    },
+    "articleMetadata": { "type": "object" },
+    "payload": { "type": "string", "maxLength": 10000 },
+    "tags": {
+      "type": "array",
+      "maxItems": 5,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" },
+    "lastUpdatedBy": { "type": "string" }
+  }
+}

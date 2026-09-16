@@ -94,6 +94,9 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> int:
         (out_sub / f"{a}.md").write_text(payload)
         print(f"[ok] {a}.md <- {picked} ({len(payload)} chars)")
 
+    # ---------------- 2b) ACXD target: flow generator prompt + spec schemas + runtime files ----------------
+    _extract_acxd(src, skill_root)
+
     # ---------------- 3) orchestrator prompt (phase-split) ----------------
     sys.path.insert(0, str(repo_root / "backend/ecs"))
     sp_text = (src / "prompts/system_prompt.py").read_text()
@@ -115,6 +118,9 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> int:
         "TOOLS_REFERENCE",
         "SCHEMA_REFERENCE",
         "CONNECT_GUIDE",
+        # Appended last for an ACXD-target session in the webapp
+        # (get_phase_system_prompt); the skill applies it when the user picked ACXD.
+        "ACXD_RUNTIME_TARGET_PROMPT",
     ]
     parts = []
     for p in phases:
@@ -245,6 +251,112 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> int:
     # surface instead of rotting.
     return _report_coverage(sp_ns, spec_ns, phases, standalone_orch, schema_models)
 
+
+
+_ACXD_SPEC_MODELS = (
+    "ACXDFlowSpec",
+    "ACXDFlowPlan",
+    "ACXDNodeStep",
+    "ACXDSlotPlan",
+    "ACXDGuardrailPlan",
+    "ACXDKnowledgeBasePlan",
+    "ACXDContextVariable",
+    "ACXDApplicationPlan",
+)
+
+
+def _light_package(name: str, path: Path) -> None:
+    """Register ``name`` as a namespace-style package rooted at ``path`` WITHOUT
+    running its ``__init__.py`` (the backend's ``tools``/``agents``/``prompts``
+    packages import every generator, strands and boto3 on init)."""
+    pkg = types.ModuleType(name)
+    pkg.__path__ = [str(path)]  # type: ignore[attr-defined]
+    sys.modules[name] = pkg
+
+
+def _extract_acxd(src: Path, skill_root: Path) -> None:
+    """ACXD runtime target: the flow-generator prompt (composed from the live
+    service contract), the ACXDFlowSpec schemas, the JSON schemas every ACXD
+    resource is validated against, the Node runner the bundle ships, and the
+    bundle's deploy.sh — all read from the same backend sources the webapp uses."""
+    import importlib
+    import shutil
+
+    out_sub = skill_root / "resources/sub-agents"
+    out_schemas = skill_root / "resources/schemas"
+    out_templates = skill_root / "resources/templates"
+
+    saved_modules = {k: v for k, v in sys.modules.items()
+                     if k in ("tools", "prompts", "agents", "strands") or k.startswith(("tools.", "prompts.", "agents."))}
+    saved_path = list(sys.path)
+    try:
+        for k in list(saved_modules):
+            sys.modules.pop(k, None)
+        if "strands" not in sys.modules:
+            try:
+                import strands  # noqa: F401
+            except Exception:
+                stub = types.ModuleType("strands")
+                setattr(stub, "tool", lambda f: f)
+                sys.modules["strands"] = stub
+        sys.path.insert(0, str(src))
+        _light_package("tools", src / "tools")
+        _light_package("prompts", src / "prompts")
+        _light_package("agents", src / "agents")
+        _light_package("agents.acxd_flow_generator", src / "agents/acxd_flow_generator")
+
+        # generator prompt (needs tools.acxd_contract + tools.validate_acxd_flow for real)
+        gen = importlib.import_module("agents.acxd_flow_generator.system_prompt")
+        prompt = getattr(gen, "ACXD_FLOW_GENERATOR_SYSTEM_PROMPT", "")
+        if isinstance(prompt, str) and len(prompt) > 300:
+            (out_sub / "acxd_flow_generator.md").write_text(prompt)
+            print(f"[ok] acxd_flow_generator.md <- ACXD_FLOW_GENERATOR_SYSTEM_PROMPT ({len(prompt)} chars)")
+        else:
+            print("[!] acxd_flow_generator: prompt missing")
+
+        # ACXDFlowSpec and the plan models the interview confirms
+        spec_mod = importlib.import_module("tools.acxd_flow_spec")
+        for cls in _ACXD_SPEC_MODELS:
+            model = getattr(spec_mod, cls, None)
+            if model is None:
+                print(f"[!] missing {cls}")
+                continue
+            try:
+                schema = model.model_json_schema()
+            except Exception as e:
+                print(f"[!] {cls}: schema generation failed: {e}")
+                continue
+            p = out_schemas / f"{cls}.schema.json"
+            p.write_text(json.dumps(schema, indent=2))
+            print(f"[ok] {cls}.schema.json ({p.stat().st_size} bytes)")
+    finally:
+        for k in list(sys.modules):
+            if k in ("tools", "prompts", "agents") or k.startswith(("tools.", "prompts.", "agents.")):
+                sys.modules.pop(k, None)
+        sys.modules.update(saved_modules)
+        sys.path[:] = saved_path
+
+    # resource JSON schemas + the service contract the validators read
+    acxd_schemas = out_schemas / "acxd"
+    acxd_schemas.mkdir(parents=True, exist_ok=True)
+    for f in sorted((src / "schemas/acxd").glob("*.json")):
+        shutil.copyfile(f, acxd_schemas / f.name)
+    print(f"[ok] schemas/acxd/*.json ({len(list(acxd_schemas.glob('*.json')))} files)")
+
+    # the Node runner the bundle ships (deploys the application via the ACXD SDK)
+    runner_src = src / "templates/acxd_runner"
+    runner_out = out_templates / "acxd_runner"
+    if runner_src.is_dir():
+        if runner_out.exists():
+            shutil.rmtree(runner_out)
+        shutil.copytree(runner_src, runner_out, ignore=shutil.ignore_patterns("node_modules", "__pycache__", ".DS_Store"))
+        print(f"[ok] templates/acxd_runner/ ({sum(1 for _ in runner_out.rglob('*') if _.is_file())} files)")
+
+    # the bundle's deploy.sh (Classic phases + the ACXD chain) — one source of truth
+    deploy_src = src / "templates/deploy_workshop.sh"
+    if deploy_src.is_file():
+        shutil.copyfile(deploy_src, out_templates / "deploy_workshop.sh")
+        print(f"[ok] templates/deploy_workshop.sh ({deploy_src.stat().st_size} bytes)")
 
 _LINT_HEADER = '''#!/usr/bin/env python3
 # AUTO-GENERATED — DO NOT EDIT.

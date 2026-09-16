@@ -1,0 +1,67 @@
+{
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "type": {
+      "default": "text",
+      "title": "Type",
+      "type": "string"
+    },
+    "sensitive": {
+      "default": false,
+      "title": "Sensitive",
+      "type": "boolean"
+    },
+    "examples": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Examples",
+      "type": "array"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "regex": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Regex"
+    },
+    "field_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "OperationSpec input field this slot fills (constraints come from its FieldSpec)",
+      "title": "Field Name"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "ACXDSlotPlan",
+  "type": "object"
+}
