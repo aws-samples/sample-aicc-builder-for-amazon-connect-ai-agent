@@ -685,6 +685,32 @@ async def openapi_generator_agent(
                 # validation entirely). Runs AFTER streaming so the preview is
                 # instant; re-streams + re-saves only if the autofix changed the
                 # spec. Fault-tolerant: any failure leaves the streamed spec.
+                # Response contract first (deterministic: envelope + output_fields,
+                # request = input_fields), then the OpenAPI 3.0 lint gate. Both run
+                # AFTER the first stream so the preview is instant; re-stream +
+                # re-save only if something changed. Fault-tolerant.
+                try:
+                    from tools.response_contract import enforce_openapi_yaml
+                    _enforced, _contract_changes = enforce_openapi_yaml(code)
+                    result["response_contract_changes"] = _contract_changes[:20]
+                    if _enforced != code:
+                        code = _enforced
+                        logger.info("[OPENAPI] response contract rewrote schemas — re-streaming: %s",
+                                    "; ".join(_contract_changes[:6]))
+                        try:
+                            from tools.streaming_callback import clear_asset_preview_cache, get_session_id
+                            from tools.s3_asset_storage import save_asset_to_s3
+                            clear_asset_preview_cache("openapi", "openapi.yaml", op_id)
+                            _stream_asset("openapi", "openapi.yaml", code, op_id)
+                            _sid = get_session_id()
+                            if _sid:
+                                save_asset_to_s3(session_id=_sid, asset_type="openapi",
+                                                 file_name="openapi.yaml", content=code, operation_id=op_id)
+                        except Exception as e:
+                            logger.warning(f"[OPENAPI] response contract re-stream failed (non-fatal): {e}")
+                except Exception as e:
+                    logger.warning(f"[OPENAPI] response contract enforcement failed (non-fatal): {e}")
+
                 try:
                     from tools.asset_linters import lint_and_autofix_openapi
                     _lint = lint_and_autofix_openapi(code)

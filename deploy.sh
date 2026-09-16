@@ -244,6 +244,15 @@ if [ -n "$STAGE" ]; then
     echo -e "${CYAN}Stage: ${STAGE} (stack suffix: ${STAGE_SUFFIX})${NC}"
 fi
 
+# The backend records which build generated a bundle (deploy-manifest.json
+# → builder.build), so a downloaded bundle can be matched to the code that
+# produced it. The git commit is the build id when the tree is a checkout.
+BUILDER_BUILD="$(git rev-parse --short HEAD 2>/dev/null || true)"
+if [ -n "$BUILDER_BUILD" ]; then
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then BUILDER_BUILD="${BUILDER_BUILD}-dirty"; fi
+    CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c builderBuild=${BUILDER_BUILD}"
+fi
+
 if [ "$ALLOW_VPC_PUBLIC_ACCESS" = true ]; then
     CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c allowVpcPublicAccess=true"
     echo -e "${YELLOW}VPC Block Public Access exclusion ENABLED: this VPC will be excluded from the account BPA guardrail (allow-bidirectional).${NC}"
@@ -778,13 +787,14 @@ if [ "$DEPLOY_BACKEND" = true ]; then
                 | .containerDefinitions = (.containerDefinitions | map(
                     if .name == \"app\" then
                       .environment = (
-                        [(.environment // [])[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"AGENTCORE_GATEWAY_URL\",\"AGENTCORE_GATEWAY_REGION\") | not)]
+                        [(.environment // [])[] | select(.name | IN(\"ASSETS_BUCKET_NAME\",\"USER_POOL_ID\",\"USER_POOL_CLIENT_ID\",\"CONTACT_FLOW_KB_ID\",\"AGENTCORE_GATEWAY_URL\",\"AGENTCORE_GATEWAY_REGION\",\"AICC_BUILDER_BUILD\") | not)]
                         + [{\"name\":\"ASSETS_BUCKET_NAME\",\"value\":\$bucket},
                        {\"name\":\"USER_POOL_ID\",\"value\":\$pool},
                        {\"name\":\"USER_POOL_CLIENT_ID\",\"value\":\$poolclient},
                        {\"name\":\"CONTACT_FLOW_KB_ID\",\"value\":\$kbid},
                        {\"name\":\"AGENTCORE_GATEWAY_URL\",\"value\":\$gateway},
-                       {\"name\":\"AGENTCORE_GATEWAY_REGION\",\"value\":\"us-east-1\"}]
+                       {\"name\":\"AGENTCORE_GATEWAY_REGION\",\"value\":\"us-east-1\"},
+                       {\"name\":\"AICC_BUILDER_BUILD\",\"value\":\$build}]
                       )
                     else . end
                   ))"
@@ -795,6 +805,7 @@ if [ "$DEPLOY_BACKEND" = true ]; then
                      --arg poolclient "${USER_POOL_CLIENT_ID:-}" \
                      --arg kbid "${CONTACT_FLOW_KB_ID:-}" \
                      --arg gateway "${AGENTCORE_GATEWAY_URL:-}" \
+                     --arg build "${BUILDER_BUILD:-}" \
                      "$JQ_FILTER" > /tmp/patched-task-def.json
 
             PATCHED_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file:///tmp/patched-task-def.json \

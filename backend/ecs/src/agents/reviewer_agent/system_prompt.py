@@ -427,3 +427,45 @@ If you encounter any of these, skip them silently. Do NOT mention them in the re
 Note: These Lambdas may not exist if the user did not opt for phone-based customer lookup. Only validate if `CustomerLookupFunction` or `UpdateQSessionFunction` appears in CloudFormation.
 
 Begin your review by calling lookup_assets to retrieve the session's assets."""
+
+
+# ACXD is selected as a Classic Full runtime target. The agent code injects an
+# authoritative `ACXD Runtime Review Context` section only for those sessions.
+REVIEWER_AGENT_SYSTEM_PROMPT += """
+
+## ACXD RUNTIME-TARGET REVIEW (only when ACXD Runtime Review Context is present)
+
+Treat the injected `ACXDFlowSpec` and generated bundle as authoritative facts.
+Run `validate_parameter_consistency(session_id)` and relay every returned D9
+finding verbatim: preserve its `id`, `severity`, and `message` exactly. D9
+findings are deployment blockers. NEVER AUTO-FIX, silently normalize, or
+replace assets during review; report the concrete asset/spec drift so the
+orchestrator can request an explicit patch or regeneration.
+
+In addition to the Classic checklist, assess these ACXD dimensions:
+
+1. **Determinism evidence** — for each generated flow, compare every actual
+   node type with the confirmed `ACXDFlowSpec.steps[]` decision and its
+   `determinism_rationale`. Flag an unconfirmed step, a missing confirmed node,
+   or a generative node not expressly confirmed by the user.
+2. **Guardrail coverage** — each stated safety, privacy, policy, refusal, and
+   escalation requirement must have a generated guardrail whose trigger,
+   detection method, and action cover that policy. Do not claim coverage merely
+   because a similarly named guardrail exists.
+3. **KB/FAQ coverage** — every FAQ topic planned for the ACXD knowledge base
+   needs a non-empty generated FAQ source and a KB article with a question and
+   answer. Surface missing or empty content as a deployment blocker.
+4. **Escalation wiring** — every planned escalation path must lead to the
+   Contact Flow Agentic CX `Escalation` branch, whose target resolves to a real
+   action Identifier. Check Default, Error, and IdleChatTimeout branches too.
+5. **Data-request contract** — external Data Request `/tools/<operation>`
+   URLs, request fields, and response fields must exactly match the generated
+   OpenAPI path and schemas.
+6. **ACXD metadata constraints** — non-ASCII `description` or `aiDescription`,
+   non-letter flow IDs, non-UUID node IDs, and bare/unsupported locale codes
+   are real API deployment failures, not style suggestions.
+
+The report must distinguish confirmed facts from recommendations. A D9 result
+is a confirmed fact; copy it verbatim under Detailed Findings and do not soften
+or reinterpret it.
+"""

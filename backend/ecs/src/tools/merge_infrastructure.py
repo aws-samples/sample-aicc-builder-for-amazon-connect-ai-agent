@@ -13,6 +13,7 @@ Usage by Orchestrator:
 
 import json
 import logging
+import difflib
 import re
 from strands import tool
 
@@ -218,6 +219,76 @@ def _ensure_qsession_env_vars(yaml_str: str) -> str:
                 "UpdateQSessionFunction (handler throws without them; "
                 "deploy.sh backfills the values)")
     return yaml_str.replace(block, new_block, 1)
+
+
+def _is_acxd_session() -> bool:
+    try:
+        from tools.acxd_flow_spec import is_acxd_target
+        return bool(is_acxd_target())
+    except Exception:
+        return False
+
+
+_METHOD_TYPE_RE = re.compile(r"^(\s+)Type:\s*AWS::ApiGateway::Method\s*$")
+
+
+def require_api_key_on_methods(yaml_str: str) -> str:
+    """ACXD target: every API Gateway method except CORS OPTIONS requires the
+    API key.
+
+    In the Classic target an AgentCore Gateway (Cognito JWT) fronts the API and
+    the workshop keeps `ApiKeyRequired: false` for simplicity. ACXD Data Requests
+    call the API Gateway directly, so without this the generated backend is an
+    anonymous public REST API. The template already creates the key, the usage
+    plan and the retriever that outputs `ApiKeyValue`; the Data Requests send it
+    as `x-api-key` from the `BackendApiKey` secret and deploy.sh creates that
+    secret from the output — nothing manual.
+    """
+    lines = yaml_str.split("\n")
+    out: list[str] = []
+    i = 0
+    changed = 0
+    while i < len(lines):
+        line = lines[i]
+        match = _METHOD_TYPE_RE.match(line)
+        if not match:
+            out.append(line)
+            i += 1
+            continue
+        type_indent = len(match.group(1))
+        # collect the resource block: lines indented deeper than the resource key
+        # (resource key indent = type_indent - 2), stopping at the next sibling
+        block = [line]
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= type_indent - 2:
+                break
+            block.append(nxt)
+            j += 1
+        http_method = next((re.sub(r"[\"']", "", l.split(":", 1)[1]).strip().upper()
+                            for l in block if re.match(r"^\s+HttpMethod:\s*\S", l)), "")
+        if http_method != "OPTIONS":
+            props_idx = next((k for k, l in enumerate(block) if re.match(r"^\s+Properties:\s*$", l)), None)
+            key_idx = next((k for k, l in enumerate(block) if re.match(r"^\s+ApiKeyRequired:\s*", l)), None)
+            if key_idx is not None:
+                indent = block[key_idx][:len(block[key_idx]) - len(block[key_idx].lstrip())]
+                if "true" not in block[key_idx].lower():
+                    block[key_idx] = f"{indent}ApiKeyRequired: true"
+                    changed += 1
+            elif props_idx is not None:
+                prop_indent = " " * (type_indent + 2)
+                block.insert(props_idx + 1, f"{prop_indent}ApiKeyRequired: true")
+                changed += 1
+        out.extend(block)
+        i = j
+    result = "\n".join(out)
+    result = result.replace(
+        "API key value (informational; methods do NOT require an API key)",
+        "API key value - the ACXD Data Requests send it as x-api-key (deploy.sh stores it in the BackendApiKey secret)")
+    if changed:
+        logger.info(f"[MERGE] ACXD target: ApiKeyRequired: true set on {changed} API Gateway method(s)")
+    return result
 
 
 def _fix_qconnect_namespace(yaml_str: str) -> str:
@@ -438,6 +509,96 @@ def _fix_common_property_hallucinations(yaml_str: str) -> str:
     if total_fixes:
         logger.info(f"[MERGE] Total property hallucination fixes: {total_fixes}")
     return yaml_str
+
+
+_METHOD_TYPE_RE = re.compile(r'^(\s+)Type:\s*[\'"]?AWS::ApiGateway::Method[\'"]?\s*$', re.M)
+_RESP_HEADER_RE = re.compile(r'^(\s+)method\.response\.header\.([\w-]+):\s*(.*?)\s*$', re.M)
+
+
+def _fix_cors_response_headers(yaml_str: str) -> str:
+    """Every header an ApiGateway::Method's IntegrationResponses maps must be
+    declared in its MethodResponses, or API Gateway rejects the method with
+    "Invalid mapping expression parameter specified: method.response.header.X"
+    and the whole stack rolls back. Live (GreenCart): the model declared
+    `Access-Control-All-Methods` (typo) while mapping `Access-Control-Allow-Methods`.
+
+    Per method: a declared name that is a near-miss spelling of a mapped one is
+    renamed; a mapped header with no declaration gets `: true` added next to the
+    existing declarations. Text-based, indentation-preserving; never removes.
+    """
+    lines = yaml_str.split("\n")
+    # Locate each Method resource: from its `Type:` line back to the resource
+    # key (one indent level up) and forward to the next key at that indent.
+    type_positions = [i for i, line in enumerate(lines) if _METHOD_TYPE_RE.match(line)]
+    if not type_positions:
+        return yaml_str
+    fixes = 0
+    for type_idx in reversed(type_positions):  # bottom-up so insertions keep earlier indices valid
+        type_indent = len(lines[type_idx]) - len(lines[type_idx].lstrip())
+        start = type_idx
+        while start > 0 and (len(lines[start - 1]) - len(lines[start - 1].lstrip()) >= type_indent
+                             or not lines[start - 1].strip()):
+            start -= 1
+        end = type_idx + 1
+        while end < len(lines) and (not lines[end].strip()
+                                    or len(lines[end]) - len(lines[end].lstrip()) >= type_indent):
+            end += 1
+        block = lines[start:end]
+        # Split the block into the MethodResponses section and everything else.
+        mr_idx = next((k for k, line in enumerate(block) if re.match(r'^\s+MethodResponses:\s*$', line)), None)
+        if mr_idx is None:
+            continue
+        mr_indent = len(block[mr_idx]) - len(block[mr_idx].lstrip())
+        mr_end = mr_idx + 1
+        while mr_end < len(block) and (not block[mr_end].strip()
+                                       or len(block[mr_end]) - len(block[mr_end].lstrip()) > mr_indent):
+            mr_end += 1
+        mapped = {m.group(2) for k, line in enumerate(block) if not (mr_idx <= k < mr_end)
+                  for m in [_RESP_HEADER_RE.match(line)] if m}
+        if not mapped:
+            continue
+        declared_lines = [(k, _RESP_HEADER_RE.match(block[k])) for k in range(mr_idx, mr_end)
+                          if _RESP_HEADER_RE.match(block[k])]
+        declared = {m.group(2) for _, m in declared_lines}
+
+        def _norm(name: str) -> str:
+            return re.sub(r'[^a-z]', '', name.lower())
+
+        # 1) near-miss spellings → the mapped name
+        for k, m in declared_lines:
+            name = m.group(2)
+            if name in mapped:
+                continue
+            for target in mapped:
+                if target in declared:
+                    continue
+                a, b = _norm(name), _norm(target)
+                if a == b or difflib.SequenceMatcher(None, a, b).ratio() >= 0.9:
+                    block[k] = block[k].replace(f"method.response.header.{name}:", f"method.response.header.{target}:", 1)
+                    declared.discard(name); declared.add(target)
+                    logger.info(f"[MERGE] CORS: MethodResponses header '{name}' renamed to mapped '{target}'")
+                    fixes += 1
+                    break
+        # 2) mapped but undeclared → declare
+        missing = sorted(mapped - declared)
+        if missing:
+            if declared_lines:
+                anchor_k, anchor_m = declared_lines[-1]
+                indent = anchor_m.group(1)
+            else:
+                rp = next((k for k in range(mr_idx, mr_end) if re.match(r'^\s+ResponseParameters:\s*$', block[k])), None)
+                if rp is None:
+                    continue  # no ResponseParameters section to extend safely
+                anchor_k = rp
+                indent = " " * (len(block[rp]) - len(block[rp].lstrip()) + 2)
+            for offset, name in enumerate(missing, start=1):
+                block.insert(anchor_k + offset, f"{indent}method.response.header.{name}: true")
+                logger.info(f"[MERGE] CORS: declared missing MethodResponses header '{name}'")
+                fixes += 1
+        lines[start:end] = block
+    if fixes:
+        logger.info(f"[MERGE] CORS response-header declarations fixed: {fixes}")
+    return "\n".join(lines)
 
 
 def _deduplicate_resources(yaml_str: str) -> str:
@@ -698,6 +859,7 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     merged, merge_info = _merge_at_anchor(base_yaml, fragments)
     final_yaml = _remove_anchor_comment(merged)
     final_yaml = _fix_common_property_hallucinations(final_yaml)
+    final_yaml = _fix_cors_response_headers(final_yaml)
     final_yaml = _fix_qconnect_namespace(final_yaml)
     final_yaml = _fix_rds_env_var_names(final_yaml)
     final_yaml = _fix_inline_handler_name(final_yaml)
@@ -708,6 +870,8 @@ def merge_infrastructure_fragments(project_name: str) -> dict:
     final_yaml = _deduplicate_resources(final_yaml)
     final_yaml = _fix_api_deployment_depends_on(final_yaml)
     final_yaml = _strip_tools_from_api_endpoint(final_yaml)
+    if _is_acxd_session():
+        final_yaml = require_api_key_on_methods(final_yaml)
 
     logger.info(f"[MERGE] Final template: {len(final_yaml)} chars")
 

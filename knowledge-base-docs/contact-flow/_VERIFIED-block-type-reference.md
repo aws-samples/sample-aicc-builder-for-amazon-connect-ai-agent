@@ -50,6 +50,7 @@ or `CheckStaffing` FAIL import with `InvalidContactFlowException: Invalid Action
 | Contact tags (tag/untag) | `TagContact`, `UntagContact` |
 | Create persistent contact association | `CreatePersistentContactAssociation` |
 | Q in Connect AI bot | `ConnectParticipantWithLexBot` |
+| Agentic CX (Connect Customer; ACXD application) | `ConnectParticipantWithAgenticCX` — verified 2026-09-10 from a console export + CreateContactFlow; see `blocks/interact/connect-participant-with-agentic-cx.md` |
 | Message iteratively | `MessageParticipantIteratively` |
 | Update previous participant state | `UpdatePreviousContactParticipantState` |
 | Transfer to queue | `TransferContactToQueue` |

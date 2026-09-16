@@ -320,6 +320,19 @@ def merge_openapi_fragments(api_title: str) -> dict:
 
     logger.info(f"[MERGE_OPENAPI] Final spec: {len(final_yaml)} chars")
 
+    # Response contract: request/response schemas are the spec's projection
+    # (envelope + output_fields), decided by code. The model's descriptions are
+    # kept; its extra/missing/renamed properties are not — the parity gate then
+    # holds by construction instead of being fixed by hand every session.
+    contract_changes: list[str] = []
+    try:
+        from tools.response_contract import enforce_openapi_yaml
+        final_yaml, contract_changes = enforce_openapi_yaml(final_yaml)
+        if contract_changes:
+            logger.info("[MERGE_OPENAPI] response contract: %s", "; ".join(contract_changes[:8]))
+    except Exception as e:
+        logger.warning(f"[MERGE_OPENAPI] response contract enforcement failed (non-fatal): {e}")
+
     # NOTE: the OpenAPI lint gate runs AFTER streaming/saving (below). The
     # validator/YAML round-trip is CPU-bound and blocks the event loop, which
     # would delay/drop the openapi.yaml asset_preview events. Stream the merged
@@ -393,6 +406,7 @@ def merge_openapi_fragments(api_title: str) -> dict:
         "lint_fixes_applied": lint_result.get("fixes_applied", []),
         "lint_errors": oas_errors[:20],
         "lint_error_count": len(oas_errors),
+        "response_contract_changes": contract_changes[:20],
         "summary": (
             f"Merged {len(chunks)} chunks into openapi.yaml ({len(final_yaml)} chars). "
             f"OpenAPI 3.0 validation: {len(lint_result.get('fixes_applied', []))} auto-fix(es), "

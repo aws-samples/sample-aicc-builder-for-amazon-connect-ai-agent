@@ -401,6 +401,19 @@ Use the download button to get the ZIP file containing all FAQ documents.
     except ImportError:
         pass
 
+    # Runtime target acxd: the Knowledge Base asset was built in phase 4, before
+    # the FAQ existed, so its articles were empty (live run 1, D9-5). Re-render
+    # it from the FAQ documents now that they exist. Best effort — a failure
+    # here must not fail the FAQ package itself.
+    kb_refresh = None
+    try:
+        from tools.acxd_flow_spec import is_acxd_target
+        if is_acxd_target():
+            from tools.acxd_application_generator import refresh_acxd_knowledge_base
+            kb_refresh = refresh_acxd_knowledge_base()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(f"[FAQ] ACXD knowledge base refresh skipped: {exc}")
+
     return {
         "success": True,
         "package_name": f"{package_name}.zip",
@@ -409,7 +422,8 @@ Use the download button to get the ZIP file containing all FAQ documents.
         "file_size_bytes": len(zip_content),
         "format": output_format,
         "s3_key": s3_key,  # Frontend downloads from S3
-        "message": f"Created {package_name}.zip with {len(documents)} FAQ documents"
+        "message": f"Created {package_name}.zip with {len(documents)} FAQ documents",
+        **({"acxd_knowledge_base": kb_refresh} if kb_refresh else {}),
     }
 
 
@@ -821,6 +835,17 @@ Cover these topics:
                 "size_bytes": package_result.get("file_size_bytes"),
                 "s3_key": package_result.get("s3_key")
             }
+
+        # Runtime target acxd: whatever the sub-agent did (fresh documents or a
+        # patch-only "no change" turn), the ACXD knowledge base must mirror the
+        # FAQ documents that exist now. Phase 4 built it before any FAQ existed.
+        try:
+            from tools.acxd_flow_spec import is_acxd_target
+            if is_acxd_target():
+                from tools.acxd_application_generator import refresh_acxd_knowledge_base
+                result["acxd_knowledge_base"] = refresh_acxd_knowledge_base()
+        except Exception as _kb_exc:  # pragma: no cover - defensive
+            logger.warning(f"[FAQ] ACXD knowledge base refresh skipped: {_kb_exc}")
 
         yield result
 

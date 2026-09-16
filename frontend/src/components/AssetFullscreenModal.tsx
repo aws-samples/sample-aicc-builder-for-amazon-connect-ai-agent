@@ -20,6 +20,7 @@ import { cn } from '../lib/utils';
 import { TAB_META, tabIdFor, itemLabel, groupAssetTabs } from '../lib/assetTabs';
 import type { Language } from '../types';
 import { AssetPreviewBubble } from './AssetPreviewBubble';
+import { AcxdFlowDiagram } from './AcxdFlowDiagram';
 
 interface AssetFullscreenModalProps {
   language: Language;
@@ -136,14 +137,18 @@ export function AssetFullscreenModal({ language }: AssetFullscreenModalProps) {
 
           {/* RIGHT: selected asset content */}
           <div data-testid="asset-fullscreen-content" className="flex-1 min-w-0 overflow-y-auto p-5">
-            {preview.language && selectedTabId !== 'contact_flow' && (
+            {preview.language && selectedTabId !== 'contact_flow' && selectedTabId !== 'acxd_flows' && (
               <div className="mb-2 flex items-center gap-2">
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wide bg-surface-100 dark:bg-surface-800 text-surface-500 dark:text-surface-400 border border-surface-200 dark:border-surface-700">
                   {preview.language}
                 </span>
               </div>
             )}
-            <AssetPreviewBubble preview={preview} language={language} />
+            {selectedTabId === 'acxd_flows' ? (
+              <AcxdFlowDiagram flowJson={preview.content} language={language} />
+            ) : (
+              <AssetPreviewBubble preview={preview} language={language} />
+            )}
           </div>
         </div>
       </div>

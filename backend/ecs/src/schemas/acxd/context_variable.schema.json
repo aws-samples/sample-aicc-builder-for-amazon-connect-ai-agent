@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aicc-builder/acxd/context_variable.schema.json",
+  "title": "ACXD Context Variable",
+  "description": "Contract schema for workspace-level ACXD context variables. The public docs document flow-scoped variables as {name, type}; workspace-level variables additionally accept a JSON Schema. Kept permissive on undocumented fields by design.",
+  "type": "object",
+  "required": ["name", "type"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "type": { "type": "string", "enum": ["text", "number", "boolean"] },
+    "description": { "type": "string", "maxLength": 200 },
+    "schema": { "type": "object" },
+    "metadata": { "type": "object" }
+  }
+}

@@ -11,6 +11,7 @@ import type {
   Language,
   AssetPreview,
   BuilderPhase,
+  RuntimeTarget,
 } from '../types';
 import { PHASE_ORDER } from '../types';
 
@@ -146,6 +147,15 @@ interface BuilderState {
 
   // Start-screen mode + active generation scope
   startMode: StartMode;
+  // Runtime target of the ACTIVE session, echoed by the backend (connected /
+  // session_created / history_injected). Drives the progress list.
+  runtimeTarget: RuntimeTarget;
+  // The start-screen choice for the NEXT session. Kept apart from
+  // `runtimeTarget` because backend echoes for the current (auto-created,
+  // classic) session must never overwrite a choice the user has made but not
+  // yet sent — live on dev, ACXD flipped back to Classic before Start.
+  // null = no explicit choice yet (the card shows the active session's target).
+  pendingRuntimeTarget: RuntimeTarget | null;
   segment: SegmentType | null;
   // Active scope for this run (from session_created / asset_imported).
   // null = full build (all assets). A non-null list = scoped run.
@@ -208,6 +218,8 @@ interface BuilderState {
   setSelectedModel: (modelId: string) => void;
   setSelectedEffort: (effortId: string) => void;
   setStartMode: (mode: StartMode) => void;
+  setRuntimeTarget: (target: RuntimeTarget) => void;
+  setPendingRuntimeTarget: (target: RuntimeTarget | null) => void;
   setSegment: (segment: SegmentType | null) => void;
   setScope: (scope: string[] | null) => void;
   setImportedAsset: (info: ImportedAssetInfo | null) => void;
@@ -275,6 +287,16 @@ const initialProgress: ProgressItem[] = [
     phase: 'generation',
   },
   {
+    // This occupies the same visual slot as prompt for the ACXD runtime.
+    id: 'acxd_application',
+    label: 'ACXD Application',
+    labelKo: 'ACXD 애플리케이션',
+    labelJa: 'ACXD アプリケーション',
+    status: 'pending',
+    progress: 0,
+    phase: 'generation',
+  },
+  {
     id: 'openapi',
     label: 'OpenAPI Spec',
     labelKo: 'OpenAPI 스펙',
@@ -330,6 +352,7 @@ export const SCOPE_TO_PROGRESS_ID: Record<string, string> = {
   contact_flow: 'contact_flow',
   prompt: 'prompt',
   faq: 'knowledge_base',
+  acxd_application: 'acxd_application',
 };
 
 const initialSession: SessionState = {
@@ -410,6 +433,8 @@ export const useBuilderStore = create<BuilderState>((set) => ({
   selectedModel: getInitialModel(),
   selectedEffort: getInitialEffort(),
   startMode: 'full',
+  runtimeTarget: 'classic',
+  pendingRuntimeTarget: null,
   segment: null,
   scope: null,
   importedAsset: null,
@@ -814,6 +839,10 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       // Leaving segment mode clears any chosen segment.
       segment: mode === 'segment' ? state.segment : null,
     })),
+
+  setRuntimeTarget: (target) => set({ runtimeTarget: target }),
+
+  setPendingRuntimeTarget: (target) => set({ pendingRuntimeTarget: target }),
 
   setSegment: (segment) => set({ segment }),
 

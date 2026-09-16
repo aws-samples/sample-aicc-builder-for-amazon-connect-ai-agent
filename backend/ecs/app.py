@@ -23,6 +23,7 @@ import re
 import sys
 import json
 import signal
+import threading
 import asyncio
 import logging
 import time
@@ -94,6 +95,14 @@ from tools.project_workspace import (
     load_requirement_document,
 )
 from tools.interview_completion import complete_interview, check_interview_handoff
+from tools.acxd_flow_spec import (
+    ACXD_INTERVIEW_TOOLS,
+    RUNTIME_TARGET_CLASSIC,
+    RUNTIME_TARGETS,
+    get_runtime_target,
+    get_runtime_target_if_set,
+    set_runtime_target,
+)
 # Conversational asset-import tools (replace the old auto-firing importAsset path):
 # the orchestrator calls these after acknowledging an upload (and, for images,
 # asking the user) to lint + seed an external Contact Flow / AI Prompt into
@@ -131,12 +140,19 @@ except ImportError:
 
 # S3 Files context store
 from context.s3files_store import S3FilesContextStore
+from context.bedrock_messages import fix_messages_for_bedrock
 from context.message_log import get_message_log
 from context.generation_progress import update_from_new_messages as _update_generation_progress
+from context import task_protection as _task_protection
 from context.generation_progress import read_progress as _read_generation_progress
 from context.generation_progress import record_tool_completion as _record_tool_completion
 from context.generation_progress import detect_phase as _detect_phase
 from context.generation_progress import read_phase as _read_phase
+from context.generation_progress import interview_handoff_pending as _interview_handoff_pending
+
+# Forward-only phase order used when a sub-agent completion re-detects the phase.
+_PHASE_ORDER = {"interview": 0, "generation": 1, "review": 2, "post_generation": 3}
+from context.generation_progress import mark_handoff_processed as _mark_handoff_processed
 from context.generation_progress import update_phase as _update_phase
 from context.generation_progress import get_frontend_progress_state as _get_frontend_progress
 from context.generation_progress import (
@@ -147,6 +163,7 @@ from context.generation_progress import (
     get_generation_scope as _get_generation_scope,
     set_generation_scope as _set_generation_scope,
     mark_imported_session as _mark_imported_session,
+    get_full_asset_set as _get_full_asset_set,
     FULL_ASSET_SET as _FULL_ASSET_SET,
 )
 from tools.model_selection import (
@@ -177,6 +194,7 @@ SUBAGENT_TO_PROGRESS_ID = {
     "lambda_generator_agent": "lambda",
     "openapi_generator_agent": "openapi",
     "prompt_generator_agent": "prompt",
+    "generate_acxd_application": "acxd_application",
     "contact_flow_generator_agent": "contact_flow",
     "faq_generator_agent": "knowledge_base",
     "reviewer_agent": "review",
@@ -275,31 +293,136 @@ _GENERATOR_TOOL_TO_ASSET = {
 }
 
 
-def get_tools_for_phase(phase: str, scope: Optional[list] = None) -> list:
-    """Return the appropriate tool list for the given phase.
+def _normalize_runtime_target(value: Any) -> str:
+    """Return a supported target; missing or invalid client values stay Classic."""
+    return value if value in RUNTIME_TARGETS else RUNTIME_TARGET_CLASSIC
 
-    When *scope* is a proper subset of the full asset set, the generator
-    sub-agents whose produced asset is out of scope are dropped from the tool
-    list (a tool the model can't call can't be misused). Non-generator tools
-    (workspace, spec, lint, review) are always kept.
+
+def _full_asset_set_for_runtime(runtime_target: str) -> set[str]:
+    """Keep tool trimming aligned with the target-specific progress asset id."""
+    if runtime_target == "acxd":
+        return (set(_FULL_ASSET_SET) - {"prompt"}) | {"acxd_application"}
+    return set(_FULL_ASSET_SET)
+
+
+def _load_acxd_application_tool():
+    """Load Task B's generator lazily so Classic startup never depends on it."""
+    try:
+        from tools.acxd_application_generator import generate_acxd_application
+        return generate_acxd_application
+    except ImportError as exc:
+        logger.warning("[acxd] application generator unavailable: %s", exc)
+        return None
+
+
+def _load_acxd_kb_refresh_tool():
+    try:
+        from tools.acxd_application_generator import refresh_acxd_knowledge_base_tool
+        return refresh_acxd_knowledge_base_tool
+    except ImportError as exc:
+        logger.warning("[acxd] knowledge base refresh tool unavailable: %s", exc)
+        return None
+
+
+def _load_deterministic_repairs(is_acxd: bool) -> list:
+    """Deterministic repairs for review findings (no LLM patching): OpenAPI
+    re-projection for both targets, slot type rebuild for ACXD."""
+    tools_out: list = []
+    try:
+        from tools.deterministic_repairs import (
+            enforce_openapi_contract_tool,
+            rebuild_acxd_slot_types_tool,
+            remove_duplicate_asset_copies_tool,
+        )
+        tools_out.append(enforce_openapi_contract_tool)
+        if is_acxd:
+            tools_out.append(rebuild_acxd_slot_types_tool)
+            tools_out.append(remove_duplicate_asset_copies_tool)
+    except ImportError as exc:
+        logger.warning("[repairs] deterministic repair tools unavailable: %s", exc)
+    return tools_out
+
+
+def _load_acxd_asset_patcher():
+    """Load the ACXD patch-only tool without making a missing optional module fatal."""
+    try:
+        from tools.acxd_asset_patcher import patch_acxd_asset
+        return patch_acxd_asset
+    except ImportError as exc:
+        logger.warning("[acxd] asset patcher unavailable: %s", exc)
+        return None
+
+
+def get_tools_for_phase(
+    phase: str,
+    scope: Optional[list] = None,
+    runtime_target: str = RUNTIME_TARGET_CLASSIC,
+) -> list:
+    """Return target-aware tools for a phase and optional generated-asset scope.
+
+    ACXD retains the Classic interview and backend generators but augments the
+    interview with ACXD flow-design tools. In generation it replaces the Classic
+    prompt generator with Task B's ACXD application generator and exposes only the
+    patch-only ACXD asset editor for modifications.
     """
+    runtime_target = _normalize_runtime_target(runtime_target)
+    is_acxd = runtime_target == "acxd"
     if phase == "interview":
-        return INTERVIEW_TOOLS
+        return INTERVIEW_TOOLS + ACXD_INTERVIEW_TOOLS if is_acxd else INTERVIEW_TOOLS
 
-    # Full build (no scope, or scope == full set) → unmodified generation tools.
     scope_set = set(scope) if scope else set()
-    if not scope_set or scope_set >= set(_FULL_ASSET_SET):
-        return GENERATION_TOOLS
+    if is_acxd and "prompt" in scope_set:
+        scope_set.discard("prompt")
+        scope_set.add("acxd_application")
+    full_asset_set = _full_asset_set_for_runtime(runtime_target)
+    is_full_build = not scope_set or scope_set >= full_asset_set
 
-    # Proper subset: drop generators whose asset isn't in scope.
-    trimmed = []
-    for t in GENERATION_TOOLS:
-        asset = _GENERATOR_TOOL_TO_ASSET.get(t)
-        if asset is not None and asset not in scope_set:
-            continue  # out-of-scope generator → drop
-        trimmed.append(t)
-    return trimmed
+    # The Classic prompt generator is deliberately absent for ACXD. All other
+    # Classic generators continue to produce the backend and Contact Flow assets.
+    generation_tools = [
+        tool for tool in GENERATION_TOOLS
+        if not (is_acxd and tool is prompt_generator_agent)
+    ]
 
+    if not is_full_build:
+        generation_tools = [
+            tool for tool in generation_tools
+            if (_GENERATOR_TOOL_TO_ASSET.get(tool) is None
+                or _GENERATOR_TOOL_TO_ASSET[tool] in scope_set)
+        ]
+
+    generation_tools = generation_tools + _load_deterministic_repairs(is_acxd)
+    # The gates validate assets AGAINST the OperationSpec (D1–D8, parity, D9-4),
+    # so a wrong FieldSpec (live: a mangled regex) can only be corrected at the
+    # source — editing the asset to match a wrong spec is exactly what the gates
+    # forbid. And a NEW operation discovered after the interview (live: a
+    # call-outcome logger the backend needed) must become a spec BEFORE any
+    # asset exists for it, otherwise no gate ever checks it (the SPEC:* gate now
+    # blocks such orphans). Both targets get the spec editor and the registrar.
+    for spec_tool in (update_operation_spec, save_operation_spec):
+        if spec_tool not in generation_tools:
+            generation_tools.append(spec_tool)
+    if not is_acxd:
+        return generation_tools
+
+    application_tool = _load_acxd_application_tool()
+    if application_tool and (is_full_build or "acxd_application" in scope_set):
+        generation_tools.append(application_tool)
+
+    patch_tool = _load_acxd_asset_patcher()
+    if patch_tool:
+        generation_tools.append(patch_tool)
+    kb_tool = _load_acxd_kb_refresh_tool()
+    if kb_tool:
+        generation_tools.append(kb_tool)
+    # Spec-level modification requests after the interview (a flow step
+    # re-designed, a guardrail added) go through the same ACXD spec tools the
+    # interview used, then generate_acxd_application re-runs — just as the
+    # Classic OperationSpec tools stay available during generation.
+    for tool in ACXD_INTERVIEW_TOOLS:
+        if tool not in generation_tools:
+            generation_tools.append(tool)
+    return generation_tools
 
 
 # ========================================
@@ -388,7 +511,17 @@ async def startup():
     _background_tasks_lock = asyncio.Lock()
     _metric_task = asyncio.create_task(_metric_publisher())
     _resolve_contact_flow_kb_id()
-    logger.info(f"AICC Builder ECS started. S3FILES_MOUNT={S3FILES_MOUNT}, REGION={AWS_REGION}")
+    storage_ok = _ensure_storage_root(S3FILES_MOUNT)
+    logger.info(
+        "AICC Builder ECS started. S3FILES_MOUNT=%s exists=%s is_mount=%s, REGION=%s",
+        S3FILES_MOUNT, storage_ok, os.path.ismount(S3FILES_MOUNT), AWS_REGION,
+    )
+    if storage_ok and not os.path.ismount(S3FILES_MOUNT):
+        logger.warning(
+            "[storage] %s is a plain directory, not a mounted volume — files written here are "
+            "local to this task; sessions rely on the S3 dual-write + hydration path.",
+            S3FILES_MOUNT,
+        )
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -417,8 +550,14 @@ async def _graceful_shutdown():
         except Exception as e:
             logger.error(f"Failed to flush session {session_id}: {e}")
 
+# Set on SIGTERM so a turn cancelled by the stop is reported as a server
+# restart rather than as the user's own cancel.
+_shutting_down = threading.Event()
+
+
 def _sigterm_handler(signum, frame):
     logger.info("SIGTERM received, initiating graceful shutdown")
+    _shutting_down.set()
     loop = asyncio.get_event_loop()
     loop.create_task(_graceful_shutdown())
 
@@ -544,6 +683,15 @@ class SafeBedrockModel(BedrockModel):
     sanitization actually runs.
     """
 
+    def format_request(self, messages, *args, **kwargs):
+        """strands >= 1.5x builds the request through the PUBLIC format_request
+        (``_stream`` calls ``self.format_request(...)``), so the ``_format_request``
+        override below never ran there — the sanitizer was dead code and a
+        trailing assistant message reached Bedrock as prefill. Sanitize here and
+        delegate with the caller's exact positional/keyword shape."""
+        messages = self._fix_messages_for_bedrock(messages)
+        return super().format_request(messages, *args, **kwargs)
+
     def _format_request(self, messages, tool_specs=None, system_prompt_content=None, tool_choice=None):
         """Override internal _format_request to sanitize messages before Bedrock API call."""
         messages = self._fix_messages_for_bedrock(messages)
@@ -551,96 +699,8 @@ class SafeBedrockModel(BedrockModel):
 
     @staticmethod
     def _fix_messages_for_bedrock(messages: list) -> list:
-        """Ensure messages satisfy Bedrock ConverseStream constraints:
-        1. First message must be role=user
-        2. Strict user/assistant alternation
-        3. Every toolResult has matching toolUse in preceding assistant
-        4. toolResult count <= toolUse count
-
-        This runs on EVERY Bedrock API call during agent execution, not just
-        on the initial history load.  Critical for catching issues that arise
-        mid-conversation as the SDK mutates agent.messages.
-        """
-        if not messages:
-            return messages
-
-        # 0. Filter out system-role messages (Bedrock only accepts user/assistant)
-        fixed = [m for m in messages if m.get("role") in ("user", "assistant")]
-
-        # 1. Drop leading non-user messages
-        while fixed and fixed[0].get("role") != "user":
-            logger.warning("[SafeBedrockModel] Dropping leading non-user message")
-            fixed.pop(0)
-
-        if not fixed:
-            return fixed
-
-        # 2. Enforce role alternation — merge consecutive same-role messages
-        merged = [fixed[0]]
-        for msg in fixed[1:]:
-            if msg.get("role") == merged[-1].get("role"):
-                # Merge content blocks
-                prev_content = merged[-1].get("content", [])
-                curr_content = msg.get("content", [])
-                if isinstance(prev_content, list) and isinstance(curr_content, list):
-                    merged[-1] = {"role": msg["role"], "content": prev_content + curr_content}
-                # else: skip malformed
-            else:
-                merged.append(msg)
-        fixed = merged
-
-        # 3. Fix toolResult/toolUse pairing
-        for i in range(len(fixed)):
-            msg = fixed[i]
-            content = msg.get("content")
-            if not isinstance(content, list) or msg.get("role") != "user":
-                continue
-
-            tool_result_ids = {
-                b["toolResult"]["toolUseId"]
-                for b in content
-                if isinstance(b, dict) and "toolResult" in b and b["toolResult"].get("toolUseId")
-            }
-            if not tool_result_ids:
-                continue
-
-            # Collect toolUse IDs from preceding assistant
-            preceding_tool_use_ids = set()
-            if i > 0 and fixed[i - 1].get("role") == "assistant":
-                prev_content = fixed[i - 1].get("content", [])
-                if isinstance(prev_content, list):
-                    preceding_tool_use_ids = {
-                        b["toolUse"]["toolUseId"]
-                        for b in prev_content
-                        if isinstance(b, dict) and "toolUse" in b and b["toolUse"].get("toolUseId")
-                    }
-
-            excess = tool_result_ids - preceding_tool_use_ids
-            if excess:
-                logger.warning(f"[SafeBedrockModel] Removing {len(excess)} excess toolResult blocks at msg {i}")
-                cleaned = [
-                    b for b in content
-                    if not (isinstance(b, dict) and "toolResult" in b and b["toolResult"].get("toolUseId") in excess)
-                ]
-                if cleaned:
-                    fixed[i] = {"role": "user", "content": cleaned}
-                else:
-                    fixed[i] = {"role": "user", "content": [{"text": "(tool results removed)"}]}
-
-        # 4. Remove trailing assistant toolUse without following toolResult
-        if fixed and fixed[-1].get("role") == "assistant":
-            last_content = fixed[-1].get("content", [])
-            if isinstance(last_content, list):
-                has_tool_use = any(isinstance(b, dict) and "toolUse" in b for b in last_content)
-                if has_tool_use:
-                    cleaned = [b for b in last_content if not (isinstance(b, dict) and "toolUse" in b)]
-                    if cleaned:
-                        fixed[-1] = {"role": "assistant", "content": cleaned}
-                    else:
-                        fixed.pop()
-                        logger.warning("[SafeBedrockModel] Removed trailing assistant with only toolUse blocks")
-
-        return fixed
+        """Sanitize messages for Bedrock (rules live in context.bedrock_messages)."""
+        return fix_messages_for_bedrock(messages)
 
 # ========================================
 # Session Management
@@ -676,9 +736,10 @@ def get_or_create_session(session_id: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # Determine phase to select appropriate tools
+    # Determine phase and fixed runtime target before selecting tools.
     initial_phase = _detect_phase(session_id)
-    tools = get_tools_for_phase(initial_phase)
+    runtime_target = _normalize_runtime_target(get_runtime_target(session_id))
+    tools = get_tools_for_phase(initial_phase, runtime_target=runtime_target)
 
     agent = Agent(
         model=model,
@@ -704,6 +765,8 @@ def get_or_create_session(session_id: str) -> Dict[str, Any]:
         "tools": tools,
         "conversation_history": conversation_history,
         "session_data": {},
+        "runtime_target": runtime_target,
+        "_runtime_target_seeded": False,
         "document_mode": False,
         "uploaded_document": None,
         "created_at": datetime.utcnow().isoformat(),
@@ -1305,11 +1368,39 @@ def _read_interview_state(session_id: str) -> Optional[str]:
 # ========================================
 # Health Check
 # ========================================
+@app.get("/live")
+async def live():
+    """Process liveness for the container health check — independent of the mount."""
+    return {"status": "alive"}
+
+
+def _ensure_storage_root(path: str) -> bool:
+    """Make sure the session storage root exists; False when it cannot be created.
+
+    With a real S3 Files volume the directory is mounted before the process
+    starts. Without one (observed on dev: the task definition carries the volume
+    but no mount point, so `/mnt/s3` is a plain directory) every path under it
+    used to be created lazily by the first write — a fresh task had no root at
+    all until a session touched it, which is also why a new task briefly
+    answered with an empty workspace. Creating it up front makes the root's
+    presence a real readiness signal instead of a race.
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+        return os.path.isdir(path)
+    except OSError as exc:
+        logger.error("[storage] cannot create storage root %s: %s", path, exc)
+        return False
+
+
 @app.get("/ping")
 async def ping():
-    # NFS mount diagnostics
+    # ALB target health. The storage root must be usable before traffic is
+    # routed here; the diagnostics below are what /api/debug/nfs reports too.
     s3files_mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
-    mount_exists = os.path.isdir(s3files_mount)
+    mount_required = os.environ.get("SESSION_STORE_BACKEND", "").lower() == "s3files"
+    mount_exists = _ensure_storage_root(s3files_mount) if mount_required else os.path.isdir(s3files_mount)
+    ready = mount_exists or not mount_required
     sessions_dir = os.path.join(s3files_mount, "sessions")
     sessions_exists = os.path.isdir(sessions_dir)
     session_count = 0
@@ -1321,7 +1412,7 @@ async def ping():
 
     return JSONResponse(
         content={
-            "status": "healthy",
+            "status": "healthy" if ready else "waiting_for_mount",
             "mode": "ecs",
             "active_sessions": len(session_store),
             "active_ws": len(_active_ws_connections),
@@ -1333,7 +1424,7 @@ async def ping():
                 "session_dirs_count": session_count,
             },
         },
-        status_code=200,
+        status_code=200 if ready else 503,
     )
 
 # ========================================
@@ -1660,13 +1751,39 @@ async def download_assets(
     from tools.asset_packager import package_assets_impl
 
     filter_value = None if not asset_type or asset_type.lower() == "all" else asset_type
-    result = package_assets_impl(
-        session_id=session_id,
-        asset_type_filter=filter_value,
-        include_readme=filter_value is None,
-    )
+    # Bind the session like the WebSocket loop does. The D9 gate reads the
+    # OperationSpecs through the session ContextVar; unbound, it saw an empty
+    # spec set and flagged every flow slot as "unknown OperationSpec field"
+    # (13 false refusals on a live download).
+    from tools.session_context import current_session_id as _dl_sid
+    _dl_token = _dl_sid.set(session_id)
+    try:
+        try:
+            from tools.project_workspace import set_workspace_session_id
+            from tools.spec_manager import restore_specs_from_workspace
+            set_workspace_session_id(session_id)
+            restore_specs_from_workspace()
+        except Exception as bind_err:
+            logger.warning(f"[download] session bind failed for {session_id}: {bind_err}")
+        result = package_assets_impl(
+            session_id=session_id,
+            asset_type_filter=filter_value,
+            include_readme=filter_value is None,
+        )
+    finally:
+        _dl_sid.reset(_dl_token)
     if not result.get("success"):
-        raise HTTPException(status_code=404, detail=result.get("error", "No assets found"))
+        # 409, not 404: CloudFront rewrites 403/404 to the SPA's index.html, so a
+        # 404 reached the browser as an HTML page it could not parse. 409 keeps
+        # the JSON body (and the D9 problem list) intact for the download UI.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "error": result.get("error", "No assets found"),
+                "problems": result.get("problems") or [],
+            },
+        )
     return JSONResponse({
         "success": True,
         "downloadUrl": result["download_url"],
@@ -1683,6 +1800,7 @@ async def download_assets(
 async def get_message_log_endpoint(
     session_id: str,
     after_seq: int = Query(default=0),
+    turn_id: Optional[str] = Query(default=None, description="Turn the caller saw after_seq in; a different current turn returns the whole log"),
     _claims: dict = Depends(verify_token),
 ):
     """Return message log entries after the given sequence number.
@@ -1691,7 +1809,7 @@ async def get_message_log_endpoint(
     """
     try:
         msg_log = get_message_log(S3FILES_MOUNT, session_id)
-        entries = msg_log.read_after(after_seq)
+        entries = msg_log.read_after(after_seq, turn_id=turn_id)
 
         # Check if a background task is still running for this session
         is_active = False
@@ -1703,6 +1821,7 @@ async def get_message_log_endpoint(
         return JSONResponse({
             "entries": entries,
             "isAgentActive": is_active,
+            "turnId": msg_log.turn_id,
         })
     except Exception as e:
         logger.error(f"[message-log] Error reading log for {session_id}: {e}")
@@ -1860,6 +1979,18 @@ _REHYDRATE_FOLDER_TO_TYPE = {
     "faq": "faq",
     "knowledge-base": "faq",
     "knowledge_base": "faq",
+    # ACXD target: the application and its resources live in their own folders
+    # (same name as the frontend assetType). Without these, reopening an ACXD
+    # session showed every Classic asset but the ACXD Application entry vanished
+    # from the right pane whenever the browser's own autosave had missed it.
+    # acxd_secret holds placeholders the pane does not render — not replayed.
+    "acxd_application": "acxd_application",
+    "acxd_flow": "acxd_flow",
+    "acxd_slot_type": "acxd_slot_type",
+    "acxd_data_request": "acxd_data_request",
+    "acxd_guardrail": "acxd_guardrail",
+    "acxd_knowledge_base": "acxd_knowledge_base",
+    "acxd_context_variable": "acxd_context_variable",
     # NOTE: 'mermaid' is intentionally absent — the Contact Flow diagram is now
     # rendered from the JSON (React Flow), so legacy mermaid assets are not
     # rehydrated.
@@ -1967,12 +2098,19 @@ async def websocket_handler(
 
     # Send connected event (include current phase + NFS progress for frontend restoration)
     _conn_progress = _get_frontend_progress(session_id)
-    await safe_send_json(websocket, {
+    _conn_payload = {
         "type": "connected",
         "sessionId": session_id,
         "phase": _detect_phase(session_id),
         "progressState": _conn_progress if _conn_progress else None,
-    })
+    }
+    # Echo the runtime target only when this session has one persisted. A fresh
+    # session must not push the default at the client: that overwrote the
+    # start-screen choice before the user had sent it (seen live on dev).
+    _conn_rt = get_runtime_target_if_set(session_id)
+    if _conn_rt:
+        _conn_payload["runtime_target"] = _conn_rt
+    await safe_send_json(websocket, _conn_payload)
 
     # Check for running background task and reattach WebSocket
     _bg_active = False
@@ -2052,6 +2190,8 @@ async def websocket_handler(
                 await handle_inject_history_ws(websocket, session_id, data)
             elif action == "createNewSession":
                 await handle_create_new_session_ws(websocket, session_id, data)
+            elif action == "setRuntimeTarget":
+                await handle_set_runtime_target_ws(websocket, session_id, data)
             elif action == "importAsset":
                 await handle_import_asset_ws(websocket, session_id, data)
             elif action == "ping":
@@ -2178,6 +2318,45 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     except Exception as e:
         logger.warning(f"workspace_init_failed: {e}")
 
+    # The target is fixed on the first user message. A createNewSession request
+    # seeds it earlier for the acknowledgement, while this path also covers
+    # direct WebSocket clients that send their first message without that action.
+    # A value already persisted for this session (by createNewSession, or by an
+    # earlier process before a restart) always wins over the connect-time default
+    # cached in `session` — re-deriving it here is what turned a start-screen
+    # ACXD choice back into Classic on the first message.
+    requested_target = message.get("runtime_target", message.get("runtimeTarget"))
+    # "Started" must also hold after the interview→generation handoff, which
+    # empties the in-memory history, so the phase is consulted as well.
+    conversation_started = (
+        bool(session.get("conversation_history"))
+        or bool(session.get("_handoff_processed"))
+        or _detect_phase(effective_session_id) != "interview"
+    )
+    if not session.get("_runtime_target_seeded"):
+        persisted_target = get_runtime_target_if_set(effective_session_id)
+        runtime_target = _normalize_runtime_target(
+            persisted_target
+            if persisted_target is not None
+            else (requested_target if requested_target is not None else session.get("runtime_target"))
+        )
+        if not set_runtime_target(effective_session_id, runtime_target):
+            logger.warning("[runtime_target] could not persist %s for %s", runtime_target, effective_session_id)
+        session["runtime_target"] = runtime_target
+        session["_runtime_target_seeded"] = True
+    elif requested_target is not None and not conversation_started:
+        # The session was created — and seeded with the default — the moment it
+        # was opened, before the user reached the start-screen radio. Until the
+        # conversation starts, the choice carried by the first message is the
+        # user's explicit decision and replaces that default.
+        runtime_target = _normalize_runtime_target(requested_target)
+        if runtime_target != session.get("runtime_target"):
+            if set_runtime_target(effective_session_id, runtime_target):
+                logger.info("[runtime_target] first message switched %s to %s", effective_session_id, runtime_target)
+                session["runtime_target"] = runtime_target
+            else:
+                logger.warning("[runtime_target] could not persist %s for %s", runtime_target, effective_session_id)
+
     set_message_index(len(session["conversation_history"]))
 
     # Set up Sub-Agent callback handler for streaming
@@ -2231,8 +2410,11 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     # Dynamic phase-based system prompt selection
     current_phase = _detect_phase(effective_session_id)
 
-    # Context boundary: interview → generation handoff
-    if current_phase != "interview" and not session.get("_handoff_processed"):
+    # Context boundary: interview → generation handoff. Runs exactly once, at
+    # the boundary: the in-memory flag alone was lost on every task replacement,
+    # so after a deploy the next turn of a review-phase session re-ran this —
+    # wiping its context and forcing the phase back to 'generation'.
+    if not session.get("_handoff_processed") and _interview_handoff_pending(effective_session_id, current_phase):
         handoff = check_interview_handoff(effective_session_id)
         if handoff:
             logger.info(f"[handoff] Interview→Generation context boundary for {effective_session_id}")
@@ -2250,6 +2432,7 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             session["conversation_history"] = []
             strands_messages = []
             session["_handoff_processed"] = True
+            _mark_handoff_processed(effective_session_id)
             # Persist phase transition to NFS (prevents duplicate phase_changed on first sub-agent completion)
             _update_phase(effective_session_id, "generation", "interview_complete_handoff")
             # Notify frontend
@@ -2262,17 +2445,27 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                 "- get_operation_spec(operation_id) for individual operation details\n"
                 "- get_session_flow_config_tool() for session-level config\n"
                 "- load_requirement_document(doc_type=\"analysis\") for the requirements analysis document\n"
-                "Begin generation following the 5-phase workflow."
+                "Begin generation following the runtime-target-specific workflow."
             )
             strands_messages = [{"role": "user", "content": [{"text": bootstrap_msg}]}]
 
     # Single-segment scope: trim generators + use the scoped generation prompt.
     generation_scope = _get_generation_scope(effective_session_id)
-    phase_prompt = get_phase_system_prompt(current_phase, scope=generation_scope)
-    phase_tools = get_tools_for_phase(current_phase, scope=generation_scope)
+    runtime_target = _normalize_runtime_target(get_runtime_target(effective_session_id))
+    session["runtime_target"] = runtime_target
+    phase_prompt = get_phase_system_prompt(
+        current_phase,
+        scope=generation_scope,
+        runtime_target=runtime_target,
+    )
+    phase_tools = get_tools_for_phase(
+        current_phase,
+        scope=generation_scope,
+        runtime_target=runtime_target,
+    )
     logger.info(
         f"[phase] Using phase '{current_phase}' system prompt for {effective_session_id} "
-        f"(scope={generation_scope})"
+        f"(scope={generation_scope}, runtime_target={runtime_target})"
     )
 
     # Create streaming agent
@@ -2409,12 +2602,16 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     ws_holder: Dict[str, Any] = {"ws": websocket}
 
     async def safe_send_or_log(data: dict) -> bool:
-        """Always log to NFS, best-effort send to WebSocket."""
-        msg_log.append(data)
+        """Always log to NFS, best-effort send to WebSocket.
+
+        The live copy carries its log position (logTurn/logSeq) so the client
+        can resume the log from exactly where its socket dropped.
+        """
+        seq = msg_log.append(data)
         ws = ws_holder.get("ws")
         if ws is not None:
             try:
-                return await safe_send_json(ws, data)
+                return await safe_send_json(ws, {**data, "logSeq": seq, "logTurn": msg_log.turn_id})
             except Exception:
                 return False
         return False  # no WebSocket attached
@@ -2446,6 +2643,8 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                         await safe_send_or_log({"type": "heartbeat", "seq": seq})
 
         heartbeat_task = asyncio.create_task(heartbeat_loop())
+        # Keep scale-in / rolling deploys from stopping this task mid-turn.
+        await asyncio.to_thread(_task_protection.turn_started)
 
         try:
             async for event in streaming_agent.stream_async(message_for_agent):
@@ -2552,17 +2751,15 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                                 # Phase transition detection
                                 try:
                                     if progress_id:  # sub-agent completion
+                                        # Phases only move forward, to whatever the asset
+                                        # state says. Comparing against the detected phase
+                                        # (not a fixed old→new pair) also heals a stored
+                                        # phase that was pushed backwards.
                                         old_phase = _read_phase(effective_session_id)
                                         detected = _detect_phase(effective_session_id)
-                                        if old_phase == "interview" and detected != "interview":
-                                            _update_phase(effective_session_id, "generation", f"first_subagent:{tr_tool_name}")
-                                            await safe_send_or_log({"type": "phase_changed", "phase": "generation", "previousPhase": "interview"})
-                                        elif old_phase == "generation" and detected == "review":
-                                            _update_phase(effective_session_id, "review", "all_core_assets_completed")
-                                            await safe_send_or_log({"type": "phase_changed", "phase": "review", "previousPhase": "generation"})
-                                        elif old_phase == "review" and detected == "post_generation":
-                                            _update_phase(effective_session_id, "post_generation", f"post_review_fix:{tr_tool_name}")
-                                            await safe_send_or_log({"type": "phase_changed", "phase": "post_generation", "previousPhase": "review"})
+                                        if detected != old_phase and _PHASE_ORDER.get(detected, 0) > _PHASE_ORDER.get(old_phase, 0):
+                                            _update_phase(effective_session_id, detected, f"{detected}_detected:{tr_tool_name}")
+                                            await safe_send_or_log({"type": "phase_changed", "phase": detected, "previousPhase": old_phase})
                                     elif tr_tool_name == "save_operation_spec":
                                         new_phase = _read_phase(effective_session_id)
                                         if new_phase != current_phase:
@@ -2597,6 +2794,21 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                 remaining_events = callback_handler.get_pending_ws_events()
                 for evt in remaining_events:
                     await safe_send_or_log(evt)
+
+            # Claim audit: the model can narrate a tool result it never received
+            # (live: "reviewer_agent returned blocking: []" with no reviewer call
+            # in the turn). Only the runtime knows which tools ran; tell the user
+            # where the claim was made.
+            try:
+                from tools.tool_claim_audit import audit_notice
+                _notice = audit_notice(full_response, tool_names_map.values(),
+                                       language=str(session.get("language") or "ko"))
+                if _notice:
+                    logger.warning(f"[ClaimAudit] {session_id}: unbacked tool claims — {_notice.strip()[:200]}")
+                    full_response += _notice
+                    await safe_send_or_log({"type": "stream", "content": _notice})
+            except Exception as audit_err:  # never let the audit break the turn
+                logger.debug(f"[ClaimAudit] skipped: {audit_err}")
 
             # Stream end
             await safe_send_or_log({"type": "stream_end"})
@@ -2651,12 +2863,31 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
                     pass  # non-critical
 
         except asyncio.CancelledError:
-            # User cancelled generation (cancelGeneration action). Preserve any
-            # partial work, notify the client, then re-raise so the task is
-            # correctly marked cancelled. The finally block persists history.
-            logger.info(f"[BG] Generation cancelled by user for {session_id}")
+            # Either the user cancelled generation (cancelGeneration action) or
+            # the task is being stopped (SIGTERM from a scale-in / deployment).
+            # Preserve any partial work, notify the client, then re-raise so the
+            # task is correctly marked cancelled. The finally block persists history.
+            interrupted_by_shutdown = _shutting_down.is_set()
+            if interrupted_by_shutdown:
+                logger.warning(f"[BG] Turn interrupted by task shutdown for {session_id}")
+            else:
+                logger.info(f"[BG] Generation cancelled by user for {session_id}")
             try:
                 partial = _extract_new_messages(streaming_agent.messages, pre_stream_message_count)
+                if interrupted_by_shutdown:
+                    # Leave the same kind of breadcrumb the max_tokens path does,
+                    # so the next turn (on another task) knows the work after the
+                    # cut never ran instead of assuming it did.
+                    partial = list(partial or []) + [{
+                        "role": "user",
+                        "content": [{"text": (
+                            "[System] The previous assistant turn was interrupted by a server "
+                            "restart (deployment or scale-in). Tool calls that had not returned "
+                            "a result did NOT execute. Verify the current state with the "
+                            "workspace tools before continuing, and do NOT ask the user to "
+                            "re-confirm work that earlier turns already saved."
+                        )}],
+                    }]
                 if partial:
                     try:
                         _update_generation_progress(effective_session_id, partial)
@@ -2680,7 +2911,10 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             await safe_send_or_log({
                 "type": "generation_cancelled",
                 "sessionId": session_id,
-                "message": "생성이 취소됐어요.",
+                "message": (
+                    "서버가 교체되어 응답이 중단됐어요. 잠시 후 다시 연결되면 '계속'이라고 입력해 주세요."
+                    if interrupted_by_shutdown else "생성이 취소됐어요."
+                ),
             })
             raise
         except MaxTokensReachedException as e:
@@ -2784,6 +3018,10 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             # Remove from background tasks registry
             async with _background_tasks_lock:
                 _background_tasks.pop(session_id, None)
+            try:
+                await asyncio.to_thread(_task_protection.turn_finished)
+            except Exception as protect_err:  # never let this mask the turn's outcome
+                logger.warning(f"[BG] task protection release failed: {protect_err}")
             logger.info(f"[BG] Agent task finished for {session_id}")
 
     # Register and launch background task (fire-and-forget).
@@ -3147,6 +3385,7 @@ async def handle_inject_history_ws(websocket: WebSocket, session_id: str, data: 
         "messageCount": len(session.get("conversation_history", [])),
         "hasWorkspace": bool(workspace_summary),
         "phase": _detect_phase(_hi_sid),
+        **({"runtime_target": get_runtime_target_if_set(_hi_sid)} if get_runtime_target_if_set(_hi_sid) else {}),
         "progressState": _hi_progress if _hi_progress else None,
     })
 
@@ -3155,9 +3394,10 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
     """Create a fresh session.
 
     Accepts an optional ``scope`` (subset of {contact_flow, prompt, faq} for a
-    partial run) and ``model`` (one of the allowlisted Bedrock ids) chosen on the
-    start screen. Both are persisted to NFS so detect_phase / the phase prompt /
-    every BedrockModel construction reason about the right values from turn one.
+    partial run), ``model`` (one of the allowlisted Bedrock ids), and
+    ``runtime_target`` (``classic`` or ``acxd``) chosen on the start screen. They
+    are persisted to NFS so detect_phase / the phase prompt / every BedrockModel
+    construction reason about the right values from turn one.
 
     NEVER purge state while an agent task is running for this session. The
     frontend fires createNewSession on reconnect-with-no-history (useWebSocket.ts),
@@ -3187,7 +3427,8 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
             "type": "session_created",
             "sessionId": session_id,
             "phase": _detect_phase(session_id),
-            "scope": [] if set(_live_scope) >= set(_FULL_ASSET_SET) else _live_scope,
+            "scope": [] if set(_live_scope) >= _get_full_asset_set(_eff_live) else _live_scope,
+            "runtime_target": _normalize_runtime_target(get_runtime_target(_eff_live)),
             "selectedModel": _get_selected_model(_eff_live) or resolve_model_id(),
         })
         return
@@ -3238,10 +3479,24 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
         if isinstance(session_store.get(session_id), dict) else session_id
     try:
         _scope = data.get("scope")
-        if isinstance(_scope, list):
-            _set_generation_scope(_eff_for_state, _scope)
+        _set_generation_scope(_eff_for_state, _scope if isinstance(_scope, list) else [])
+        _runtime_target = _normalize_runtime_target(
+            data.get("runtime_target", data.get("runtimeTarget"))
+        )
+        if not set_runtime_target(_eff_for_state, _runtime_target):
+            logger.warning(
+                "[createNewSession] set runtime target failed for %s", _eff_for_state
+            )
+        else:
+            logger.info("[createNewSession] runtime_target=%s for %s", _runtime_target, _eff_for_state)
+        # The in-memory session was created at connect time with the default
+        # target; mark it seeded so the first message cannot re-derive Classic.
+        _live = session_store.get(session_id)
+        if isinstance(_live, dict):
+            _live["runtime_target"] = _runtime_target
+            _live["_runtime_target_seeded"] = True
     except Exception as _se:
-        logger.warning(f"[createNewSession] set scope failed: {_se}")
+        logger.warning(f"[createNewSession] set scope/runtime target failed: {_se}")
     try:
         _model = validate_model_id(data.get("model"))
         if _model:
@@ -3260,13 +3515,55 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
     # set, so we must collapse that back to [] here — otherwise the progress panel
     # would mistake a full build for a 6-asset "scope" and trim interview/review.
     _resolved_scope = _get_generation_scope(_eff_for_state)
-    _ui_scope = [] if set(_resolved_scope) >= set(_FULL_ASSET_SET) else _resolved_scope
+    _ui_scope = [] if set(_resolved_scope) >= _get_full_asset_set(_eff_for_state) else _resolved_scope
     await safe_send_json(websocket, {
         "type": "session_created",
         "sessionId": session_id,
         "phase": _detect_phase(session_id),
         "scope": _ui_scope,
+        "runtime_target": _normalize_runtime_target(get_runtime_target(_eff_for_state)),
         "selectedModel": _get_selected_model(_eff_for_state) or resolve_model_id(),
+    })
+
+
+async def handle_set_runtime_target_ws(websocket: WebSocket, session_id: str, data: Dict[str, Any]):
+    """Start-screen radio change on a session that already exists.
+
+    The session is created — and its target seeded with the default — when it is
+    opened, before the user reaches the radio. Until the conversation starts the
+    choice may still change; afterwards the target is fixed and the echo simply
+    carries the persisted value with ``accepted: false``.
+    """
+    _live = session_store.get(session_id)
+    _eff = _live.get("session_data", {}).get("original_session_id", session_id) \
+        if isinstance(_live, dict) else session_id
+    requested = _normalize_runtime_target(data.get("runtime_target", data.get("runtimeTarget")))
+    started = bool(
+        isinstance(_live, dict)
+        and (_live.get("conversation_history") or _live.get("_handoff_processed"))
+    ) or _detect_phase(_eff) != "interview"
+    if started:
+        await safe_send_json(websocket, {
+            "type": "runtime_target_updated",
+            "sessionId": session_id,
+            "runtime_target": _normalize_runtime_target(get_runtime_target(_eff)),
+            "accepted": False,
+            "reason": "conversation_started",
+        })
+        return
+    if not set_runtime_target(_eff, requested):
+        logger.warning("[setRuntimeTarget] could not persist %s for %s", requested, _eff)
+        await safe_send_json(websocket, {"type": "error", "content": "Could not save the runtime target."})
+        return
+    if isinstance(_live, dict):
+        _live["runtime_target"] = requested
+        _live["_runtime_target_seeded"] = True
+    logger.info("[setRuntimeTarget] runtime_target=%s for %s", requested, _eff)
+    await safe_send_json(websocket, {
+        "type": "runtime_target_updated",
+        "sessionId": session_id,
+        "runtime_target": requested,
+        "accepted": True,
     })
 
 

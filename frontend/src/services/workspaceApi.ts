@@ -158,25 +158,44 @@ export async function fetchWorkspaceFile(
  * points at the latest content. Pass `assetType` to download a single type, or
  * omit/use "all" for the full package.
  */
+export type AssetDownloadResult =
+  | { ok: true; downloadUrl: string; s3Key: string }
+  | { ok: false; status: number; error: string; problems: string[] };
+
+/**
+ * Ask the backend to package the session (or one asset type) and return a
+ * presigned URL. A refusal comes back as `ok: false` with the backend's reason
+ * and, for ACXD bundles, the consistency problems that blocked packaging —
+ * the caller shows those instead of guessing.
+ */
 export async function fetchAssetDownloadUrl(
   sessionId: string,
   assetType?: string,
-): Promise<{ downloadUrl: string; s3Key: string } | null> {
+): Promise<AssetDownloadResult> {
+  const base = getApiBase();
+  const qs = assetType && assetType !== "all" ? `?asset_type=${encodeURIComponent(assetType)}` : "";
+  const url = `${base}/api/assets/${encodeURIComponent(sessionId)}/download${qs}`;
   try {
-    const base = getApiBase();
-    const qs = assetType && assetType !== "all" ? `?asset_type=${encodeURIComponent(assetType)}` : "";
-    const url = `${base}/api/assets/${encodeURIComponent(sessionId)}/download${qs}`;
     const headers = await getAuthHeaders();
     const res = await fetch(url, { headers });
-    if (!res.ok) {
-      console.warn("[workspaceApi] asset download fetch failed:", res.status);
-      return null;
+    const isJson = (res.headers.get("content-type") || "").includes("application/json");
+    // CloudFront rewrites 403/404 to the SPA's index.html: never parse HTML as JSON.
+    const data = isJson ? await res.json().catch(() => null) : null;
+    if (!res.ok || !data || !data.success || !data.downloadUrl) {
+      const error =
+        (data && (data.error || data.detail)) ||
+        (isJson ? "Download unavailable" : `Download failed (HTTP ${res.status})`);
+      console.warn("[workspaceApi] asset download refused:", res.status, error);
+      return {
+        ok: false,
+        status: res.status,
+        error: typeof error === "string" ? error : JSON.stringify(error),
+        problems: Array.isArray(data?.problems) ? data.problems.map(String) : [],
+      };
     }
-    const data = await res.json();
-    if (!data.success || !data.downloadUrl) return null;
-    return { downloadUrl: data.downloadUrl, s3Key: data.s3Key };
+    return { ok: true, downloadUrl: data.downloadUrl, s3Key: data.s3Key };
   } catch (e) {
     console.warn("[workspaceApi] asset download error:", e);
-    return null;
+    return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e), problems: [] };
   }
 }

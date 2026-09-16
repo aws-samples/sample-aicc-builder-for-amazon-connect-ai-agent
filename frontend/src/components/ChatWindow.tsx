@@ -50,6 +50,7 @@ export function ChatWindow() {
   const setConnectionError = useBuilderStore(s => s.setConnectionError);
   const resetStillProcessingCount = useBuilderStore(s => s.resetStillProcessingCount);
   const progress = useBuilderStore(s => s.progress);
+  const runtimeTarget = useBuilderStore(s => s.runtimeTarget);
   const inputHint = useBuilderStore(s => s.inputHint);
   const session = useBuilderStore(s => s.session);
 
@@ -57,7 +58,7 @@ export function ChatWindow() {
   const setStartMode = useBuilderStore(s => s.setStartMode);
   const setSegment = useBuilderStore(s => s.setSegment);
 
-  const { currentSessionId, updateSessionTitle, updateSessionActivity, createNewSession, sessions } = useSessionStore();
+  const { currentSessionId, updateSessionTitle, updateSessionActivity, createNewSession, deleteSessionById, sessions } = useSessionStore();
   const { sendMessage, sendMessageWithAttachments, connect, switchSession, cancelGeneration, getCurrentSessionId } = useWebSocket();
 
   const handleResetSession = useCallback(() => {
@@ -72,15 +73,18 @@ export function ChatWindow() {
 
   // E1: Mobile progress bar state
   const activeProgress = useMemo(() => {
-    const inProgress = progress.filter(p => p.status === 'in_progress');
-    const completed = progress.filter(p => p.status === 'completed');
-    const total = progress.length;
+    const visibleProgress = progress.filter((item) =>
+      runtimeTarget === 'acxd' ? item.id !== 'prompt' : item.id !== 'acxd_application'
+    );
+    const inProgress = visibleProgress.filter(p => p.status === 'in_progress');
+    const completed = visibleProgress.filter(p => p.status === 'completed');
+    const total = visibleProgress.length;
     const completedCount = completed.length;
     const currentItem = inProgress[0];
     const hasAnyActivity = completedCount > 0 || inProgress.length > 0;
     const overallPercent = total > 0 ? Math.round((completedCount / total) * 100) : 0;
     return { currentItem, completedCount, total, hasAnyActivity, overallPercent, inProgress, completed };
-  }, [progress]);
+  }, [progress, runtimeTarget]);
 
   // E2: Requirements checklist derived from session state
   const requirementsChecklist = useMemo(() => {
@@ -312,7 +316,10 @@ export function ChatWindow() {
     }
 
     if (currentSessionId) {
-      updateSessionActivity(currentSessionId, userMessageCount + 1);
+      // lastMessageAt only — the sidebar count follows the live conversation
+      // (useAutoSave) and is persisted as len(history) by the history save, so
+      // writing the user-message tally here would pin it at the wrong number.
+      updateSessionActivity(currentSessionId);
     }
   };
 
@@ -355,11 +362,15 @@ export function ChatWindow() {
   // observed dropping a large importAsset payload onto a closing socket.
   const whenSessionReady = useCallback((fn: () => void, expectSessionId?: string, attempt = 0) => {
     const ready = useBuilderStore.getState().isSessionReady;
-    const onExpected = !expectSessionId || getCurrentSessionId() === expectSessionId;
+    const current = getCurrentSessionId();
+    const onExpected = !expectSessionId || current === expectSessionId;
     if (ready && onExpected) {
       fn();
     } else if (attempt < 80) {
       setTimeout(() => whenSessionReady(fn, expectSessionId, attempt + 1), 250);
+    } else {
+      // Never fail silently: a dropped kickoff leaves the user on a blank start screen.
+      console.error('[ChatWindow] whenSessionReady gave up', { ready, current, expectSessionId });
     }
   }, [getCurrentSessionId]);
 
@@ -416,6 +427,12 @@ export function ChatWindow() {
       const baseText = description.trim() || (defaultOpener[language] || defaultOpener['en-US']);
       const kickoff = `${baseText}${inlinedText}`;
 
+      // The session shown before Start is the one auto-created when the chat
+      // was opened; the conversation moves to `freshId`, so the sidebar must
+      // follow it (QA 2026-09-10: the kickoff title landed on the abandoned
+      // session and the real one surfaced later as "Untitled").
+      const previousId = currentSessionId;
+      const previousWasEmpty = messages.length === 0;
       const freshId = `session-${crypto.randomUUID()}`;
       await switchSession(freshId, true);
       setScope(scope.length > 0 ? scope : null);
@@ -445,15 +462,26 @@ export function ChatWindow() {
           }));
           void sendMessageWithAttachments(kickoff, readyAttached, meta);
         } else {
-          sendMessage(kickoff);
+          const ok = sendMessage(kickoff);
+          if (!ok) console.error('[ChatWindow] kickoff sendMessage returned false');
         }
-        if (currentSessionId) {
-          updateSessionTitle(currentSessionId, description.trim() || (files[0]?.name ?? kickoff));
-          updateSessionActivity(currentSessionId, 1);
-        }
+        const title = description.trim() || (files[0]?.name ?? kickoff);
+        void (async () => {
+          // Register + select the rotated session under the kickoff title …
+          if (!sessions.some((s) => s.sessionId === freshId)) {
+            await createNewSession(freshId, title);
+          } else {
+            await updateSessionTitle(freshId, title);
+          }
+          await updateSessionActivity(freshId, 1);
+          // … and drop the empty pre-rotation entry so it does not linger as a ghost.
+          if (previousId && previousId !== freshId && previousWasEmpty) {
+            await deleteSessionById(previousId);
+          }
+        })();
       }, freshId);
     },
-    [setScope, sendMessage, sendMessageWithAttachments, switchSession, currentSessionId, updateSessionTitle, updateSessionActivity, whenSessionReady, language]
+    [setScope, sendMessage, sendMessageWithAttachments, switchSession, currentSessionId, messages.length, sessions, createNewSession, deleteSessionById, updateSessionTitle, updateSessionActivity, whenSessionReady, language]
   );
 
   // Reset the start screen when a fresh, empty session is shown.

@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**Turn a ~1-hour AI conversation into a fully customized Amazon Connect PoC** · powered by Amazon Bedrock and Strands SDK 
+**Turn a ~1-hour AI conversation into a fully customized Amazon Connect PoC** — for the Classic Lex + AI agent stack **or an Agentic CX Designer (ACXD) application** · powered by Amazon Bedrock and Strands SDK 
 
 [![AWS CDK](https://img.shields.io/badge/AWS%20CDK-2.x-orange?style=flat&logo=amazonaws)](https://aws.amazon.com/cdk/)
 [![React](https://img.shields.io/badge/React-18.3-blue?style=flat&logo=react)](https://reactjs.org/)
@@ -29,7 +29,70 @@ https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
 
 ---
 
-## What's New in v2.4
+## What's New in v3.0 — Amazon Connect Agentic CX Designer (ACXD) is now supported
+
+AICC Builder can now build your PoC for **Agentic CX Designer** as well as for
+the Classic stack. On the start screen, choose where your agent will run:
+
+- **Classic** — Lex bot + Amazon Connect AI agent + AgentCore Gateway MCP tools
+  (everything you had before).
+- **ACXD** — an Agentic CX Designer application that Amazon Connect hands the
+  caller to through the Agentic CX block (requires a Connect Customer instance).
+
+Nothing else changes: the same ~1-hour interview, the same review, the same
+six-asset bundle. Only the last mile is different.
+
+With the ACXD target you get:
+
+- **A complete ACXD application from your interview.** Conversation flows, slot
+  types, data requests already pointed at your generated Lambda/API, guardrails,
+  knowledge bases and context variables — delivered under `assets/acxd/` next to
+  the Lambda, OpenAPI, CloudFormation, FAQ and Contact Flow assets. The AI Prompt
+  asset is replaced by the application.
+- **Conversation flows you approve as you go.** During the interview, every
+  operation gets a flow plan you confirm step by step, with escalation rules
+  spelled out before anything is generated.
+- **A conversation that holds together — by construction.** The application
+  greets the caller, listens, hands the utterance to the recognised flow, and
+  after each answer asks whether it can help with anything else, so one call
+  can cover several requests. Unrecognised answers are re-asked, a third miss
+  or an explicit "connect me to an agent" hands off to a human, and the hand-off
+  reaches your Contact Flow's Escalation branch. These system flows are built
+  deterministically from a contract verified on the live service, not written
+  by a model, so they behave the same in every project.
+- **Data requests that reach your API.** Every data request calls the
+  generated API Gateway with the API key held as an ACXD Secret, in both the
+  development and production environments, and posts the slots it collected as
+  the request body.
+- **A Contact Flow that is ready to take calls.** The generated flow already
+  contains the Agentic CX block with its Default, Escalation, Error and Idle
+  chat timeout branches wired, so the caller reaches your application on the
+  first import.
+- **One-shot deploy.** Run the bundled `./deploy.sh`: it recognises the ACXD
+  bundle, deploys the backend (CloudFormation, Lambda, API), creates the
+  application and all of its resources in your ACXD workspace, builds and
+  deploys it, and imports the published Contact Flow with the deployed
+  workspace and application ids filled in. Re-runs are safe, and `status`,
+  `cleanup` and `--dry-run` are included. The one click left is choosing the
+  application alias in the block — or set `ACXD_ALIAS_ID` before you deploy.
+  When a re-deploy has to replace the application deployment, the alias key
+  changes; the script tells you, and `./deploy.sh --rebind-alias <key>`
+  re-points the flow without opening the console.
+- **Consistency checks before you download.** The application's data requests
+  are verified against the generated OpenAPI spec and Lambdas (paths, fields,
+  formats, webhook URLs), and every flow against the runtime contract the live
+  service enforces but does not document — slot types it can actually
+  recognise, request bodies that carry the collected values, reply templates
+  that only name fields the API returns — so what you deploy matches the
+  backend you received and behaves as designed.
+
+> 📖 Bundle contents and deploy phases: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
+> what we validated in a real Connect Customer account: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
+
+---
+
+<details>
+<summary><strong>What's New in v2.4</strong> — build on the database you already have (click to expand)</summary>
 
 **Build on the database you already have.** Point AICC Builder at an existing
 database — **any RDS or Aurora engine**, or DynamoDB — or just hand it your
@@ -103,9 +166,11 @@ your real tables, columns and business rules instead of inventing new ones.
 > 📖 Details, per-engine notes and the verification runs:
 > [docs/existing-database.md](./docs/existing-database.md)
 
----
+</details>
 
-## What's New in v2.3
+<details>
+<summary><strong>What's New in v2.3</strong> — automated workshop deploy, IAM validation gate, model effort (click to expand)</summary>
+
 
 A fully-automated workshop deploy script, live-QA permission hardening, a new
 deterministic IAM validation gate, and a model *effort* control — all verified
@@ -147,7 +212,7 @@ against live AWS accounts (including a customer workshop account).
   orchestrator and every sub-agent via `output_config.effort`, persisted per
   session, switchable mid-session.
 
----
+</details>
 
 <details>
 <summary><strong>What's New in v2.2</strong> — model choice, segment-scoped generation, import-and-improve, UI redesign (click to expand)</summary>
@@ -253,7 +318,7 @@ business.
 │                  │         │                  │         │                         │
 │   💬 INPUT       │         │  🤖 AICC Builder  │         │   📦 OUTPUT              │
 │                  │  ────▶  │                  │  ────▶  │                         │
-│  AI Conversation │         │  9 Specialized   │         │  6 Production-Ready     │
+│  AI Conversation │         │  10 Specialized  │         │  6 Production-Ready     │
 │  (~1 hour)       │         │  Agents (Opus    │         │  Asset Packages         │
 │                  │         │  4.8 on Bedrock) │         │                         │
 │                  │         │                  │         │                         │
@@ -261,11 +326,12 @@ business.
 
   • Industry & company       Orchestrator             ✅ Lambda Functions
   • Business operations      Research Agent           ✅ OpenAPI Spec (MCP Gateway)
-  • Rules & policies         FAQ Generator            ✅ AI Prompt
-  • Conversation scenarios   Lambda Generator         ✅ Contact Flows
-  • Tone & language          OpenAPI Generator        ✅ CDK Infrastructure
-  • Edge cases               Prompt Generator         ✅ FAQ / Knowledge Base
-                             Contact Flow Generator
+  • Rules & policies         FAQ Generator            ✅ AI Prompt (Classic) or
+  • Conversation scenarios   Lambda Generator            ACXD Application (ACXD)
+  • Tone & language          OpenAPI Generator        ✅ Contact Flows
+  • Edge cases               Prompt Generator         ✅ CDK Infrastructure
+  • Runtime target:          ACXD Flow Generator      ✅ FAQ / Knowledge Base
+    Classic or ACXD          Contact Flow Generator
                              Infrastructure Generator
                              Reviewer Agent
 ```
@@ -318,14 +384,15 @@ The system produces a complete set of workshop-ready artifacts:
 |---|---|---|
 | **Lambda Functions** | Python handlers for each business operation (e.g., `process_return`, `track_order`) | Module 2: MCP Server Setup |
 | **OpenAPI Spec** | API definitions for Amazon Connect MCP Gateway integration | Module 2: MCP Gateway |
-| **AI Prompt** | Customized personality, tone, business rules, and guardrails | Module 2: AI Agent Prompt |
-| **Contact Flows** | Amazon Connect flow configurations with an interactive visual diagram (rendered from the JSON) | Module 2: Flow Builder |
+| **AI Prompt** *(Classic target)* | Customized personality, tone, business rules, and guardrails | Module 2: AI Agent Prompt |
+| **ACXD Application** *(ACXD target)* | Agentic CX Designer flows, slot types, data requests, guardrails, knowledge bases and context variables under `assets/acxd/`, plus `deploy-manifest.json` and a Node runner that deploys them | Module 2: Agentic CX Designer |
+| **Contact Flows** | Amazon Connect flow configurations with an interactive visual diagram (rendered from the JSON); the ACXD target hands the caller to the application through the Agentic CX block | Module 2: Flow Builder |
 | **CDK Infrastructure** | Complete AWS CDK project (Lambda, API Gateway, DynamoDB) | Module 2: Deploy |
 | **FAQ Documents** | Knowledge base articles for common customer questions | Module 3: Knowledge Base |
 
 ### Step 4 — Workshop
 
-Customers use their generated assets throughout the workshop, ending with a **deployable PoC for their actual business**.
+Customers use their generated assets throughout the workshop, ending with a **deployable PoC for their actual business**. The downloaded bundle's `./deploy.sh` detects its runtime target and deploys either stack one-shot — Classic (chapters 3–6 of the workshop) or ACXD (backend + application + published Contact Flow).
 
 ---
 
@@ -485,6 +552,7 @@ letter, and a number (no symbol required).
 │           │   ├── openapi_generator/   # OpenAPI 3.0 specs (chunked)
 │           │   ├── prompt_generator/    # AI agent prompts
 │           │   ├── contact_flow_generator/  # Connect flows (diagram from JSON)
+│           │   ├── acxd_flow_generator/     # ACXD conversation flows (ACXD target)
 │           │   ├── infrastructure_generator/ # CloudFormation YAML (chunked)
 │           │   └── reviewer_agent/      # Asset consistency validation
 │           ├── tools/                   # Utility tools
@@ -495,7 +563,11 @@ letter, and a number (no symbol required).
 │           │   ├── s3_asset_storage.py      # S3 + NFS dual-write asset storage
 │           │   ├── clues_format.py          # CLUES response format (context engineering)
 │           │   ├── validate_consistency.py  # Cross-asset validation (9 checks)
+│           │   ├── acxd_*.py                # ACXD target: flow spec, deterministic resource builders,
+│           │   │                            #   application/manifest, Contact Flow binding, bundle, D9 checks
 │           │   └── ...
+│           ├── schemas/acxd/            # JSON schemas every ACXD resource is validated against
+│           ├── templates/acxd_runner/   # Node runner shipped in ACXD bundles (deploys via the ACXD SDK)
 │           ├── context/                 # Session context (3-tier s3files store)
 │           │   ├── __init__.py
 │           │   ├── s3files_store.py     # memory → NFS → DynamoDB
@@ -556,6 +628,9 @@ letter, and a number (no symbol required).
 |---|---|
 | [docs/agentic-ai.md](./docs/agentic-ai.md) | **How the multi-agent system keeps customer requirements intact end-to-end** — OperationSpec contract, deterministic validation, patch-only modification |
 | [docs/existing-database.md](./docs/existing-database.md) | **Building on a database you already have** — live scan vs schema-as-document, schema fidelity, and the deterministic SQL gates |
+| [docs/acxd-packaging.md](./docs/acxd-packaging.md) | **ACXD runtime target** — bundle contract, deploy phases, the Agentic CX block |
+| [docs/acxd-live-validation.md](./docs/acxd-live-validation.md) | What a real Connect Customer deployment taught us — service-contract facts the SDK types do not show, and the fixes |
+| [docs/acxd-redesign.md](./docs/acxd-redesign.md) | Design note (Korean): why ACXD is a runtime target of the Classic pipeline, not a separate mode |
 | [docs/architecture.md](./docs/architecture.md) | Runtime architecture, WebSocket protocol, data flow |
 | [docs/architecture-asset-flow.md](./docs/architecture-asset-flow.md) | Asset read/write/stream paths, dual-write to NFS + S3 |
 | [docs/agents.md](./docs/agents.md) | 9 agents: roles, tools, model configs, generation sequence |
@@ -635,6 +710,58 @@ Contact Flow, CDK 인프라, FAQ)을 자동 생성합니다. 단일 오케스트
 
 ---
 
+## v3.0의 새 기능 — Amazon Connect Agentic CX Designer(ACXD)를 지원합니다
+
+이제 AICC Builder로 Classic 스택뿐 아니라 **Agentic CX Designer**용 PoC도 만들 수
+있습니다. 시작 화면에서 에이전트가 실행될 곳을 고르세요.
+
+- **Classic** — Lex 봇 + Amazon Connect AI 에이전트 + AgentCore Gateway MCP 도구
+  (기존 그대로).
+- **ACXD** — Amazon Connect가 Agentic CX 블록으로 통화를 넘기는 Agentic CX Designer
+  애플리케이션(Connect Customer 인스턴스 필요).
+
+나머지는 똑같습니다. 같은 약 1시간 인터뷰, 같은 리뷰, 같은 6종 에셋 번들. 마지막
+구간만 다릅니다.
+
+ACXD를 선택하면 다음을 받습니다.
+
+- **인터뷰에서 바로 나오는 완성된 ACXD 애플리케이션.** 대화 플로우, 슬롯 타입,
+  생성된 Lambda/API를 이미 가리키는 데이터 요청, 가드레일, 지식 베이스, 컨텍스트
+  변수가 `assets/acxd/` 아래에 Lambda·OpenAPI·CloudFormation·FAQ·Contact Flow와
+  함께 담깁니다. AI 프롬프트 에셋 자리를 애플리케이션이 대신합니다.
+- **진행하면서 승인하는 대화 플로우.** 인터뷰 중 업무마다 플로우 계획을 단계별로
+  확인하고, 상담원 연결 조건을 생성 전에 명확히 정합니다.
+- **처음부터 끝까지 이어지는 대화.** 애플리케이션이 인사하고, 고객의 말을 듣고,
+  인식된 플로우로 넘긴 뒤, 답변마다 "더 도와드릴 일이 있을까요?"를 물어 한 통화에서
+  여러 요청을 처리합니다. 알아듣지 못한 답변은 다시 묻고, 세 번째 실패나 "상담원
+  연결해 주세요"는 상담원으로 넘기며, 이 연결은 Contact Flow의 Escalation 분기에
+  도달합니다. 이 시스템 플로우들은 모델이 쓰는 것이 아니라 실제 서비스에서 검증한
+  계약으로 결정론적으로 만들어지므로 어떤 프로젝트에서도 같은 방식으로 동작합니다.
+- **API에 실제로 도달하는 데이터 요청.** 모든 데이터 요청은 ACXD Secret에 담긴 API
+  키로 생성된 API Gateway를 호출하며(development·production 환경 모두), 수집한
+  슬롯 값을 요청 본문으로 보냅니다.
+- **바로 전화를 받을 수 있는 Contact Flow.** 생성된 플로우에 Agentic CX 블록과
+  Default·Escalation·Error·Idle chat timeout 분기가 이미 배선되어 있어, 첫 import
+  부터 통화가 애플리케이션에 도달합니다.
+- **원샷 배포.** 번들의 `./deploy.sh`를 실행하면 ACXD 번들을 알아보고 백엔드
+  (CloudFormation, Lambda, API)를 배포하고, ACXD 워크스페이스에 애플리케이션과 모든
+  리소스를 만들어 빌드·배포한 뒤, 배포된 워크스페이스/애플리케이션 id를 채운 Contact
+  Flow를 PUBLISHED로 import합니다. 재실행해도 안전하며 `status`, `cleanup`,
+  `--dry-run`을 지원합니다. 남는 클릭은 블록에서 애플리케이션 alias를 고르는 것
+  하나입니다(배포 전에 `ACXD_ALIAS_ID`를 지정해도 됩니다). 재배포 시 애플리케이션
+  배포를 교체해야 하면 alias 키가 바뀌는데, 스크립트가 이를 알려 주고
+  `./deploy.sh --rebind-alias <key>`로 콘솔 없이 플로우를 다시 연결합니다.
+- **다운로드 전 정합성 검사.** 애플리케이션의 데이터 요청을 생성된 OpenAPI 스펙·
+  Lambda와 대조(경로, 필드, 형식, 웹훅 URL)하고, 모든 플로우를 서비스가 문서화하지
+  않은 채 강제하는 런타임 계약(실제로 인식 가능한 슬롯 타입, 수집한 값을 담는 요청
+  본문, API가 반환하는 필드만 쓰는 응답 템플릿)과 대조하므로, 배포하는 것이 받은
+  백엔드와 일치하고 설계대로 동작합니다.
+
+> 📖 번들 구성과 배포 단계: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
+> 실제 Connect Customer 계정 검증 기록: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
+
+---
+
 ## 입력 → 출력
 
 ```
@@ -642,18 +769,19 @@ Contact Flow, CDK 인프라, FAQ)을 자동 생성합니다. 단일 오케스트
 │                  │         │                  │         │                         │
 │   💬 입력        │         │  🤖 AICC Builder  │         │   📦 출력                │
 │                  │  ────▶  │                  │  ────▶  │                         │
-│  AI 대화         │         │  9개 전문 에이전트 │         │  6종 프로덕션 에셋       │
-│  (~1시간)        │         │ (Bedrock Opus 4.6)│         │                         │
+│  AI 대화         │         │ 10개 전문 에이전트 │         │  6종 프로덕션 에셋       │
+│  (~1시간)        │         │ (Bedrock Opus 4.8)│         │                         │
 │                  │         │                  │         │                         │
 └─────────────────┘         └──────────────────┘         └─────────────────────────┘
 
   • 업종 및 회사 정보         오케스트레이터          ✅ Lambda 함수
   • 업무 프로세스             리서치 에이전트        ✅ OpenAPI 스펙 (MCP Gateway)
-  • 비즈니스 룰/정책          FAQ 생성기            ✅ AI 프롬프트
-  • 대화 시나리오             Lambda 생성기         ✅ Contact Flow
-  • 톤앤매너/언어             OpenAPI 생성기        ✅ CDK 인프라
-  • 예외 케이스              프롬프트 생성기        ✅ FAQ / 지식 베이스
-                             Contact Flow 생성기
+  • 비즈니스 룰/정책          FAQ 생성기            ✅ AI 프롬프트(Classic) 또는
+  • 대화 시나리오             Lambda 생성기            ACXD 애플리케이션(ACXD)
+  • 톤앤매너/언어             OpenAPI 생성기        ✅ Contact Flow
+  • 예외 케이스              프롬프트 생성기        ✅ CDK 인프라
+  • 런타임 타깃:             ACXD Flow 생성기       ✅ FAQ / 지식 베이스
+    Classic 또는 ACXD        Contact Flow 생성기
                              인프라 생성기
                              리뷰어 에이전트
 ```
@@ -871,6 +999,63 @@ AICC Builder は、約 1 時間の対話で、Amazon Connect 用のカスタム�
 
 ---
 
+## v3.0 の新機能 — Amazon Connect Agentic CX Designer（ACXD）に対応しました
+
+AICC Builder で、Classic スタックに加えて **Agentic CX Designer** 向けの PoC も
+作れるようになりました。開始画面でエージェントを動かす場所を選びます。
+
+- **Classic** — Lex ボット + Amazon Connect AI エージェント + AgentCore Gateway の
+  MCP ツール（従来どおり）。
+- **ACXD** — Amazon Connect が Agentic CX ブロックで通話を引き渡す Agentic CX
+  Designer アプリケーション（Connect Customer インスタンスが必要）。
+
+それ以外は同じです。約 1 時間のインタビュー、レビュー、6 種のアセットバンドル。
+違うのは最後の区間だけです。
+
+ACXD を選ぶと次が得られます。
+
+- **インタビューからそのまま出来上がる ACXD アプリケーション。** 会話フロー、
+  スロットタイプ、生成した Lambda/API をすでに指しているデータリクエスト、
+  ガードレール、ナレッジベース、コンテキスト変数が `assets/acxd/` 配下に、
+  Lambda・OpenAPI・CloudFormation・FAQ・Contact Flow と一緒に揃います。AI
+  プロンプトの代わりにアプリケーションが入ります。
+- **進めながら承認する会話フロー。** インタビュー中に業務ごとのフロー計画を
+  ステップ単位で確認し、エスカレーション条件を生成前に確定します。
+- **最初から最後までつながる会話。** アプリケーションが挨拶し、お客様の発話を聞き、
+  認識したフローに引き渡し、回答のたびに「他にお手伝いできることはありますか」と
+  尋ねるので、1 回の通話で複数の依頼を処理できます。聞き取れなかった回答は聞き直し、
+  3 回目の失敗や「オペレーターにつないで」は担当者へ引き継ぎ、その引き継ぎは
+  Contact Flow の Escalation 分岐に届きます。これらのシステムフローはモデルが書くの
+  ではなく、実サービスで検証した契約から決定論的に生成されるため、どのプロジェクト
+  でも同じように動作します。
+- **API に実際に届くデータリクエスト。** すべてのデータリクエストは ACXD Secret に
+  保持した API キーで生成済みの API Gateway を呼び出し（development・production の
+  両環境）、収集したスロット値をリクエスト本文として送ります。
+- **すぐに着信を受けられる Contact Flow。** 生成されたフローには Agentic CX
+  ブロックと Default・Escalation・Error・Idle chat timeout の分岐が結線済みで、
+  最初のインポートから通話がアプリケーションに届きます。
+- **ワンショットデプロイ。** バンドルの `./deploy.sh` を実行すると、ACXD バンドルを
+  判別してバックエンド（CloudFormation、Lambda、API）をデプロイし、ACXD
+  ワークスペースにアプリケーションと全リソースを作成してビルド・デプロイし、
+  デプロイ済みのワークスペース / アプリケーション id を埋めた Contact Flow を
+  PUBLISHED でインポートします。再実行しても安全で、`status`、`cleanup`、
+  `--dry-run` に対応。残る操作はブロックでアプリケーションの alias を選ぶことだけです
+  （事前に `ACXD_ALIAS_ID` を指定することもできます）。再デプロイでアプリケーションの
+  デプロイメントを置き換える必要がある場合は alias キーが変わります。スクリプトが
+  それを知らせ、`./deploy.sh --rebind-alias <key>` でコンソールを開かずにフローを
+  つなぎ直せます。
+- **ダウンロード前の整合性チェック。** アプリケーションのデータリクエストを生成した
+  OpenAPI 仕様・Lambda と照合（パス、フィールド、形式、ウェブフック URL）し、さらに
+  すべてのフローを、サービスが文書化せずに強制するランタイム契約（実際に認識できる
+  スロットタイプ、収集した値を運ぶリクエスト本文、API が返すフィールドだけを使う
+  応答テンプレート）と照合するため、デプロイするものが受け取ったバックエンドと一致し、
+  設計どおりに動作します。
+
+> 📖 バンドルの内容とデプロイフェーズ: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
+> 実際の Connect Customer アカウントでの検証記録: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
+
+---
+
 ## 入力 → 出力
 
 ```
@@ -878,19 +1063,20 @@ AICC Builder は、約 1 時間の対話で、Amazon Connect 用のカスタム�
 │                  │         │                  │         │                         │
 │   💬 入力         │         │  🤖 AICC Builder  │         │   📦 出力                │
 │                  │  ────▶  │                  │  ────▶  │                         │
-│  AI との対話      │         │  9 個の専門        │         │  そのまま使える 6 種の    │
+│  AI との対話      │         │  10 個の専門       │         │  そのまま使える 6 種の    │
 │  （約 1 時間）    │         │ エージェント       │         │  アセットパッケージ       │
-│                  │         │(Bedrock Opus 4.6)│         │                         │
+│                  │         │(Bedrock Opus 4.8)│         │                         │
 │                  │         │                  │         │                         │
 └─────────────────┘         └──────────────────┘         └─────────────────────────┘
 
   • 業種・会社情報             オーケストレーター        ✅ Lambda 関数
   • 業務オペレーション          リサーチエージェント       ✅ OpenAPI スペック (MCP Gateway)
-  • ルール・ポリシー            FAQ ジェネレーター        ✅ AI プロンプト
-  • 会話シナリオ                Lambda ジェネレーター     ✅ Contact Flow
-  • トーン・言語                OpenAPI ジェネレーター    ✅ CDK インフラ
-  • 例外パターン                プロンプトジェネレーター    ✅ FAQ / ナレッジベース
-                              Contact Flow ジェネレーター
+  • ルール・ポリシー            FAQ ジェネレーター        ✅ AI プロンプト (Classic) または
+  • 会話シナリオ                Lambda ジェネレーター        ACXD アプリケーション (ACXD)
+  • トーン・言語                OpenAPI ジェネレーター    ✅ Contact Flow
+  • 例外パターン                プロンプトジェネレーター    ✅ CDK インフラ
+  • ランタイムターゲット:       ACXD Flow ジェネレーター  ✅ FAQ / ナレッジベース
+    Classic または ACXD         Contact Flow ジェネレーター
                               インフラジェネレーター
                               レビューエージェント
 ```
@@ -943,7 +1129,8 @@ Web 画面から AI エージェントとチャット形式でやり取りをし
 |---|---|---|
 | **Lambda 関数** | 業務ごとの Python ハンドラー（例: `process_return`、`track_order`） | Module 2: MCP Server Setup |
 | **OpenAPI スペック** | Amazon Connect MCP Gateway 連携用の API 定義 | Module 2: MCP Gateway |
-| **AI プロンプト** | 業種に合わせたペルソナ、トーン、業務ルール、ガードレール | Module 2: AI Agent Prompt |
+| **AI プロンプト** *(Classic)* | 業種に合わせたペルソナ、トーン、業務ルール、ガードレール | Module 2: AI Agent Prompt |
+| **ACXD アプリケーション** *(ACXD)* | `assets/acxd/` 配下の Agentic CX Designer のフロー、スロットタイプ、データリクエスト、ガードレール、ナレッジベース、コンテキスト変数と、それをデプロイする `deploy-manifest.json` + Node ランナー | Module 2: Agentic CX Designer |
 | **Contact Flow** | Amazon Connect のフロー設定とインタラクティブなビジュアル図 (JSON から描画) | Module 2: Flow Builder |
 | **CDK インフラ** | Lambda、API Gateway、DynamoDB を含む AWS CDK プロジェクト一式 | Module 2: Deploy |
 | **FAQ ドキュメント** | よくある問い合わせ向けのナレッジベース記事 | Module 3: Knowledge Base |
@@ -1154,13 +1341,14 @@ aws cognito-idp admin-create-user \
 │       ├── requirements.txt
 │       ├── healthcheck.py       # ALB ヘルスチェック
 │       └── src/
-│           ├── agents/              # 9 個の専門サブエージェント
+│           ├── agents/              # 10 個の専門サブエージェント
 │           │   ├── research_agent/      # Web 検索（AgentCore Gateway）
 │           │   ├── faq_generator/       # ナレッジベース用ドキュメント
 │           │   ├── lambda_generator/    # Python の Lambda ハンドラー
 │           │   ├── openapi_generator/   # OpenAPI 3.0 スペック（チャンク生成）
 │           │   ├── prompt_generator/    # AI エージェント用プロンプト
 │           │   ├── contact_flow_generator/  # Connect フロー (JSON から図を描画)
+│           │   ├── acxd_flow_generator/     # ACXD 会話フロー（ACXD ターゲット）
 │           │   ├── infrastructure_generator/ # CloudFormation YAML（チャンク生成）
 │           │   └── reviewer_agent/      # アセット間の整合性チェック
 │           ├── tools/                   # ユーティリティツール
@@ -1231,6 +1419,8 @@ aws cognito-idp admin-create-user \
 | ドキュメント | 内容 |
 |---|---|
 | [docs/agentic-ai.md](./docs/agentic-ai.md) | **マルチエージェントがお客様の要件を最後まで保ち続ける仕組み** — OperationSpec を契約と見立てる方式、決定論的なバリデーション、パッチモードでの修正 |
+| [docs/acxd-packaging.md](./docs/acxd-packaging.md) | **ACXD ランタイムターゲット** — バンドル契約、デプロイフェーズ、Agentic CX ブロック |
+| [docs/acxd-live-validation.md](./docs/acxd-live-validation.md) | 実際の Connect Customer アカウントへのデプロイで分かったこと — SDK の型からは見えないサービス契約と修正 |
 | [docs/architecture.md](./docs/architecture.md) | ランタイムのアーキテクチャ、WebSocket プロトコル、データフロー |
 | [docs/architecture-asset-flow.md](./docs/architecture-asset-flow.md) | アセットの読み書きとストリーミング経路、NFS と S3 への二重書き込み |
 | [docs/agents.md](./docs/agents.md) | 9 個のエージェントの役割、ツール、モデル設定、生成順 |

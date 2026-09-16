@@ -22,12 +22,14 @@ import {
   Paperclip,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import type { AttachedFile, Language } from '../types';
+import type { AttachedFile, Language, RuntimeTarget } from '../types';
 import {
   useBuilderStore,
   type StartMode,
   type SegmentType,
 } from '../stores/builderStore';
+import { RUNTIME_TARGETS, runtimeTargetForKey } from '../lib/runtimeTarget';
+import { sendRuntimeTarget } from '../hooks/useWebSocket';
 import { ModelSelector } from './ModelSelector';
 import { validateFile, MAX_FILES } from './ChatAttachmentButton';
 import { AttachmentPreview } from './AttachmentPreview';
@@ -52,6 +54,11 @@ const STRINGS: Record<Language, Record<string, string>> = {
     heading: 'What would you like to build?',
     full: 'Full Build',
     fullDesc: 'Run the full interview and generate the complete 6-asset bundle.',
+    runtimeTarget: 'Runtime target',
+    classicRuntime: 'Classic',
+    classicRuntimeDesc: 'Lex + AI agent + AgentCore Gateway',
+    acxdRuntime: 'ACXD',
+    acxdRuntimeDesc: 'Agentic CX Designer app behind the Agentic CX block',
     segment: 'Single Segment',
     segmentDesc: 'Generate just one Connect asset: Contact Flow, AI Prompt, or FAQ.',
     improve: 'Improve Existing',
@@ -71,6 +78,11 @@ const STRINGS: Record<Language, Record<string, string>> = {
     heading: '무엇을 만들고 싶으신가요?',
     full: '전체 빌드',
     fullDesc: '전체 인터뷰를 진행하고 6개 에셋 번들을 생성합니다.',
+    runtimeTarget: '런타임 대상',
+    classicRuntime: 'Classic',
+    classicRuntimeDesc: 'Lex + AI 에이전트 + AgentCore Gateway',
+    acxdRuntime: 'ACXD',
+    acxdRuntimeDesc: 'Agentic CX 블록 뒤의 Agentic CX Designer 앱',
     segment: '단일 세그먼트',
     segmentDesc: 'Connect 에셋 하나만 생성: Contact Flow, AI 프롬프트, FAQ.',
     improve: '기존 에셋 개선',
@@ -90,6 +102,11 @@ const STRINGS: Record<Language, Record<string, string>> = {
     heading: '何を構築しますか?',
     full: 'フルビルド',
     fullDesc: 'フルインタビューを実施し、6つのアセットバンドルを生成します。',
+    runtimeTarget: 'ランタイムターゲット',
+    classicRuntime: 'Classic',
+    classicRuntimeDesc: 'Lex + AI エージェント + AgentCore Gateway',
+    acxdRuntime: 'ACXD',
+    acxdRuntimeDesc: 'Agentic CX ブロックの背後にある Agentic CX Designer アプリ',
     segment: '単一セグメント',
     segmentDesc: 'Connectアセットを1つだけ生成: Contact Flow、AIプロンプト、FAQ。',
     improve: '既存を改善',
@@ -119,6 +136,11 @@ const MODE_CARDS: { id: StartMode; icon: typeof LayoutGrid; titleKey: string; de
   { id: 'improve', icon: Pencil, titleKey: 'improve', descKey: 'improveDesc' },
 ];
 
+const RUNTIME_TARGET_OPTIONS: Array<{ id: RuntimeTarget; titleKey: string; descKey: string }> = [
+  { id: 'classic', titleKey: 'classicRuntime', descKey: 'classicRuntimeDesc' },
+  { id: 'acxd', titleKey: 'acxdRuntime', descKey: 'acxdRuntimeDesc' },
+];
+
 // Text-asset extensions the start screen accepts in addition to images/docs.
 // These are NOT valid Bedrock attachment MIME types, so they're carried inline
 // as message text by ChatWindow — staged here only for preview/removal.
@@ -136,12 +158,39 @@ export function ChatEmptyState({ language, onStart }: ChatEmptyStateProps) {
   const setStartMode = useBuilderStore((s) => s.setStartMode);
   const segment = useBuilderStore((s) => s.segment);
   const setSegment = useBuilderStore((s) => s.setSegment);
+  // The card edits the PENDING choice for the next session. Until the user
+  // picks, it mirrors the active session's target; after that, backend echoes
+  // for the current session cannot flip it (live bug: ACXD reverted to Classic
+  // before Start because `connected`/`session_created` echoed the auto-created
+  // classic session).
+  const runtimeTarget = useBuilderStore((s) => s.pendingRuntimeTarget ?? s.runtimeTarget);
+  const setPendingRuntimeTarget = useBuilderStore((s) => s.setPendingRuntimeTarget);
+  // The session already exists (auto-created on open, seeded with the default)
+  // by the time the radio is touched, so the choice is pushed to the backend
+  // immediately; the pending value is the fallback the first message carries.
+  const setRuntimeTarget = useCallback(
+    (target: RuntimeTarget) => {
+      setPendingRuntimeTarget(target);
+      sendRuntimeTarget(target);
+    },
+    [setPendingRuntimeTarget],
+  );
 
   const [description, setDescription] = useState('');
   const [stagedFiles, setStagedFiles] = useState<AttachedFile[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleRuntimeTargetKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const nextTarget = runtimeTargetForKey(runtimeTarget, event.key);
+    if (!nextTarget) return;
+    event.preventDefault();
+    setRuntimeTarget(nextTarget);
+    event.currentTarget.parentElement
+      ?.querySelector<HTMLButtonElement>(`[data-runtime-target="${nextTarget}"]`)
+      ?.focus();
+  };
 
   // Stage files (no upload, no auto-start). Accepts images/docs (validateFile)
   // plus .json/.yaml/.yml (treated as 'document' for preview; inlined as text on Start).
@@ -251,20 +300,8 @@ export function ChatEmptyState({ language, onStart }: ChatEmptyStateProps) {
         {MODE_CARDS.map((card) => {
           const Icon = card.icon;
           const active = startMode === card.id;
-          return (
-            <button
-              key={card.id}
-              role="radio"
-              aria-checked={active}
-              onClick={() => setStartMode(card.id)}
-              className={cn(
-                'group flex flex-col items-start gap-2 p-4 rounded-xl border text-left transition-all',
-                'focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 dark:focus:ring-offset-surface-850',
-                active
-                  ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/30 dark:border-primary-500'
-                  : 'border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 hover:border-primary-300 dark:hover:border-primary-600'
-              )}
-            >
+          const cardBody = (
+            <>
               <div
                 className={cn(
                   'w-10 h-10 rounded-lg flex items-center justify-center transition-colors',
@@ -286,7 +323,88 @@ export function ChatEmptyState({ language, onStart }: ChatEmptyStateProps) {
               <p className="text-xs text-surface-500 dark:text-surface-400 leading-relaxed">
                 {t[card.descKey]}
               </p>
-            </button>
+            </>
+          );
+
+          if (card.id !== 'full') {
+            return (
+              <button
+                key={card.id}
+                role="radio"
+                aria-checked={active}
+                onClick={() => setStartMode(card.id)}
+                className={cn(
+                  'group flex flex-col items-start gap-2 p-4 rounded-xl border text-left transition-all',
+                  'focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 dark:focus:ring-offset-surface-850',
+                  active
+                    ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/30 dark:border-primary-500'
+                    : 'border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 hover:border-primary-300 dark:hover:border-primary-600'
+                )}
+              >
+                {cardBody}
+              </button>
+            );
+          }
+
+          return (
+            <div
+              key={card.id}
+              className={cn(
+                'group flex flex-col rounded-xl border text-left transition-all overflow-hidden',
+                active
+                  ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/30 dark:border-primary-500'
+                  : 'border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 hover:border-primary-300 dark:hover:border-primary-600'
+              )}
+            >
+              <button
+                role="radio"
+                aria-checked={active}
+                onClick={() => setStartMode('full')}
+                className="flex flex-col items-start gap-2 p-4 text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-primary-500"
+              >
+                {cardBody}
+              </button>
+              <div className="mx-4 mb-4 pt-3 border-t border-primary-100 dark:border-primary-800/50">
+                <div role="radiogroup" aria-label={t.runtimeTarget} className="grid grid-cols-1 gap-1.5">
+                  {RUNTIME_TARGETS.map((target) => {
+                    const option = RUNTIME_TARGET_OPTIONS.find((item) => item.id === target)!;
+                    const selected = runtimeTarget === target;
+                    return (
+                      <button
+                        key={target}
+                        type="button"
+                        role="radio"
+                        data-runtime-target={target}
+                        aria-checked={selected}
+                        aria-label={`${t[option.titleKey]}: ${t[option.descKey]}`}
+                        tabIndex={selected ? 0 : -1}
+                        disabled={!active}
+                        onClick={() => setRuntimeTarget(target)}
+                        onKeyDown={handleRuntimeTargetKeyDown}
+                        className={cn(
+                          'flex items-start gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors',
+                          'focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-1 dark:focus:ring-offset-surface-850',
+                          selected
+                            ? 'border-primary-500 bg-primary-100/80 dark:bg-primary-900/45 text-primary-700 dark:text-primary-200'
+                            : 'border-surface-200 dark:border-surface-600 text-surface-600 dark:text-surface-300',
+                          active
+                            ? 'hover:border-primary-300 dark:hover:border-primary-600'
+                            : 'cursor-not-allowed opacity-50'
+                        )}
+                      >
+                        <span className="mt-0.5 h-3.5 w-3.5 rounded-full border-2 border-current flex items-center justify-center" aria-hidden="true">
+                          {selected && <span className="h-1.5 w-1.5 rounded-full bg-current" />}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-xs font-semibold">{t[option.titleKey]}</span>
+                          <span className="mt-0.5 block text-[11px] leading-snug opacity-80">{t[option.descKey]}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
           );
         })}
       </div>

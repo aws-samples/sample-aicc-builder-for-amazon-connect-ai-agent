@@ -19,20 +19,24 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Core assets whose completion signals transition interview → generation → review
-GENERATION_ASSETS = {"cdk", "lambda", "openapi", "prompt", "contact_flow"}
-
-# Canonical full asset set (everything the unscoped pipeline can produce).
-# A scope equal to this set (or empty) means "full build".
-FULL_ASSET_SET = GENERATION_ASSETS | {"knowledge_base"}
+# Core assets whose completion signals transition interview → generation → review.
+# ``FULL_ASSET_SET`` remains the Classic compatibility export; ACXD uses the
+# target-aware helpers below so its fourth generation step is ``acxd_application``
+# rather than ``prompt``.
+CLASSIC_GENERATION_ASSETS = {"cdk", "lambda", "openapi", "prompt", "contact_flow"}
+ACXD_GENERATION_ASSETS = {"cdk", "lambda", "openapi", "acxd_application", "contact_flow"}
+GENERATION_ASSETS = CLASSIC_GENERATION_ASSETS | ACXD_GENERATION_ASSETS
+FULL_ASSET_SET = CLASSIC_GENERATION_ASSETS | {"knowledge_base"}
+ACXD_FULL_ASSET_SET = ACXD_GENERATION_ASSETS | {"knowledge_base"}
 
 # Scoped (single-segment) generation ids the frontend may request.
-VALID_SCOPE_IDS = {"contact_flow", "prompt", "faq"}
+VALID_SCOPE_IDS = {"contact_flow", "prompt", "acxd_application", "faq"}
 
 # Maps a requested scope id to the progress asset id it produces.
 _SCOPE_TO_ASSET = {
     "contact_flow": "contact_flow",
     "prompt": "prompt",
+    "acxd_application": "acxd_application",
     "faq": "knowledge_base",
 }
 
@@ -44,6 +48,7 @@ _TOOL_TO_ASSET: Dict[str, str] = {
     "lambda_generator_agent": "lambda",
     "openapi_generator_agent": "openapi",
     "prompt_generator_agent": "prompt",
+    "generate_acxd_application": "acxd_application",
     "contact_flow_generator_agent": "contact_flow",
     "faq_generator_agent": "knowledge_base",
     "reviewer_agent": "review",
@@ -54,11 +59,37 @@ _ASSET_LABELS: Dict[str, str] = {
     "lambda": "Lambda Functions",
     "openapi": "OpenAPI Spec",
     "prompt": "Prompt Templates",
+    "acxd_application": "ACXD Application",
     "contact_flow": "Contact Flow",
     "cdk": "CDK Infrastructure",
     "knowledge_base": "Knowledge Base / FAQ",
     "review": "Review",
 }
+
+
+def _is_acxd_target(session_id: Optional[str]) -> bool:
+    """Resolve the persisted runtime target without creating an import cycle."""
+    try:
+        from tools.acxd_flow_spec import is_acxd_target
+        return is_acxd_target(session_id)
+    except Exception:
+        return False
+
+
+def _generation_assets_for_session(session_id: Optional[str]) -> set[str]:
+    return ACXD_GENERATION_ASSETS if _is_acxd_target(session_id) else CLASSIC_GENERATION_ASSETS
+
+
+def get_full_asset_set(session_id: Optional[str] = None) -> set[str]:
+    """Return the full produced-asset set for a session's fixed runtime target."""
+    return set(ACXD_FULL_ASSET_SET if _is_acxd_target(session_id) else FULL_ASSET_SET)
+
+
+def _frontend_asset_id(session_id: str, asset_id: str) -> str:
+    """Render legacy prompt progress as ACXD Application for an ACXD target."""
+    if asset_id == "prompt" and _is_acxd_target(session_id):
+        return "acxd_application"
+    return asset_id
 
 
 def _progress_path(session_id: str) -> Path:
@@ -75,6 +106,18 @@ def _read_state(session_id: str) -> Dict[str, Any]:
                 return json.load(f)
     except Exception as e:
         logger.warning(f"[generation_progress] failed to read state: {e}")
+    # The NFS file was not visible to a task that started after it was written
+    # (live: a redeploy mid-generation dropped a session back to 'interview' and
+    # the model then narrated tool calls it could not make). The S3 workspace
+    # copy is the durable one.
+    try:
+        from tools.project_workspace import ProjectWorkspace, get_workspace_for
+        ws = get_workspace_for(session_id) or ProjectWorkspace(session_id)
+        data = ws._load_json(["generation_progress.json"])
+        if isinstance(data, dict) and data.get("assets"):
+            return data
+    except Exception as e:  # pragma: no cover - storage outage
+        logger.debug(f"[generation_progress] workspace read skipped: {e}")
     return {"assets": {}, "events": []}
 
 
@@ -88,6 +131,39 @@ def _write_state(session_id: str, state: Dict[str, Any]) -> None:
         tmp.rename(path)
     except Exception as e:
         logger.warning(f"[generation_progress] failed to write state: {e}")
+    try:
+        from tools.project_workspace import ProjectWorkspace, get_workspace_for
+        ws = get_workspace_for(session_id) or ProjectWorkspace(session_id)
+        ws._save_json(["generation_progress.json"], state)
+    except Exception as e:  # pragma: no cover - storage outage
+        logger.debug(f"[generation_progress] workspace mirror skipped: {e}")
+
+
+#: S3 asset-type prefixes that prove generation has started, keyed by the
+#: progress asset id they imply. Used only when the progress state is absent.
+_ASSET_TYPE_TO_PROGRESS = {
+    "lambda": "lambda", "openapi": "openapi", "prompt": "prompt",
+    "contact_flow": "contact_flow", "cdk": "cdk", "cloudformation": "cdk",
+    "infrastructure": "cdk", "acxd_flow": "acxd_application",
+    "acxd_application": "acxd_application", "faq": "knowledge_base",
+}
+
+
+def _infer_assets_from_storage(session_id: str) -> Dict[str, Dict[str, str]]:
+    """Rebuild a minimal completion map from the session's stored assets."""
+    inferred: Dict[str, Dict[str, str]] = {}
+    try:
+        from tools.s3_asset_storage import list_session_assets
+        for key in list_session_assets(session_id) or []:
+            parts = str(key).split("/")
+            # assets/{sid}/{asset_type}/...
+            asset_type = parts[2] if len(parts) > 3 and parts[0] == "assets" else None
+            progress_id = _ASSET_TYPE_TO_PROGRESS.get(asset_type or "")
+            if progress_id and progress_id not in inferred:
+                inferred[progress_id] = {"status": "completed", "inferred": True}
+    except Exception as e:  # pragma: no cover - storage outage
+        logger.debug(f"[generation_progress] asset inference skipped: {e}")
+    return inferred
 
 
 # Completions are recorded on TWO paths: inline per toolResult during
@@ -374,6 +450,58 @@ def update_phase(session_id: str, new_phase: str, trigger: str = "") -> tuple:
     return old_phase, True
 
 
+def mark_handoff_processed(session_id: str) -> None:
+    """Persist that the interview → generation context boundary already ran.
+
+    The boundary clears the conversation and re-bootstraps the agent for
+    generation, so it must run exactly once per session. Keeping the marker on
+    NFS (not only in the process) means a redeploy or task replacement cannot
+    make the next turn run it again.
+    """
+    state = _read_state(session_id)
+    if state.get("handoff_processed"):
+        return
+    state["handoff_processed"] = True
+    state["handoff_processed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    _write_state(session_id, state)
+
+
+def is_handoff_processed(session_id: str) -> bool:
+    """True once the interview → generation boundary ran for this session.
+
+    Sessions from before the marker existed are covered by their progress:
+    any recorded asset means generation already began, i.e. the boundary was
+    passed (a boundary re-run there would wipe the context, as seen when a
+    review-phase session was pushed back to generation after a deploy).
+    """
+    state = _read_state(session_id)
+    if state.get("handoff_processed") or state.get("assets"):
+        return True
+    # Progress state absent or unreadable (fresh task, NFS lag): fall back to
+    # the durable traces the boundary leaves behind — the archived interview
+    # history it writes, and any asset generation already stored.
+    archive = _progress_path(session_id).parent / "interview_history.json"
+    try:
+        if archive.exists():
+            return True
+    except Exception:
+        pass
+    return bool(_infer_assets_from_storage(session_id))
+
+
+def interview_handoff_pending(session_id: str, current_phase: str) -> bool:
+    """Should this turn run the interview → generation context boundary?
+
+    Only at the boundary itself: the detected phase is 'generation' (the
+    handoff marker exists and nothing has been generated yet) and the boundary
+    has not been processed before. 'review' / 'post_generation' sessions never
+    qualify, whatever the process remembers.
+    """
+    if current_phase != "generation":
+        return False
+    return not is_handoff_processed(session_id)
+
+
 def get_selected_model(session_id: str) -> Optional[str]:
     """Read the persisted Bedrock model id for this session (None if unset)."""
     state = _read_state(session_id)
@@ -410,23 +538,24 @@ def set_selected_effort(session_id: str, effort: Optional[str]) -> None:
 
 
 def get_generation_scope(session_id: str) -> List[str]:
-    """Return the requested generation scope as asset ids.
+    """Return requested produced-asset ids for this session's runtime target.
 
-    Default (no scope set, or "full") → the canonical full asset set.
-    Scoped runs map the requested ids ({contact_flow, prompt, faq}) to their
-    produced asset ids ({contact_flow, prompt, knowledge_base}).
+    The start-screen scope is stored in request-id space. A full ACXD build maps
+    its former prompt position to ``acxd_application`` so phase detection and the
+    frontend progress event use the same asset id.
     """
     state = _read_state(session_id)
     raw = state.get("generation_scope")
     if not raw:
-        return sorted(FULL_ASSET_SET)
+        return sorted(get_full_asset_set(session_id))
     assets: List[str] = []
-    for sid in raw:
-        mapped = _SCOPE_TO_ASSET.get(sid)
+    for scope_id in raw:
+        mapped = _SCOPE_TO_ASSET.get(scope_id)
+        if mapped == "prompt" and _is_acxd_target(session_id):
+            mapped = "acxd_application"
         if mapped and mapped not in assets:
             assets.append(mapped)
-    return assets or sorted(FULL_ASSET_SET)
-
+    return assets or sorted(get_full_asset_set(session_id))
 
 def set_generation_scope(session_id: str, scope: List[str]) -> None:
     """Persist the requested generation scope (list of {contact_flow, prompt, faq}).
@@ -481,17 +610,28 @@ def detect_phase(session_id: str) -> str:
     # Scope-derived expectations. For an unscoped (full) run this resolves to the
     # canonical full asset set, preserving legacy behavior exactly.
     scope = set(get_generation_scope(session_id))
-    required_core = {a for a in scope if a in GENERATION_ASSETS}
+    generation_assets = _generation_assets_for_session(session_id)
+    required_core = {a for a in scope if a in generation_assets}
     # Non-core scoped assets (e.g. faq → knowledge_base) gate the terminal rule
-    # below when the scope produces nothing in GENERATION_ASSETS.
-    scoped_non_core = {a for a in scope if a not in GENERATION_ASSETS}
+    # below when the scope produces nothing in the active target's core assets.
+    scoped_non_core = {a for a in scope if a not in generation_assets}
 
     if not assets:
         # Check if interview was completed (handoff marker exists)
         from tools.interview_completion import check_interview_handoff
         if check_interview_handoff(session_id):
             return "generation"
-        return state.get("phase", "interview")
+        # No progress state visible (fresh task after a redeploy, NFS lag): the
+        # stored assets are the ground truth for whether generation began.
+        inferred = _infer_assets_from_storage(session_id)
+        if inferred:
+            logger.info(
+                f"[generation_progress] {session_id}: progress state absent, "
+                f"inferred {sorted(inferred)} from stored assets"
+            )
+            assets = inferred
+        else:
+            return state.get("phase", "interview")
 
     # Check which core assets are completed
     core_completed = set()
@@ -501,7 +641,7 @@ def detect_phase(session_id: str) -> str:
 
     for asset_id, info in assets.items():
         status = info.get("status", "")
-        if asset_id in GENERATION_ASSETS and status in ("completed", "fixed", "reviewed"):
+        if asset_id in generation_assets and status in ("completed", "fixed", "reviewed"):
             core_completed.add(asset_id)
         elif status in ("completed", "fixed", "reviewed"):
             non_core_completed.add(asset_id)
@@ -553,13 +693,14 @@ def get_frontend_progress_state(session_id: str) -> Dict[str, Any]:
     assets = state.get("assets", {})
     result: Dict[str, Any] = {}
     for asset_id, info in assets.items():
+        frontend_id = _frontend_asset_id(session_id, asset_id)
         nfs_status = info.get("status", "")
         if nfs_status in ("completed", "reviewed", "fixed"):
-            result[asset_id] = {"status": "completed", "progress": 100}
+            result[frontend_id] = {"status": "completed", "progress": 100}
         elif nfs_status in ("in_progress", "fix_in_progress"):
-            result[asset_id] = {"status": "in_progress", "progress": 50}
+            result[frontend_id] = {"status": "in_progress", "progress": 50}
         elif nfs_status == "error":
-            result[asset_id] = {"status": "pending", "progress": 0}
+            result[frontend_id] = {"status": "pending", "progress": 0}
         else:
-            result[asset_id] = {"status": "in_progress", "progress": 10}
+            result[frontend_id] = {"status": "in_progress", "progress": 10}
     return result

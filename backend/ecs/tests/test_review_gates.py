@@ -470,3 +470,221 @@ def test_qsession_env_complete_is_untouched():
         'CONNECT_INSTANCE_ID: ""\n',
         'CONNECT_INSTANCE_ID: ""\n          AI_ASSISTANT_ID: ""\n')
     assert _ensure_qsession_env_vars(complete) == complete
+
+
+def _sample_rows_gate(monkeypatch, tmp_path, template: str):
+    """Run the consistency gate with one infrastructure template and a spec that
+    carries customer-supplied sample rows."""
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
+    import tools.validate_consistency as vc
+    from tools.spec_manager import InfrastructureSpec, DynamoDbConfig
+
+    ispec = InfrastructureSpec.model_construct(
+        project_name="daon", db_type="dynamodb", region="ap-northeast-2",
+        dynamodb_config=DynamoDbConfig.model_construct(
+            tables=[{"name": "subscribers", "partition_key": "phoneNumber"}],
+            sample_rows={"subscribers": [
+                {"phoneNumber": "010-2222-3333", "customerName": "홍길동",
+                 "birthDate": "19900512", "planCode": "STD15", "usedGb": 12.4},
+            ]}),
+    )
+    import tools.spec_manager as sm
+    from tools.spec_manager import OperationSpec
+    op = OperationSpec.model_construct(operation_id="get_plan_info", input_fields=[], output_fields=[], tools=[])
+    monkeypatch.setattr(sm, "get_infrastructure_spec", lambda: ispec)
+    monkeypatch.setattr(vc, "get_all_specs", lambda: {"get_plan_info": op})
+    monkeypatch.setattr(vc, "get_all_tools", lambda: [])
+    monkeypatch.setattr(vc, "list_session_assets",
+                        lambda sid: ["assets/session-x/infrastructure/daon/infrastructure.yaml"])
+    monkeypatch.setattr(vc, "get_asset_from_s3", lambda key: template)
+    return vc.validate_parameter_consistency("session-x")
+
+
+def test_sample_rows_seeded_verbatim_pass(monkeypatch, tmp_path):
+    template = ("Resources:\n  Seeder:\n    Properties:\n      Code: |\n"
+                "        rows = [{'phoneNumber': '010-2222-3333', 'customerName': '홍길동',"
+                " 'birthDate': '19900512', 'planCode': 'STD15', 'usedGb': 12.4}]\n")
+    result = _sample_rows_gate(monkeypatch, tmp_path, template)
+    assert [m for m in result["mismatches"] if m["asset_type"] == "infrastructure"] == []
+
+
+def test_sample_rows_altered_by_the_seeder_is_a_blocking_mismatch(monkeypatch, tmp_path):
+    """Live (Daon, 2026-09-13): the requirements said 홍길동 / 19900512; the seeder
+    shipped 19880312 and the identity check in every test dialog failed."""
+    template = ("Resources:\n  Seeder:\n    Properties:\n      Code: |\n"
+                "        rows = [{'phoneNumber': '010-2222-3333', 'customerName': '홍길동',"
+                " 'birthDate': '19880312', 'planCode': 'STD15', 'usedGb': 12.4}]\n")
+    result = _sample_rows_gate(monkeypatch, tmp_path, template)
+    hits = [m for m in result["mismatches"] if m["asset_type"] == "infrastructure"]
+    assert len(hits) == 1
+    assert "birthDate='19900512'" in hits[0]["issue"]
+    assert hits[0]["operation_id"] == "subscribers"
+
+
+def test_retrieve_guide_is_added_once_after_the_tool_list():
+    """Live (Daon, 2026-09-13): the generated prompt had guides for every
+    operation tool, Escalate and Complete but none for RETRIEVE, and the agent
+    answered a FAQ the knowledge base held with "I cannot tell you precisely"."""
+    from tools.asset_linters import ensure_retrieve_tool_guide
+
+    prompt = (
+        "system_prompt: |\n"
+        "  <tool_instructions>\n"
+        "  사용 가능한 도구:\n"
+        "  {{$.toolConfigurationList}}\n"
+        "\n"
+        "  [get_plan_info 도구 사용 가이드 - 요금제 조회]\n"
+        "  고객이 자신의 요금제를 문의할 때 사용합니다.\n"
+        "  </tool_instructions>\n"
+    )
+    fixed, fixes = ensure_retrieve_tool_guide(prompt, "ko")
+    assert fixes and "RETRIEVE" in fixes[0]
+    lines = fixed.split("\n")
+    i = next(k for k, l in enumerate(lines) if "toolConfigurationList" in l)
+    assert lines[i + 2].startswith("  [RETRIEVE 도구 사용 가이드")
+    assert "  [get_plan_info 도구 사용 가이드" in fixed
+    again, fixes2 = ensure_retrieve_tool_guide(fixed, "ko")
+    assert again == fixed and fixes2 == []
+    # a prompt that already guides RETRIEVE is left alone
+    ok_prompt = prompt.replace("[get_plan_info", "[RETRIEVE 도구 사용 가이드 - 지식 검색]\n  검색하세요.\n  [get_plan_info")
+    assert ensure_retrieve_tool_guide(ok_prompt, "ko") == (ok_prompt, [])
+    # no tool block → untouched
+    assert ensure_retrieve_tool_guide("system_prompt: |\n  hello\n", "en") == ("system_prompt: |\n  hello\n", [])
+
+
+def test_cfn_gsi_names_reads_every_table_in_the_template():
+    """Live (Hanbit, 2026-09-13): D1-1 knew only the schema registry's GSIs and
+    blocked a Lambda querying PatientsTable's 'phone-birth-index', which the
+    CloudFormation template (the artifact that deploys) defined."""
+    from tools.validate_consistency import _cfn_gsi_names
+
+    template = """
+Resources:
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-patients"
+      GlobalSecondaryIndexes:
+        - IndexName: phone-birth-index
+          KeySchema: [{AttributeName: phone, KeyType: HASH}]
+  AppointmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hanbit-appointments
+      GlobalSecondaryIndexes:
+        - IndexName: phone-index
+        - IndexName: dept-date-index
+  Fn:
+    Type: AWS::Lambda::Function
+"""
+    names = _cfn_gsi_names(template)
+    assert names["hanbit-appointments"] == {"phone-index", "dept-date-index"}
+    assert {"phone-birth-index"} in names.values()
+    assert _cfn_gsi_names(None) == {} and _cfn_gsi_names("not: [valid") == {}
+
+
+def test_ai_prompt_unknown_variable_is_rewritten_to_a_custom_attribute():
+    """Live (Hanul, 2026-09-13): `{{$.channel}}` made CreateAIPrompt reject the
+    prompt ('Prompt contains unknown variable') and the deploy finished with no
+    AI agent. Known variables and $.Custom.* pass; a bare unknown name becomes a
+    custom attribute; a non-identifier loses its braces."""
+    from tools.asset_linters import lint_ai_prompt
+
+    text = ("채널은 {{$.channel}}입니다. 도구: {{$.toolConfigurationList}} "
+            "이름: {{$.Custom.firstName}} 이상: {{$.foo.bar}}")
+    result = lint_ai_prompt(text)
+    assert "{{$.Custom.channel}}" in result["fixed_text"]
+    assert "{{$.channel}}" not in result["fixed_text"]
+    assert "{{$.toolConfigurationList}}" in result["fixed_text"]
+    assert "{{$.Custom.firstName}}" in result["fixed_text"]
+    assert "$.foo.bar" in result["fixed_text"] and "{{$.foo.bar}}" not in result["fixed_text"]
+    assert result["unknown_variables"] == ["channel", "foo.bar"]
+    assert any("Custom.channel" in w for w in result["warnings"])
+    clean = lint_ai_prompt("{{$.toolConfigurationList}} and {{$.Custom.x}}")
+    assert clean["fixes_applied"] == [] and clean["unknown_variables"] == []
+
+
+def test_cors_headers_mapped_by_integration_are_declared_in_method_responses():
+    """Live (GreenCart, 2026-09-13): the model declared
+    'Access-Control-All-Methods' (typo) while mapping 'Access-Control-Allow-Methods';
+    API Gateway rejected the OPTIONS method and the whole stack rolled back."""
+    from tools.merge_infrastructure import _fix_cors_response_headers
+
+    tpl = """Resources:
+  RequestReturnOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-All-Methods: true
+  GetOrderStatus:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: GET
+      Integration:
+        Type: AWS_PROXY
+      MethodResponses:
+        - StatusCode: 200
+  Bucket:
+    Type: AWS::S3::Bucket
+"""
+    out = _fix_cors_response_headers(tpl)
+    assert "method.response.header.Access-Control-All-Methods" not in out
+    assert out.count("method.response.header.Access-Control-Allow-Methods: true") == 1
+    assert out.count("method.response.header.Access-Control-Allow-Origin: true") == 1
+    assert _fix_cors_response_headers(out) == out          # idempotent
+    assert "Bucket:\n    Type: AWS::S3::Bucket" in out       # untouched neighbours
+
+
+def test_template_under_cloudformation_folder_feeds_the_template_checks(monkeypatch, tmp_path):
+    """Live (Hanbit, 2026-09-14): the generator stores the template under
+    cloudformation/<project>/infrastructure.yaml; the gate only read
+    infrastructure/…, so the template-based checks (IAM, GSI union) silently
+    never ran and a correct 'phone-birth-index' query stayed blocked."""
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
+    import tools.validate_consistency as vc
+    from tools.spec_manager import OperationSpec
+
+    spec = OperationSpec(operation_id="book_appointment", input_fields=[], output_fields=[])
+    monkeypatch.setattr(vc, "get_all_specs", lambda: {"book_appointment": spec})
+    monkeypatch.setattr(vc, "get_all_tools", lambda: [])
+    template = """
+Resources:
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: patients
+      GlobalSecondaryIndexes:
+        - IndexName: phone-birth-index
+  AppointmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: appointments
+      GlobalSecondaryIndexes:
+        - IndexName: phone-index
+"""
+    handler = "import boto3\ndef lambda_handler(e, c):\n    t.query(IndexName='phone-birth-index')\n"
+    assets = {
+        "sessions/s1/cloudformation/hanbit/infrastructure.yaml": template,
+        "sessions/s1/lambda/book_appointment/handler.py": handler,
+    }
+    monkeypatch.setattr(vc, "list_session_assets", lambda sid: list(assets.keys()))
+    monkeypatch.setattr(vc, "get_asset_from_s3", lambda key: assets.get(key))
+    # a registry that only knows the appointments table's GSI (the live drift)
+    schema = {"tables": {"appointments": {"gsi": [{"index_name": "phone-index"}]}}}
+    import agents.infrastructure_generator.agent as infra_agent
+    monkeypatch.setattr(infra_agent, "get_infrastructure_schema", lambda: __import__("json").dumps(schema))
+    result = vc.validate_parameter_consistency("s1")
+    gsi_issues = [m for m in result["mismatches"] if m["asset_type"] == "lambda_gsi"]
+    assert gsi_issues == [], gsi_issues

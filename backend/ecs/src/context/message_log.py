@@ -34,18 +34,35 @@ class MessageLog:
     def __init__(self, log_dir: Path):
         self._log_dir = log_dir
         self._log_file = log_dir / "current.jsonl"
+        # Identifies the invocation the log belongs to. Sequence numbers restart
+        # at 1 on every clear(), so a client's "last seen seq" is only meaningful
+        # together with the turn it was seen in.
+        self._turn_file = log_dir / "current.turn"
+        self._turn_id: Optional[str] = None
         self._seq = 0
         self._lock = threading.Lock()
+
+    @property
+    def turn_id(self) -> str:
+        """Id of the invocation currently in the log ('' when nothing was logged yet)."""
+        if self._turn_id is None:
+            try:
+                self._turn_id = self._turn_file.read_text(encoding="utf-8").strip()
+            except Exception:
+                self._turn_id = ""
+        return self._turn_id
 
     def clear(self) -> None:
         """Reset the log for a new agent invocation."""
         with self._lock:
             self._seq = 0
+            self._turn_id = f"{time.time_ns()}"
             try:
                 os.makedirs(self._log_dir, exist_ok=True)
                 # Truncate the file
                 with open(self._log_file, "w", encoding="utf-8") as f:
                     pass  # empty file
+                self._turn_file.write_text(self._turn_id, encoding="utf-8")
             except Exception as e:
                 logger.warning(f"[message_log] clear failed: {e}")
 
@@ -67,8 +84,15 @@ class MessageLog:
             logger.warning(f"[message_log] append failed (seq={seq}): {e}")
         return seq
 
-    def read_after(self, after_seq: int = 0) -> List[Dict[str, Any]]:
-        """Read all entries with seq > after_seq."""
+    def read_after(self, after_seq: int = 0, turn_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Read all entries with seq > after_seq.
+
+        ``turn_id`` is the turn the caller saw ``after_seq`` in. When it is not
+        the turn currently in the log, ``after_seq`` is meaningless (numbering
+        restarted) and the whole log is returned instead.
+        """
+        if turn_id is not None and turn_id != self.turn_id:
+            after_seq = 0
         entries: List[Dict[str, Any]] = []
         try:
             if not self._log_file.exists():
