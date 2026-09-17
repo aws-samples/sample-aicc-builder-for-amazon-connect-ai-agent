@@ -596,10 +596,22 @@ def _check_runtime_contract(bundle: dict, out: list, spec: Optional[dict] = None
         (fid for fid in sorted(known_targets) if fid.lower().startswith("escalation")),
         "EscalationFlow")
 
+    # The plan's data_request steps per flow, in order — D3p checks that the
+    # flow's data_request nodes call the requests the interview confirmed.
+    request_steps_by_flow: dict[str, list[str]] = {}
+    for plan in (spec or {}).get("flows") or []:
+        if not isinstance(plan, dict) or not plan.get("flow_id"):
+            continue
+        request_steps_by_flow[str(plan["flow_id"])] = [
+            str(step["data_request_id"]) for step in plan.get("steps") or []
+            if isinstance(step, dict) and step.get("node_type") == "data_request"
+            and step.get("data_request_id")]
+
     for index, flow in enumerate(flows):
         flow_id = str(flow.get("flowId") or "")
         for problem in runtime_contract_violations(
             flow,
+            request_steps=request_steps_by_flow.get(flow_id) or None,
             role=roles.get(flow_id, "operation"),
             slot_type_ids=set(slot_type_docs),
             slot_type_docs=slot_type_docs,
