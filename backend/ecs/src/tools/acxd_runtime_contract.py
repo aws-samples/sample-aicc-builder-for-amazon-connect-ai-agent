@@ -2407,7 +2407,16 @@ class _RuntimeContract:
                     body = "죄송합니다. 요청을 처리하지 못했습니다."
                 apology_id = _derived_id("4f1a00a5", f"{self.flow_id}#{node_id}#refused")
                 end_id = next((nid for nid, _ in self.nodes_of_type("end")), None)
-                next_id = self._follow_up_redirect(end_id) if end_id else self._agent_request_redirect()
+                # After the refusal, go where the plan sends a failed call (the
+                # node's failure edge — live: "미조회 시 → 상담원", "동의 거부 시 →
+                # 상담원"); a flow without one offers further help instead.
+                failure_target = next((e.get("nodeId") for e in _edges(node)
+                                       if _has_status(e, "failure") and isinstance(e.get("nodeId"), str)
+                                       and e.get("nodeId") in self.nodes), None)
+                if failure_target:
+                    next_id = failure_target
+                else:
+                    next_id = self._follow_up_redirect(end_id) if end_id else self._agent_request_redirect()
                 self.nodes[apology_id] = {
                     "nodeId": apology_id, "type": "basic",
                     "messages": [{"type": "text", "body": body}],
@@ -2426,7 +2435,8 @@ class _RuntimeContract:
                 self.change(
                     f"{_label(node_id, node)} edge {edge.get('name')!r}: {request_id}.{success} is tested "
                     f"before the result is announced; success false speaks "
-                    f"{'the API message' if message_field else 'an apology'} then offers help (D7)")
+                    f"{'the API message' if message_field else 'an apology'} then "
+                    f"{'follows the failure edge' if failure_target else 'offers help'} (D7)")
 
     def _tests_success_flag(self, start_id: str, request_id: str) -> bool:
         """True when a choice on ``<request>.success`` sits between ``start_id``

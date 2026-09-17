@@ -1930,7 +1930,7 @@ def test_d7_tests_the_success_flag_before_announcing_a_result():
     assert accepted["conditions"][0]["left"] == {"type": "variable", "name": "createCleaningReservation.success"}
     apology = out["nodes"][refused["nodeId"]]
     assert apology["messages"][0]["body"] == "{createCleaningReservation.message:NLX.Variable}"
-    assert out["nodes"][apology["childNodes"][0]["nodeId"]]["type"] == "redirect"
+    assert apology["childNodes"][0]["nodeId"] == "esc"      # where the plan sends a failed call
     assert any("(D7)" in n for n in notes)
     # idempotent
     _, again = apply_runtime_contract(out, **context("CreateCleaningReservation"))
