@@ -397,17 +397,22 @@ def test_guardrails_generalise_literal_regex_and_localise_the_modify_message():
     assert by_name["explicit"]["detection"]["pattern"] == r"^\d{10}$"      # a real regex is kept
     assert "never violate" in by_name["medical"]["detection"]["prompt"]
     # Live: derived OUTPUT rules replaced the greeting / redacted the bot's own
-    # format hint. They stay advisory; an explicit interviewer regex keeps mask.
+    # format hint. A judged output rule stays advisory; a PII mask planned on
+    # output runs on INPUT instead (2026-09-17: the same regex as an input mask
+    # left the phone slot capture intact) and keeps masking there.
     assert by_name["medical"]["enforcement"] == {"action": "flag"}
-    assert by_name["pii"]["enforcement"] == {"action": "flag"}
+    docs_by_name = {d["name"]: d for d in docs}
+    assert docs_by_name["pii"]["trigger"] == "input"
+    assert by_name["pii"]["enforcement"]["action"] == "mask"
+    assert docs_by_name["explicit_mask"]["trigger"] == "input"
     assert by_name["explicit_mask"]["enforcement"]["action"] == "mask"
     # Live (2026-09-16): the reviewer read that flag as a defect and the action
     # was hand-edited back to modify without a message — the service rejected
     # it at deploy. The reason now travels on the rule, and the schema refuses
     # the bare modify the edit produced.
     from tools.validate_acxd_flow import validate_acxd_asset
-    for name in ("medical", "pii"):
-        assert by_name[name]["description"].startswith("AICC: derived output rule kept as flag")
+    assert by_name["medical"]["description"].startswith("AICC: derived output rule kept as flag")
+    assert "description" not in by_name["pii"]   # an input mask is the interview's rule, not a downgrade
     for doc in docs:
         assert validate_acxd_asset("guardrail", doc) == []
     bare = {"name": "medical", "trigger": "output",
@@ -440,3 +445,29 @@ def test_guardrail_names_are_project_scoped_and_the_application_references_them(
     app = build_application(spec)
     refs = {g["guardrailId"] for g in app["settings"]["guardrails"]}
     assert refs == {f"{{GUARDRAIL:{n}}}" for n in names}
+
+
+def test_llm_judged_input_route_is_kept_advisory_but_keyword_route_stays():
+    """Live (2026-09-17): an llmJudge input rule derived from the escalation
+    policy fired on a customer describing a cleaning order and routed the call
+    to the escalation flow before the journey collected anything. Judged input
+    routes become flag; a keyword route (deterministic, the interview's words)
+    keeps routing."""
+    import copy
+    spec = copy.deepcopy(SPEC)
+    spec["guardrails"] = [
+        {"name": "Scope", "trigger": "input", "policy": "환불·클레임 요청은 상담원 연결로 라우팅",
+         "detection": "llm_judge", "action": "route", "route_flow_id": "EscalationFlow"},
+        {"name": "Abuse Filter", "trigger": "input", "policy": "abusive language",
+         "detection": "auto", "examples": ["idiot", "stupid"], "action": "route",
+         "route_flow_id": "EscalationFlow"},
+    ]
+    docs, problems = build_guardrails(spec)
+    assert problems == []
+    by_name = {d["name"]: d for d in docs}
+    scope = by_name["Scope"]["rules"][0]
+    assert scope["detection"]["method"] == "llmJudge"
+    assert scope["enforcement"] == {"action": "flag"}
+    assert "hijacks" in scope["description"]
+    abuse = by_name["Abuse Filter"]["rules"][0]
+    assert abuse["enforcement"] == {"action": "route", "behavior": {"flowId": "EscalationFlow"}}

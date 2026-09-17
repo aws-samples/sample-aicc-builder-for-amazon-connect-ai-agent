@@ -1768,3 +1768,20 @@ def test_j3_reports_a_journey_that_captures_but_cannot_continue():
                                              escalation_flow_id="Escalation", slot_type_ids={"yesNo", "reason"},
                                              slot_type_docs={"reason": _REASON_TYPE}, journey_steps=_JOURNEY_STEPS)
     assert any("J3" in v and "no edge to continue" in v for v in violations)
+
+
+def test_runtime_regex_loosens_separators_of_a_variable_width_pattern():
+    """Live (2026-09-17): the phone slot's "^01[0-9]-[0-9]{3,4}-[0-9]{4}$" has a
+    variable-width run the skeleton parser does not model; used as written, the
+    F1 format check refused "010-2345-6789" because NLX.PhoneNumber delivered
+    the value without dashes. Every literal separator becomes optional."""
+    import re as _re
+    from tools.acxd_runtime_contract import runtime_regex
+    loosened = runtime_regex(r"^01[0-9]-[0-9]{3,4}-[0-9]{4}$")
+    assert loosened == r"^01[0-9][-. /:]?[0-9]{3,4}[-. /:]?[0-9]{4}$"
+    for value in ("010-2345-6789", "01023456789", "010 234 5678"):
+        assert _re.match(loosened, value), value
+    assert not _re.match(loosened, "02-345-6789")
+    # a class keeps its own hyphen; a wildcard dot is not a separator
+    assert runtime_regex(r"^[A-Z-]{2}[0-9]+$") == r"^[A-Z-]{2}[0-9]+$"
+    assert runtime_regex(r"^[0-9]{10}$") == r"^[0-9]{10}$"
