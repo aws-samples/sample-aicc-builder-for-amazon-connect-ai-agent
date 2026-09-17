@@ -33,13 +33,16 @@ skills/aicc-builder-skill/
     │   ├── contact_flow_generator.md
     │   ├── faq_generator.md
     │   ├── research_agent.md
-    │   └── reviewer_agent.md
+    │   ├── reviewer_agent.md
+    │   └── acxd_flow_generator.md     # ACXD operation flows (node/operator catalog + runtime contract)
     ├── reference/                     # Authored (NOT auto-extracted)
     │   ├── vision_import.md           # Flow-image → Contact Flow JSON contract
     │   └── contact_flow_block_schemas.md  # API-verified block Types + per-block params
     ├── schemas/
     │   ├── OperationSpec.schema.json
     │   ├── InfrastructureSpec.schema.json
+    │   ├── ACXDFlowSpec.schema.json (+ ACXDFlowPlan / ACXDSlotPlan / ... — the ACXD interview output)
+    │   ├── acxd/*.schema.json, acxd/contract.json  # every ACXD resource's schema + the service contract
     │   └── ... (12 more JSON Schemas, incl. SessionFlowConfig / ContactFlowSpec / FlowBehavior)
     ├── scripts/
     │   ├── lint_assets.py           # AUTO-GENERATED from backend tools/asset_linters.py:
@@ -48,10 +51,13 @@ skills/aicc-builder-skill/
     │   ├── validate_consistency.py  # 18-check cross-asset validator (incl. IAM, RDS, SQL)
     │   ├── shape_parity.py          # spec ↔ OpenAPI shape parity HARD GATE
     │   ├── check_spec_complete.py   # Interview-completion gate
-    │   └── clues_format.py          # CLUES response helper
+    │   ├── clues_format.py          # CLUES response helper
+    │   └── acxd_local.py            # ACXD target: system resources, runtime contract, D9 gate,
+    │                                #   bundle — runs the backend engine from an AICC Builder checkout
     ├── templates/
     │   ├── pre_questionnaire_template.md
-    │   ├── deploy_workshop.sh
+    │   ├── deploy_workshop.sh         # the bundle's deploy.sh (Classic + ACXD chain) — AUTO-EXTRACTED
+    │   ├── acxd_runner/               # the ACXD Node runner the bundle ships — AUTO-EXTRACTED
     │   └── update_q_session/index.js  # FIXED Node.js Lambda — bundled, not generated
     └── examples/
         └── sample_*.md              # Complete + partial input examples
@@ -138,6 +144,14 @@ natural-language triggers in the frontmatter description ("amazon connect",
   failing, which is easy to miss in a long run.
 - No AWS credentials needed to run the skill itself — you only need them to
   `aws cloudformation deploy` the generated template.
+- **ACXD runtime target only:** `resources/scripts/acxd_local.py` runs the webapp's
+  ACXD engine (system flows, runtime contract, D9 gate, manifest, bundle) from an
+  **AICC Builder checkout** — the ~10k lines of live-verified code are imported, not
+  copied. Keep the clone you installed from (or set `AICC_BUILDER_REPO`) and run the
+  script with a Python that has the backend's dependencies
+  (`backend/.venv/bin/python`, or `pip install -r backend/ecs/requirements.txt`).
+  Deploying the bundle additionally needs Node 18+, a Connect Customer instance, an
+  agentic CX designer workspace and its API key (see the bundle's `WIRING-GUIDE.md`).
 
 ## How it works
 

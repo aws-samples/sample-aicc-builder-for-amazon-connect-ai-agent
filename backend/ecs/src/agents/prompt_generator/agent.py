@@ -493,6 +493,33 @@ Operations:
             except Exception as e:
                 logger.warning(f"[PROMPT] AI-prompt lint skipped: {e}")
 
+            # The FAQ knowledge base is searched through the native RETRIEVE tool;
+            # a prompt that names every operation tool but never says WHEN to
+            # search the knowledge base answers policy questions with "I cannot
+            # tell you" (live). Deterministic: make sure the guide is there.
+            try:
+                from tools.asset_linters import ensure_retrieve_tool_guide
+                _use_kb = True
+                try:
+                    from tools.spec_manager import get_contact_flow_spec as _gcfs
+                    _cf = _gcfs()
+                    if _cf is not None and getattr(_cf, "use_native_faq_retrieve", True) is False:
+                        _use_kb = False
+                except Exception:
+                    pass
+                if _use_kb:
+                    yaml_content, _guide_fixes = ensure_retrieve_tool_guide(yaml_content, language)
+                    if _guide_fixes:
+                        logger.info(f"[PROMPT] {_guide_fixes[0]}")
+                        try:
+                            from tools.streaming_callback import stream_asset as _stream_full
+                            _stream_full("prompt", file_name, yaml_content,
+                                         operation_id=agent_name, is_complete=True, force_full=True)
+                        except Exception as e:
+                            logger.warning(f"[PROMPT] re-stream after RETRIEVE guide failed: {e}")
+            except Exception as e:
+                logger.warning(f"[PROMPT] RETRIEVE guide check skipped: {e}")
+
             _send_progress("completed", agent_name)
             yield {
                 "type": "progress",

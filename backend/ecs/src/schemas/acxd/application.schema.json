@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aicc-builder/acxd/application.schema.json",
+  "title": "ACXD Application",
+  "description": "Contract schema for ACXD applications (AWS devguide acxd-applications).",
+  "type": "object",
+  "required": ["name", "settings"],
+  "additionalProperties": false,
+  "properties": {
+    "applicationId": { "type": "string" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "description": { "type": "string", "maxLength": 200 },
+    "flows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["flowId"],
+        "additionalProperties": false,
+        "properties": { "flowId": { "type": "string" } }
+      }
+    },
+    "settings": { "$ref": "#/$defs/settings" },
+    "deploymentSettings": { "$ref": "#/$defs/deploymentSettings" },
+    "metadata": { "type": "object" },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" },
+    "updatedBy": { "type": "string" }
+  },
+  "$defs": {
+    "defaultFlowRef": {
+      "type": "object",
+      "required": ["flowId"],
+      "additionalProperties": false,
+      "properties": {
+        "flowId": { "type": "string" },
+        "quickReplies": { "type": "array", "items": { "type": "string" } },
+        "knowledgeBaseId": { "type": "string" }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "languageCode": { "type": "string" },
+        "languageCodes": { "type": "array", "items": { "type": "string" } },
+        "languageSettings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["languageCode"],
+            "additionalProperties": false,
+            "properties": {
+              "languageCode": { "type": "string" },
+              "useNativeLanguage": { "type": "boolean" },
+              "useLex3pAsr": { "type": "boolean" },
+              "projectId": { "type": "string" },
+              "voice": { "type": "string" }
+            }
+          }
+        },
+        "defaultFlows": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "welcome": { "$ref": "#/$defs/defaultFlowRef" },
+            "fallback": { "$ref": "#/$defs/defaultFlowRef" },
+            "unknown": { "$ref": "#/$defs/defaultFlowRef" },
+            "escalation": { "$ref": "#/$defs/defaultFlowRef" },
+            "frustration": { "$ref": "#/$defs/defaultFlowRef" },
+            "help": { "$ref": "#/$defs/defaultFlowRef" },
+            "repeat": { "$ref": "#/$defs/defaultFlowRef" },
+            "resume": { "$ref": "#/$defs/defaultFlowRef" }
+          }
+        },
+        "guardrails": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["guardrailId"],
+            "additionalProperties": false,
+            "properties": { "guardrailId": { "type": "string" } }
+          }
+        },
+        "lifecycleHooks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "conversationStart": { "type": "string" },
+            "conversationEnd": { "type": "string" },
+            "escalation": { "type": "string" },
+            "stateModification": { "type": "string" },
+            "messageReceived": { "type": "string" }
+          }
+        },
+        "thresholds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incomprehensionCount": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "conversationTTL": { "type": "integer", "minimum": 1, "maximum": 60 },
+        "autoCorrection": { "type": "boolean" },
+        "childDirected": { "type": "boolean" },
+        "repeatOnIncomprehension": { "type": "boolean" },
+        "clusters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "frequency": { "$ref": "#/$defs/countResolution" },
+            "phraseThreshold": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": { "count": { "type": "integer", "minimum": 30 } }
+            },
+            "retention": { "$ref": "#/$defs/countResolution" }
+          }
+        }
+      }
+    },
+    "countResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "resolution": { "type": "string", "enum": ["HOUR", "DAY", "WEEK", "MONTH"] }
+      }
+    },
+    "deploymentSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "oneClickDeployEnabled": { "type": "boolean" },
+        "environment": {
+          "type": "string",
+          "enum": ["development", "qa", "staging", "production"]
+        },
+        "contextAttributes": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "required": ["key"],
+            "additionalProperties": false,
+            "properties": {
+              "key": { "type": "string" },
+              "value": {}
+            }
+          }
+        }
+      }
+    }
+  }
+}

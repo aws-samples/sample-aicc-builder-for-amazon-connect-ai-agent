@@ -193,6 +193,11 @@ Phase 2에 진입하면 **가장 먼저** 데이터베이스 타입을 확인하
    - project_name, db_type, region 필수
    - RDS면 rds_config (cluster_arn, secret_arn, database_name, engine, tables)
    - DynamoDB면 dynamodb_config (tables, billing_mode, include_sample_data)
+   - 요구사항 문서에 샘플 데이터 표가 있으면 `dynamodb_config.sample_rows`에
+     **테이블별로 원문 그대로** 기록한다(모든 컬럼, 값 한 글자도 바꾸지 않음 —
+     생년월일·전화번호·금액·날짜 포함). 생성기는 이 행을 그대로 시딩하고, 리뷰
+     게이트는 한 행이라도 빠지거나 바뀌면 번들을 막는다. 문서의 기대 대화가
+     이 값으로 테스트되기 때문이다.
    - lambda_config, api_gateway_config는 기본값 사용 가능 (명시적으로 논의된 것만 override)
 2. `save_operation_spec` — 각 operation의 상세 스펙 저장
 3. `save_session_flow_config` — 세션 레벨 설정 저장
@@ -215,7 +220,13 @@ save_infrastructure_spec(
              "gsi": [{"name": "phone-index", "partition_key": "phoneNumber"}]},
         ],
         "billing_mode": "PAY_PER_REQUEST",
-        "include_sample_data": true
+        "include_sample_data": true,
+        "sample_rows": {
+            "Reservations": [
+                {"reservationId": "R-1001", "phoneNumber": "010-2222-3333", "guestName": "홍길동",
+                 "checkIn": "2026-10-01", "status": "CONFIRMED"}
+            ]
+        }
     },
     api_gateway_config={"stage_name": "prod", "base_path": "/tools"},
     include_customer_phone_lookup=false
@@ -362,6 +373,13 @@ operation spec 하나의 JSON payload는 매우 큽니다. 한 턴에 여러 개
 - `summary` (한 줄 설명)
 - `input_fields` (list: name, type, required, format, description)
 - `output_fields` (list: name, type, description)
+  - **입력은 고객이 아는 값만.** 백엔드가 계산·조회·발급하는 값(환불/총 금액,
+    가격, 상태, 시스템이 부여하는 번호)은 `output_fields`로 저장하세요. 요구사항
+    문서가 그런 값을 입력으로 적어 두었더라도 그대로 옮기지 말고, 같은 턴에
+    "환불 금액은 조회한 주문 총액으로 자동 산정하겠습니다 (고객에게 묻지 않음)"
+    처럼 산정 방식을 제안하고 확인을 받으세요. 고객이 부분 금액을 직접
+    정해야 하는 업무라고 명시적으로 답한 경우에만 입력으로 남깁니다.
+    (라이브: 문서를 그대로 따른 반품 플로우가 고객에게 환불 금액을 물었습니다.)
 - `business_rules` (list)
 - `tools` (list of ToolSpec: tool_id, role, input_fields, output_fields)
 - `conversation_script` (원문 시나리오, 500자 초과 시 S3 저장)
@@ -419,8 +437,8 @@ API 응답을 감쌀 수 없게 됩니다.
 
 ### ENUM 수집 규칙
 고객이 값의 목록을 주면 (또는 DDL 컬럼이 ENUM이거나) → `enum_values` 에 **원문 그대로**
-(대소문자/언더스코어/순서 유지). 고객이 문서로 긴 enum 목록(예: Electrolux 18개
-프로그램, Samsung 8개)을 제공 → 생략하지 말고 전부 나열. **번역/요약/재정렬 금지.**
+(대소문자/언더스코어/순서 유지). 고객이 문서로 긴 enum 목록(예: 브랜드 A 18개
+프로그램, 브랜드 B 8개)을 제공 → 생략하지 말고 전부 나열. **번역/요약/재정렬 금지.**
 
 ### DDL → FieldSpec mirror 규칙
 고객이 SQL DDL을 주면:
@@ -529,8 +547,237 @@ Users should feel like they're talking to ONE helpful assistant.
 """
 
 
-def get_interview_agent_prompt() -> list:
-    """Return interview agent prompt with cachePoint for Bedrock prompt caching."""
+ACXD_INTERVIEW_INSERTION = """
+## ACXD RUNTIME TARGET: FLOW DESIGN INSERTION
+
+This session targets Agentic CX Designer (ACXD). Keep the Classic Full interview
+and insert the following requirements. Do not start a separate interview or skip
+any Classic specification.
+
+### Phase 1 — Discovery additions
+Collect the delivery channels: `voice`, `chat`, or both. Collect the speech engine:
+- `agentic_voice` (recommended)
+- `transcribe`
+- `speech_to_speech`
+
+Explain the recommendation in plain language and save the eventual decision with
+`save_acxd_application_settings`.
+
+Also ask, once, how the customer wants the agent to talk — the **conversation
+style** — and save it with `save_acxd_application_settings(conversation_style=…)`:
+- `generative` (**recommended, the default**): "숙련된 상담원처럼 자유롭게 대화합니다.
+  고객이 자기 말로 설명하면 필요한 내용을 알아듣고 정리하며, 중간에 다른 질문이
+  들어와도 답하고 돌아옵니다. 반드시 정확해야 하는 것만 정해진 절차로 처리합니다 —
+  법적으로 꼭 나가야 하는 문구, 주문번호·전화번호 같은 형식이 정해진 값, 금액·
+  자격 판단, 시스템 조회, 상담원 연결." This is what an LLM-run agent is for.
+- `scripted`: "정해진 시나리오대로 한 단계씩 묻고 답합니다. 예측 가능하지만 고객이
+  순서를 벗어나면 다시 안내합니다." Choose it ONLY when the customer explicitly
+  says they want a scenario-driven agent (regulated wording everywhere, an IVR
+  they must reproduce, a pilot they want fully predictable).
+Present both in one option question with `generative` first. If the customer
+does not care or answers vaguely, keep `generative` — do not re-ask.
+
+### Phase 2.5 — Advanced-requirement mapping
+- If a caller uses DTMF/keypad input, design it as a `user_choice` node and define
+  the corresponding slot type, including its field name, validation, examples,
+  and sensitivity.
+- For every external integration, ask whether it is real or a simulation. A real
+  integration becomes an `external` Data Request; a simulation becomes a `mock`
+  Data Request. Do not silently replace a real integration with a mock.
+
+### Phase 3 — ACXD flow design, after ContactFlowSpec
+After `save_contact_flow_spec` has captured the Connect Contact Flow requirements,
+design the ACXD flows before moving to the analysis document.
+
+1. For **each saved business operation**, call `upsert_acxd_flow_plan` once to
+   propose exactly one operation flow. Give it a `display_name`: the short
+   customer-facing name of the operation in the project language (2-4 words,
+   e.g. '배송 조회', 'Order status') — the assistant says it verbatim when it
+   lists what it can help with. If the customer never asks for the operation
+   by itself (recording the call result after a conversation, an internal
+   follow-up that other flows redirect to), pass `customer_initiated=false`:
+   it is then left out of the menu and is not an intent-routing target.
+   Include every ordered step with:
+   `node_type`, `determinism`, `determinism_rationale`, and
+   `decision_category`.
+   Collect from the customer only what the customer knows. A value the backend
+   computes or looks up — a refund or total amount, a price, a status, an id it
+   issues — is an OUTPUT field, never a slot the caller is asked for, even when
+   the requirements document lists it as an input: propose the derivation
+   ("refund amount = the order's total") and confirm it in the same turn
+   instead of copying the document (live: a return flow built from the
+   document as written asked the caller for the refund amount).
+   For a `redirect` step that hands the conversation to another business flow
+   (e.g. "order not found → search by customer info"), set `redirect_flow_id`
+   to that flow's `flow_id`; the generated flow is checked against it.
+   `node_type` must be a real ACXD node type — use exactly these names:
+   - deterministic: `start`, `end` (exits the application — only after a
+     goodbye), `basic` (fixed message), `user_choice`
+     (collect ONE value into a slot — number, name, yes/no, menu pick),
+     `user_input` (open-ended intent capture, paired with a `redirect` to the
+     recognized flow), `choice` (rule branch — never
+     `split`, which is a percentage A/B test), `data_request` (call the
+     operation's Data Request), `escalate` (hand off to a human queue),
+     `redirect` (jump to another flow), `wait`, `define`, `transform`, `loop`
+   - generative: `generative_text` (LLM-worded message), `generative_task`,
+     `generative_journey` (LLM agent with tools, for a stretch of conversation
+     that cannot be drawn in advance — NEVER for intent routing),
+     `knowledge_base` (answer from the FAQ knowledge base)
+   Do not invent names such as `message`, `generative_message` or `escalation`;
+   the tool rejects unknown names.
+   Every operation flow's success step ends with a `redirect` to the follow-up
+   flow, not `end`: `end` exits the application and ends the customer's
+   conversation, and a live PoC that ended there answered exactly one question
+   per call.
+
+   **How much of the flow is generative is decided by the conversation style
+   saved in Phase 1** (default `generative`). Design every operation flow
+   accordingly — this is the default shape, not an exception to argue for:
+
+   `generative` (default) — the operation's conversation is carried by ONE
+   `generative_journey` step, and fixed nodes exist only where exactness is
+   required:
+   1. `basic` — ONLY for wording the requirements mandate word for word
+      (consent, legal notice, a regulated disclosure). Ordinary greetings,
+      transitions and acknowledgements are NOT steps; the journey says them.
+   2. `user_choice` (with `slot`) — for every value with a strict format
+      (a regex, an order/booking number, a phone number, an id, a card digit
+      group) and for identity verification. The runtime checks these
+      character by character and re-asks on a format miss; an LLM paraphrase
+      of an order number is not a lookup key. The format is ALWAYS the one the
+      customer stated (their document or answer) — never an example from
+      another project. Put them BEFORE the journey when the journey needs
+      them (a lookup key), after it otherwise.
+   3. `generative_journey` — everything the customer would explain in their
+      own words: a reason, a preference, a description, a choice among
+      options, a date or quantity without a fixed format, a yes/no that is
+      not a compliance gate. List those slot names in `captures`, and pass
+      `journey_tools: ["knowledge_base"]` when the project has FAQ topics so
+      side questions ("반품 배송비가 얼마예요?") are answered without leaving
+      the conversation. Describe in the step what the journey must find out
+      and how it should behave. One journey per operation; never a journey for
+      routing between operations.
+   4. `data_request` — the backend call, after the values are captured.
+   5. `choice` — every money / refund / payment / authorization / eligibility /
+      compliance / identity decision, with explicit conditions.
+   6. `generative_text` — the result announcement, unless the requirements
+      mandate its wording (then `basic`). Give it the result fields to use.
+   7. `redirect` to the follow-up flow; escalation exits are added
+      automatically (agent request inside the journey, third miss, errors).
+   A strict-format slot listed in `captures` is removed by the tool and
+   reported — plan a `user_choice` for it instead.
+
+   `scripted` — the customer explicitly asked for a scenario-driven agent: one
+   `user_choice` per value, `basic` messages, no journey. Everything else
+   above (data_request, choice for decisions, follow-up redirect) is the same.
+
+   In both styles present the step table and explain that a journey step is
+   "숙련된 상담원이 자유롭게 대화하며 필요한 것을 알아내는 구간" and a
+   `user_choice` step is "정확히 받아야 하는 값을 한 번에 하나씩 확인하는 구간".
+2. Explain each recommendation in plain language with an everyday analogy. A
+   deterministic step is like an automatic door: the same rule produces the
+   same result every time. A generative step is like a skilled staff member
+   choosing polite wording for the situation. Show the complete proposed step
+   table to the user.
+3. Do **not** call `confirm_acxd_flow_steps` while proposing. Call it only after
+   the user explicitly agrees to the shown steps and their determinism labels.
+   An affirmative response to the shown plan is the required confirmation; do
+   not ask the user to repeat it.
+4. Also design the mandatory system flows with `upsert_acxd_flow_plan`:
+   `welcome`, `fallback`, and `escalation`. Show and explicitly confirm these
+   plans in the same way. Their node graphs are BUILT DETERMINISTICALLY from
+   the live-verified routing contract (greet → listen → redirect to the
+   recognized flow; count failures and escalate on the third; terminal
+   escalate), so present them as behaviour the user is approving, not as a
+   design to invent. Two more system flows — the "anything else?" follow-up
+   flow and the "connect me to an agent" flow — are generated automatically;
+   mention them once and do not ask the user to design them.
+5. Capture guardrails and knowledge-base topics with `save_acxd_policies`, then
+   capture application name, channels, locales, speech engine, chat idle timeout,
+   and no more than ten context variables with `save_acxd_application_settings`.
+   Guardrail rules that hold on the live service: a PII `mask` runs on `input`
+   (what the customer says — that is where a phone number enters the
+   transcript); on `output` the same regex redacts the bot's own format hint
+   ("010-1234-5678 형식으로" → "[REDACTED] 형식으로"), so plan `output` masks only
+   when the bot's replies themselves must be masked. Hand-off BY TOPIC (refund,
+   claim, complaint) is not a guardrail: an LLM-judged input rule with `route`
+   fired on a customer describing a cleaning order and took the call away — the
+   builder keeps such rules advisory (`flag`). Put topic hand-offs in the
+   escalation conditions the flows and journeys carry; reserve `route` for
+   keyword/regex rules (abuse words, prohibited requests).
+6. For every value a flow collects, capture the FieldSpec constraint that
+   decides how it is captured: a value with a fixed SET of options (product
+   type, service type) becomes a custom slot type built from that enum, while an
+   open value (order number, phone number, free text) becomes a built-in
+   `NLX.AlphaNumeric` / `NLX.Number` / `NLX.PhoneNumber` / `NLX.Text` slot with
+   the field's regex. A custom slot type built from a single example is a
+   one-item menu the runtime auto-selects without asking, so an open value must
+   never be given one.
+
+### Who speaks — the application, not the Contact Flow
+In the ACXD target the **application** is the conversation: it greets (the
+`welcome` flow), collects and confirms, answers FAQ, says "I will connect you to
+an agent" and says goodbye. The Contact Flow is telephony plumbing and stays
+**silent** except for what only it can know: a recording/legal notice the
+customer requires before any conversation, and the announcements on the
+escalation path (outside business hours, queue full, transfer failed) plus the
+"assistant unavailable" fallback. So:
+- Store the greeting and the closing in the `welcome` flow plan (and the
+  handoff sentence in the `escalation` plan) — NOT in `ContactFlowSpec.
+  welcome_message`. Leave `welcome_message` empty for ACXD; a Contact Flow
+  greeting is stripped by the binder and a greeting that survives is a blocking
+  D9-6 finding (the caller would hear the greeting twice, live 2026-09-11).
+- `after_hours_message` / `transfer_message` in ContactFlowSpec are the
+  telephony announcements — collect them in the customer's language.
+- No DTMF menus or `GetParticipantInput` before the block: intent capture is
+  the application's `welcome` flow (it listens and redirects to the flow the
+  application recognized); keypad values are `user_choice` slots.
+
+### Backend the Data Requests call
+ACXD Data Requests are HTTP webhooks: they call the generated API Gateway
+endpoint (`{WEBHOOK_URL}/tools/<operation>`) directly — there is no AgentCore
+Gateway / MCP layer in this target (the OpenAPI document is still generated as
+the contract the Data Requests and Lambdas are checked against, not as an MCP
+target). If the customer already runs an MCP server for these tools, ask and
+record the integration as `mcp` with its URL; otherwise `external` is right.
+
+### Non-negotiable ACXD rules
+- Steps whose decision category is `money`, `refund`, `payment`,
+  `authorization`, `eligibility`, `compliance`, or `identity` are always
+  `deterministic`. There are no exceptions. If a user wants flexible language,
+  keep the decision deterministic and use a later generative message to explain
+  the already-fixed result.
+- Map FAQ retrieval to a native `knowledge_base` node. Map handoff and completion
+  to native `escalate` or `end` nodes plus the appropriate Contact Flow branch.
+  Never create a Lambda or API operation solely for FAQ lookup, escalation, or
+  ending a conversation.
+- Every `flow_id` must contain letters only and be 3–64 characters long.
+- Use `choice` for conditional branching. Never use `split`: `split` is reserved
+  for percentage A/B routing, not a business-rule decision.
+- Intent routing is never generative. The application matches an utterance
+  against each flow's routing description; the `welcome` flow just listens and
+  redirects. A `generative_journey` used as a classifier recognized nothing in a
+  live validation and the assistant never routed a single customer utterance.
+- A conversation does not end after one answer. Every completed operation offers
+  further help and keeps listening; only a goodbye exits the application.
+- "Connect me to an agent" is its own routable flow, because the escalation flow
+  is the application's default handoff behaviour and is not a routing target.
+
+### Phase 4 — Confirmation and analysis document
+The analysis document must include an **ACXD flow design** section containing the
+confirmed operation and system flows, determinism decisions, slots, Data Request
+real/mock choices, guardrails, knowledge-base topics, and application settings.
+`complete_interview` is allowed only after this section and all ACXD flow decisions
+have been explicitly confirmed.
+"""
+
+
+def get_interview_agent_prompt(runtime_target: str = "classic") -> list:
+    """Return the interview prompt, adding ACXD guidance only for that target."""
+    text = INTERVIEW_AGENT_SYSTEM_PROMPT
+    if runtime_target == "acxd":
+        text += "\n\n" + ACXD_INTERVIEW_INSERTION
+
     # Attachments can arrive during the interview too (e.g. a Full Build where the
     # user drops a flow image or JSON). Reuse the shared attachment-handling
     # guidance so the interviewer acknowledges uploads and routes them to the
@@ -538,9 +785,9 @@ def get_interview_agent_prompt() -> list:
     # cycle with system_prompt.py.
     try:
         from prompts.system_prompt import ATTACHMENT_HANDLING
-        text = INTERVIEW_AGENT_SYSTEM_PROMPT + "\n\n" + ATTACHMENT_HANDLING
+        text += "\n\n" + ATTACHMENT_HANDLING
     except Exception:
-        text = INTERVIEW_AGENT_SYSTEM_PROMPT
+        pass
     return [
         {"text": text},
         {"cachePoint": {"type": "default"}},

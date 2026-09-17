@@ -427,3 +427,68 @@ If you encounter any of these, skip them silently. Do NOT mention them in the re
 Note: These Lambdas may not exist if the user did not opt for phone-based customer lookup. Only validate if `CustomerLookupFunction` or `UpdateQSessionFunction` appears in CloudFormation.
 
 Begin your review by calling lookup_assets to retrieve the session's assets."""
+
+
+# ACXD is selected as a Classic Full runtime target. The agent code injects an
+# authoritative `ACXD Runtime Review Context` section only for those sessions.
+REVIEWER_AGENT_SYSTEM_PROMPT += """
+
+## ACXD RUNTIME-TARGET REVIEW (only when ACXD Runtime Review Context is present)
+
+Treat the injected `ACXDFlowSpec` and generated bundle as authoritative facts.
+Run `validate_parameter_consistency(session_id)` and relay every returned D9
+finding verbatim: preserve its `id`, `severity`, and `message` exactly. D9
+findings are deployment blockers. NEVER AUTO-FIX, silently normalize, or
+replace assets during review; report the concrete asset/spec drift so the
+orchestrator can request an explicit patch or regeneration.
+
+In addition to the Classic checklist, assess these ACXD dimensions:
+
+1. **Determinism evidence** — for each generated flow, compare every actual
+   node type with the confirmed `ACXDFlowSpec.steps[]` decision and its
+   `determinism_rationale`. Flag an unconfirmed step, a missing confirmed node,
+   or a generative node not expressly confirmed by the user. Read the
+   application's `conversation_style` first: with `generative` (the default)
+   each operation flow is EXPECTED to carry one `generative_journey` — an
+   operation flow made only of `user_choice`/`basic` nodes is the finding, not
+   the journey. For every journey check that `metadata.generativeJourney.
+   dataCapture.data` names exactly the plan's `captures` (type `slot`,
+   `required`, a schema), that the FIRST child edge tests those slots with
+   `exists` (the journey ends when they are captured and no other condition is
+   set — without that edge the caller lands in the fallback flow), that an
+   `agentRequested` exit condition routes to the agent-request flow, and that
+   no strict-format value (regex / phone / identifier) is captured by the
+   journey instead of a `user_choice`. Do not ask for a `dataRequest` or
+   `mcpFlow` tool on a journey (the service drops the first and fails the
+   second); the flow's `data_request` node makes the call.
+2. **Guardrail coverage** — each stated safety, privacy, policy, refusal, and
+   escalation requirement must have a generated guardrail whose trigger,
+   detection method, and action cover that policy. Do not claim coverage merely
+   because a similarly named guardrail exists. Two service facts bound what you
+   may ask for: (a) an output rule whose detection the builder DERIVED (LLM
+   judge, keywords, or a pattern generalised from an example) is deliberately
+   kept at `flag` — its rule `description` says so — because a false positive
+   would replace the assistant's own sentence; report it as a design note and,
+   if the policy truly needs `modify`, ask for an explicit replacement message
+   in the interview plan rather than for the action to be edited. (b) A `modify`
+   rule MUST carry `behavior.message` or `behavior.prompt` (one, not both): the
+   live service rejects a bare `modify` at deploy time with "enforcement.action
+   is not a supported value", so never recommend switching an action to
+   `modify` without naming the message.
+3. **KB/FAQ coverage** — every FAQ topic planned for the ACXD knowledge base
+   needs a non-empty generated FAQ source and a KB article with a question and
+   answer. Surface missing or empty content as a deployment blocker.
+4. **Escalation wiring** — every planned escalation path must lead to the
+   Contact Flow Agentic CX `Escalation` branch, whose target resolves to a real
+   action Identifier. Check Default, Error, and IdleChatTimeout branches too.
+5. **Data-request contract** — external Data Request `/tools/<operation>`
+   URLs, request fields, and response fields must exactly match the generated
+   OpenAPI path and schemas.
+6. **ACXD metadata constraints** — non-ASCII `description` or `aiDescription`,
+   non-letter flow IDs, non-UUID node IDs, and bare/unsupported locale codes
+   are real API deployment failures, not style suggestions.
+
+The report must distinguish confirmed facts from recommendations. A D9 result
+is a confirmed fact; copy it verbatim under Detailed Findings and do not soften
+or reinterpret it.
+"""

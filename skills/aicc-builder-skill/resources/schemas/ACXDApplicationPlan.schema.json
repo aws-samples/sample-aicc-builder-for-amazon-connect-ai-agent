@@ -1,0 +1,146 @@
+{
+  "$defs": {
+    "ACXDContextVariable": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "default": "string",
+          "title": "Type",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "from_contact_attribute": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Connect attribute the contact flow passes in, e.g. '$.CustomerEndpoint.Address'",
+          "title": "From Contact Attribute"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ACXDContextVariable",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Name"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "conversation_style": {
+      "default": "generative",
+      "description": "One of ('generative', 'scripted'). 'generative' (default): each operation is run by a generative_journey that talks freely, with deterministic islands only where they are needed \u2014 mandatory wording, strict-format identifiers, money/eligibility/compliance/identity decisions, backend calls, hand-off. 'scripted': every step is a fixed node; only when the customer explicitly asks for a scenario-driven agent.",
+      "title": "Conversation Style",
+      "type": "string"
+    },
+    "channels": {
+      "description": "Subset of ('voice', 'chat')",
+      "items": {
+        "type": "string"
+      },
+      "title": "Channels",
+      "type": "array"
+    },
+    "locales": {
+      "description": "Full locale codes, e.g. ['ko-KR','en-US']",
+      "items": {
+        "type": "string"
+      },
+      "title": "Locales",
+      "type": "array"
+    },
+    "primary_locale": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Primary Locale"
+    },
+    "speech_engine": {
+      "default": "agentic_voice",
+      "description": "One of ('agentic_voice', 'transcribe', 'speech_to_speech')",
+      "title": "Speech Engine",
+      "type": "string"
+    },
+    "idle_chat_timeout_seconds": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Chat only",
+      "title": "Idle Chat Timeout Seconds"
+    },
+    "context_variables": {
+      "items": {
+        "$ref": "#/$defs/ACXDContextVariable"
+      },
+      "title": "Context Variables",
+      "type": "array"
+    },
+    "default_flows": {
+      "additionalProperties": true,
+      "description": "role \u2192 flow_id; derived from system flows when empty",
+      "title": "Default Flows",
+      "type": "object"
+    },
+    "environment": {
+      "default": "development",
+      "title": "Environment",
+      "type": "string"
+    }
+  },
+  "title": "ACXDApplicationPlan",
+  "type": "object"
+}

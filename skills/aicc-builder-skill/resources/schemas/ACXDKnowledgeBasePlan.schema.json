@@ -1,0 +1,26 @@
+{
+  "description": "Only the KB shell \u2014 articles are rendered from the FAQ asset.",
+  "properties": {
+    "name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Name"
+    },
+    "topics": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Topics",
+      "type": "array"
+    }
+  },
+  "title": "ACXDKnowledgeBasePlan",
+  "type": "object"
+}

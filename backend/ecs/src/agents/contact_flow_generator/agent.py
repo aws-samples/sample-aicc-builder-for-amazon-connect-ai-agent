@@ -19,7 +19,12 @@ from strands import Agent, tool
 from strands.models import BedrockModel
 from botocore.config import Config as BotocoreConfig
 
-from .system_prompt import CONTACT_FLOW_GENERATOR_SYSTEM_PROMPT, RAG_SEARCH_INSTRUCTION
+from .system_prompt import (
+    ACXD_CONTACT_FLOW_ADDENDUM,
+    CONTACT_FLOW_GENERATOR_SYSTEM_PROMPT,
+    RAG_SEARCH_INSTRUCTION,
+)
+from tools.acxd_flow_spec import get_acxd_flow_spec, is_acxd_target
 from tools.workspace_tools_for_subagent import detect_spec_escalation
 from tools.model_selection import resolve_model_id, build_model_kwargs
 from .retrieve_tool import retrieve_contact_flow_knowledge
@@ -503,10 +508,14 @@ Operations:
         if modification_tools:
             tools.extend(modification_tools)
 
+        system_prompt_text = CONTACT_FLOW_GENERATOR_SYSTEM_PROMPT
+        if is_acxd_target():
+            system_prompt_text += ACXD_CONTACT_FLOW_ADDENDUM
+
         agent = Agent(
             model=model,
             system_prompt=[
-                {"text": CONTACT_FLOW_GENERATOR_SYSTEM_PROMPT},
+                {"text": system_prompt_text},
                 {"cachePoint": {"type": "default"}},
             ],
             tools=tools,
@@ -637,6 +646,19 @@ Operations:
 
         if json_content:
             json_file_name = "contact_flow.json"
+            acxd_binding_applied = False
+            if is_acxd_target() and json_method != "workspace_tools" and isinstance(json_content, str):
+                try:
+                    from tools.acxd_contact_flow_binding import normalize_acxd_contact_flow
+
+                    normalized = normalize_acxd_contact_flow(
+                        json.loads(json_content),
+                        get_acxd_flow_spec(),
+                    )
+                    json_content = json.dumps(normalized, indent=2, ensure_ascii=False)
+                    acxd_binding_applied = True
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    logger.warning("[CONTACT_FLOW] ACXD binding normalization skipped: %s", exc)
 
             if json_method == "workspace_tools":
                 # Tools already handled file modification + streaming
@@ -660,6 +682,20 @@ Operations:
                             _stream_asset("contact_flow", json_file_name, json_content, flow_name)
                 elif not json_streamer.found_code_block:
                     _stream_asset("contact_flow", json_file_name, json_content, flow_name)
+
+            if acxd_binding_applied:
+                try:
+                    from tools.streaming_callback import stream_asset as _stream_bound
+                    _stream_bound(
+                        "contact_flow",
+                        json_file_name,
+                        json_content,
+                        operation_id=flow_name,
+                        is_complete=True,
+                        force_full=True,
+                    )
+                except Exception as exc:
+                    logger.warning("[CONTACT_FLOW] ACXD binding re-stream failed: %s", exc)
 
             _send_progress("completed", flow_name)
             yield {
@@ -709,6 +745,28 @@ Operations:
                     logger.warning(f"[CONTACT_FLOW] structural lint errors: {flow_lint['errors'][:5]}")
             except Exception as e:
                 logger.warning(f"[CONTACT_FLOW] structural lint skipped: {e}")
+
+            if acxd_binding_applied:
+                try:
+                    from tools.acxd_contact_flow_binding import normalize_acxd_contact_flow
+                    from tools.streaming_callback import stream_asset as _stream_bound
+
+                    normalized = normalize_acxd_contact_flow(
+                        json.loads(json_content),
+                        get_acxd_flow_spec(),
+                        rewrite_attribute_context=True,
+                    )
+                    json_content = json.dumps(normalized, indent=2, ensure_ascii=False)
+                    _stream_bound(
+                        "contact_flow",
+                        json_file_name,
+                        json_content,
+                        operation_id=flow_name,
+                        is_complete=True,
+                        force_full=True,
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    logger.warning("[CONTACT_FLOW] final ACXD binding normalization skipped: %s", exc)
 
             yield {
                 "success": True,

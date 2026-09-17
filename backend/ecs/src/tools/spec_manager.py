@@ -584,6 +584,16 @@ class DynamoDbConfig(FlexibleBaseModel):
         description="Whether to seed sample data on deployment",
         validation_alias=AliasChoices("include_sample_data", "includeSampleData"),
     )
+    sample_rows: dict[str, list[dict]] = Field(
+        default_factory=dict,
+        description=(
+            "Sample rows the customer supplied, table name -> rows, copied VERBATIM from the "
+            "requirements (every column, exact values). The seeder loads exactly these rows and "
+            "the consistency gate fails the bundle when a row is missing or altered; rows the "
+            "generator invents are only allowed when this is empty."
+        ),
+        validation_alias=AliasChoices("sample_rows", "sampleRows", "sample_data", "sampleData"),
+    )
 
 
 class LambdaConfig(FlexibleBaseModel):
@@ -703,6 +713,17 @@ class InfrastructureSpec(FlexibleBaseModel):
     region: str = Field(
         default="ap-northeast-2",
         description="AWS region for all resources",
+    )
+
+    # Runtime target — what sits between the Contact Flow and the backend.
+    # 'classic': Lex + AI Prompt + AgentCore Gateway (v2).
+    # 'acxd'   : Agentic CX Designer application (flows / data requests / KB /
+    #            guardrails) behind the Agentic CX contact-flow block. The CFN,
+    #            Lambda, OpenAPI, Contact Flow and FAQ assets are still built.
+    runtime_target: str = Field(
+        default="classic",
+        description="'classic' (Lex + AI Prompt + AgentCore Gateway) or 'acxd' (Agentic CX Designer)",
+        validation_alias=AliasChoices("runtime_target", "runtimeTarget"),
     )
 
     # Database
@@ -1086,7 +1107,13 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
 _LEN_RANGE_RE = re.compile(r'(\d+)\s*[~\-–]\s*(\d+)\s*(?:자|글자|chars?|characters?)?')
 _LEN_MAX_RE = re.compile(r'(?:최대|max(?:imum)?|up to)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
 _LEN_MIN_RE = re.compile(r'(?:최소|min(?:imum)?|at least)\s*(\d+)\s*(?:자|글자|chars?|characters?)?', re.IGNORECASE)
-_LEN_EXACT_RE = re.compile(r'(\d+)\s*(?:자리|자|글자|digits?|chars?|characters?)')
+_LEN_EXACT_RE = re.compile(
+    r'(\d+)\s*(?:[A-Za-z\-]{3,}\s+){0,3}(?:자리|자|글자|桁|文字|digits?|chars?|characters?)',
+)
+_CJK_RE = re.compile(r'[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]')
+# A format mask is a short token like "010-XXXX-XXXX" or "AAA-000"; a phrase with
+# real words ("10 alphanumeric characters") is a description, never a mask.
+_LOOKS_LIKE_SENTENCE_RE = re.compile(r'[A-Za-z]{3,}\s+[A-Za-z]{3,}|[가-힣]{2,}\s|\s[가-힣]{2,}')
 _LOOKS_LIKE_DATEFMT_RE = re.compile(r'^\s*(?:[YyMmDdHhSs][\-/:. ]?){2,}\s*$|ISO\s*8601|ISO8601|RFC\s*3339', re.IGNORECASE)
 
 
@@ -1113,8 +1140,10 @@ def _normalize_field_constraints(data: dict) -> dict:
             # Not a length phrase — it's a FORMAT mask/pattern on a non-date
             # field (e.g. "010-XXXX-XXXX", "AAA-000"). Move it to `pattern` as a
             # best-effort regex (only if pattern is empty). Mask chars: X/0/9→\d,
-            # A/a→[A-Za-z]; keep literal separators escaped.
-            if data.get("pattern") is None:
+            # A/a→[A-Za-z]; keep literal separators escaped. A sentence is never a
+            # mask (live: "10 alphanumeric characters" became
+            # "^10\ [A-Za-z]{1}lph[A-Za-z]{1}numeric..." and rejected every input).
+            if data.get("pattern") is None and not _LOOKS_LIKE_SENTENCE_RE.search(df):
                 data["pattern"] = _mask_to_regex(df)
             moved = True
         if moved:
@@ -1128,7 +1157,7 @@ def _normalize_field_constraints(data: dict) -> dict:
         for k in ("date_format", "format", "dateFormat"):
             if k in data and ("자" in str(data.get(k)) or "char" in str(data.get(k)).lower()):
                 data[k] = None
-    return data
+    return _enforce_exact_length_phrase(data)
 
 
 def _mask_to_regex(mask: str) -> str:
@@ -1194,10 +1223,176 @@ def _apply_length_constraint(data: dict, text: str) -> bool:
             data["min_length"] = n; applied = True
         if data.get("max_length") is None:
             data["max_length"] = n; applied = True
-        if ("숫자" in text or "digit" in text.lower()) and data.get("pattern") is None:
-            data["pattern"] = r"^\d{" + str(n) + r"}$"
+        if data.get("pattern") is None:
+            data["pattern"] = _exact_length_pattern(text, n)
+            applied = True
         return applied
     return applied
+
+
+# Input fields whose name says the BACKEND produces the value. The caller cannot
+# know a refund or total amount, a price, a status or an approval outcome, so a
+# spec that collects one of these asks the customer for a number the system
+# would have to check anyway (live: a return flow asked for the refund amount).
+# Order/return/reservation numbers are NOT listed — the caller does know those.
+_BACKEND_COMPUTED_INPUT = re.compile(
+    r"(?:(?:refund|total|final|settle(?:d|ment)?|net|payable|approved|discount)_?amount$"
+    r"|(?:^|_)price$|(?:^|_)fee$|(?:^|_)status$|approval_?(?:status|result|decision)|(?:^|_)result$)",
+    re.I,
+)
+_BACKEND_COMPUTED_DESCRIPTION = re.compile(r"환불|총\s*액|총\s*금액|합계|산정|판정|refund|total|computed|calculated", re.I)
+
+
+def backend_computed_input_warnings(input_fields) -> list[str]:
+    """One advisory per input field that looks like a value the backend computes."""
+    warnings: list[str] = []
+    for field in input_fields or []:
+        name = str(getattr(field, "name", None) or (field.get("name") if isinstance(field, dict) else "") or "")
+        description = str(getattr(field, "description", None) or (field.get("description") if isinstance(field, dict) else "") or "")
+        if not name:
+            continue
+        snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
+        hit = bool(_BACKEND_COMPUTED_INPUT.search(snake))
+        if not hit and snake.lower() in ("amount", "value") and _BACKEND_COMPUTED_DESCRIPTION.search(description):
+            hit = True
+        if hit:
+            warnings.append(
+                f"Input field '{name}' looks like a value the backend computes or looks up "
+                f"(an amount, price, status or decision). The caller cannot know it — move it to "
+                f"output_fields and derive it in the business rules (e.g. refund amount = the order's "
+                f"total), unless the customer confirmed the caller really chooses this value."
+            )
+    return warnings
+
+
+def _field_key(name: str) -> str:
+    """camelCase / snake_case / spaced spellings of one field compare equal."""
+    return re.sub(r"[\s_\-]+", "", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name or ""))).lower()
+
+
+def _field_keys(fields) -> list[str]:
+    return [_field_key(getattr(f, "name", None) or (f.get("name") if isinstance(f, dict) else "")) for f in (fields or [])]
+
+
+def reconcile_tool_fields(tools, old_inputs, new_inputs, old_outputs, new_outputs):
+    """Keep each ToolSpec's field lists consistent with the operation's after an
+    update of `input_fields` / `output_fields`.
+
+    The Data Request, OpenAPI operation and Lambda are generated from the TOOL's
+    lists, so a field moved out of the operation's inputs but left on the tool
+    still reaches the request contract (live: the interview moved `refundAmount`
+    to the outputs, the tool kept it as a required input, and the generated
+    Data Request demanded a slot no flow collected).
+
+    A tool whose list mirrored the operation's keeps mirroring it (the normal
+    primary-tool case); any other tool only loses fields the operation no
+    longer has. Returns (tools, notes)."""
+    notes: list[str] = []
+    for tool in tools or []:
+        tool_id = getattr(tool, "tool_id", "?")
+        for side, old_op, new_op in (("input_fields", old_inputs, new_inputs),
+                                     ("output_fields", old_outputs, new_outputs)):
+            if new_op is None:
+                continue
+            tool_fields = list(getattr(tool, side, None) or [])
+            if not tool_fields and not old_op:
+                continue
+            new_keys = set(_field_keys(new_op))
+            old_keys = set(_field_keys(old_op))
+            if set(_field_keys(tool_fields)) == old_keys:
+                if set(_field_keys(tool_fields)) != new_keys:
+                    setattr(tool, side, [f.model_copy() if hasattr(f, "model_copy") else f for f in new_op])
+                    notes.append(f"{tool_id}.{side} now mirrors the operation ({', '.join(_field_keys(new_op)) or 'none'})")
+                continue
+            removed = old_keys - new_keys
+            kept = [f for f in tool_fields if _field_key(getattr(f, "name", "")) not in removed]
+            if len(kept) != len(tool_fields):
+                dropped = [getattr(f, "name", "") for f in tool_fields if _field_key(getattr(f, "name", "")) in removed]
+                setattr(tool, side, kept)
+                notes.append(f"{tool_id}.{side}: dropped {', '.join(dropped)} (no longer an operation field)")
+    return tools, notes
+
+
+def align_primary_tool_fields(spec) -> list[str]:
+    """Make each PRIMARY tool's field lists the operation's own.
+
+    The primary tool's Lambda is generated from the operation's fields while its
+    OpenAPI operation and Data Request are generated from the tool's lists; an
+    interview-written subset ("orderDate" left out) or a stale entry makes the
+    three disagree at review time. A primary tool whose names are all operation
+    fields is stored with the operation's list; a primary tool that declares a
+    field of its own, and every helper, is left as written. Returns notes."""
+    notes: list[str] = []
+    for tool in getattr(spec, "tools", None) or []:
+        if str(getattr(tool, "role", "primary") or "primary").lower() != "primary":
+            continue
+        for side in ("input_fields", "output_fields"):
+            op_fields = list(getattr(spec, side, None) or [])
+            if not op_fields:
+                continue
+            tool_fields = list(getattr(tool, side, None) or [])
+            op_keys = set(_field_keys(op_fields))
+            tool_keys = set(_field_keys(tool_fields))
+            same_spelling = [getattr(f, "name", "") for f in tool_fields] == [getattr(f, "name", "") for f in op_fields]
+            if same_spelling or (tool_keys - op_keys):
+                continue
+            setattr(tool, side, [f.model_copy() if hasattr(f, "model_copy") else f for f in op_fields])
+            notes.append(f"{getattr(tool, 'tool_id', '?')}.{side} aligned with the operation's fields")
+    return notes
+
+
+def _exact_length_pattern(text: str, n: int) -> Optional[str]:
+    """Regex for an exact-length phrase: alphanumeric beats digits ("영숫자 12자리"
+    contains the substring "숫자" but means letters AND digits)."""
+    low = text.lower()
+    if ("영숫자" in text or "alphanumeric" in low or "영문" in text or "letters" in low
+            or "英数字" in text or "英字" in text):
+        return r"^[A-Za-z0-9]{" + str(n) + r"}$"
+    if "숫자" in text or "digit" in low or "数字" in text:
+        return r"^\d{" + str(n) + r"}$"
+    return None
+
+
+def _enforce_exact_length_phrase(data: dict) -> dict:
+    """The customer's words win over the model's numbers.
+
+    Live run 1: the interviewer stored max_length=9 for a field whose own
+    description said "영숫자 12자리" (a 12-char alphanumeric serial), and the slot
+    type then rejected every real serial number. When the description or
+    validation text states an exact length N, min/max are forced to N and a
+    pattern is derived when none was given.
+    """
+    if not isinstance(data, dict):
+        return data
+    ftype = (data.get("field_type") or data.get("type") or "").lower()
+    if ftype in ("date", "datetime", "time", "number", "integer", "boolean", "array", "object"):
+        return data
+    # Live (Japanese run): the interviewer wrote the customer's phrase itself
+    # into `pattern` ("^数字10桁$"). A pattern containing CJK text is never a
+    # regex — read it as a phrase and derive the regex from it, or drop it.
+    pattern = data.get("pattern")
+    phrase_pattern = pattern if isinstance(pattern, str) and _CJK_RE.search(pattern) else None
+    if phrase_pattern is not None:
+        phrase = phrase_pattern.strip("^$ ")
+        ex_p = _LEN_EXACT_RE.search(phrase)
+        data["pattern"] = _exact_length_pattern(phrase, int(ex_p.group(1))) if ex_p else None
+    text = " ".join(str(data.get(k) or "") for k in ("description", "validation", "constraints", "format_hint"))
+    if phrase_pattern is not None:
+        text = f"{text} {phrase_pattern}"
+    ex = _LEN_EXACT_RE.search(text)
+    if not ex or _LEN_RANGE_RE.search(text):
+        return data
+    n = int(ex.group(1))
+    for key in ("min_length", "max_length"):
+        if data.get(key) is not None and data.get(key) != n:
+            data[key] = n
+    if data.get("min_length") is None:
+        data["min_length"] = n
+    if data.get("max_length") is None:
+        data["max_length"] = n
+    if data.get("pattern") is None:
+        data["pattern"] = _exact_length_pattern(text, n)
+    return data
 
 
 def _safe_parse_model(model_class, data: dict):
@@ -1406,6 +1601,7 @@ def save_operation_spec(
             conversation_steps=parsed_conversation_steps,
             flow_type=flow_type,
         )
+        aligned_tools = align_primary_tool_fields(spec)
 
         _specs_bucket()[operation_id] = spec
 
@@ -1448,7 +1644,7 @@ def save_operation_spec(
         except Exception:
             pass  # Phase tracking must never block core logic
 
-        return {
+        result = {
             "success": True,
             "operation_id": operation_id,
             "message": f"Operation '{operation_id}' specification saved successfully.",
@@ -1465,6 +1661,16 @@ def save_operation_spec(
                 "flow_type": spec.flow_type,
             }
         }
+        computed_inputs = backend_computed_input_warnings(spec.input_fields)
+        if computed_inputs:
+            result["warnings"] = computed_inputs
+            result["message"] += (
+                " Review the warnings: confirm with the customer in this turn whether the caller "
+                "really supplies these values, or move them to output_fields with update_operation_spec."
+            )
+        if aligned_tools:
+            result["tool_fields_aligned"] = aligned_tools
+        return result
     except Exception as e:
         return {
             "success": False,
@@ -1825,6 +2031,14 @@ def update_operation_spec(
                 serialized[k] = v
 
         updated_spec = _safe_parse_model(OperationSpec, serialized)
+        tool_notes: list[str] = []
+        if "tools" not in updates and ("input_fields" in updates or "output_fields" in updates):
+            _, tool_notes = reconcile_tool_fields(
+                updated_spec.tools,
+                spec.input_fields, updated_spec.input_fields if "input_fields" in updates else None,
+                spec.output_fields, updated_spec.output_fields if "output_fields" in updates else None,
+            )
+        tool_notes += align_primary_tool_fields(updated_spec)
         _specs_bucket()[operation_id] = updated_spec
 
         # Persist to NFS (fast-path) + S3
@@ -1847,12 +2061,19 @@ def update_operation_spec(
         except Exception:
             pass  # Preview failure must not block update
 
-        return {
+        result = {
             "success": True,
             "operation_id": operation_id,
             "updated_fields": updated_fields,
             "message": f"Operation '{operation_id}' updated: {', '.join(updated_fields)}",
         }
+        if tool_notes:
+            result["tool_fields_reconciled"] = tool_notes
+            result["message"] += (
+                "; the tools' field lists were aligned with the operation (" + "; ".join(tool_notes) + ")"
+                " — regenerate the OpenAPI spec, the Lambda and the ACXD application from this spec."
+            )
+        return result
     except Exception as e:
         return {
             "success": False,
@@ -2347,7 +2568,13 @@ def save_infrastructure_spec(
              "engine": "postgresql", "tables": [{"name": "reservations", "columns": [...]}]}
         dynamodb_config: DynamoDB settings (required when db_type is 'dynamodb').
             {"tables": [{"name": "...", "partition_key": "pk", "sort_key": "sk", "gsi": [...]}],
-             "billing_mode": "PAY_PER_REQUEST", "include_sample_data": true}
+             "billing_mode": "PAY_PER_REQUEST", "include_sample_data": true,
+             "sample_rows": {"<table>": [{"<column>": <value>, ...}, ...]}}
+            sample_rows: when the customer's requirements list sample records (a table of
+            subscribers, orders, patients...), copy them here VERBATIM — every column, exact
+            values, no rounding, no "improved" examples. The infrastructure generator seeds
+            exactly these rows and the review gate fails the bundle when a row is missing or
+            altered, so the live test dialogs in the requirements keep working.
         lambda_config: Lambda function defaults.
             {"runtime": "python3.11", "memory_mb": 256, "timeout_seconds": 30,
              "architectures": ["arm64"], "layers": [], "environment_variables": {}}
@@ -2375,9 +2602,19 @@ def save_infrastructure_spec(
         parsed_api_gw = _safe_parse_model(ApiGatewayConfig, api_gateway_config) if api_gateway_config else None
         parsed_vpc = _safe_parse_model(VpcConfig, vpc_config) if vpc_config else None
 
+        # The runtime target is a start-screen decision, not an interview
+        # answer: copy it from the session seed so the spec (and the bundle
+        # built from it) carries it. Never exposed as a tool parameter.
+        try:
+            from tools.acxd_flow_spec import get_runtime_target
+            runtime_target = get_runtime_target()
+        except Exception:  # pragma: no cover - defensive
+            runtime_target = "classic"
+
         spec = InfrastructureSpec(
             project_name=project_name,
             region=region,
+            runtime_target=runtime_target,
             db_type=db_type,
             rds_config=parsed_rds,
             dynamodb_config=parsed_dynamodb,

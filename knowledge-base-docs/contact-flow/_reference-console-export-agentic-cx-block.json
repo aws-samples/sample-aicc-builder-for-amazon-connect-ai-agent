@@ -1,0 +1,122 @@
+{
+  "_reference": "Amazon Connect console export of a flow containing the Agentic CX block (Connect Customer instance, 2026-09-10). Re-imported through CreateContactFlow unchanged. Identifiers replaced by the AICC Builder bundle placeholders.",
+  "Version": "2019-10-30",
+  "StartAction": "2798037b-32b4-435e-aea9-0ff099daa676",
+  "Metadata": {
+    "entryPointPosition": {
+      "x": 40,
+      "y": 40
+    },
+    "ActionMetadata": {
+      "049334af-78c0-468c-90df-c8adca97d030": {
+        "position": {
+          "x": 496,
+          "y": 105.6
+        }
+      },
+      "2798037b-32b4-435e-aea9-0ff099daa676": {
+        "position": {
+          "x": 231.2,
+          "y": 63.2
+        },
+        "isFriendlyName": false,
+        "parameters": {
+          "AgentConfiguration": {
+            "WorkspaceId": {
+              "displayName": "hanbit-aicc",
+              "useDropdown": "true"
+            },
+            "ContextVariables": {
+              "customerPhone": {
+                "displayName": "customerPhone",
+                "useDynamic": true
+              }
+            },
+            "ApplicationId": {
+              "displayName": "hanbit-electronics-acxd"
+            },
+            "Alias": {
+              "displayName": "Production"
+            }
+          },
+          "SpeechRecognitionConfiguration": {
+            "SpeechRecognitionEngine": {
+              "displayName": "Amazon Connect 에이전틱 음성(권장)"
+            }
+          },
+          "AudioFillerConfiguration": {
+            "AudioType": {
+              "displayName": "멜로디 - 치퍼 차임"
+            }
+          }
+        }
+      }
+    },
+    "Annotations": [],
+    "name": "agentic-cx-block",
+    "description": "",
+    "type": "contactFlow",
+    "status": "published",
+    "hash": {}
+  },
+  "Actions": [
+    {
+      "Parameters": {},
+      "Identifier": "049334af-78c0-468c-90df-c8adca97d030",
+      "Type": "DisconnectParticipant",
+      "Transitions": {}
+    },
+    {
+      "Identifier": "2798037b-32b4-435e-aea9-0ff099daa676",
+      "Type": "ConnectParticipantWithAgenticCX",
+      "Parameters": {
+        "AgentConfiguration": {
+          "WorkspaceId": "{ACXD_WORKSPACE_ID}",
+          "ContextVariables": {
+            "customerPhone": "$.CustomerEndpoint.Address"
+          },
+          "ApplicationId": "{ACXD_APPLICATION_ID}",
+          "Alias": "{ACXD_ALIAS_ID}"
+        },
+        "SpeechRecognitionConfiguration": {
+          "SpeechRecognitionEngine": "AMAZON_AGENTIC_VOICE"
+        },
+        "AudioFillerConfiguration": {
+          "Enabled": true,
+          "AudioType": "MELODY_CHIPPER_CHIME",
+          "StartDelayInMilliseconds": 2500,
+          "MinimumPlayDurationInMilliseconds": 3000,
+          "ResponseDeliveryDelayInMilliseconds": 500
+        }
+      },
+      "Transitions": {
+        "NextAction": "049334af-78c0-468c-90df-c8adca97d030",
+        "Errors": [
+          {
+            "NextAction": "049334af-78c0-468c-90df-c8adca97d030",
+            "ErrorType": "NoMatchingError"
+          },
+          {
+            "NextAction": "049334af-78c0-468c-90df-c8adca97d030",
+            "ErrorType": "NoMatchingCondition"
+          },
+          {
+            "NextAction": "049334af-78c0-468c-90df-c8adca97d030",
+            "ErrorType": "InputTimeLimitExceeded"
+          }
+        ],
+        "Conditions": [
+          {
+            "NextAction": "049334af-78c0-468c-90df-c8adca97d030",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": [
+                "Escalation"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -54,6 +54,7 @@ const STEP_ICONS: Record<string, ReactNode> = {
   validation: <Check className="w-4 h-4" />,
   lambda: <FileCode className="w-4 h-4" />,
   prompt: <MessageSquare className="w-4 h-4" />,
+  acxd_application: <Boxes className="w-4 h-4" />,
   openapi: <FileJson className="w-4 h-4" />,
   contact_flow: <Workflow className="w-4 h-4" />,
   cdk: <Boxes className="w-4 h-4" />,
@@ -167,6 +168,7 @@ function useAvailableAssetTypes() {
       else if (p.assetType === 'contact_flow') flags |= 8;
       else if (p.assetType === 'cdk' || p.assetType === 'cloudformation') flags |= 16;
       else if (p.assetType === 'faq' || p.assetType === 'package') flags |= 32;
+      else if (p.assetType.startsWith('acxd_')) flags |= 64;
     }
     return flags;
   });
@@ -188,6 +190,7 @@ export function ProgressSidebar() {
   const setShowDownloadModal = useBuilderStore(s => s.setShowDownloadModal);
   const currentPhase = useBuilderStore(s => s.currentPhase);
   const scope = useBuilderStore(s => s.scope);
+  const runtimeTarget = useBuilderStore(s => s.runtimeTarget);
   const [isDownloading, setIsDownloading] = useState(false);
   // E4: real download lifecycle + toast (replaces the fake 2s timer).
   const [downloadState, setDownloadState] = useState<'idle' | 'packaging' | 'ready' | 'error'>('idle');
@@ -203,6 +206,9 @@ export function ProgressSidebar() {
   //   run) don't execute. So we keep the interview + review + packaging steps
   //   visible and trim only the generation lanes that won't run. A flow-only run
   //   therefore shows ~7 honest steps, not a misleading 1–2.
+  const targetProgress = progress.filter((item) =>
+    runtimeTarget === 'acxd' ? item.id !== 'prompt' : item.id !== 'acxd_application'
+  );
   const inScopeProgressIds = scope
     ? new Set([...scope.map((s) => SCOPE_TO_PROGRESS_ID[s] || s)])
     : null;
@@ -211,8 +217,8 @@ export function ProgressSidebar() {
   const isStepInScope = (item: ProgressItem) =>
     !inScopeProgressIds || ALWAYS_IN_SCOPE.has(item.id) || inScopeProgressIds.has(item.id);
 
-  const inScopeSteps = progress.filter(isStepInScope);
-  const outOfScopeSteps = inScopeProgressIds ? progress.filter((p) => !isStepInScope(p)) : [];
+  const inScopeSteps = targetProgress.filter(isStepInScope);
+  const outOfScopeSteps = inScopeProgressIds ? targetProgress.filter((p) => !isStepInScope(p)) : [];
 
   // Completion meter reflects the in-scope steps only.
   const completedCount = inScopeSteps.filter((p) => p.status === 'completed').length;
@@ -231,6 +237,7 @@ export function ProgressSidebar() {
   const hasContactFlowAsset = !!(assetFlags & 8);
   const hasCdkAsset = !!(assetFlags & 16);
   const hasKnowledgeBaseAsset = !!(assetFlags & 32);
+  const hasAcxdAsset = !!(assetFlags & 64);
 
   const hasAnyAsset = assetFlags > 0;
 
@@ -243,9 +250,9 @@ export function ProgressSidebar() {
     : false;
 
   const ko = language === 'ko-KR';
-  const toast = (msg: string) => {
+  const toast = (msg: string, ms: number = 4000) => {
     setDownloadToast(msg);
-    setTimeout(() => setDownloadToast(null), 4000);
+    setTimeout(() => setDownloadToast(null), ms);
   };
 
   const handleDownloadAll = async () => {
@@ -256,7 +263,7 @@ export function ProgressSidebar() {
       // Always fetch a fresh package from the backend (bypasses NFS cache and
       // any stale packageS3Key / downloadUrl cached on the client).
       const result = await fetchAssetDownloadUrl(currentSessionId, 'all');
-      if (result?.downloadUrl) {
+      if (result.ok) {
         const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
         setDownloadUrl(result.downloadUrl, expiresAt, result.s3Key);
         const win = window.open(result.downloadUrl, '_blank');
@@ -266,6 +273,12 @@ export function ProgressSidebar() {
         }
         setShowDownloadModal(true);
         setDownloadState('ready');
+      } else if (result.status > 0) {
+        // The backend answered and refused (e.g. the ACXD consistency gate found
+        // problems). Show its reason — asking the agent to package again would
+        // hit the same gate and hide it.
+        setDownloadState('error');
+        toast(formatDownloadRefusal(result.error, result.problems, ko), 15000);
       } else if (isConnected) {
         // Fallback: ask the agent via WebSocket (legacy path)
         requestAssets();
@@ -429,7 +442,7 @@ export function ProgressSidebar() {
                           {STEP_ICONS[item.id] || <Circle className="w-3.5 h-3.5" />}
                         </div>
                         <span className="text-xs text-surface-400 dark:text-surface-500 line-through">
-                          {language === 'ko-KR' ? item.labelKo : item.label}
+                          {localizedProgressLabel(item, language)}
                         </span>
                       </div>
                     ))}
@@ -491,6 +504,13 @@ export function ProgressSidebar() {
                 assetType="prompt"
               />
             )}
+            {hasAcxdAsset && (
+              <AssetDownloadButton
+                icon={<Boxes className="w-4 h-4" />}
+                label={language === 'ko-KR' ? 'ACXD 애플리케이션' : 'ACXD Application'}
+                assetType="acxd"
+              />
+            )}
             {hasOpenapiAsset && (
               <AssetDownloadButton
                 icon={<FileJson className="w-4 h-4" />}
@@ -527,13 +547,13 @@ export function ProgressSidebar() {
       <div className="px-6 py-4 border-t border-surface-200 dark:border-surface-700 flex-shrink-0">
         {downloadToast && (
           <div className={cn(
-            'mb-2 flex items-center gap-2 px-3 py-2 rounded-lg text-xs',
+            'mb-2 flex items-start gap-2 px-3 py-2 rounded-lg text-xs',
             downloadState === 'error'
               ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800'
               : 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300 border border-primary-200 dark:border-primary-800'
           )}>
-            {downloadState === 'error' ? <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" /> : <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />}
-            <span>{downloadToast}</span>
+            {downloadState === 'error' ? <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /> : <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />}
+            <span className="whitespace-pre-line break-words">{downloadToast}</span>
           </div>
         )}
         <button
@@ -759,15 +779,20 @@ function AssetDownloadButton({ icon, label, assetType }: AssetDownloadButtonProp
   const { currentSessionId } = useSessionStore();
   const [isDownloading, setIsDownloading] = useState(false);
 
+  const [refusal, setRefusal] = useState<string | null>(null);
+
   const handleDownload = async () => {
     if (!currentSessionId) return;
     setIsDownloading(true);
+    setRefusal(null);
     try {
       const result = await fetchAssetDownloadUrl(currentSessionId, assetType);
-      if (result?.downloadUrl) {
+      if (result.ok) {
         window.open(result.downloadUrl, '_blank');
       } else {
-        console.error('[Download] Failed to get fresh download URL for', assetType);
+        console.error('[Download] refused for', assetType, result.error);
+        setRefusal(formatDownloadRefusal(result.error, result.problems, language === 'ko-KR'));
+        setTimeout(() => setRefusal(null), 15000);
       }
     } catch (error) {
       console.error('[Download] error:', error);
@@ -779,19 +804,23 @@ function AssetDownloadButton({ icon, label, assetType }: AssetDownloadButtonProp
   // Check if we have any content to download
   // For knowledge_base type, check both 'faq' and 'package' asset types
   // For cdk type, also check 'cloudformation' (new naming convention)
+  // For 'acxd' (the whole ACXD application), any completed acxd_* resource counts.
   const assetTypesToCheck = assetType === 'knowledge_base'
     ? ['faq', 'package']
     : assetType === 'cdk'
     ? ['cdk', 'cloudformation']
     : [assetType];
+  const matchesType = (type: string) =>
+    assetType === 'acxd' ? type.startsWith('acxd_') : assetTypesToCheck.includes(type);
   const hasContent = Object.values(assetPreviews).some(
-    (p) => assetTypesToCheck.includes(p.assetType) && p.isComplete
+    (p) => matchesType(p.assetType) && p.isComplete
   ) || (assets[assetType]?.files && Object.keys(assets[assetType].files).length > 0);
 
-  // Show ZIP indicator for Lambda and knowledge_base (includes package)
-  const isZipDownload = assetType === 'lambda' || assetType === 'knowledge_base' || assetType === 'package';
+  // Show ZIP indicator for multi-file downloads (Lambda, knowledge base, ACXD application)
+  const isZipDownload = assetType === 'lambda' || assetType === 'knowledge_base' || assetType === 'package' || assetType === 'acxd';
 
   return (
+    <div>
     <button
       onClick={handleDownload}
       disabled={isDownloading || !hasContent}
@@ -817,7 +846,41 @@ function AssetDownloadButton({ icon, label, assetType }: AssetDownloadButtonProp
       </span>
       <Download className="w-3.5 h-3.5 text-surface-400 dark:text-surface-500" />
     </button>
+    {refusal && (
+      <div
+        role="alert"
+        className="mt-1 px-3 py-2 rounded-lg text-xs whitespace-pre-line bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800"
+      >
+        {refusal}
+      </div>
+    )}
+    </div>
   );
+}
+
+/**
+ * One readable message for a refused download: the backend's reason plus the
+ * first few consistency problems (the D9 gate lists them one per line).
+ */
+function formatDownloadRefusal(error: string, problems: string[], ko: boolean): string {
+  const headline = error.split('\n')[0].trim();
+  if (problems.length === 0) return headline;
+  const shown = problems.slice(0, 4).map((p) => `• ${p.replace(/^D9:\s*/, '')}`);
+  const more = problems.length > shown.length
+    ? (ko ? `… 외 ${problems.length - shown.length}건` : `… and ${problems.length - shown.length} more`)
+    : '';
+  const hint = ko
+    ? '에이전트에게 "정합성 문제를 수정해줘"라고 요청하면 위 항목을 고칩니다.'
+    : 'Ask the agent to "fix the consistency problems" to resolve these.';
+  return [ko ? `패키징이 거부되었습니다 — 정합성 검사 ${problems.length}건` : `Packaging refused — ${problems.length} consistency problem(s)`, ...shown, more, hint]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function localizedProgressLabel(item: ProgressItem, language: string): string {
+  if (language === 'ko-KR') return item.labelKo;
+  if (language === 'ja-JP') return item.labelJa || item.label;
+  return item.label;
 }
 
 interface ProgressStepProps {
@@ -827,7 +890,7 @@ interface ProgressStepProps {
 
 function ProgressStep({ item, language }: ProgressStepProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const label = language === 'ko-KR' ? item.labelKo : item.label;
+  const label = localizedProgressLabel(item, language);
   const icon = STEP_ICONS[item.id] || <Circle className="w-4 h-4" />;
   const colors = STATUS_COLORS[item.status] || STATUS_COLORS.pending;
   const hasSubSteps = item.subSteps && item.subSteps.length > 0;

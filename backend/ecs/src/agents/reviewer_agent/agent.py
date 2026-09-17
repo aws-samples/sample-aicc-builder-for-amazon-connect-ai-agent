@@ -33,6 +33,57 @@ HEARTBEAT_INTERVAL_SECONDS = 5
 from tools.session_context import current_callback_handler
 
 
+def _blocking_ids_path(session_id: str):
+    import os
+    from pathlib import Path
+    mount = os.environ.get("S3FILES_MOUNT_PATH", "/mnt/s3")
+    safe = session_id.replace("..", "_").replace("/", "_")
+    return Path(mount) / "sessions" / safe / "context" / "review_blocking.json"
+
+
+def _load_previous_blocking_ids(session_id: str) -> list[str]:
+    """Blocking ids recorded by the previous review (so this one can say fixed / new)."""
+    import json
+    try:
+        path = _blocking_ids_path(session_id)
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return [str(x) for x in (data.get("ids") or [])]
+    except Exception as exc:
+        logger.debug("[reviewer] previous blocking ids unavailable: %s", exc)
+    return []
+
+
+def _store_blocking_ids(session_id: str, ids: list[str]) -> None:
+    import json
+    import time as _time
+    try:
+        path = _blocking_ids_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"ids": ids, "recorded_at": _time.time()}, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("[reviewer] could not store blocking ids: %s", exc)
+
+
+def count_findings(report: str, marker: str) -> int:
+    """Number of distinct findings carrying ``marker`` (❌ / ⚠️) in a review report.
+
+    Findings are the bullet lines (``- ❌ …``) of the per-asset sections; the
+    action list repeats them as a numbered list (``1. ❌ …``). Section headers
+    and summary-table rows also carry the marker but are not findings. When
+    both list forms are present they describe the same set, so take the larger
+    rather than the sum; fall back to the raw count only for a report that
+    uses neither form.
+    """
+    import re as _re
+    esc = _re.escape(marker)
+    bullets = len(_re.findall(rf"^\s*[-*]\s*{esc}", report, _re.M))
+    numbered = len(_re.findall(rf"^\s*\d+[.)]\s*{esc}", report, _re.M))
+    if bullets or numbered:
+        return max(bullets, numbered)
+    return report.count(marker)
+
+
 def set_callback_handler(handler):
     current_callback_handler.set(handler)
 
@@ -546,6 +597,29 @@ async def reviewer_agent(
     except Exception as e:
         logger.warning(f"[REVIEWER] Failed to auto-load infrastructure spec: {e}")
 
+    # ACXD is a Classic Full runtime target, not a separate reviewer. Inject
+    # both authoritative artifacts so the reviewer can compare the interview
+    # decisions with the generated nodes rather than infer intent from prose.
+    try:
+        from tools.acxd_flow_spec import get_acxd_flow_spec, is_acxd_target
+        if is_acxd_target(session_id):
+            from tools.acxd_bundle import load_acxd_bundle
+            import json as _json
+            flow_spec = get_acxd_flow_spec(session_id)
+            acxd_context = {
+                "runtime_target": "acxd",
+                "flow_spec": flow_spec.model_dump() if flow_spec else None,
+                "bundle": load_acxd_bundle(session_id),
+            }
+            infra_spec_section += (
+                "\n## ACXD Runtime Review Context (authoritative)\n"
+                + _json.dumps(acxd_context, ensure_ascii=False, indent=2)
+                + "\n"
+            )
+            logger.info("[REVIEWER] Loaded ACXD bundle and ACXDFlowSpec")
+    except Exception as e:
+        logger.warning(f"[REVIEWER] Failed to load ACXD review context: {e}")
+
     yield {
         "type": "progress",
         "agent": "reviewer_agent",
@@ -782,9 +856,27 @@ Begin now."""
             "status": "completed"
         }
 
-        # Count issues from response
-        critical_count = full_response.count("❌")
-        warning_count = full_response.count("⚠️")
+        # Count findings, not emoji: the report repeats each finding in a section
+        # header, a summary-table row and the action list, so a raw count ran
+        # 2-3x high (live: header said 26/29 while the tables held 13/16).
+        advisory_critical = count_findings(full_response, "❌")
+        warning_count = count_findings(full_response, "⚠️")
+
+        # Blocking = deterministic gates (stable ids), computed here in code —
+        # not what the model wrote. Its ❌ items are advisory: real, worth
+        # offering, but a list that changes on every run cannot be the exit
+        # condition of a fix loop (GAON: 13 → 21 "critical" after fixing 5).
+        blocking = {"findings": [], "gates": {}, "count": 0}
+        blocking_diff = {"fixed": [], "new": [], "remaining": []}
+        try:
+            from tools.review_gates import collect_blocking_findings, diff_findings
+            blocking = collect_blocking_findings(session_id)
+            previous_ids = _load_previous_blocking_ids(session_id)
+            blocking_diff = diff_findings(previous_ids, blocking["findings"])
+            _store_blocking_ids(session_id, [f["id"] for f in blocking["findings"]])
+        except Exception as gate_err:
+            logger.warning(f"[reviewer] blocking gates failed (non-fatal): {gate_err}")
+        critical_count = blocking["count"]
 
         # Return the FULL report (capped) in the completion result, plus the
         # exact workspace path. This keeps the findings in the orchestrator's
@@ -802,13 +894,19 @@ Begin now."""
             "review_scope": review_scope,
             "critical_issues": critical_count,
             "warnings": warning_count,
+            "blocking": blocking["findings"][:60],
+            "blocking_by_gate": blocking["gates"],
+            "blocking_diff": blocking_diff,
+            "advisory_critical": advisory_critical,
             "report_path": report_path,
             "report": report_for_result,
             "summary": (
-                f"Review completed. Found {critical_count} critical issues, {warning_count} warnings. "
-                f"Full findings are in the `report` field above and saved at {report_path}. "
-                f"To act on specific items later, RE-READ {report_path} with read_workspace_file — "
-                f"do NOT re-run the reviewer just to recall findings."
+                f"Review completed. BLOCKING (deterministic gates, stable ids): {critical_count} "
+                f"— fixed since last review: {len(blocking_diff['fixed'])}, new: {len(blocking_diff['new'])}. "
+                f"Packaging requires 0 blocking findings. The reviewer additionally raised "
+                f"{advisory_critical} advisory ❌ and {warning_count} ⚠️ items in `report` — offer them "
+                f"to the user; they do not block. Full report saved at {report_path}; to act on items "
+                f"later RE-READ it with read_workspace_file — do NOT re-run the reviewer just to recall findings."
             ),
             "_completion_marker": "SUBAGENT_COMPLETE"
         }

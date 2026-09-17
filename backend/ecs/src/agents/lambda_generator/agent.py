@@ -570,6 +570,27 @@ Database: {db_type}{schema_section}{infra_spec_section}{modification_section}
                 except Exception as e:
                     logger.warning(f"[LAMBDA] python lint skipped: {e}")
 
+            # Save-time contract check (the D1 rule, per handler): spec input
+            # fields the handler never reads, spec output / envelope fields it
+            # never writes. Reported now so the orchestrator fixes this handler
+            # while it is the thing being generated, not at the final review.
+            field_gaps = {"missing_inputs": [], "missing_outputs": [], "checked": False}
+            if isinstance(code, str):
+                try:
+                    from tools.validate_consistency import lambda_field_gaps
+                    field_gaps = lambda_field_gaps(operation_id, code)
+                except Exception as e:
+                    logger.warning(f"[LAMBDA] spec field check skipped: {e}")
+            gap_note = ""
+            if field_gaps["missing_inputs"] or field_gaps["missing_outputs"]:
+                gap_note = (
+                    " — ⚠️ SPEC GAP: "
+                    + (f"handler never reads input {field_gaps['missing_inputs']}" if field_gaps["missing_inputs"] else "")
+                    + ("; " if field_gaps["missing_inputs"] and field_gaps["missing_outputs"] else "")
+                    + (f"response never sets {field_gaps['missing_outputs']}" if field_gaps["missing_outputs"] else "")
+                    + ". Fix NOW with a precise modification_request before generating the next asset."
+                )
+
             # Final result for Orchestrator - always yields this
             yield {
                 "success": True,
@@ -578,11 +599,13 @@ Database: {db_type}{schema_section}{infra_spec_section}{modification_section}
                 "parse_method": parse_method,
                 "syntax_ok": py_lint["ok"],
                 "syntax_errors": py_lint["errors"][:5],
+                "spec_field_gaps": field_gaps,
                 "status_code_fixes": status_fix["fixes_applied"][:10],
                 "status_code_warnings": status_fix["warnings"][:5],
                 "summary": (
                     f"Generated index.py for {operation_id}"
                     + ("" if py_lint["ok"] else f" — ⚠️ SYNTAX ERROR (patch before deploy): {py_lint['errors'][0]['message']}")
+                    + gap_note
                     + (
                         f" — rewrote {len(status_fix['fixes_applied'])} business-outcome 4xx → 200 "
                         "(Connect AI agents read non-2xx as a tool failure)"

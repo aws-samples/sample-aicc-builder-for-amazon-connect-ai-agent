@@ -1,0 +1,553 @@
+{
+  "$defs": {
+    "ACXDApplicationPlan": {
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "conversation_style": {
+          "default": "generative",
+          "description": "One of ('generative', 'scripted'). 'generative' (default): each operation is run by a generative_journey that talks freely, with deterministic islands only where they are needed \u2014 mandatory wording, strict-format identifiers, money/eligibility/compliance/identity decisions, backend calls, hand-off. 'scripted': every step is a fixed node; only when the customer explicitly asks for a scenario-driven agent.",
+          "title": "Conversation Style",
+          "type": "string"
+        },
+        "channels": {
+          "description": "Subset of ('voice', 'chat')",
+          "items": {
+            "type": "string"
+          },
+          "title": "Channels",
+          "type": "array"
+        },
+        "locales": {
+          "description": "Full locale codes, e.g. ['ko-KR','en-US']",
+          "items": {
+            "type": "string"
+          },
+          "title": "Locales",
+          "type": "array"
+        },
+        "primary_locale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Locale"
+        },
+        "speech_engine": {
+          "default": "agentic_voice",
+          "description": "One of ('agentic_voice', 'transcribe', 'speech_to_speech')",
+          "title": "Speech Engine",
+          "type": "string"
+        },
+        "idle_chat_timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Chat only",
+          "title": "Idle Chat Timeout Seconds"
+        },
+        "context_variables": {
+          "items": {
+            "$ref": "#/$defs/ACXDContextVariable"
+          },
+          "title": "Context Variables",
+          "type": "array"
+        },
+        "default_flows": {
+          "additionalProperties": true,
+          "description": "role \u2192 flow_id; derived from system flows when empty",
+          "title": "Default Flows",
+          "type": "object"
+        },
+        "environment": {
+          "default": "development",
+          "title": "Environment",
+          "type": "string"
+        }
+      },
+      "title": "ACXDApplicationPlan",
+      "type": "object"
+    },
+    "ACXDContextVariable": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "default": "string",
+          "title": "Type",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "from_contact_attribute": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Connect attribute the contact flow passes in, e.g. '$.CustomerEndpoint.Address'",
+          "title": "From Contact Attribute"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ACXDContextVariable",
+      "type": "object"
+    },
+    "ACXDFlowPlan": {
+      "description": "Interview-level plan for one ACXD flow (before node-graph generation).",
+      "properties": {
+        "flow_id": {
+          "description": "Letters only, 3-64 chars (ACXD constraint)",
+          "title": "Flow Id",
+          "type": "string"
+        },
+        "purpose": {
+          "title": "Purpose",
+          "type": "string"
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Short customer-facing name of the operation in the project language (2-4 words, e.g. '\ubc30\uc1a1 \uc870\ud68c'); spoken verbatim when the assistant lists what it can help with",
+          "title": "Display Name"
+        },
+        "role": {
+          "default": "operation",
+          "description": "One of ('operation', 'welcome', 'fallback', 'unknown', 'escalation', 'frustration', 'help', 'repeat', 'resume', 'followup', 'agent_request')",
+          "title": "Role",
+          "type": "string"
+        },
+        "customer_initiated": {
+          "default": true,
+          "description": "False for an operation the customer never asks for by itself \u2014 e.g. recording the call result after a conversation \u2014 that other flows reach by redirect. Such a flow is left out of the greeting/re-guide menu and is not an intent-routing target",
+          "title": "Customer Initiated",
+          "type": "boolean"
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "OperationSpec this flow implements (required when role='operation')",
+          "title": "Operation Id"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/ACXDNodeStep"
+          },
+          "title": "Steps",
+          "type": "array"
+        },
+        "slots": {
+          "items": {
+            "$ref": "#/$defs/ACXDSlotPlan"
+          },
+          "title": "Slots",
+          "type": "array"
+        },
+        "uses_knowledge_base": {
+          "default": false,
+          "title": "Uses Knowledge Base",
+          "type": "boolean"
+        },
+        "escalation_conditions": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Escalation Conditions"
+        },
+        "confirmed": {
+          "default": false,
+          "description": "User approved the whole flow plan",
+          "title": "Confirmed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "flow_id",
+        "purpose"
+      ],
+      "title": "ACXDFlowPlan",
+      "type": "object"
+    },
+    "ACXDGuardrailPlan": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "trigger": {
+          "default": "input",
+          "description": "'input' or 'output'",
+          "title": "Trigger",
+          "type": "string"
+        },
+        "policy": {
+          "description": "The business policy, in plain language",
+          "title": "Policy",
+          "type": "string"
+        },
+        "detection_method": {
+          "default": "auto",
+          "description": "'regex', 'keyword', 'llmJudge' or 'auto'",
+          "title": "Detection Method",
+          "type": "string"
+        },
+        "action": {
+          "default": "flag",
+          "description": "'mask', 'modify', 'route' or 'flag'",
+          "title": "Action",
+          "type": "string"
+        },
+        "route_flow_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Route Flow Id"
+        },
+        "examples": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Examples",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "policy"
+      ],
+      "title": "ACXDGuardrailPlan",
+      "type": "object"
+    },
+    "ACXDKnowledgeBasePlan": {
+      "description": "Only the KB shell \u2014 articles are rendered from the FAQ asset.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "topics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Topics",
+          "type": "array"
+        }
+      },
+      "title": "ACXDKnowledgeBasePlan",
+      "type": "object"
+    },
+    "ACXDNodeStep": {
+      "description": "One planned step of a flow, with its determinism decision.",
+      "properties": {
+        "step": {
+          "description": "1-based order within the flow",
+          "title": "Step",
+          "type": "integer"
+        },
+        "description": {
+          "description": "What happens at this step, in plain language",
+          "title": "Description",
+          "type": "string"
+        },
+        "node_type": {
+          "description": "ACXD node type; one of ['basic', 'choice', 'data_request', 'define', 'end', 'escalate', 'generative_journey', 'generative_task', 'generative_text', 'intent_capture', 'knowledge_base', 'loop', 'note', 'redirect', 'split', 'start', 'transform', 'user_choice', 'user_input', 'wait']",
+          "title": "Node Type",
+          "type": "string"
+        },
+        "determinism": {
+          "default": "deterministic",
+          "description": "'deterministic' (fixed) or 'generative' (LLM-driven)",
+          "title": "Determinism",
+          "type": "string"
+        },
+        "determinism_rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why this label was recommended, in plain language",
+          "title": "Determinism Rationale"
+        },
+        "decision_category": {
+          "default": "general",
+          "description": "What the step decides; one of ('authorization', 'compliance', 'eligibility', 'identity', 'money', 'payment', 'refund', 'general'). Money/refund/payment/authorization/eligibility/compliance/identity steps are always deterministic.",
+          "title": "Decision Category",
+          "type": "string"
+        },
+        "data_request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For data_request steps: the Data Request to call. Defaults to the flow's operation_id (one Data Request per operation).",
+          "title": "Data Request Id"
+        },
+        "redirect_flow_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For redirect steps: the flow_id this step hands the conversation to (e.g. the customer-info search flow when the order number is not found). The generated flow must redirect there; system hand-offs (follow-up, escalation) need not be named.",
+          "title": "Redirect Flow Id"
+        },
+        "captures": {
+          "description": "generative_journey steps only: names of the flow's slots the journey collects in free conversation (e.g. ['reason', 'preferredDate']). A value with a strict format \u2014 a regex, a phone number, an identifier \u2014 is never captured here: it gets its own user_choice step, which the runtime checks character by character.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Captures",
+          "type": "array"
+        },
+        "slot": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "user_choice steps: the flow slot this step collects (e.g. 'orderNumber'). Required for a strict-format slot when the flow also has a generative_journey, so the plan shows which values stay deterministic.",
+          "title": "Slot"
+        },
+        "journey_tools": {
+          "description": "generative_journey steps only: 'knowledge_base' lets the journey answer side questions from the FAQ knowledge base while it collects values.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Journey Tools",
+          "type": "array"
+        },
+        "user_confirmed": {
+          "default": false,
+          "title": "User Confirmed",
+          "type": "boolean"
+        },
+        "confirmation_pending_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Set when a re-upsert changed the decision and reset confirmation",
+          "title": "Confirmation Pending Reason"
+        }
+      },
+      "required": [
+        "step",
+        "description",
+        "node_type"
+      ],
+      "title": "ACXDNodeStep",
+      "type": "object"
+    },
+    "ACXDSlotPlan": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "default": "text",
+          "title": "Type",
+          "type": "string"
+        },
+        "sensitive": {
+          "default": false,
+          "title": "Sensitive",
+          "type": "boolean"
+        },
+        "examples": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Examples",
+          "type": "array"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "regex": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Regex"
+        },
+        "field_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "OperationSpec input field this slot fills (constraints come from its FieldSpec)",
+          "title": "Field Name"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ACXDSlotPlan",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "flows": {
+      "items": {
+        "$ref": "#/$defs/ACXDFlowPlan"
+      },
+      "title": "Flows",
+      "type": "array"
+    },
+    "guardrails": {
+      "items": {
+        "$ref": "#/$defs/ACXDGuardrailPlan"
+      },
+      "title": "Guardrails",
+      "type": "array"
+    },
+    "knowledge_base": {
+      "$ref": "#/$defs/ACXDKnowledgeBasePlan"
+    },
+    "application": {
+      "$ref": "#/$defs/ACXDApplicationPlan"
+    },
+    "notes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Notes"
+    }
+  },
+  "title": "ACXDFlowSpec",
+  "type": "object"
+}

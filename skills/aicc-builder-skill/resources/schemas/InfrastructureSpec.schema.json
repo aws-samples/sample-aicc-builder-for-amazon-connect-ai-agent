@@ -75,6 +75,18 @@
           "description": "Whether to seed sample data on deployment",
           "title": "Include Sample Data",
           "type": "boolean"
+        },
+        "sample_rows": {
+          "additionalProperties": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "description": "Sample rows the customer supplied, table name -> rows, copied VERBATIM from the requirements (every column, exact values). The seeder loads exactly these rows and the consistency gate fails the bundle when a row is missing or altered; rows the generator invents are only allowed when this is empty.",
+          "title": "Sample Rows",
+          "type": "object"
         }
       },
       "title": "DynamoDbConfig",
@@ -223,6 +235,12 @@
       "default": "ap-northeast-2",
       "description": "AWS region for all resources",
       "title": "Region",
+      "type": "string"
+    },
+    "runtime_target": {
+      "default": "classic",
+      "description": "'classic' (Lex + AI Prompt + AgentCore Gateway) or 'acxd' (Agentic CX Designer)",
+      "title": "Runtime Target",
       "type": "string"
     },
     "db_type": {

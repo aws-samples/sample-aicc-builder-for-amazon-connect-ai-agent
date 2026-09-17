@@ -382,17 +382,26 @@ export class EcsStack extends cdk.Stack {
         // endpoint is patched in by deploy.sh (from AGENTCORE_GATEWAY_URL);
         // when empty the agents fall back to built-in knowledge.
         AGENTCORE_GATEWAY_REGION: "us-east-1",
+        // Which build of AICC Builder this is (git commit from deploy.sh); the
+        // backend stamps it into every ACXD bundle's deploy-manifest.json.
+        ...(this.node.tryGetContext("builderBuild")
+          ? { AICC_BUILDER_BUILD: String(this.node.tryGetContext("builderBuild")) }
+          : {}),
       },
       portMappings: [
         { containerPort: 8080, protocol: ecs.Protocol.TCP },
       ],
       healthCheck: {
+        // Process liveness only (/live); mount readiness gates ALB traffic via /ping.
         command: ["CMD-SHELL", "python healthcheck.py"],
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(5),
         retries: 3,
         startPeriod: cdk.Duration.seconds(30),
       },
+      // Fargate maximum. A SIGTERM'd task keeps its in-flight turn alive this
+      // long so the client is told what happened and history is flushed.
+      stopTimeout: cdk.Duration.seconds(120),
     });
 
     // X-Ray sidecar container (Improvement D)
@@ -468,6 +477,11 @@ export class EcsStack extends cdk.Stack {
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       serviceName: `${id.toLowerCase()}-svc`,
       enableExecuteCommand: true, // ECS Exec for debugging
+      // /ping reports 503 until the S3 Files volume is visible (observed: the
+      // mount became available ~2.5 min after the app started, and traffic
+      // routed there in the meantime saw an empty workspace). Give the ALB
+      // health check time to wait for it instead of recycling the task.
+      healthCheckGracePeriod: cdk.Duration.minutes(6),
     });
 
     service.attachToApplicationTargetGroup(targetGroup);
@@ -576,17 +590,18 @@ export class EcsStack extends cdk.Stack {
         s3FilesVolumeConfiguration: { fileSystemArn: s3FilesFsArn, rootDirectory: "/" },
       },
     ];
-    const cfnContainerDefs = cfnTaskDef.containerDefinitions as any[];
-    if (cfnContainerDefs?.length) {
-      const appContainerDef = cfnContainerDefs[0];
-      const existingMounts = appContainerDef.mountPoints || [];
-      if (!existingMounts.some((m: any) => m.sourceVolume === "s3files")) {
-        appContainerDef.mountPoints = [
-          ...existingMounts,
-          { sourceVolume: "s3files", containerPath: "/mnt/s3", readOnly: false },
-        ];
-      }
-    }
+    // Mount the volume into the APP container through the L2 API. The previous
+    // escape-hatch read `cfnTaskDef.containerDefinitions`, which is a lazy
+    // token at synth time (not an array), so the mount point was never added
+    // and every task ran with /mnt/s3 as a plain local directory — the volume
+    // above was declared but mounted nowhere (found on dev, 2026-09-10).
+    // CDK only validates volume/mount pairing for configuredAtLaunch volumes,
+    // so referencing the L1-declared volume by name is fine here.
+    appContainer.addMountPoints({
+      sourceVolume: "s3files",
+      containerPath: "/mnt/s3",
+      readOnly: false,
+    });
 
     // Note: the ALB DNS is published to the SSM parameter
     // `props!.albDnsSsmParamName` by deploy.sh after stack deployment,
@@ -599,19 +614,37 @@ export class EcsStack extends cdk.Stack {
     // ========================================
     // Auto-Scaling (Improvement G)
     // ========================================
+    // Observed on dev (2026-09-10): a CPU target-tracking policy (scale IN
+    // whenever CPU < 70%, i.e. always for this I/O-bound app) and a connection
+    // step policy that scaled OUT at an average of 5 WebSockets fought each
+    // other — desired count flapped 1↔2 every 2–5 minutes, and every scale-in
+    // killed the task hosting a live interview turn. Both policies are now
+    // scale-out-only except for one explicit, slow scale-in step on the
+    // connection metric, and running turns hold ECS task scale-in protection
+    // (see backend/ecs/src/context/task_protection.py).
     const scaling = service.autoScaleTaskCount({
       minCapacity: 1,
       maxCapacity: 10,
     });
 
-    // Scale on CPU utilization
-    scaling.scaleOnCpuUtilization("CpuScaling", {
-      targetUtilizationPercent: 70,
-      scaleInCooldown: cdk.Duration.seconds(300),
-      scaleOutCooldown: cdk.Duration.seconds(60),
+    const cpuMetric = service.metricCpuUtilization({
+      statistic: "Average",
+      period: cdk.Duration.minutes(1),
+    });
+    scaling.scaleOnMetric("CpuScaling", {
+      metric: cpuMetric,
+      scalingSteps: [
+        { upper: 80, change: 0 },  // scale-out only: sustained ≥80% CPU adds a task
+        { lower: 80, change: +1 },
+      ],
+      adjustmentType: applicationautoscaling.AdjustmentType.CHANGE_IN_CAPACITY,
+      cooldown: cdk.Duration.minutes(5),
+      evaluationPeriods: 3,
     });
 
-    // Custom metric-based scaling on ActiveWebSocketConnections
+    // Custom metric-based scaling on ActiveWebSocketConnections. One Fargate
+    // task serves long-lived WebSockets asynchronously, so the thresholds are
+    // per-task connection counts, not "a handful of users".
     const wsMetric = new cloudwatch.Metric({
       namespace: "AiccBuilder/ECS",
       metricName: "ActiveWebSocketConnections",
@@ -622,14 +655,26 @@ export class EcsStack extends cdk.Stack {
     scaling.scaleOnMetric("WsConnectionScaling", {
       metric: wsMetric,
       scalingSteps: [
-        { upper: 5, change: 0 },  // 0-5 connections: no scaling
-        { lower: 5, change: +1 }, // 5+ connections: add 1 task
-        { lower: 15, change: +2 }, // 15+ connections: add 2 more
-        { lower: 30, change: +3 }, // 30+ connections: add 3 more
+        { upper: 10, change: -1 },              // quiet for the whole evaluation window: drop a task
+        { lower: 10, upper: 60, change: 0 },    // steady state
+        { lower: 60, change: +1 },              // 60+ connections per task: add 1
+        { lower: 120, change: +2 },             // 120+: add 2 more
+        { lower: 240, change: +3 },             // 240+: add 3 more
       ],
       adjustmentType:
         applicationautoscaling.AdjustmentType.CHANGE_IN_CAPACITY,
+      cooldown: cdk.Duration.minutes(15),
+      evaluationPeriods: 5,
     });
+
+    // Running agent turns protect their task from scale-in / rolling-deploy
+    // termination through the ECS agent endpoint; that call needs this action.
+    taskDefinition.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["ecs:UpdateTaskProtection"],
+        resources: [`arn:aws:ecs:${this.region}:${this.account}:task/${cluster.clusterName}/*`],
+      })
+    );
 
     // ========================================
     // Outputs

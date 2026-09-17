@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aicc-builder/acxd/data_request.schema.json",
+  "title": "ACXD Data Request",
+  "description": "Contract schema for ACXD data requests (AWS devguide acxd-data-requests). AICC Builder contract additions: 'external' requires url (may contain the {WEBHOOK_URL} placeholder substituted at deploy time), 'inline-static' requires code, 'mcp' requires mcp.url.",
+  "type": "object",
+  "required": ["dataRequestId", "type", "webhook"],
+  "additionalProperties": false,
+  "properties": {
+    "dataRequestId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9]{3,100}$",
+      "description": "Alphanumeric only, 3-100 chars"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["text", "number", "boolean", "list<text>", "object", "list<object>"]
+    },
+    "webhook": { "$ref": "#/$defs/webhook" },
+    "requestSchema": { "$ref": "#/$defs/jsonSchemaObject" },
+    "responseSchema": { "$ref": "#/$defs/jsonSchemaObject" },
+    "sensitive": { "type": "boolean" },
+    "description": { "type": "string", "maxLength": 200 },
+    "metadata": { "type": "object" },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" },
+    "updatedBy": { "type": "string" }
+  },
+  "$defs": {
+    "jsonSchemaObject": {
+      "type": "object",
+      "anyOf": [
+        { "required": ["type"] },
+        { "required": ["$ref"] },
+        { "required": ["anyOf"] }
+      ],
+      "description": "JSON Schema with type, $ref, or anyOf at the top level"
+    },
+    "header": {
+      "type": "object",
+      "required": ["key", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "value": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "May reference secrets: {{secrets.my_secret}}"
+        },
+        "sensitive": { "type": "boolean" },
+        "dynamic": { "type": "boolean" },
+        "required": { "type": "boolean" }
+      }
+    },
+    "mcpTool": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "requestSchema": { "type": "object" },
+        "responseSchema": { "type": "object" }
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "required": ["implementation"],
+      "additionalProperties": false,
+      "properties": {
+        "implementation": {
+          "type": "string",
+          "enum": ["inline-static", "external", "mcp"]
+        },
+        "method": {
+          "type": "string",
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        },
+        "url": { "type": "string", "maxLength": 2048 },
+        "headers": { "type": "array", "items": { "$ref": "#/$defs/header" } },
+        "code": { "type": "string", "maxLength": 200000 },
+        "environments": { "type": "object" },
+        "provider": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "providerId": { "type": "string" },
+            "actionId": { "type": "string" }
+          }
+        },
+        "mcp": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "method": { "type": "string" },
+            "url": { "type": "string", "maxLength": 2048 },
+            "headers": { "type": "array", "items": { "$ref": "#/$defs/header" } },
+            "environments": { "type": "object" },
+            "tools": {
+              "type": "array",
+              "maxItems": 100,
+              "items": { "$ref": "#/$defs/mcpTool" }
+            }
+          }
+        },
+        "sendContext": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "implementation": { "const": "inline-static" } } },
+          "then": { "required": ["code"] }
+        },
+        {
+          "if": { "properties": { "implementation": { "const": "external" } } },
+          "then": { "required": ["url"] }
+        },
+        {
+          "if": { "properties": { "implementation": { "const": "mcp" } } },
+          "then": {
+            "required": ["mcp"],
+            "properties": { "mcp": { "required": ["url"] } }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -94,8 +94,28 @@ def _get_items(field: dict) -> Optional[dict]:
 
 
 def _get_properties(field: dict) -> Optional[list]:
-    """FieldSpec `properties` is a LIST of sub-FieldSpec (not a dict)."""
-    return _pick_field(field, "properties", "sub_fields", "subFields", "fields")
+    """FieldSpec `properties` is a LIST of sub-FieldSpec (not a dict).
+
+    Interviews have stored it as a list of names (``["code", "detail"]``) or as a
+    name → spec mapping; live (GAON) the validator then died with
+    ``'str' object has no attribute 'get'`` and the whole check was refused.
+    Normalise both shapes to a list of dicts.
+    """
+    raw = _pick_field(field, "properties", "sub_fields", "subFields", "fields")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return [dict(spec, name=name) if isinstance(spec, dict) else {"name": name}
+                for name, spec in raw.items()]
+    if isinstance(raw, list):
+        out = []
+        for item in raw:
+            if isinstance(item, dict):
+                out.append(item)
+            elif isinstance(item, str) and item.strip():
+                out.append({"name": item.strip()})
+        return out
+    return None
 
 
 def _get_field_type(field: dict) -> str:
@@ -338,7 +358,7 @@ def _fields_to_synthetic_object(fields: list, object_name: str) -> dict:
 # ignore the gate. Treat them as implicitly declared at the response ROOT
 # only (never inside nested objects/arrays, where an undeclared property is
 # still a real mismatch).
-_IMPLICIT_RESPONSE_ENVELOPE_FIELDS = {"errorCode", "message"}
+from tools.response_contract import ENVELOPE_FIELD_NAMES as _IMPLICIT_RESPONSE_ENVELOPE_FIELDS  # noqa: E501
 
 
 def validate_shape_parity(spec: dict, openapi_doc: dict) -> list[ShapeMismatch]:
@@ -410,6 +430,11 @@ def validate_shape_parity(spec: dict, openapi_doc: dict) -> list[ShapeMismatch]:
             t_id = t.get("tool_id") or ""
             t_method = t.get("http_method") or method
             t_path = t.get("path") or (f"/tools/{t_id}" if t_id else op_path)
+            # a tool may name the operation's top-level fields instead of repeating them,
+            # and the primary tool's contract IS the operation's field list
+            from tools.response_contract import tool_contract_fields
+            t = dict(t, input_fields=tool_contract_fields(spec, t, "input_fields"),
+                     output_fields=tool_contract_fields(spec, t, "output_fields"))
             _compare_bundle(
                 owner_label=t_id or op_id,
                 in_fields=t.get("input_fields") or [],

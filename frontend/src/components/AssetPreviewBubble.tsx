@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { ContactFlowPreview } from './ContactFlowPreview';
+import { AcxdFlowPreview } from './AcxdFlowPreview';
 import { generatePresignedUrl } from '../services/sessions';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -61,6 +62,12 @@ const ASSET_TYPE_INFO: Record<string, {
   contact_flow: { icon: <Workflow className="w-4 h-4" />, label: 'Contact Flow', labelKo: 'Contact Flow', color: 'text-green-600 dark:text-green-300 bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800', collapseMode: 'full' },
   cdk: { icon: <Boxes className="w-4 h-4" />, label: 'CloudFormation Template', labelKo: 'CloudFormation 템플릿', color: 'text-cyan-600 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-900/20 border-cyan-200 dark:border-cyan-800', collapseMode: 'preview', previewLines: 10 },
   cloudformation: { icon: <Boxes className="w-4 h-4" />, label: 'CloudFormation Template', labelKo: 'CloudFormation 템플릿', color: 'text-cyan-600 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-900/20 border-cyan-200 dark:border-cyan-800', collapseMode: 'preview', previewLines: 10 },
+  acxd_slot_type: { icon: <FileCode className="w-4 h-4" />, label: 'ACXD Slot Type', labelKo: 'ACXD 슬롯 타입', color: 'text-violet-600 dark:text-violet-300 bg-violet-50 dark:bg-violet-900/20 border-violet-200 dark:border-violet-800', collapseMode: 'preview', previewLines: 10 },
+  acxd_data_request: { icon: <FileJson className="w-4 h-4" />, label: 'ACXD Data Request', labelKo: 'ACXD 데이터 요청', color: 'text-blue-600 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800', collapseMode: 'preview', previewLines: 10 },
+  acxd_guardrail: { icon: <Settings className="w-4 h-4" />, label: 'ACXD Guardrail', labelKo: 'ACXD 가드레일', color: 'text-amber-600 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800', collapseMode: 'preview', previewLines: 10 },
+  acxd_knowledge_base: { icon: <FileText className="w-4 h-4" />, label: 'ACXD Knowledge Base', labelKo: 'ACXD 지식 베이스', color: 'text-emerald-600 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800', collapseMode: 'preview', previewLines: 10 },
+  acxd_application: { icon: <Boxes className="w-4 h-4" />, label: 'ACXD Application', labelKo: 'ACXD 애플리케이션', color: 'text-fuchsia-600 dark:text-fuchsia-300 bg-fuchsia-50 dark:bg-fuchsia-900/20 border-fuchsia-200 dark:border-fuchsia-800', collapseMode: 'preview', previewLines: 10 },
+  acxd_context_variable: { icon: <Settings className="w-4 h-4" />, label: 'ACXD Context Variables', labelKo: 'ACXD 컨텍스트 변수', color: 'text-fuchsia-600 dark:text-fuchsia-300 bg-fuchsia-50 dark:bg-fuchsia-900/20 border-fuchsia-200 dark:border-fuchsia-800', collapseMode: 'preview', previewLines: 10 },
   company: { icon: <Building2 className="w-4 h-4" />, label: 'Company Profile', labelKo: '회사 정보', color: 'text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/20 border-indigo-200 dark:border-indigo-800', collapseMode: 'full' },
   operations: { icon: <Settings className="w-4 h-4" />, label: 'Operations', labelKo: '작업 정의', color: 'text-teal-600 dark:text-teal-300 bg-teal-50 dark:bg-teal-900/20 border-teal-200 dark:border-teal-800', collapseMode: 'full' },
   validation: { icon: <CheckCircle2 className="w-4 h-4" />, label: 'Validation Rules', labelKo: '유효성 검사', color: 'text-amber-600 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800', collapseMode: 'full' },
@@ -82,6 +89,9 @@ export const AssetPreviewBubble = memo(function AssetPreviewBubble({ preview, la
   // Delegate to specialized components
   if (preview.assetType === 'contact_flow') {
     return <ContactFlowPreview preview={preview} language={language} />;
+  }
+  if (preview.assetType === 'acxd_flow') {
+    return <AcxdFlowPreview preview={preview} language={language} />;
   }
 
 
@@ -161,6 +171,13 @@ export const AssetPreviewBubble = memo(function AssetPreviewBubble({ preview, la
       case 'openapi': return 'yaml';
       case 'prompt': return 'markdown';
       case 'contact_flow': return 'json';
+      case 'acxd_flow':
+      case 'acxd_slot_type':
+      case 'acxd_data_request':
+      case 'acxd_guardrail':
+      case 'acxd_knowledge_base':
+      case 'acxd_application':
+      case 'acxd_context_variable': return 'json';
       case 'cdk': case 'cloudformation': return 'yaml';
       case 'research': case 'faq': case 'package': case 'operation_spec': case 'requirement': return 'markdown';
       default: return 'text';

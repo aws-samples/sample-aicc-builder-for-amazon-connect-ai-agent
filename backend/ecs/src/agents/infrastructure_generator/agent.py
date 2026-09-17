@@ -817,6 +817,7 @@ async def _generate_base(project_name, industry, operations_str, ops_list,
     # the prompt so the sample-data seeder keys a record to it — a live test call
     # then matches a real record. Pull from the loaded infra spec.
     test_phone_line = ""
+    sample_rows_block = ""
     try:
         from tools.spec_manager import get_infrastructure_spec as _gis
         _ispec = _gis()
@@ -828,6 +829,20 @@ async def _generate_base(project_name, industry, operations_str, ops_list,
                 f"format used by the phone GSI (match the other sample records' format, "
                 f"e.g. with/without leading '+'). This lets a live test call find a match.\n"
             )
+        # Rows the customer supplied are a contract, not inspiration: the
+        # requirements' test dialogs are written against these exact values
+        # (live: a seeder that "improved" a birth date broke identity checks).
+        _ddb = getattr(_ispec, "dynamodb_config", None) if _ispec else None
+        _rows = getattr(_ddb, "sample_rows", None) if _ddb else None
+        if isinstance(_rows, dict) and any(_rows.values()):
+            import json as _json
+            sample_rows_block = (
+                "\nCUSTOMER-SUPPLIED SAMPLE ROWS (seed EXACTLY these — every column, every value "
+                "verbatim; do NOT rename, reformat, round, translate or replace any value; extra "
+                "rows may be added only AFTER these; the review gate fails the template when a "
+                "value below is missing):\n"
+                + _json.dumps(_rows, ensure_ascii=False, indent=2) + "\n"
+            )
     except Exception:
         pass
 
@@ -837,7 +852,7 @@ Project Name: {project_name}
 Industry: {industry}
 {current_date_line}{test_phone_line}Include Sample Data: {include_sample_data}
 Include Customer Phone Lookup: {include_customer_phone_lookup}
-{infra_spec_section}{spec_table}
+{sample_rows_block}{infra_spec_section}{spec_table}
 ALL operations (for Schema Summary JSON, DependsOn, and DynamoDB design):
 {operations_str}
 

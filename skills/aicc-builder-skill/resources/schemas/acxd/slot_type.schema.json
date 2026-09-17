@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aicc-builder/acxd/slot_type.schema.json",
+  "title": "ACXD Slot Type",
+  "description": "Contract schema for ACXD slot types (AWS devguide acxd-slot-types).",
+  "type": "object",
+  "required": ["slotTypeId", "values"],
+  "additionalProperties": false,
+  "properties": {
+    "slotTypeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z]{3,100}$",
+      "description": "Alphabetic only, 3-100 chars"
+    },
+    "values": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/slotTypeValue" }
+    },
+    "sensitive": { "type": "boolean" },
+    "mainLanguageCode": { "type": "string" },
+    "languageCodes": { "type": "array", "items": { "type": "string" } },
+    "description": { "type": "string", "maxLength": 200 },
+    "metadata": { "type": "object" },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" },
+    "lastUpdatedBy": { "type": "string" }
+  },
+  "$defs": {
+    "slotTypeValue": {
+      "type": "object",
+      "required": ["value"],
+      "additionalProperties": false,
+      "properties": {
+        "value": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "valueId": { "type": "string" },
+        "synonyms": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "skipTraining": { "type": "boolean" },
+        "skipTranslation": { "type": "boolean" },
+        "choicePayload": { "type": "string", "maxLength": 200 }
+      }
+    }
+  }
+}

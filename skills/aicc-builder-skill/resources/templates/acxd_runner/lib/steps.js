@@ -1,0 +1,1007 @@
+'use strict';
+/**
+ * Deploy step library. Static, tested code — the LLM never writes deploy
+ * logic, it only selects these steps via the manifest (decision D2).
+ *
+ * Each step: { plan(ctx, params) -> string[], run(ctx, params) -> void }.
+ * ``plan`` must be side-effect free (used by --dry-run).
+ *
+ * ctx = {
+ *   bundleDir, project, region, log(line),
+ *   client, sdk,           // ACXD SDK (fake-injectable)
+ *   state,                 // lib/state.js object (mutated by steps)
+ *   exec(cmd, args) -> string,   // external CLI (aws) — fake-injectable
+ *   sleep(ms), env,        // injectables
+ * }
+ */
+
+const fs = require('fs');
+const path = require('path');
+
+const { resolveFiles } = require('./manifest');
+const { sendWithRetry, upsert, poll } = require('./client');
+const { recordResource, resolvePlaceholders } = require('./state');
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, 'utf-8'));
+}
+
+function listFiles(ctx, params) {
+  const files = resolveFiles(ctx.bundleDir, params.files || []);
+  for (const f of files) {
+    if (!fs.existsSync(f)) {
+      throw new Error(`asset file not found: ${f}`);
+    }
+  }
+  return files;
+}
+
+function send(ctx, CommandName, input) {
+  const Command = ctx.sdk[CommandName];
+  if (!Command) throw new Error(`SDK command not found: ${CommandName}`);
+  return sendWithRetry(ctx.client, new Command(input), { sleep: ctx.sleep });
+}
+
+/** List every page of a paginated List* command. */
+async function listAll(ctx, CommandName, input = {}) {
+  const items = [];
+  let nextToken;
+  do {
+    const resp = await send(ctx, CommandName, { ...input, nextToken });
+    items.push(...(resp.items || []));
+    nextToken = resp.nextToken;
+  } while (nextToken);
+  return items;
+}
+
+/** Resolve bundle placeholders, preferring a WEBHOOK_URL supplied by deploy.sh.
+ *
+ * The walk is deep, so `{WEBHOOK_URL}` is substituted inside nested webhook
+ * structures as well — notably `webhook.environments.{production,development}.url`,
+ * which is where the runtime actually reads the URL and resolves the
+ * `{Name:NLX.Secret}` header (live 2026-09-13; a top-level url/headers pair
+ * alone answered 403). Locked by a test so a future refactor cannot make the
+ * resolution shallow again.
+ */
+function resolveAssetPlaceholders(doc, ctx) {
+  const webhookUrl = ctx.state.webhookUrl || (ctx.env && ctx.env.WEBHOOK_URL);
+  const state = webhookUrl === ctx.state.webhookUrl
+    ? ctx.state
+    : { ...ctx.state, webhookUrl };
+  return resolvePlaceholders(doc, state);
+}
+
+// ---------------------------------------------------------------------------
+// Backend (CloudFormation) steps — reuse the Classic aws-cli approach (D8)
+// ---------------------------------------------------------------------------
+
+/**
+ * The CloudFormation stack this deploy targets.
+ *
+ * deploy.sh names it `${PROJECT_NAME}-stack` and exports PROJECT_NAME plus
+ * AICC_STACK_NAME before invoking the runner, so both entry points converge on
+ * ONE stack. Live (2026-09-13): a bare `node runner.js deploy` used the
+ * manifest's default project and created a SECOND stack (`aicc-poc-stack`)
+ * beside deploy.sh's `gaon-stack` — the Data Requests then called a different
+ * backend than the one deploy.sh had deployed. A runner-only deploy must pass
+ * PROJECT_NAME (or AICC_STACK_NAME) to reuse the stack.
+ */
+function resolveStackName(ctx, params) {
+  const env = ctx.env || {};
+  if (env.AICC_STACK_NAME) return env.AICC_STACK_NAME;
+  if (env.PROJECT_NAME) return `${env.PROJECT_NAME}-stack`;
+  return (params && params.stackName) || `${ctx.project}-acxd-backend`;
+}
+
+/** Log the stack in use, and say so when it is not the manifest's own name. */
+function logStackChoice(ctx, params, stack) {
+  ctx.log(`  = CloudFormation stack: ${stack}`);
+  const manifestStack = params && params.stackName;
+  if (manifestStack && manifestStack !== stack) {
+    ctx.log(`  ! manifest names '${manifestStack}'; using '${stack}' ` +
+      '(PROJECT_NAME / AICC_STACK_NAME from deploy.sh wins so both share one stack)');
+  }
+}
+
+const deployCfnBackend = {
+  plan(ctx, params) {
+    const stack = resolveStackName(ctx, params);
+    const lines = [`deploy CloudFormation stack '${stack}' from ${params.templatePath}`];
+    for (const dir of params.lambdaDirs || []) {
+      lines.push(`update Lambda code from ${dir}`);
+    }
+    return lines;
+  },
+  async run(ctx, params) {
+    const stack = resolveStackName(ctx, params);
+    logStackChoice(ctx, params, stack);
+    if (ctx.env && ctx.env.AICC_CFN_ALREADY_DEPLOYED === '1') {
+      if (!ctx.env.WEBHOOK_URL) {
+        throw new Error(
+          'AICC_CFN_ALREADY_DEPLOYED=1 requires WEBHOOK_URL from the shared CloudFormation output');
+      }
+      ctx.state.cfnStackName = stack;
+      ctx.log(`  = using shared CloudFormation backend '${stack}'`);
+      return;
+    }
+    const template = path.join(ctx.bundleDir, params.templatePath);
+    if (!fs.existsSync(template)) {
+      throw new Error(`CloudFormation template not found: ${template}`);
+    }
+    ctx.exec('aws', [
+      'cloudformation', 'deploy',
+      '--template-file', template,
+      '--stack-name', stack,
+      '--capabilities', 'CAPABILITY_NAMED_IAM',
+      '--no-fail-on-empty-changeset',
+      '--region', ctx.region,
+    ]);
+    ctx.state.cfnStackName = stack;
+    recordResource(ctx.state, 'cfn-stack', stack);
+    for (const dir of params.lambdaDirs || []) {
+      const absDir = path.join(ctx.bundleDir, dir);
+      if (!fs.existsSync(absDir)) {
+        // The CloudFormation template ships a placeholder handler that returns
+        // HTTP 501; without the real code the deploy "succeeds" and every tool
+        // call fails. Fail here instead.
+        throw new Error(
+          `Lambda source directory not found: ${absDir}. The bundle must ship ` +
+          'real handler code — the CloudFormation placeholder answers every ' +
+          'tool call with HTTP 501 "Upload Lambda code from lambda/ folder".');
+      }
+      const fnName = resolveLambdaName(ctx, stack, path.basename(dir), params.environment || 'dev');
+      const zipPath = path.join(ctx.bundleDir, `${path.basename(dir)}.zip`);
+      ctx.exec('sh', ['-c',
+        `cd ${JSON.stringify(absDir)} && zip -qr ${JSON.stringify(zipPath)} .`]);
+      ctx.exec('aws', [
+        'lambda', 'update-function-code',
+        '--function-name', fnName,
+        '--zip-file', `fileb://${zipPath}`,
+        '--region', ctx.region,
+      ]);
+      fs.rmSync(zipPath, { force: true });
+      ctx.log(`  ~ updated Lambda code: ${fnName}`);
+    }
+  },
+};
+
+const wireWebhookUrls = {
+  plan(ctx, params) {
+    const key = (params && params.outputKey) || 'ApiEndpoint';
+    return [`read CFN output '${key}' and record it as {WEBHOOK_URL}`];
+  },
+  async run(ctx, params) {
+    const key = (params && params.outputKey) || 'ApiEndpoint';
+    const supplied = ctx.env && ctx.env.WEBHOOK_URL;
+    if (supplied) {
+      ctx.state.webhookUrl = supplied.replace(/\/$/, '');
+      ctx.log(`  = webhook base URL: ${ctx.state.webhookUrl} (WEBHOOK_URL)`);
+      // deploy.sh supplies WEBHOOK_URL, so this is the path every bundle deploy
+      // takes: the backend key must still be resolved for the *BackendApiKey
+      // secret (live: it was skipped here and every data request answered 403).
+      readBackendApiKey(ctx, ctx.state.cfnStackName);
+      return;
+    }
+    const stack = ctx.state.cfnStackName;
+    if (!stack) {
+      throw new Error('wire-webhook-urls requires deploy-cfn-backend to run first');
+    }
+    const out = readCfnOutput(ctx, stack, key);
+    if (!out || out === 'None') {
+      throw new Error(`CFN stack '${stack}' has no output '${key}'`);
+    }
+    ctx.state.webhookUrl = out;
+    ctx.log(`  = webhook base URL: ${out}`);
+    readBackendApiKey(ctx, stack);
+  },
+};
+
+// The template names functions `${ProjectName}-${Environment}-<op-with-hyphens>`
+// while the bundle's lambda directories are `<op_with_underscores>`; deploy.sh
+// resolves the real names from the stack, so must the runner-only path. Match
+// the physical id of the stack's AWS::Lambda::Function resources on the
+// normalised operation name; fall back to the historical convention.
+function resolveLambdaName(ctx, stack, dirName, environment) {
+  const norm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const wanted = norm(dirName);
+  try {
+    const raw = ctx.exec('aws', [
+      'cloudformation', 'describe-stack-resources',
+      '--stack-name', stack,
+      '--query', "StackResources[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId",
+      '--output', 'text',
+      '--region', ctx.region,
+    ]).trim();
+    const names = raw ? raw.split(/\s+/).filter(Boolean) : [];
+    const hit = names.find((n) => norm(n).includes(wanted));
+    if (hit) return hit;
+    if (names.length) ctx.log(`  ! no stack Lambda matches '${dirName}' (have: ${names.join(', ')})`);
+  } catch (err) {
+    ctx.log(`  ! could not list stack Lambdas: ${err.message || err}`);
+  }
+  return `${ctx.project}-${dirName}-${environment}`;
+}
+
+function readCfnOutput(ctx, stack, key) {
+  return ctx.exec('aws', [
+    'cloudformation', 'describe-stacks',
+    '--stack-name', stack,
+    '--query', `Stacks[0].Outputs[?OutputKey=='${key}'].OutputValue`,
+    '--output', 'text',
+    '--region', ctx.region,
+  ]).trim();
+}
+
+// The generated API Gateway requires its key (ACXD target); the Data Requests
+// send it from the BackendApiKey secret. When deploy.sh did not hand the value
+// over as ACXD_SECRET_BACKENDAPIKEY (runner-only deploys), take it from the
+// stack's ApiKeyValue output. Kept in memory only — never written to the state
+// file or the log.
+function readBackendApiKey(ctx, stack) {
+  // The backend key may arrive under the generic env name while the bundle's
+  // secret carries the project-scoped name (<projectSlug>BackendApiKey): the
+  // env value serves every *BackendApiKey secret. Live: the scoped secret was
+  // skipped ("env not set") and every data request answered 403.
+  if (ctx.env && ctx.env.ACXD_SECRET_BACKENDAPIKEY) {
+    ctx.backendApiKey = ctx.env.ACXD_SECRET_BACKENDAPIKEY;
+    return;
+  }
+  if (!stack) {
+    ctx.log('  ! no CloudFormation stack known — the BackendApiKey secret will need ACXD_SECRET_BACKENDAPIKEY');
+    return;
+  }
+  try {
+    const value = readCfnOutput(ctx, stack, 'ApiKeyValue');
+    if (value && value !== 'None' && value !== 'RETRIEVE_FAILED') {
+      ctx.backendApiKey = value;
+      ctx.log('  = BackendApiKey value taken from CFN output ApiKeyValue (not stored)');
+    } else {
+      ctx.log('  ! CFN output ApiKeyValue missing — the BackendApiKey secret will need ACXD_SECRET_BACKENDAPIKEY');
+    }
+  } catch (err) {
+    ctx.log(`  ! could not read ApiKeyValue: ${err.message || err}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ACXD resource upserts
+// ---------------------------------------------------------------------------
+
+/** Build a simple Get/Create/Update upsert step for ID-addressable resources. */
+function idUpsertStep({ label, idField, identifierField, getCmd, createCmd, updateCmd, deleteCmd, kind, transform }) {
+  return {
+    plan(ctx, params) {
+      return listFiles(ctx, params).map((f) => `upsert ${label} from ${path.relative(ctx.bundleDir, f)}`);
+    },
+    async run(ctx, params) {
+      for (const file of listFiles(ctx, params)) {
+        let doc = readJson(file);
+        if (transform) doc = transform(doc, ctx);
+        const id = doc[idField];
+        await upsert({
+          label: `${label} ${id}`,
+          log: ctx.log,
+          get: () => send(ctx, getCmd, { [identifierField]: id }),
+          create: () => send(ctx, createCmd, doc),
+          update: () => {
+            const { [idField]: _omit, ...rest } = doc;
+            return send(ctx, updateCmd, { [identifierField]: id, ...rest });
+          },
+          // A create that fails validation part-way can leave a shell record:
+          // Get succeeds but Update then fails with
+          //   "The item is not found by key {...treeId: 'x-Omni'}".
+          // Observed live on 2026-09-05. Heal it by recreating in place
+          // instead of dead-ending an otherwise idempotent re-run.
+          recreate: deleteCmd
+            ? async () => {
+                await send(ctx, deleteCmd, { [identifierField]: id });
+                return send(ctx, createCmd, doc);
+              }
+            : undefined,
+        });
+        recordResource(ctx.state, kind, id);
+      }
+    },
+  };
+}
+
+const upsertSlotTypes = idUpsertStep({
+  label: 'slot type', kind: 'slot-type',
+  idField: 'slotTypeId', identifierField: 'slotTypeIdentifier',
+  getCmd: 'GetSlotTypeCommand', createCmd: 'CreateSlotTypeCommand',
+  updateCmd: 'UpdateSlotTypeCommand',
+  deleteCmd: 'DeleteSlotTypeCommand',
+});
+
+const upsertDataRequests = idUpsertStep({
+  label: 'data request', kind: 'data-request',
+  idField: 'dataRequestId', identifierField: 'dataRequestIdentifier',
+  getCmd: 'GetDataRequestCommand', createCmd: 'CreateDataRequestCommand',
+  updateCmd: 'UpdateDataRequestCommand',
+  deleteCmd: 'DeleteDataRequestCommand',
+  transform: (doc, ctx) => resolveAssetPlaceholders(doc, ctx),
+});
+
+// KnowledgeBaseNodeConfig keys the service accepts (SDK models_0.d.ts). The
+// service also REQUIRES `name` although the type marks it optional — the second
+// real deployment failed with "metadata.knowledgeBase.name is required".
+const KB_NODE_KEYS = new Set(['name', 'knowledgeBaseId', 'prompt', 'question',
+  'includeCitation', 'timeout', 'minConfidenceScore', 'brandId', 'filters']);
+
+/** Make knowledge_base nodes deployable: name from the {KB:<name>} placeholder, known keys only. */
+function normalizeFlowForService(rawDoc, doc) {
+  const rawNodes = (rawDoc && rawDoc.nodes) || {};
+  for (const [nodeId, node] of Object.entries(doc.nodes || {})) {
+    if (!node || node.type !== 'knowledge_base' || !node.metadata) continue;
+    const kb = node.metadata.knowledgeBase;
+    if (!kb || typeof kb !== 'object') continue;
+    if (!kb.name) {
+      const rawKb = rawNodes[nodeId] && rawNodes[nodeId].metadata && rawNodes[nodeId].metadata.knowledgeBase;
+      const m = rawKb && typeof rawKb.knowledgeBaseId === 'string' && rawKb.knowledgeBaseId.match(/^\{KB:([^}]+)\}$/);
+      if (m) kb.name = m[1];
+    }
+    for (const key of Object.keys(kb)) if (!KB_NODE_KEYS.has(key)) delete kb[key];
+  }
+  return doc;
+}
+
+const upsertFlows = idUpsertStep({
+  label: 'flow', kind: 'flow',
+  idField: 'flowId', identifierField: 'flowIdentifier',
+  getCmd: 'GetFlowCommand', createCmd: 'CreateFlowCommand',
+  updateCmd: 'UpdateFlowCommand',
+  deleteCmd: 'DeleteFlowCommand',
+  transform: (doc, ctx) => normalizeFlowForService(doc, resolveAssetPlaceholders(doc, ctx)),
+});
+
+/** Name-addressable resources (no get-by-name): list + match. */
+const upsertSecrets = {
+  plan(ctx, params) {
+    return listFiles(ctx, params).map((f) => `upsert secret from ${path.relative(ctx.bundleDir, f)} (value from env)`);
+  },
+  async run(ctx, params) {
+    const existing = await listAll(ctx, 'ListSecretsCommand');
+    for (const file of listFiles(ctx, params)) {
+      const doc = readJson(file);
+      // Secret values are NEVER stored in the bundle: read from env.
+      const envVar = doc.valueEnv || `ACXD_SECRET_${String(doc.name || '').toUpperCase()}`;
+      const value = ctx.env[envVar]
+        || (/BackendApiKey$/.test(doc.name || '') ? (ctx.backendApiKey || ctx.env.ACXD_SECRET_BACKENDAPIKEY) : undefined);
+      if (!value) {
+        ctx.log(`  ! skipping secret '${doc.name}': env ${envVar} not set`);
+        continue;
+      }
+      // SDK contract (CreateSecretRequest / UpdateSecretRequest): the value member
+      // is `secretValue`, plus `isSensitive`. A `value` key is silently dropped by
+      // the SDK serializer and the service answers 500 "Failed to create secret"
+      // (live, 2026-09-12) — the same unknown-key failure mode as flow nodes.
+      const match = existing.find((s) => s.name === doc.name);
+      if (match) {
+        await send(ctx, 'UpdateSecretCommand', {
+          secretIdentifier: match.secretId || doc.name, secretValue: value, isSensitive: true,
+          ...(doc.description ? { description: doc.description } : {}),
+        });
+        ctx.log(`  ~ updated secret ${doc.name}`);
+      } else {
+        await send(ctx, 'CreateSecretCommand', {
+          name: doc.name, secretValue: value, isSensitive: true,
+          ...(doc.description ? { description: doc.description } : {}),
+        });
+        ctx.log(`  + created secret ${doc.name}`);
+      }
+      recordResource(ctx.state, 'secret', doc.name);
+    }
+  },
+};
+
+const upsertContextVariables = {
+  plan(ctx, params) {
+    return listFiles(ctx, params).map((f) => `upsert context variables from ${path.relative(ctx.bundleDir, f)}`);
+  },
+  async run(ctx, params) {
+    const existing = await listAll(ctx, 'ListContextVariablesCommand');
+    for (const file of listFiles(ctx, params)) {
+      const docs = [].concat(readJson(file));
+      for (const doc of docs) {
+        const match = existing.find((v) => v.name === doc.name);
+        if (match) {
+          // UpdateContextVariableRequest keys the variable by
+          // contextVariableIdentifier (its name); `name` is not an input.
+          // Live: the second run of a bundle failed here with "No value
+          // provided for input HTTP label: contextVariableIdentifier".
+          const { name, type, ...rest } = doc;
+          await send(ctx, 'UpdateContextVariableCommand', { contextVariableIdentifier: name, ...rest });
+          ctx.log(`  ~ updated context variable ${doc.name}`);
+        } else {
+          await send(ctx, 'CreateContextVariableCommand', doc);
+          ctx.log(`  + created context variable ${doc.name}`);
+        }
+        recordResource(ctx.state, 'context-variable', doc.name);
+      }
+    }
+  },
+};
+
+const upsertKnowledgeBases = {
+  plan(ctx, params) {
+    const lines = [];
+    for (const f of listFiles(ctx, params)) {
+      const doc = readJson(f);
+      lines.push(`upsert knowledge base '${doc.name}' (${(doc.articles || []).length} articles) + publish`);
+    }
+    return lines;
+  },
+  async run(ctx, params) {
+    for (const file of listFiles(ctx, params)) {
+      const doc = readJson(file);
+      const { articles = [], ...kbPayload } = doc;
+      const existing = await listAll(ctx, 'ListKnowledgeBasesCommand');
+      const match = existing.find((k) => k.name === kbPayload.name);
+      let kbId;
+      if (match) {
+        kbId = match.knowledgeBaseId;
+        await send(ctx, 'UpdateKnowledgeBaseCommand', { knowledgeBaseId: kbId, ...kbPayload });
+        ctx.log(`  ~ updated knowledge base ${kbPayload.name}`);
+      } else {
+        const created = await send(ctx, 'CreateKnowledgeBaseCommand', kbPayload);
+        kbId = created.knowledgeBaseId;
+        ctx.log(`  + created knowledge base ${kbPayload.name}`);
+      }
+      ctx.state.knowledgeBases[kbPayload.name] = { knowledgeBaseId: kbId };
+      recordResource(ctx.state, 'knowledge-base', kbId, { name: kbPayload.name });
+
+      const existingArticles = await listAll(ctx, 'ListKnowledgeBaseArticlesCommand', { knowledgeBaseId: kbId });
+      for (const article of articles) {
+        const found = existingArticles.find(
+          (a) => a.question && article.question && a.question.text === article.question.text);
+        if (found) {
+          await send(ctx, 'UpdateKnowledgeBaseArticleCommand',
+            { knowledgeBaseId: kbId, articleId: found.articleId, ...article });
+        } else {
+          await send(ctx, 'CreateKnowledgeBaseArticleCommand', { knowledgeBaseId: kbId, ...article });
+        }
+      }
+      ctx.log(`  = ${articles.length} article(s) synced`);
+
+      const publication = await send(ctx, 'PublishKnowledgeBaseCommand',
+        { knowledgeBaseId: kbId, description: 'AICC Builder deploy' });
+      const status = await poll(async () => {
+        const p = await send(ctx, 'GetKnowledgeBasePublicationCommand',
+          { knowledgeBaseId: kbId, deploymentId: publication.deploymentId });
+        if (p.status === 'published') return p;
+        if (p.status === 'failed') throw new Error(`knowledge base publish failed for '${kbPayload.name}'`);
+        return null;
+      }, { sleep: ctx.sleep });
+      ctx.log(`  = published (deployment ${status.deploymentId})`);
+    }
+  },
+};
+
+const GUARDRAIL_ACTIONS = new Set(['flag', 'mask', 'modify', 'route']);
+
+/**
+ * Shape checks the ACXD service enforces on a guardrail but reports vaguely.
+ * Mirrors the SDK's EnforcementBehavior contract: "modify" needs message OR
+ * prompt (mutually exclusive), "route" needs flowId; detection needs the field
+ * its method reads. Returns human-readable problems, empty when deployable.
+ */
+function guardrailPreflightProblems(doc) {
+  const problems = [];
+  const rules = Array.isArray(doc && doc.rules) ? doc.rules : [];
+  if (!rules.length) problems.push('rules: at least one rule is required');
+  rules.forEach((rule, i) => {
+    const at = `rules[${i}]`;
+    const enforcement = (rule && rule.enforcement) || {};
+    const behavior = enforcement.behavior || {};
+    const action = enforcement.action;
+    if (!GUARDRAIL_ACTIONS.has(action)) {
+      problems.push(`${at}.enforcement.action '${action}' is not one of ${[...GUARDRAIL_ACTIONS].join('/')}`);
+    } else if (action === 'modify') {
+      const hasMessage = typeof behavior.message === 'string' && behavior.message.trim() !== '';
+      const hasPrompt = typeof behavior.prompt === 'string' && behavior.prompt.trim() !== '';
+      if (hasMessage === hasPrompt) {
+        problems.push(`${at}.enforcement: action 'modify' requires behavior.message or behavior.prompt ` +
+          '(exactly one); the service rejects it as "enforcement.action is not a supported value"');
+      }
+    } else if (action === 'route' && !(typeof behavior.flowId === 'string' && behavior.flowId)) {
+      problems.push(`${at}.enforcement: action 'route' requires behavior.flowId`);
+    }
+    const detection = (rule && rule.detection) || {};
+    const needs = { regex: 'pattern', keyword: 'keywords', llmJudge: 'prompt' }[detection.method];
+    if (!needs) {
+      problems.push(`${at}.detection.method '${detection.method}' is not one of regex/keyword/llmJudge`);
+    } else if (detection[needs] === undefined || detection[needs] === null || detection[needs].length === 0) {
+      problems.push(`${at}.detection: method '${detection.method}' requires ${needs}`);
+    }
+  });
+  return problems;
+}
+
+const upsertGuardrails = {
+  plan(ctx, params) {
+    return listFiles(ctx, params).map((f) => `upsert guardrail from ${path.relative(ctx.bundleDir, f)} (+ smoke tests if present)`);
+  },
+  async run(ctx, params) {
+    const files = listFiles(ctx, params);
+    // Pre-flight EVERY file before touching the workspace: the service rejects
+    // a malformed rule with a message that does not name the guardrail
+    // ("rules[0].enforcement.action is not a supported value" — live, a
+    // 'modify' rule without behavior.message), and by then earlier guardrails
+    // were already created. Fail here, with the file and the reason.
+    for (const file of files) {
+      const problems = guardrailPreflightProblems(readJson(file));
+      if (problems.length) {
+        throw new Error(`guardrail ${path.relative(ctx.bundleDir, file)} cannot be deployed:\n` +
+          problems.map((p) => `  - ${p}`).join('\n'));
+      }
+    }
+    for (const file of files) {
+      const doc = readJson(file);
+      const { smokeTests = [], ...payload } = doc;
+      const existing = await listAll(ctx, 'ListGuardrailsCommand');
+      const match = existing.find((g) => g.name === payload.name);
+      let guardrailId;
+      try {
+        if (match) {
+          guardrailId = match.guardrailId;
+          await send(ctx, 'UpdateGuardrailCommand', { guardrailIdentifier: guardrailId, ...payload });
+          ctx.log(`  ~ updated guardrail ${payload.name}`);
+        } else {
+          const created = await send(ctx, 'CreateGuardrailCommand', payload);
+          guardrailId = created.guardrailId;
+          ctx.log(`  + created guardrail ${payload.name}`);
+        }
+      } catch (err) {
+        err.message = `guardrail '${payload.name}' (${path.relative(ctx.bundleDir, file)}): ${err.message}`;
+        throw err;
+      }
+      ctx.state.guardrails[payload.name] = { guardrailId };
+      recordResource(ctx.state, 'guardrail', guardrailId, { name: payload.name });
+
+      for (const test of smokeTests) {
+        const result = await send(ctx, 'TestGuardrailCommand',
+          { guardrailIdentifier: guardrailId, input: test.input });
+        const triggered = (result.violations || []).length > 0;
+        const ok = test.expectTriggered === undefined || test.expectTriggered === triggered;
+        ctx.log(`  ${ok ? '✓' : '✗'} smoke: ${JSON.stringify(test.input)} → ${triggered ? 'triggered' : 'passed through'}`);
+        if (!ok) {
+          throw new Error(`guardrail smoke test failed for '${payload.name}': ` +
+            `input ${JSON.stringify(test.input)} expected triggered=${test.expectTriggered}, got ${triggered}`);
+        }
+      }
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Application compose / build / deploy
+// ---------------------------------------------------------------------------
+
+const composeApplication = {
+  plan(ctx, params) {
+    return [`compose application from ${params.file} (resolve {KB:*}/{GUARDRAIL:*} placeholders, attach flows)`];
+  },
+  async run(ctx, params) {
+    const doc = resolveAssetPlaceholders(readJson(path.join(ctx.bundleDir, params.file)), ctx);
+    const existing = await listAll(ctx, 'ListApplicationsCommand');
+    const match = existing.find((a) => a.name === doc.name);
+    let appId;
+    if (match) {
+      appId = match.applicationId;
+      await send(ctx, 'UpdateApplicationCommand', { applicationIdentifier: appId, ...doc });
+      ctx.log(`  ~ updated application ${doc.name}`);
+    } else {
+      const created = await send(ctx, 'CreateApplicationCommand', doc);
+      appId = created.applicationId;
+      ctx.log(`  + created application ${doc.name}`);
+    }
+    ctx.state.applicationId = appId;
+    ctx.state.applicationName = doc.name;
+    await ensureApplicationLanguages(ctx, appId, doc);
+    // Remembered for deploy-application: a deployment requires at least one
+    // language code (live: UpdateApplicationDeployment refused without them).
+    ctx.state.applicationLanguageCodes = applicationLanguageCodes(doc);
+    recordResource(ctx.state, 'application', appId, { name: doc.name });
+  },
+};
+
+// Live (2026-09-13): CreateApplication silently ignores settings.languageCode /
+// languageCodes / languageSettings and creates the application as en-US. The
+// build then snapshots en-US while every flow is ko-KR, and the Agentic CX
+// block fails with "NLX Chat Streaming Failed" on the first contact.
+// UpdateApplication does honour the fields, so re-read the application and
+// re-apply the document's languages when they differ.
+async function ensureApplicationLanguages(ctx, appId, doc) {
+  const wanted = applicationLanguageCodes(doc);
+  if (!wanted.length) return;
+  let live;
+  try {
+    live = await send(ctx, 'GetApplicationCommand', { applicationIdentifier: appId });
+  } catch (err) {
+    ctx.log(`  ! could not read back application languages (${err.name}); continuing`);
+    return;
+  }
+  const got = applicationLanguageCodes(live);
+  const same = got.length === wanted.length && wanted.every((c) => got.includes(c));
+  if (same) return;
+  const s = (doc && doc.settings) || {};
+  const settings = {
+    ...((live && live.settings) || {}),
+    ...(s.languageCode ? { languageCode: s.languageCode } : {}),
+    ...(Array.isArray(s.languageCodes) && s.languageCodes.length ? { languageCodes: s.languageCodes } : {}),
+    ...(Array.isArray(s.languageSettings) && s.languageSettings.length ? { languageSettings: s.languageSettings } : {}),
+  };
+  if (!s.languageCode && !s.languageCodes && !s.languageSettings) {
+    settings.languageCode = wanted[0];
+    settings.languageCodes = wanted;
+    settings.languageSettings = wanted.map((languageCode) => ({ languageCode }));
+  }
+  await send(ctx, 'UpdateApplicationCommand', {
+    applicationIdentifier: appId,
+    name: (live && live.name) || doc.name,
+    settings,
+  });
+  ctx.log(`  ~ application languages ${JSON.stringify(got)} → ${JSON.stringify(wanted)} ` +
+          '(CreateApplication ignores language settings; re-applied)');
+}
+
+/** Language codes an application document declares, in every shape the builder emits. */
+function applicationLanguageCodes(doc) {
+  const s = (doc && doc.settings) || {};
+  const list = [
+    ...(Array.isArray(s.languageCodes) ? s.languageCodes : []),
+    ...(Array.isArray(s.languageSettings) ? s.languageSettings.map((x) => x && x.languageCode) : []),
+    s.languageCode,
+    ...(Array.isArray(doc && doc.languageCodes) ? doc.languageCodes : []),
+    doc && doc.mainLanguageCode,
+  ].filter(Boolean);
+  return [...new Set(list)];
+}
+
+const buildApplication = {
+  plan(ctx, params) {
+    return [`create application build (poll until BUILT; FAILED aborts with details)`];
+  },
+  async run(ctx, params = {}) {
+    const appId = ctx.state.applicationId;
+    if (!appId) throw new Error('build-application requires compose-application to run first');
+    const build = await send(ctx, 'CreateApplicationBuildCommand', {
+      applicationIdentifier: appId,
+      version: params.version,
+      description: params.description || 'AICC Builder deploy',
+    });
+    ctx.log(`  = build ${build.buildId} started`);
+    const result = await poll(async () => {
+      const b = await send(ctx, 'GetApplicationBuildCommand',
+        { applicationIdentifier: appId, buildIdentifier: build.buildId });
+      if (b.status === 'BUILT') return b;
+      if (b.status === 'FAILED') {
+        // Server-side validation is the second half of the double safety
+        // net — surface everything the API returns.
+        throw new Error('application build FAILED (server-side validation):\n' +
+          JSON.stringify(b, null, 2));
+      }
+      return null;
+    }, { sleep: ctx.sleep });
+    ctx.state.buildId = result.buildId;
+    recordResource(ctx.state, 'build', result.buildId);
+    ctx.log(`  = build ${result.buildId} BUILT`);
+  },
+};
+
+const deployApplication = {
+  plan(ctx, params = {}) {
+    return [`deploy build to environment '${params.environment || 'development'}' (poll until deployed)`];
+  },
+  async run(ctx, params = {}) {
+    const appId = ctx.state.applicationId;
+    const buildId = ctx.state.buildId;
+    if (!appId || !buildId) {
+      throw new Error('deploy-application requires compose-application and build-application first');
+    }
+    const environment = params.environment || 'development';
+
+    // A deployment requires at least one language code. The manifest may pin
+    // them; otherwise use the application's own languages (recorded at compose
+    // time, or read back for a state file written before that was recorded).
+    let languageCodes = Array.isArray(params.languageCodes) && params.languageCodes.length
+      ? params.languageCodes
+      : (ctx.state.applicationLanguageCodes || []);
+    if (!languageCodes.length) {
+      const app = await send(ctx, 'GetApplicationCommand', { applicationIdentifier: appId });
+      languageCodes = applicationLanguageCodes(app);
+    }
+    if (!languageCodes.length) {
+      ctx.log('  ! application declares no language code; deploying without languageCodes');
+    }
+    const langs = languageCodes.length ? { languageCodes } : {};
+
+    // An environment holds ONE deployment record (a second CreateApplicationDeployment
+    // for the same environment is refused: LimitExceededException). Promoting a new
+    // build is an UPDATE of that record; live (2026-09-10) the service answered
+    // UpdateApplicationDeployment with InternalServerException "Failed to update
+    // deployment." for every payload shape, so the fallback is delete + create —
+    // a brief gap on the development environment, not a failed deploy.
+    const existing = await listAll(ctx, 'ListApplicationDeploymentsCommand',
+      { applicationIdentifier: appId });
+    const current = (existing || []).find((d) => d.environment === environment);
+
+    // Live (2026-09-12, ko-KR application): CreateApplicationDeployment with
+    // languageCodes ['ko-KR'] answered InternalServerException "Failed to create
+    // deployment." while the same request without languageCodes was accepted —
+    // the deployment then uses the application's own language settings. Send
+    // the codes first (en-US deploys accepted them), fall back without them.
+    const withLangFallback = async (command, base) => {
+      try {
+        return await send(ctx, command, { ...base, ...langs });
+      } catch (err) {
+        if (!Object.keys(langs).length || (err && err.name !== 'InternalServerException'
+            && err.name !== 'ValidationException')) {
+          throw err;
+        }
+        ctx.log(`  ! ${command} refused languageCodes ${JSON.stringify(languageCodes)} (${err.name}); ` +
+          'retrying with the application\'s language settings');
+        return send(ctx, command, base);
+      }
+    };
+
+    let deploymentId;
+    let aliasRotation = null;
+    if (current) {
+      try {
+        await withLangFallback('UpdateApplicationDeploymentCommand', {
+          applicationIdentifier: appId,
+          deploymentIdentifier: current.deploymentId,
+          buildIdentifier: buildId,
+          environment,
+          description: 'AICC Builder deploy',
+        });
+        deploymentId = current.deploymentId;
+        ctx.log(`  ~ promoted build on existing '${environment}' deployment`);
+      } catch (err) {
+        ctx.log(`  ! update of '${environment}' deployment refused (${err.name}: ${err.message}); replacing it`);
+        await send(ctx, 'DeleteApplicationDeploymentCommand',
+          { applicationIdentifier: appId, deploymentIdentifier: current.deploymentId });
+        const created = await withLangFallback('CreateApplicationDeploymentCommand', {
+          applicationIdentifier: appId,
+          buildIdentifier: buildId,
+          environment,
+          description: 'AICC Builder deploy',
+        });
+        deploymentId = created.deploymentId;
+        ctx.log(`  + replaced '${environment}' deployment`);
+        aliasRotation = {
+          environment,
+          previousDeploymentId: current.deploymentId,
+          deploymentId,
+          buildId,
+          at: new Date().toISOString(),
+        };
+      }
+    } else {
+      const created = await withLangFallback('CreateApplicationDeploymentCommand', {
+        applicationIdentifier: appId,
+        buildIdentifier: buildId,
+        environment,
+        description: 'AICC Builder deploy',
+      });
+      deploymentId = created.deploymentId;
+      ctx.log(`  + created '${environment}' deployment`);
+    }
+
+    const result = await poll(async () => {
+      const d = await send(ctx, 'GetApplicationDeploymentCommand',
+        { applicationIdentifier: appId, deploymentIdentifier: deploymentId });
+      const status = String(d.deploymentStatus || d.status || '').toLowerCase();
+      // Treat 'failed' as terminal: otherwise a real failure is reported as a
+      // timeout and the actual reason is lost.
+      if (status === 'failed') {
+        throw new Error(
+          `deployment ${deploymentId} FAILED` +
+          (d.statusReason ? `: ${d.statusReason}` : '') +
+          '. A deployment will accept a failed build and then sit scheduled ' +
+          'indefinitely — confirm the build reached BUILT first.');
+      }
+      return status === 'deployed' ? d : null;
+    }, { sleep: ctx.sleep });
+
+    ctx.state.deploymentId = deploymentId;
+    recordResource(ctx.state, 'deployment', deploymentId, { environment });
+    ctx.log(`  = deployment ${deploymentId} live (${environment})`);
+    recordAliasRotation(ctx, aliasRotation);
+  },
+};
+
+/**
+ * A replaced deployment issues a NEW deployment key, and the Agentic CX block in
+ * the published Connect flow stores that key as `AgentConfiguration.Alias` — the
+ * OLD key still resolves, so Connect silently keeps serving the previous build.
+ * Nothing in the public SDK exposes the key, so the operator has to re-select the
+ * alias (or pass it in). Record it in .deploy-state.json and say it loudly;
+ * deploy.sh reads the same flag in Phase 11 and in its summary.
+ */
+function recordAliasRotation(ctx, rotation) {
+  if (!rotation) {
+    // An in-place promotion keeps the key: clear a flag left by an earlier run.
+    ctx.state.aliasRotated = false;
+    delete ctx.state.aliasRotation;
+    return;
+  }
+  ctx.state.aliasRotated = true;
+  ctx.state.aliasRotation = rotation;
+  const bar = '  ' + '!'.repeat(72);
+  ctx.log(bar);
+  ctx.log('  !! ALIAS ROTATED — the published Contact Flow now points at the OLD build.');
+  ctx.log(`  !! The '${rotation.environment}' deployment could not be updated in place, so it was`);
+  ctx.log(`  !! replaced (${rotation.previousDeploymentId} -> ${rotation.deploymentId}). Replacing a`);
+  ctx.log('  !! deployment issues a new deployment key, and the Agentic CX block still holds');
+  ctx.log('  !! the previous one — which still resolves, to the previous build.');
+  ctx.log('  !! Fix it in the Connect flow designer, exactly:');
+  ctx.log('  !!   1. Open the contact flow that carries the Agentic CX block');
+  ctx.log('  !!   2. Click the block -> Alias dropdown');
+  ctx.log(`  !!   3. Re-select the environment alias (the '${rotation.environment}' entry)`);
+  ctx.log('  !!   4. Save -> Publish');
+  ctx.log('  !! Or non-interactively: ./deploy.sh --rebind-alias <deploymentKey>');
+  ctx.log('  !! (or re-run the deploy with ACXD_ALIAS_ID=<deploymentKey>). The deploymentKey');
+  ctx.log('  !! is NOT in the SDK — read it from the console-internal endpoint');
+  ctx.log('  !! GET /acxd/api/cxn/flowResources?workspaceId=...&applicationId=...&type=deployments');
+  ctx.log(bar);
+}
+
+// ---------------------------------------------------------------------------
+// Connect contact flow import (Classic-style aws cli; D7/D11)
+// ---------------------------------------------------------------------------
+
+function contactFlowName(doc, _file, project) {
+  return doc.name || doc.flowName || (doc.Metadata && doc.Metadata.name)
+    || `${project}-flow`;
+}
+
+function existingContactFlowId(output, name) {
+  try {
+    const listed = JSON.parse(output || '{}').ContactFlowSummaryList || [];
+    const match = listed.find((flow) => flow.Name === name);
+    return match && match.Id;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+const importContactFlows = {
+  plan(ctx, params) {
+    return listFiles(ctx, params).map((f) =>
+      `import or update contact flow ${path.relative(ctx.bundleDir, f)} into Connect ` +
+      '(requires CONNECT_INSTANCE_ID; Agentic CX block wired manually per WIRING-GUIDE.md)');
+  },
+  async run(ctx, params) {
+    if (ctx.env.AICC_FLOW_IMPORT_BY_DEPLOY_SH === '1') {
+      // deploy.sh resolves {{HOURS_ARN}} / {{QUEUE_ARN}} / {{*_LAMBDA_ARN}} against
+      // the Connect instance and binds the Agentic CX block itself (Phase 11).
+      ctx.log('  = contact flow import handed to deploy.sh (Phase 11)');
+      return;
+    }
+    const instanceId = ctx.env.CONNECT_INSTANCE_ID;
+    if (!instanceId) {
+      ctx.log('  ! CONNECT_INSTANCE_ID not set — skipping contact flow import.');
+      ctx.log('    Import manually and wire the Agentic CX block per WIRING-GUIDE.md.');
+      return;
+    }
+    for (const file of listFiles(ctx, params)) {
+      const doc = readJson(file);
+      const name = contactFlowName(doc, file, ctx.project);
+      const content = bindAgenticCx(doc.content || doc, ctx);
+      try {
+        const existing = ctx.exec('aws', [
+          'connect', 'list-contact-flows',
+          '--instance-id', instanceId,
+          '--region', ctx.region,
+          '--output', 'json',
+        ]);
+        const contactFlowId = existingContactFlowId(existing, name);
+        if (contactFlowId) {
+          ctx.exec('aws', [
+            'connect', 'update-contact-flow-content',
+            '--instance-id', instanceId,
+            '--contact-flow-id', contactFlowId,
+            '--content', JSON.stringify(content),
+            '--region', ctx.region,
+          ]);
+          ctx.log(`  ~ updated existing contact flow ${name}`);
+          recordResource(ctx.state, 'contact-flow', contactFlowId, { name });
+          continue;
+        }
+
+        const created = ctx.exec('aws', [
+          'connect', 'create-contact-flow',
+          '--instance-id', instanceId,
+          '--name', name,
+          '--type', doc.type || 'CONTACT_FLOW',
+          '--status', 'PUBLISHED',
+          '--content', JSON.stringify(content),
+          '--region', ctx.region,
+          '--output', 'json',
+          '--cli-error-format', 'json',
+        ]);
+        let createdId;
+        try { createdId = JSON.parse(created || '{}').ContactFlowId; } catch (_) { /* best effort */ }
+        ctx.log(`  + imported contact flow ${name}`);
+        recordResource(ctx.state, 'contact-flow', createdId || name, { name });
+      } catch (e) {
+        ctx.log(`  ! contact flow ${name} import failed (${e.message.split('\n')[0]}).`);
+        // The CLI's default error text hides the linter output ("problems:
+        // <complex value>"); with --cli-error-format json the problems are in
+        // the message body — surface them, they are the whole diagnosis.
+        for (const problem of contactFlowProblems(e)) ctx.log(`    - ${problem}`);
+        ctx.log('    Import it manually and wire the Agentic CX block per WIRING-GUIDE.md.');
+      }
+    }
+  },
+};
+
+/**
+ * Fill the Agentic CX block (Type ConnectParticipantWithAgenticCX) with the ids
+ * this deploy produced. The bundle carries {ACXD_WORKSPACE_ID} /
+ * {ACXD_APPLICATION_ID} / {ACXD_ALIAS_ID}; workspace and application are known
+ * here, the alias is an opaque ACXD id the SDK does not expose, so it comes from
+ * ACXD_ALIAS_ID or stays a visible placeholder (Connect accepts the import; the
+ * operator picks the alias in the block's dropdown).
+ */
+function bindAgenticCx(content, ctx) {
+  const env = ctx.env || process.env;
+  const values = {
+    '{ACXD_WORKSPACE_ID}': env.ACXD_WORKSPACE_ID || ctx.state.workspaceId || '',
+    '{ACXD_APPLICATION_ID}': ctx.state.applicationId || '',
+    '{ACXD_ALIAS_ID}': env.ACXD_ALIAS_ID || 'SELECT_ALIAS_IN_CONSOLE',
+  };
+  let text = JSON.stringify(content);
+  for (const [placeholder, value] of Object.entries(values)) {
+    if (value) text = text.split(placeholder).join(value);
+  }
+  const bound = JSON.parse(text);
+  const hasBlock = (bound.Actions || []).some((a) => a && a.Type === 'ConnectParticipantWithAgenticCX');
+  if (hasBlock && !env.ACXD_ALIAS_ID) {
+    ctx.log('  ! ACXD_ALIAS_ID not set — the Agentic CX block is imported with alias SELECT_ALIAS_IN_CONSOLE; pick the alias in the block (see WIRING-GUIDE.md).');
+  } else if (hasBlock && ctx.state.aliasRotated) {
+    // The value was read from the console BEFORE this deploy replaced the
+    // deployment, so it is the old key: the flow would resolve to the old build.
+    ctx.log('  ! ACXD_ALIAS_ID was supplied but this deploy REPLACED the deployment — that ' +
+      'value is the OLD deployment key. Re-select the alias in the block (or ' +
+      './deploy.sh --rebind-alias <deploymentKey>) before testing.');
+  }
+  return bound;
+}
+
+/** Extract Connect's per-action problem messages from a failed aws-cli call. */
+function contactFlowProblems(err) {
+  const text = String((err && (err.stderr || err.message)) || '');
+  const start = text.indexOf('{');
+  if (start < 0) return [];
+  try {
+    const body = JSON.parse(text.slice(start, text.lastIndexOf('}') + 1));
+    const problems = body.problems || body.Problems || [];
+    return problems.map((p) => (typeof p === 'string' ? p : (p.message || JSON.stringify(p))));
+  } catch (_) {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+const STEPS = {
+  'deploy-cfn-backend': deployCfnBackend,
+  'wire-webhook-urls': wireWebhookUrls,
+  'upsert-secrets': upsertSecrets,
+  'upsert-slot-types': upsertSlotTypes,
+  'upsert-context-variables': upsertContextVariables,
+  'upsert-data-requests': upsertDataRequests,
+  'upsert-flows': upsertFlows,
+  'upsert-knowledge-bases': upsertKnowledgeBases,
+  'upsert-guardrails': upsertGuardrails,
+  'compose-application': composeApplication,
+  'build-application': buildApplication,
+  'deploy-application': deployApplication,
+  'import-contact-flows': importContactFlows,
+};
+
+module.exports = { STEPS, listAll, send, normalizeFlowForService, applicationLanguageCodes,
+                   bindAgenticCx, resolveStackName, resolveAssetPlaceholders, readBackendApiKey };

@@ -90,6 +90,21 @@ def _autofix_cfn(yaml_str: str) -> tuple[str, list[str]]:
         fixes.append(f"Converted {changed} variable-free !Sub to literal string (W1020)")
         yaml_str = new_yaml
 
+    # 3. API Gateway rejects a Method whose IntegrationResponses map a header its
+    #    MethodResponses do not declare (live: a typo'd CORS header rolled a
+    #    whole stack back). Same fix the merge applies, so `lint_cloudformation`
+    #    can repair an already-generated template.
+    try:
+        from tools.merge_infrastructure import _fix_cors_response_headers
+        new_yaml = _fix_cors_response_headers(yaml_str)
+        if new_yaml != yaml_str:
+            fixes.append("Declared/renamed CORS method.response.header entries so every header an "
+                         "integration response maps is declared in MethodResponses (API Gateway "
+                         "'Invalid mapping expression parameter')")
+            yaml_str = new_yaml
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(f"[lint] CORS header fix skipped: {exc}")
+
     return yaml_str, fixes
 
 
@@ -724,6 +739,10 @@ VALID_CONTACT_FLOW_ACTION_TYPES = frozenset({
     # Interact
     "MessageParticipant", "MessageParticipantIteratively", "GetParticipantInput",
     "ConnectParticipantWithLexBot", "RenderMessageTemplate",
+    # Agentic CX block (Connect Customer). VERIFIED 2026-09-10 against a console
+    # export and CreateContactFlow probes; reference:
+    # knowledge-base-docs/contact-flow/_reference-console-export-agentic-cx-block.json
+    "ConnectParticipantWithAgenticCX",
     # Set / update
     "UpdateContactAttributes", "UpdateContactData", "UpdateContactRecordingBehavior",
     "UpdateContactRecordingAndAnalyticsBehavior",
@@ -825,6 +844,10 @@ NO_TRANSITION_ACTION_TYPES = frozenset({
 REQUIRED_ERRORS_BY_TYPE = {
     "Compare": ["NoMatchingCondition"],
     "ConnectParticipantWithLexBot": ["NoMatchingError", "NoMatchingCondition"],
+    # Console export 2026-09-10: Error → NoMatchingError, no branch matched →
+    # NoMatchingCondition, idle chat timeout → InputTimeLimitExceeded; the
+    # Escalation output is a Conditions entry (Equals "Escalation").
+    "ConnectParticipantWithAgenticCX": ["NoMatchingError", "NoMatchingCondition", "InputTimeLimitExceeded"],
     "InvokeLambdaFunction": ["NoMatchingError"],
     "CreateWisdomSession": ["NoMatchingError"],
     "UpdateContactData": ["NoMatchingError"],
@@ -979,10 +1002,20 @@ def _normalize_contact_flow_params(actions: list, ids_to_first: dict, fixes: lis
             tr = a.setdefault("Transitions", {})
             nxt = tr.get("NextAction") or fallback
             errs = tr.setdefault("Errors", [])
+            # ChatBehavior.ChatAnalyticsBehavior: every shape the generator produced
+            # (AnalyticsModes ContactLens / RealTime / PostContact / omitted) was
+            # rejected by CreateContactFlow with "Invalid Action property value ...
+            # Parameters" (ap-northeast-2, 2026-09-14), while the voice-only block
+            # imports cleanly. Chat analytics is optional for the PoC: drop it and
+            # the error branch that only exists for it.
+            if isinstance(p, dict) and "ChatBehavior" in p:
+                p.pop("ChatBehavior", None)
+                tr["Errors"] = errs = [e for e in errs if not (isinstance(e, dict)
+                                       and e.get("ErrorType") == "InFlightRedactionConfigurationFailed")]
+                fixes.append(f"[{aid}] UpdateContactRecordingAndAnalyticsBehavior: removed ChatBehavior "
+                             f"(CreateContactFlow rejects every chat-analytics shape; the voice-only block imports)")
             have = {e.get("ErrorType") for e in errs if isinstance(e, dict)}
             required = ["NoMatchingError", "ChannelMismatch"]
-            if isinstance(p, dict) and "ChatBehavior" in p:
-                required.append("InFlightRedactionConfigurationFailed")
             for et in required:
                 if et not in have and nxt:
                     errs.append({"ErrorType": et, "NextAction": nxt})
@@ -1586,7 +1619,18 @@ def lint_contact_flow_asset(session_id: str = "", flow_name: str = "", file_name
 
 # Matches an Amazon Connect AI-prompt interpolation token: {{ $.something }} or
 # {{ foo }}. Captures the inner expression (trimmed) so we can detect duplicates.
-_AI_PROMPT_VAR_RE = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+#: ``{{ $.name }}`` — the body may not contain braces, so an unterminated run of
+#: ``{{{{`` and spaces fails in linear time (surrounding whitespace is stripped
+#: by the caller, not by the pattern).
+_AI_PROMPT_VAR_RE = re.compile(r"\{\{([^{}]*)\}\}")
+
+#: Variables the Amazon Connect AI prompt (qconnect CreateAIPrompt, ORCHESTRATION)
+#: resolves. Verified live: any other `$.name` is rejected with
+#: "Prompt contains unknown variable"; `$.Custom.<attribute>` is accepted by name.
+_AI_PROMPT_KNOWN_VARIABLES = frozenset({
+    "toolConfigurationList", "conversationHistory", "locale", "contactId",
+    "sessionId", "dateTime", "instanceId",
+})
 
 
 def lint_ai_prompt(prompt_text: str) -> dict:
@@ -1611,6 +1655,37 @@ def lint_ai_prompt(prompt_text: str) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     fixes_applied: list[str] = []
+
+    # Variables the qconnect ORCHESTRATION prompt actually knows. Live (Hanul,
+    # 2026-09-13): a model-added `{{$.channel}}` made CreateAIPrompt reject the
+    # whole prompt with "Prompt contains unknown variable", so the deploy ended
+    # with no AI agent at all. Anything under `$.Custom.` is a contact/session
+    # attribute the flow supplies and is accepted by name.
+    unknown_variables: list[str] = []
+
+    def _known(m: "re.Match") -> str:
+        inner = m.group(1).strip()
+        if not inner.startswith("$."):
+            return m.group(0)
+        path = inner[2:]
+        if path in _AI_PROMPT_KNOWN_VARIABLES or path.startswith("Custom."):
+            return m.group(0)
+        unknown_variables.append(path)
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path):
+            fixes_applied.append(
+                f"AI prompt: '{{{{{inner}}}}}' is not a variable the AI prompt API knows — "
+                f"rewritten to '{{{{$.Custom.{path}}}}}' (a contact attribute your Contact Flow "
+                f"must set; it resolves to empty text otherwise)")
+            warnings.append(
+                f"AI prompt: '{path}' is now read from the contact attribute $.Custom.{path}; "
+                f"set it in the Contact Flow (Set contact attributes) or reword the prompt")
+            return "{{$.Custom." + path + "}}"
+        fixes_applied.append(
+            f"AI prompt: '{{{{{inner}}}}}' is not a variable the AI prompt API knows — "
+            f"braces removed so the text imports as literal text")
+        return inner
+
+    prompt_text = _AI_PROMPT_VAR_RE.sub(_known, prompt_text)
 
     seen: set[str] = set()
 
@@ -1638,4 +1713,71 @@ def lint_ai_prompt(prompt_text: str) -> dict:
         "warnings": warnings,
         "fixes_applied": fixes_applied,
         "fixed_text": fixed_text,
+        "unknown_variables": unknown_variables,
     }
+
+
+_RETRIEVE_GUIDE = {
+    "ko": (
+        "[RETRIEVE 도구 사용 가이드 - 지식 검색 (FAQ)]",
+        "고객이 정책, 규정, 서비스 일반 정보, 자주 묻는 질문(FAQ)을 물으면 — 예: 이월/환불/취소 규정, "
+        "절차, 소요 시간, 필요 서류, 요금·상품 비교, 운영시간 — 먼저 RETRIEVE 도구로 고객의 질문 그대로 지식베이스를 검색하세요.",
+        "검색 결과가 있으면 검색된 내용에 근거해 대화체로 자연스럽게 요약해 안내하세요 (그대로 읽지 말기, 없는 내용 덧붙이지 말기).",
+        "검색 결과가 없거나 질문과 맞지 않을 때만 정확히 안내하기 어렵다고 말하고 상담원 연결을 제안하세요. 검색하지 않은 채 모른다고 답하지 마세요.",
+    ),
+    "ja": (
+        "[RETRIEVE ツール使用ガイド - ナレッジ検索 (FAQ)]",
+        "お客様が規定・ポリシー・サービス全般・よくある質問（繰越、返金、手続き、所要日数、必要書類、料金比較、営業時間など）を尋ねたら、"
+        "まず RETRIEVE ツールでお客様の質問をそのままナレッジベースから検索してください。",
+        "検索結果があれば、その内容に基づいて会話調で自然に要約して案内してください（そのまま読み上げない、無い内容を加えない）。",
+        "検索結果が無い、または質問に合わない場合のみ、正確に案内できない旨を伝えてオペレーターへの接続を提案してください。検索せずに分からないと答えないでください。",
+    ),
+    "en": (
+        "[RETRIEVE tool guide - knowledge search (FAQ)]",
+        "When the customer asks about a policy, rule, general service information or a frequently asked question — "
+        "carry-over/refund/cancellation rules, procedures, turnaround, required documents, plan comparisons, hours — "
+        "first call the RETRIEVE tool with the customer's question as-is to search the knowledge base.",
+        "If results come back, answer conversationally from that content (do not read it verbatim, do not add anything it does not say).",
+        "Only when nothing relevant is found say you cannot answer precisely and offer a human agent. Never say you do not know without searching.",
+    ),
+}
+
+
+def ensure_retrieve_tool_guide(prompt_text: str, language: str = "") -> tuple[str, list[str]]:
+    """Guarantee the AI-agent prompt tells the model WHEN to use the native
+    RETRIEVE (knowledge base) tool.
+
+    Live: a prompt with per-operation tool guides but no RETRIEVE guide made the
+    agent answer a FAQ ("does unused data carry over?") with "I cannot tell you
+    precisely" and offer a human — while the knowledge base held the exact
+    article. The guide is inserted inside <tool_instructions>, right after the
+    {{$.toolConfigurationList}} line, in the prompt's language. Returns
+    (text, fixes_applied); the text is unchanged when a guide already exists or
+    the prompt has no <tool_instructions> block.
+    """
+    if not isinstance(prompt_text, str) or not prompt_text:
+        return prompt_text or "", []
+    if re.search(r"RETRIEVE", prompt_text, re.IGNORECASE) and re.search(
+            r"RETRIEVE[^\n]{0,40}(가이드|guide|ガイド)|(가이드|guide|ガイド)[^\n]{0,40}RETRIEVE", prompt_text, re.IGNORECASE):
+        return prompt_text, []
+    lines = prompt_text.split("\n")
+    anchor = next((i for i, line in enumerate(lines) if "toolConfigurationList" in line), None)
+    if anchor is None:
+        anchor = next((i for i, line in enumerate(lines) if "<tool_instructions>" in line), None)
+    if anchor is None:
+        return prompt_text, []
+    indent = re.match(r"^(\s*)", lines[anchor]).group(1)
+    lang = (language or "").lower()
+    if not lang:
+        if re.search(r"[\uac00-\ud7a3]", prompt_text):
+            lang = "ko"
+        elif re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", prompt_text):
+            lang = "ja"
+        else:
+            lang = "en"
+    guide = _RETRIEVE_GUIDE.get(lang[:2], _RETRIEVE_GUIDE["en"])
+    block = [""] + [indent + line for line in guide]
+    lines[anchor + 1:anchor + 1] = block
+    return "\n".join(lines), [
+        "AI prompt: added the RETRIEVE (knowledge base) tool guide — the prompt named every "
+        "operation tool but never said when to search the FAQ knowledge base"]

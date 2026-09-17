@@ -69,8 +69,13 @@ class S3FilesContextStore:
         try:
             self._ensure_dir(path.parent)
             tmp = path.with_suffix(".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, default=str)
+            # A streamed turn that is cancelled mid-emoji can leave a lone
+            # UTF-16 surrogate in the history; a plain utf-8 write then fails
+            # and the session keeps resuming from a stale history. Encode
+            # with replacement so the write always lands.
+            payload = json.dumps(data, ensure_ascii=False, default=str)
+            with open(tmp, "wb") as f:
+                f.write(payload.encode("utf-8", errors="replace"))
             tmp.rename(path)
             return True
         except Exception as e:

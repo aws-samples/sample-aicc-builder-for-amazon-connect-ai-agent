@@ -9,9 +9,9 @@ import { useCallback, useEffect, useRef } from "react";
 import { useBuilderStore } from "../stores/builderStore";
 import { useAuthStore } from "../stores/authStore";
 import { useSessionStore } from "../stores/sessionStore";
-import type { WebSocketMessage, SubagentActivity, SubagentToolCall, AttachedFile, MessageAttachment, AttachmentData, AssetPreview, BuilderPhase } from "../types";
+import type { WebSocketMessage, SubagentActivity, SubagentToolCall, AttachedFile, MessageAttachment, AttachmentData, AssetPreview, BuilderPhase, RuntimeTarget } from "../types";
 import { PHASE_LABELS } from "../types";
-import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type ConversationMessage } from "../services/sessions";
+import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, type MessageLogEntry, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type ConversationMessage } from "../services/sessions";
 import { fetchNfsDiagnostics } from "../services/workspaceApi";
 
 // Streaming timeout configuration
@@ -180,8 +180,83 @@ async function getWebSocketUrl(
   return url;
 }
 
+/** The start-screen choice wins; the active session's echoed target is only
+ * the fallback when the user never touched the radio. */
+function effectiveRuntimeTarget(): RuntimeTarget {
+  const state = useBuilderStore.getState();
+  return state.pendingRuntimeTarget ?? state.runtimeTarget;
+}
+
+/** Every createNewSession action carries the selected build contract. */
+function createConversationStartPayload() {
+  const state = useBuilderStore.getState();
+  return {
+    action: 'createNewSession',
+    scope: state.scope ?? [],
+    startMode: state.startMode,
+    runtime_target: effectiveRuntimeTarget(),
+    model: state.selectedModel,
+    effort: state.selectedEffort === 'default' ? '' : state.selectedEffort,
+  };
+}
+
+/**
+ * The session is created (and its target seeded with the default) the moment
+ * it is opened, before the user reaches the radio. A radio change on the still
+ * empty session is therefore pushed to the backend right away so the persisted
+ * target — and the right panel, via the echo — follow the choice instead of
+ * waiting for a session rotation. Returns false when nothing could be sent; the
+ * pending choice still rides on the first message in that case.
+ */
+export function sendRuntimeTarget(target: RuntimeTarget): boolean {
+  if (globalWs?.readyState !== WebSocket.OPEN) return false;
+  try {
+    globalWs.send(JSON.stringify({ action: 'setRuntimeTarget', runtime_target: target }));
+    return true;
+  } catch (err) {
+    console.warn('[useWebSocket] setRuntimeTarget send failed:', err);
+    return false;
+  }
+}
+
+/** Accept snake_case from the backend while tolerating the legacy camel alias.
+ * An echo is the session's persisted truth, so it also consumes the pending
+ * start-screen choice — otherwise a stale pick would leak into the next session. */
+function restoreRuntimeTarget(message: Pick<WebSocketMessage, 'runtime_target' | 'runtimeTarget'>): void {
+  const target = message.runtime_target ?? message.runtimeTarget;
+  if (target === 'classic' || target === 'acxd') {
+    const store = useBuilderStore.getState();
+    store.setRuntimeTarget(target);
+    if (store.pendingRuntimeTarget !== null) store.setPendingRuntimeTarget(null);
+  }
+}
+
 // localStorage key for tracking last received message log sequence
 const MSG_LOG_SEQ_KEY_PREFIX = "aicc-msg-log-seq-";
+
+/**
+ * Where this browser last stood in the backend's per-turn message log.
+ * Sequence numbers restart every turn, so the position is (turn, seq).
+ */
+interface MsgLogPointer { turn: string | null; seq: number }
+
+function readMsgLogPointer(sessionId: string): MsgLogPointer {
+  const raw = localStorage.getItem(`${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`);
+  if (!raw) return { turn: null, seq: 0 };
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      return { turn: typeof parsed.turn === "string" ? parsed.turn : null, seq: Number(parsed.seq) || 0 };
+    }
+  } catch {
+    /* legacy plain-integer pointer: no turn → unusable, treated as unknown */
+  }
+  return { turn: null, seq: 0 };
+}
+
+function writeMsgLogPointer(sessionId: string, turn: string | null | undefined, seq: number): void {
+  localStorage.setItem(`${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`, JSON.stringify({ turn: turn || null, seq }));
+}
 
 /**
  * Deserialize history messages from DynamoDB ConversationMessage[] format
@@ -512,6 +587,7 @@ export function useWebSocket() {
     lambda_generator: { name: 'Lambda Generator', icon: '⚡', color: 'orange' },
     openapi_generator: { name: 'OpenAPI Generator', icon: '📄', color: 'blue' },
     prompt_generator: { name: 'Prompt Generator', icon: '💬', color: 'purple' },
+    acxd_application_generator: { name: 'ACXD Application Generator', icon: '🧩', color: 'fuchsia' },
     contact_flow_generator: { name: 'Contact Flow Generator', icon: '📞', color: 'green' },
     infrastructure_generator: { name: 'Infrastructure Generator', icon: '🏗️', color: 'slate' },
     interviewer: { name: 'Interviewer', icon: '🎤', color: 'pink' },
@@ -737,50 +813,178 @@ export function useWebSocket() {
   // ── Message Log Catch-up (ref to break circular dep with handleMessage) ──
   const handleMessageRef = useRef<((data: WebSocketMessage) => void) | null>(null);
 
-  const catchUpFromMessageLog = useCallback(async (sessionId: string) => {
-    const seqKey = `${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`;
-    const storedSeq = parseInt(localStorage.getItem(seqKey) || "0", 10);
-    let afterSeq = storedSeq;
+  /**
+   * Re-dispatch logged events through the normal message handler.
+   * Heartbeats / typing indicators are transport noise and are skipped.
+   */
+  const replayLogEntries = useCallback((entries: MessageLogEntry[]): number => {
+    let maxSeq = 0;
+    for (const entry of entries) {
+      const event = entry.event as unknown as WebSocketMessage;
+      if (event.type !== "heartbeat" && event.type !== "pong" && event.type !== "typing" && handleMessageRef.current) {
+        handleMessageRef.current(event);
+      }
+      if (entry.seq > maxSeq) maxSeq = entry.seq;
+    }
+    return maxSeq;
+  }, []);
 
-    console.log("[useWebSocket] Starting message log catch-up from seq:", afterSeq);
+  /**
+   * Cut the chat back to the start of the last turn (its user message) so the
+   * turn can be rebuilt from the log without duplicating what was already shown.
+   * Returns false when there is no turn to cut back to.
+   */
+  /**
+   * The agent is not running for this session, so nothing restored from history
+   * may still claim to be streaming: an `isStreaming` flag autosaved mid-turn by
+   * an earlier tab would otherwise leave a spinner under the last bubble for good.
+   */
+  const finishStaleStreaming = useCallback(() => {
+    const store = useBuilderStore.getState();
+    store.messages.forEach((m, i) => {
+      if (m.isStreaming) store.updateMessageAt(i, (msg) => ({ ...msg, isStreaming: false }));
+    });
+    setTyping(false);
+    streamingMessageIdRef.current = null;
+    streamTargetMsgIdRef.current = null;
+  }, [setTyping]);
+
+  const truncateToLastTurn = useCallback((): boolean => {
+    const messages = useBuilderStore.getState().messages;
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") { lastUserIdx = i; break; }
+    }
+    if (lastUserIdx < 0) return false;
+    useBuilderStore.getState().setMessages(messages.slice(0, lastUserIdx + 1));
+    streamingMessageIdRef.current = null;
+    streamTargetMsgIdRef.current = null;
+    return true;
+  }, []);
+
+  /**
+   * Catch up on a turn that is still running (backend said background_task_active).
+   * Resumes from this browser's last seen (turn, seq). If the log has moved on to
+   * a turn we never saw, the whole turn comes back — then the chat is cut back to
+   * that turn's user message first so nothing is shown twice.
+   */
+  const catchUpFromMessageLog = useCallback(async (sessionId: string) => {
+    const pointer = readMsgLogPointer(sessionId);
+    console.log("[useWebSocket] Starting message log catch-up from", pointer);
 
     try {
-      const response = await getMessageLog(sessionId, afterSeq);
-      const { entries, isAgentActive } = response;
+      const response = await getMessageLog(sessionId, pointer.seq, pointer.turn);
+      const { entries, isAgentActive, turnId } = response;
 
       if (entries.length > 0) {
-        console.log("[useWebSocket] Replaying", entries.length, "missed events from message log");
-        for (const entry of entries) {
-          const event = entry.event as unknown as WebSocketMessage;
-          // Don't re-dispatch heartbeats or typing indicators during catch-up
-          if (event.type !== 'heartbeat' && event.type !== 'pong' && event.type !== 'typing' && handleMessageRef.current) {
-            handleMessageRef.current(event);
-          }
-          if (entry.seq > afterSeq) {
-            afterSeq = entry.seq;
-          }
+        const wholeTurn = !pointer.turn || (turnId !== undefined && turnId !== pointer.turn);
+        if (wholeTurn && useBuilderStore.getState().messages.length > 0) {
+          truncateToLastTurn();
         }
-        // Persist the latest seq
-        localStorage.setItem(seqKey, String(afterSeq));
+        console.log("[useWebSocket] Replaying", entries.length, wholeTurn ? "events of a turn not seen before" : "missed events from message log");
+        const maxSeq = replayLogEntries(entries);
+        writeMsgLogPointer(sessionId, turnId ?? pointer.turn, maxSeq);
       }
 
       // After catch-up, the live WebSocket is already reattached by the backend.
       // New events will arrive via the WebSocket in real-time, so no polling needed.
-      // Just log whether agent is still active for diagnostic purposes.
       if (isAgentActive) {
         console.log("[useWebSocket] Agent still active after catch-up — live events via WebSocket");
         setTyping(true);
       } else {
-        console.log("[useWebSocket] Agent finished, catch-up complete at seq:", afterSeq);
+        console.log("[useWebSocket] Agent finished, catch-up complete");
       }
     } catch (error) {
       console.error("[useWebSocket] Message log catch-up error:", error);
     }
-  }, [setTyping]);
+  }, [setTyping, replayLogEntries, truncateToLastTurn]);
+
+  /**
+   * Reconcile a freshly loaded session with the backend's per-turn message log.
+   *
+   * History comes from DynamoDB, which is written by THIS browser's autosave.
+   * If the tab was closed while the agent was still answering, the reply (and
+   * any asset/progress events) never reached the browser, so DynamoDB holds
+   * at most a partial assistant bubble — while the backend finished the turn
+   * and kept every event in the NFS message log (one log per turn). Compare
+   * the saved output of the last turn with the log and, when it is missing or
+   * cut short, rebuild that turn from the log (dedupe is by asset key /
+   * progress id, so replaying those events is idempotent).
+   */
+  const reconcileWithMessageLog = useCallback(async (sessionId: string) => {
+    try {
+      const { entries, isAgentActive, turnId } = await getMessageLog(sessionId, 0);
+      if (entries.length === 0) return;
+      const maxSeq = entries.reduce((m, e) => Math.max(m, e.seq), 0);
+      const events = entries.map((e) => e.event as unknown as WebSocketMessage);
+      const logText = events
+        .filter((e) => e.type === "stream" && typeof e.content === "string")
+        .map((e) => e.content as string)
+        .join("");
+      // Compare with ALL whitespace removed: the log is a stream of chunks with
+      // nothing between the text before a tool card and the text after it,
+      // while the saved history holds separate bubbles. Any separator (or a
+      // stray newline at a chunk boundary) would otherwise defeat the prefix
+      // test below and a turn that finished while the tab was away would never
+      // be rebuilt — the chat then shows a stale spinner after the last bubble.
+      const norm = (t: string) => t.replace(/\s+/g, "");
+
+      // The user may have switched sessions while the log was loading.
+      if (useSessionStore.getState().currentSessionId !== sessionId) return;
+
+      const messages = useBuilderStore.getState().messages;
+      let lastUserIdx = -1;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "user") { lastUserIdx = i; break; }
+      }
+      if (lastUserIdx < 0) {
+        // Nothing conversational restored — leave it to the normal paths.
+        writeMsgLogPointer(sessionId, turnId, maxSeq);
+        return;
+      }
+      const savedReply = norm(
+        messages
+          .slice(lastUserIdx + 1)
+          .filter((m) => m.role === "assistant")
+          .map((m) => m.content || "")
+          .join(""),
+      );
+      const fullReply = norm(logText);
+      if (!fullReply || savedReply === fullReply || (!fullReply.startsWith(savedReply) && savedReply.length > 0)) {
+        // Either the turn's reply is already in the history, or the log does not
+        // describe this turn (never replay in that case — it would duplicate).
+        writeMsgLogPointer(sessionId, turnId, maxSeq);
+        if (!isAgentActive) finishStaleStreaming();
+        return;
+      }
+
+      console.log(
+        "[useWebSocket] Last turn finished while the tab was away — rebuilding it from the message log",
+        `(saved ${savedReply.length} chars, log ${fullReply.length} chars, ${entries.length} events)`,
+      );
+      // Drop the partial output of that turn and replay the whole turn.
+      truncateToLastTurn();
+      replayLogEntries(entries);
+      writeMsgLogPointer(sessionId, turnId, maxSeq);
+      if (isAgentActive) {
+        // The backend re-attached the live socket on connect; newer events stream in.
+        setTyping(true);
+      } else {
+        finishStaleStreaming();
+      }
+    } catch (error) {
+      console.warn("[useWebSocket] Message log reconcile failed:", error);
+    }
+  }, [setTyping, replayLogEntries, truncateToLastTurn, finishStaleStreaming]);
 
   // Define handleMessage first so connect can reference it
   const handleMessage = useCallback(
     (data: WebSocketMessage) => {
+      // Live events carry their position in the backend's message log; remember
+      // it so a reconnect resumes the log exactly where this socket dropped.
+      if (typeof data.logSeq === "number" && typeof data.logTurn === "string" && globalCurrentSessionId) {
+        writeMsgLogPointer(globalCurrentSessionId, data.logTurn, data.logSeq);
+      }
       switch (data.type) {
         case "typing":
           setTyping(true);
@@ -953,6 +1157,10 @@ export function useWebSocket() {
           if (data.session && typeof data.session === 'object') {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const session = data.session as any;
+            const runtimeTarget = session.runtime_target ?? session.runtimeTarget;
+            if (runtimeTarget === 'classic' || runtimeTarget === 'acxd') {
+              useBuilderStore.getState().setRuntimeTarget(runtimeTarget);
+            }
             updateSession({
               companyName: session.company_name ?? session.companyName ?? null,
               industry: session.industry ?? null,
@@ -1017,6 +1225,7 @@ export function useWebSocket() {
             save_operation_spec: { id: "operations", runningProgress: 50 },
             generate_lambda_function: { id: "lambda", runningProgress: 50 },
             generate_ai_prompt: { id: "prompt", runningProgress: 50 },
+            generate_acxd_application: { id: "acxd_application", runningProgress: 50 },
             generate_openapi_spec: { id: "openapi", runningProgress: 50 },
             generate_contact_flow: { id: "contact_flow", runningProgress: 50 },
             generate_flow_mermaid_only: { id: "contact_flow", runningProgress: 30 },
@@ -1126,6 +1335,8 @@ export function useWebSocket() {
               generate_lambda_function: { id: "lambda", runningProgress: 50 },
               lambda_generator_agent: { id: "lambda", runningProgress: 50 },
               generate_ai_prompt: { id: "prompt", runningProgress: 50 },
+              generate_acxd_application: { id: "acxd_application", runningProgress: 50 },
+              acxd_application_generator: { id: "acxd_application", runningProgress: 50 },
               prompt_generator_agent: { id: "prompt", runningProgress: 50 },
               generate_openapi_spec: { id: "openapi", runningProgress: 50 },
               openapi_generator_agent: { id: "openapi", runningProgress: 50 },
@@ -1240,6 +1451,8 @@ export function useWebSocket() {
               generate_lambda_function: "lambda",
               lambda_generator_agent: "lambda",
               generate_ai_prompt: "prompt",
+              generate_acxd_application: "acxd_application",
+              acxd_application_generator: "acxd_application",
               prompt_generator_agent: "prompt",
               generate_openapi_spec: "openapi",
               openapi_generator_agent: "openapi",
@@ -1297,7 +1510,7 @@ export function useWebSocket() {
           // Handle "generating" indicator (no content yet)
           if (data.assetType) {
             updateAssetPreview({
-              assetType: data.assetType as 'lambda' | 'openapi' | 'prompt' | 'contact_flow' | 'cdk' | 'cloudformation' | 'company' | 'operations' | 'validation',
+              assetType: data.assetType as AssetPreview['assetType'],
               operationId: data.operationId,
               fileName: data.fileName,
               content: "",  // No content yet
@@ -1348,6 +1561,7 @@ export function useWebSocket() {
                 lambda: "lambda",
                 openapi: "openapi",
                 prompt: "prompt",
+                acxd_application: "acxd_application",
                 contact_flow: "contact_flow",
                 cdk: "cdk",
                 cloudformation: "cdk",  // infrastructure_generator uses cloudformation
@@ -1387,6 +1601,7 @@ export function useWebSocket() {
               lambda_generator: "lambda",
               openapi_generator: "openapi",
               prompt_generator: "prompt",
+              acxd_application_generator: "acxd_application",
               contact_flow_generator: "contact_flow",
               infrastructure_generator: "cdk",  // CloudFormation/CDK infrastructure
               faq_generator: "knowledge_base",
@@ -1626,6 +1841,7 @@ export function useWebSocket() {
 
         case "history_injected":
           // Acknowledgment from backend that history was injected
+          restoreRuntimeTarget(data);
           // CRITICAL: Only NOW mark session as ready to accept messages
           // This ensures history is fully loaded before user can send messages
           disarmSessionReadyWatchdog();
@@ -1649,8 +1865,19 @@ export function useWebSocket() {
           }
           break;
 
+        case "runtime_target_updated":
+          // Echo of a setRuntimeTarget action (start-screen radio on an empty
+          // session). `accepted: false` means the conversation had already
+          // started and the persisted target stands — the echo carries it.
+          restoreRuntimeTarget(data);
+          if (data.accepted === false) {
+            console.warn("[useWebSocket] runtime target is fixed once the conversation has started");
+          }
+          break;
+
         case "session_created":
           // Acknowledgment from backend that a fresh session was created
+          restoreRuntimeTarget(data);
           // CRITICAL: Only NOW mark session as ready to accept messages
           disarmSessionReadyWatchdog();
           useBuilderStore.getState().setSessionReady(true);
@@ -1700,6 +1927,13 @@ export function useWebSocket() {
           }
           break;
 
+        case "session_info":
+        case "ack":
+          // Lightweight session-info acknowledgments may arrive before the full
+          // connected/session_created event. Preserve the echoed target.
+          restoreRuntimeTarget(data);
+          break;
+
         case "context_injected":
           // Acknowledgment from backend that context was injected
           if (data.success) {
@@ -1711,6 +1945,7 @@ export function useWebSocket() {
 
         case "connected":
           // Backend sends sessionId on WebSocket connect — detect mismatch
+          restoreRuntimeTarget(data);
           console.log("[useWebSocket] Backend connected event, backend sessionId:", data.sessionId, "phase:", data.phase);
           // Restore phase from backend
           if (data.phase) {
@@ -1928,31 +2163,10 @@ export function useWebSocket() {
         // Wait for backend's "history_injected" response in handleMessage
         console.log("[useWebSocket] Waiting for history_injected response after reconnect...");
 
-        // Check message log for events missed while disconnected
-        try {
-          const seqKey = `${MSG_LOG_SEQ_KEY_PREFIX}${sessionId}`;
-          const lastSeq = parseInt(localStorage.getItem(seqKey) || "0", 10);
-          const logResponse = await getMessageLog(sessionId, lastSeq);
-          if (logResponse.entries.length > 0) {
-            console.log("[useWebSocket] Replaying", logResponse.entries.length, "missed events from message log on reconnect");
-            let maxSeq = lastSeq;
-            for (const entry of logResponse.entries) {
-              const event = entry.event as unknown as WebSocketMessage;
-              if (event.type !== 'heartbeat' && event.type !== 'pong' && event.type !== 'typing' && handleMessageRef.current) {
-                handleMessageRef.current(event);
-              }
-              if (entry.seq > maxSeq) maxSeq = entry.seq;
-            }
-            localStorage.setItem(seqKey, String(maxSeq));
-
-            // If agent is still active, start polling
-            if (logResponse.isAgentActive) {
-              catchUpFromMessageLog(sessionId);
-            }
-          }
-        } catch (logError) {
-          console.warn("[useWebSocket] Message log catch-up failed on reconnect:", logError);
-        }
+        // The chat was just reset to the DynamoDB copy (this browser's autosave,
+        // at most ~15s old). Rebuild the last turn from the backend's message
+        // log if the copy is missing it or cut it short.
+        await reconcileWithMessageLog(sessionId);
 
         // Also reload assets from S3 in case they were generated while disconnected
         try {
@@ -2009,7 +2223,7 @@ export function useWebSocket() {
       } else {
         console.log("[useWebSocket] No history found for reconnect, sending createNewSession");
         // No history to inject, send createNewSession to backend
-        ws.send(JSON.stringify({ action: "createNewSession" }));
+        ws.send(JSON.stringify(createConversationStartPayload()));
         // Wait for session_created response
         console.log("[useWebSocket] Waiting for session_created response after reconnect...");
       }
@@ -2017,7 +2231,7 @@ export function useWebSocket() {
       console.error("[useWebSocket] Failed to inject history on reconnect:", error);
       // On error, still try to create a new session so user can continue
       try {
-        ws.send(JSON.stringify({ action: "createNewSession" }));
+        ws.send(JSON.stringify(createConversationStartPayload()));
         console.log("[useWebSocket] Sent createNewSession after reconnect error");
       } catch (sendError) {
         console.error("[useWebSocket] Failed to send createNewSession:", sendError);
@@ -2026,7 +2240,7 @@ export function useWebSocket() {
         useBuilderStore.getState().setLoadingSession(false);
       }
     }
-  }, [updateAssetPreview, setMessages, catchUpFromMessageLog]);
+  }, [updateAssetPreview, setMessages, reconcileWithMessageLog]);
 
   const connect = useCallback(async () => {
     if (!isAuthenticated) {
@@ -2378,6 +2592,7 @@ export function useWebSocket() {
           language: useBuilderStore.getState().language,
           model: useBuilderStore.getState().selectedModel,
           effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
+          runtime_target: effectiveRuntimeTarget(),
         })
       );
 
@@ -2537,6 +2752,7 @@ export function useWebSocket() {
               language: useBuilderStore.getState().language,
               model: useBuilderStore.getState().selectedModel,
           effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
+              runtime_target: effectiveRuntimeTarget(),
             })
           );
 
@@ -2582,6 +2798,7 @@ export function useWebSocket() {
               language: useBuilderStore.getState().language,
               model: useBuilderStore.getState().selectedModel,
           effort: useBuilderStore.getState().selectedEffort === 'default' ? '' : useBuilderStore.getState().selectedEffort,
+              runtime_target: effectiveRuntimeTarget(),
             })
           );
 
@@ -2823,16 +3040,7 @@ export function useWebSocket() {
         const waitForWsAndCreateSession = () => {
           if (globalWs?.readyState === WebSocket.OPEN) {
             console.log("[useWebSocket] Sending createNewSession to backend");
-            const st = useBuilderStore.getState();
-            globalWs.send(
-              JSON.stringify({
-                action: "createNewSession",
-                // Scope = [] for full build, [segment] for a single segment.
-                scope: st.scope ?? [],
-                model: st.selectedModel,
-                effort: st.selectedEffort === 'default' ? '' : st.selectedEffort,
-              })
-            );
+            globalWs.send(JSON.stringify(createConversationStartPayload()));
             // DO NOT set isSessionReady here!
             // Wait for backend's "session_created" response in handleMessage
             console.log("[useWebSocket] Waiting for session_created response from backend...");
@@ -3035,6 +3243,11 @@ export function useWebSocket() {
             setMessages(restoredMessages);
             console.log("[useWebSocket] Restored", restoredMessages.length, "items (messages + asset markers)");
 
+            // The reply to the last message may have arrived while this tab was
+            // closed — DynamoDB only has what this browser saw. Rebuild it from
+            // the backend's message log if it is missing or cut short.
+            void reconcileWithMessageLog(newSessionId);
+
             // Inject history into the ECS session so the agent has context
             // (only inject user/assistant/system messages, not tool/subagent/asset markers)
             // Timeout configuration: 10 seconds max wait for WebSocket to be ready
@@ -3129,7 +3342,7 @@ export function useWebSocket() {
             const notifyBackendAssetsOnly = () => {
               if (globalWs?.readyState === WebSocket.OPEN) {
                 console.log("[useWebSocket] Sending createNewSession for assets-only session");
-                globalWs.send(JSON.stringify({ action: "createNewSession" }));
+                globalWs.send(JSON.stringify(createConversationStartPayload()));
                 // Set timeout for session_created response
                 setTimeout(() => {
                   if (!useBuilderStore.getState().isSessionReady) {
@@ -3161,7 +3374,7 @@ export function useWebSocket() {
             const notifyBackendEmpty = () => {
               if (globalWs?.readyState === WebSocket.OPEN) {
                 console.log("[useWebSocket] Sending createNewSession for empty session");
-                globalWs.send(JSON.stringify({ action: "createNewSession" }));
+                globalWs.send(JSON.stringify(createConversationStartPayload()));
                 // Set timeout for session_created response
                 setTimeout(() => {
                   if (!useBuilderStore.getState().isSessionReady) {
@@ -3255,7 +3468,7 @@ export function useWebSocket() {
         }
       }
     },
-    [connect, getUserSub, setMessages, clearToolMessageIndexMap]
+    [connect, getUserSub, setMessages, clearToolMessageIndexMap, reconcileWithMessageLog]
   );
 
   // Expose switchSession via ref so the pre-send liveness probe inside

@@ -1,6 +1,6 @@
 ---
 name: aicc-builder
-description: Generate a fully customized Amazon Connect AI agent PoC bundle (Lambda handlers, OpenAPI spec, AI agent prompt, Contact Flows, CloudFormation/CDK infrastructure, FAQ knowledge base) from a ~15-minute structured interview — or from a requirements doc, a flow sketch, or an existing flow/prompt you want to improve. Triggers on "amazon connect", "aicc", "contact center AI", "connect ai agent", "connect ai agents domain", "requirements document", "improve my contact flow", "flow sketch", "\uc544\ub9c8\uc874 \ucee4\ub125\ud2b8", "\ucee8\ud0dd\uc13c\ud130 AI \uc0c1\ub2f4\uc6d0".
+description: Generate a fully customized Amazon Connect AI agent PoC bundle (Lambda handlers, OpenAPI spec, AI agent prompt, Contact Flows, CloudFormation/CDK infrastructure, FAQ knowledge base) from a ~15-minute structured interview — or from a requirements doc, a flow sketch, or an existing flow/prompt you want to improve. Triggers on "amazon connect", "aicc", "contact center AI", "connect ai agent", "connect ai agents domain", "agentic cx designer", "acxd", "connect customer", "agentic cx block", "requirements document", "improve my contact flow", "flow sketch", "\uc544\ub9c8\uc874 \ucee4\ub125\ud2b8", "\ucee8\ud0dd\uc13c\ud130 AI \uc0c1\ub2f4\uc6d0".
 metadata:
   version: 2.0.0
   author: aicc-builder
@@ -80,6 +80,33 @@ request (and any attached file); if it's genuinely unclear, ask one short questi
   don't silently expand scope.
 - Set `state/project.json.scope` to the produced-asset id list (`[]` = full build).
 
+### Runtime target (ask on every Full build)
+
+The webapp's start screen also asks **where the agent will run**. Ask the same
+question before the interview and record the answer in `state/project.json.runtime_target`
+(`"classic"` | `"acxd"`) and `state/runtime_target.json` (`{"target": "acxd"}`):
+
+| Target | Stack | What replaces the AI prompt |
+|---|---|---|
+| **Classic** (default) | Lex bot + Amazon Connect AI agent + AgentCore Gateway MCP tools | — (everything as before) |
+| **ACXD** | an **Agentic CX Designer** application behind the Agentic CX block, on a **Connect Customer** instance | the ACXD application under `assets/v1/acxd/` (flows, slot types, data requests, guardrails, knowledge bases, context variables, secrets) |
+
+Pick ACXD when the customer says "Agentic CX designer", "ACXD", "Connect Customer",
+or wants the new Agentic CX block. For an ACXD run, ALSO load
+`resources/orchestrator/system_prompt.md` § `ACXD_RUNTIME_TARGET_PROMPT` (the
+overlay the webapp appends to every phase of an ACXD session): it adds the flow-plan
+interview, the ACXD generation lane, and the review rules below. Everything else —
+Phase 0, the OperationSpec interview, the Lambda / OpenAPI / infrastructure / FAQ /
+Contact Flow lanes, the review gate — is unchanged.
+
+The deterministic half of the ACXD target (system flows, resources, the runtime
+contract, the D9 gate, the manifest, the runner) is ~10k lines of live-verified code
+that is **not copied into the skill**: `resources/scripts/acxd_local.py` imports it
+from an AICC Builder checkout (`--repo`, `$AICC_BUILDER_REPO`, or the checkout the
+skill was installed from) and runs it against your output directory. Run it with a
+Python that has the backend's dependencies (`backend/.venv/bin/python` or
+`pip install -r backend/ecs/requirements.txt`).
+
 ## The output bundle
 
 Always write to a local directory (default `./aicc-output/` — ask if unsure):
@@ -93,6 +120,9 @@ Always write to a local directory (default `./aicc-output/` — ask if unsure):
     infrastructure_schema.json           # tables, Lambda wiring, env vars (the Schema Summary);
                                          # on the existing-DB path this is the scanned SCHEMA CONTRACT
     session_flow_config.json             # call direction, greeting, persona
+    acxd_flow_spec.json                  # ACXD target only: confirmed flow plans, slot plans, guardrails,
+                                         # knowledge base, application settings (schema: ACXDFlowSpec)
+    runtime_target.json                  # {"target": "classic" | "acxd"}
     requirements/<doc_type>.md           # raw customer input (large text / uploaded docs)
     research/<topic>.md                  # cited web-research notes (optional)
     review_report.md                     # Phase 7 reviewer output
@@ -100,10 +130,17 @@ Always write to a local directory (default `./aicc-output/` — ask if unsure):
     lambda/<tool_id>/index.py            # ONE Lambda per TOOL (primary + helpers + session tools); index.py is canonical (handler.py accepted)
     lambda/update_q_session/index.js     # FIXED Node.js handler — copied, not generated (see below)
     openapi/openapi.yaml
-    prompt/ai_agent_prompt.yaml
-    contact_flow/contact_flow.json       # (+ .mermaid for review)
+    prompt/ai_agent_prompt.yaml          # Classic target only
+    acxd/                                # ACXD target only (replaces prompt/)
+      flows/<flowId>.json                #   model-written operation flows + deterministic system flows
+      slot-types/*.json  data-requests/*.json  secrets/*.json  guardrails/*.json  knowledge-bases/*.json
+      context-variables.json  application.json
+    contact_flow/contact_flow.json       # (+ .mermaid for review); ACXD: carries the Agentic CX block
     infrastructure/template.yaml         # CloudFormation
     faq/<category>/<topic>.txt           # knowledge-base docs
+  bundle/<project>/                      # ACXD target: the deployable bundle acxd_local.py package writes
+                                         # (assets/acxd/*, contact-flow/, cloudformation/, lambda/, openapi/,
+                                         #  deploy-manifest.json, runner.js + lib/, deploy.sh, WIRING-GUIDE.md)
   context/
     conversation_summary.md
     all_results.txt
@@ -348,6 +385,45 @@ and `infrastructure_schema.test_phone_number`.
 
 If incomplete → keep asking. If complete → confirm with the user, then generate.
 
+**ACXD target — flow plans (after the OperationSpecs, before generation).** Follow
+the `ACXD_RUNTIME_TARGET_PROMPT` overlay: for every operation, present a **flow plan**
+(the steps the conversation takes — ask, look up, answer, hand back; the slots it
+collects and their formats; the escalation conditions; redirect targets) and get it
+confirmed step by step; confirm the greeting, the guardrail plan, the knowledge base
+(FAQ) plan and the context variables the Contact Flow passes in. Save everything to
+`state/acxd_flow_spec.json` (schema `resources/schemas/ACXDFlowSpec.schema.json`;
+plans `ACXDFlowPlan`, slots `ACXDSlotPlan`, steps `ACXDNodeStep`). Rules the
+webapp enforces at save time, apply them yourself: a slot must name a real input
+field of the operation; a value the customer cannot know (an id the backend
+computes) is an output, never a slot; every plan carries an escalation rule; an
+operation the customer never asks for directly is `customer_initiated: false`.
+
+**Conversation style first (`application.conversation_style`, default
+`generative`).** Ask once, early, how the agent should talk, and shape every
+operation plan accordingly:
+- `generative` (recommended): ONE `generative_journey` step carries the operation's
+  conversation — it collects the values a person explains in their own words (a
+  reason, a preference, a description, a choice among options) and answers side
+  questions from the FAQ (`journey_tools: ["knowledge_base"]`). List those slot
+  names in the step's `captures`. Fixed nodes exist only where exactness is
+  required: `basic` for wording the requirements mandate, `user_choice` (with
+  `slot`) for every strict-format value — order/booking number, phone, id, any
+  regex — and for identity checks (the runtime re-asks on a format miss; a journey
+  must never capture these), `data_request` for the backend call, `choice` for
+  money / eligibility / compliance / identity decisions, then a result step and a
+  `redirect` to the follow-up flow. Escalation exits (agent request inside the
+  journey, third miss, errors) are added by the contract.
+- `scripted`: only when the customer explicitly asks for a scenario-driven agent —
+  one `user_choice` per value, `basic` messages, no journey.
+The engine turns a journey step into the node's `dataCapture` (slot, required,
+schema from the field's enum/regex), the captured edge (`slot <name> exists` for
+each capture — the journey ends when they are captured and nothing else marks
+that exit), the `agentRequested` exit condition and the knowledge-base tool.
+Then:
+```bash
+python resources/scripts/acxd_local.py check --output-dir <output_dir>   # readiness: what is still unconfirmed
+```
+
 ## GENERATION MODE — produce the asset packages
 
 **One phase per turn — HARD STOP between phases.** After each phase: report the
@@ -360,15 +436,37 @@ in-scope phases below execute; mark the rest "skipped (not in scope)".
 | 1 | `infrastructure_generator` | all specs + infra schema | `infrastructure/template.yaml` (+ `state/infrastructure_schema.json` = the **Schema Summary** every later phase consumes) |
 | 2 | `lambda_generator` (per **tool**) | tool spec + infra schema | `lambda/<tool_id>/index.py` |
 | 3 | `openapi_generator` | all tools | `openapi/openapi.yaml` |
-| 4 | `prompt_generator` | all specs + flow config | `prompt/ai_agent_prompt.yaml` |
-| 5 | `contact_flow_generator` | flow config + prompt | `contact_flow/contact_flow.json` |
+| 4 | `prompt_generator` (Classic) | all specs + flow config | `prompt/ai_agent_prompt.yaml` |
+| 4a | **ACXD lane** (ACXD target, replaces Phase 4): `acxd_local.py system` + `acxd_flow_generator` per operation flow + `acxd_local.py normalize` | `state/acxd_flow_spec.json` + all specs | `acxd/flows/*.json`, `acxd/slot-types|data-requests|secrets|guardrails|knowledge-bases/*.json`, `acxd/context-variables.json`, `acxd/application.json` |
+| 5 | `contact_flow_generator` | flow config + prompt | `contact_flow/contact_flow.json` (ACXD: `acxd_local.py package` rebinds it to the Agentic CX block) |
 | 6 | `faq_generator` (optional) | company profile / research | `faq/<category>/*.txt` |
-| 7 | **Review gate** (`reviewer_agent` + 3 validators) | all of `assets/v1/` | `state/review_report.md` |
+| 7 | **Review gate** (`reviewer_agent` + 3 validators; ACXD adds `acxd_local.py validate`) | all of `assets/v1/` | `state/review_report.md` |
 
 Run `resources/scripts/lint_assets.py <output_dir>` at the end of **every** phase
 (Phase 0 excepted) before you report the result — it is cheap, deterministic, and
 catches the failures that otherwise surface only at CloudFormation deploy or flow
 import time. See **Validation** below for the full gate list.
+
+**Phase 4a — the ACXD lane, in this order (HARD STOP after it like any phase):**
+1. `python resources/scripts/acxd_local.py system --output-dir <output_dir>` — writes the
+   deterministic resources exactly as the webapp does: the Welcome / Fallback /
+   FollowUp / RequestAgent / Escalation system flows (and `FaqFlow` when a knowledge
+   base is planned), slot types, data requests pointed at `{WEBHOOK_URL}` with the
+   API key as an ACXD secret, guardrails, the knowledge base, context variables and
+   the application. Never author these by hand.
+2. For **each operation flow plan** (`role: operation` in `state/acxd_flow_spec.json`),
+   adopt `resources/sub-agents/acxd_flow_generator.md` and write
+   `assets/v1/acxd/flows/<flowId>.json` — one flow per turn, the plan's steps as the
+   node graph, only node types and operators the prompt's catalog lists.
+3. `python resources/scripts/acxd_local.py normalize --output-dir <output_dir>` — the
+   same pipeline the webapp runs on a model-written flow: canonicalisation, the
+   live-verified **runtime contract** (slot types the service recognises, request
+   bodies that carry the collected values, a format check after every pattern
+   capture, a re-ask for a missed required value, the agent-request escape while a
+   value is collected, success → FollowUp, failure → escalation …) and validation.
+   It prints what it changed and what is still wrong; fix the flow from the printed
+   problems (max 3 attempts, like the webapp) and re-run until it exits 0.
+4. Report: flows written, contract changes applied, problems left. Then stop.
 
 **Granularity & special Lambdas (Phase 1–2) — easy to get wrong:**
 - **One Lambda per TOOL, not per operation.** Enumerate every tool id across all
@@ -458,9 +556,11 @@ your reading of a file is not a substitute:
 | `resources/scripts/lint_assets.py` | per-asset syntax + import-safety, with auto-fixes | after every generation phase |
 | `resources/scripts/validate_consistency.py` | 18 cross-asset consistency checks | after Phase 3 and Phase 6 |
 | `resources/scripts/shape_parity.py` | spec ↔ OpenAPI shape parity (reviewer HARD GATE) | after Phase 3, again at Phase 7 |
+| `resources/scripts/acxd_local.py normalize` / `validate` | **ACXD target only** — the runtime contract on every model-written flow, then the cross-asset D9 gate (data request paths/fields/formats against the OpenAPI spec and the Lambdas, every flow against the service contract, the deploy manifest) | `normalize` after each flow; `validate` at Phase 7 and before `package` |
 
 All three take `<output_dir>`, accept `--json`, exit 0 on success and 1 on findings,
 and resolve assets from the newest `assets/vN/` (a flat `assets/` also works).
+`acxd_local.py` takes `--output-dir <output_dir>` and exits 1 on findings as well.
 
 **Asset linters — after EVERY generation phase.** `lint_assets.py` is generated from
 the webapp's `asset_linters.py`, so it enforces exactly what the webapp enforces:
@@ -673,6 +773,26 @@ When the bundle is `READY_TO_DEPLOY`, reproduce the webapp's download modal. Pri
 4. Next steps after it finishes: place a test call/chat, sync the knowledge base if
    FAQ content changed, and review the flow in the Connect console.
 
+**ACXD target.** Package first, then hand off the bundle directory:
+```bash
+python resources/scripts/acxd_local.py validate --output-dir <output_dir>   # must exit 0
+python resources/scripts/acxd_local.py package  --output-dir <output_dir>   # → <output_dir>/bundle/<project>/
+```
+The bundle is what the webapp's download gives: `assets/acxd/*`, the Contact Flow
+rebound to the Agentic CX block, the Classic backend assets, `deploy-manifest.json`,
+the Node runner (`runner.js`, `lib/`, `package.json`) and the same `deploy.sh`, which
+detects the ACXD bundle by itself and runs CloudFormation → Lambda → API → ACXD
+resources → build → deployment → published Contact Flow. Tell the user what it
+cannot create for them (also in the bundle's `WIRING-GUIDE.md`): a **Connect
+Customer** instance, an **agentic CX designer workspace** and an **API key** from a
+programmatic user (Admin Hub → Users → API access; the `acxd_live_…` key is shown
+once) — exported as `CONNECT_INSTANCE_ID`, `ACXD_WORKSPACE_ID`, `ACXD_API_KEY`.
+After the deploy, the one console click is choosing the application alias in the
+Agentic CX block (or `ACXD_ALIAS_ID=… ./deploy.sh`); a redeploy replaces the
+application deployment and rotates that key — `./deploy.sh --rebind-alias <key>`
+re-points the flow. Knowledge-base answers need a generative model configured on the
+workspace.
+
 State plainly that generated assets are **PoC starting points**, not hardened
 production code (rotate the workshop `ApiKeyRequired: false`, scope IAM, etc.).
 
@@ -681,7 +801,8 @@ production code (rotate the workshop `ApiKeyRequired: false`, scope IAM, etc.).
 ```
 resources/
   orchestrator/
-    system_prompt.md            # full orchestrator prompt (COMMON + TERMINOLOGY + all phases + ATTACHMENT_HANDLING + REGENERATION)
+    system_prompt.md            # full orchestrator prompt (COMMON + TERMINOLOGY + all phases + ATTACHMENT_HANDLING + REGENERATION
+                                #   + the ACXD_RUNTIME_TARGET_PROMPT overlay, applied on an ACXD run)
     interview_agent.md          # INTERVIEW MODE persona (full + scoped)
     document_analysis.md        # raw-requirements-doc entry mode
     operation_spec_template.md  # OperationSpec authoring template (verbatim placeholders)
@@ -690,6 +811,7 @@ resources/
     infrastructure_generator.md  lambda_generator.md  openapi_generator.md
     prompt_generator.md          contact_flow_generator.md  faq_generator.md
     research_agent.md            reviewer_agent.md
+    acxd_flow_generator.md      # ACXD operation flows — node/operator catalog + runtime contract, composed from the live service contract
   reference/
     vision_import.md            # flow-image → Contact Flow JSON transcription contract (authored)
     contact_flow_block_schemas.md  # API-verified block Types + per-block params (authored)
@@ -698,15 +820,21 @@ resources/
     BusinessRule / ErrorResponse / SideEffect / ConversationStep /
     SessionFlowConfig / ContactFlowSpec / FlowBehavior / CustomerInfoVariable /
     NoResponsePolicy .schema.json
+    ACXDFlowSpec / ACXDFlowPlan / ACXDNodeStep / ACXDSlotPlan / ACXDGuardrailPlan /
+    ACXDKnowledgeBasePlan / ACXDContextVariable / ACXDApplicationPlan .schema.json   # ACXD interview output
+    acxd/*.schema.json + acxd/contract.json   # what every ACXD resource is validated against; the service contract
   scripts/
     lint_assets.py              # per-asset linters + autofixes — AUTO-GENERATED from
                                 # backend tools/asset_linters.py; do not hand-edit
     validate_consistency.py     # 18-check cross-asset validator (stdlib + PyYAML)
     shape_parity.py             # spec ↔ OpenAPI shape parity HARD GATE
     check_spec_complete.py       clues_format.py
+    acxd_local.py               # ACXD target: system resources, runtime contract, D9 gate, bundle — runs the
+                                # backend engine from an AICC Builder checkout (see Runtime target)
   templates/
     pre_questionnaire_template.md
-    deploy_workshop.sh
+    deploy_workshop.sh          # the bundle's deploy.sh (Classic phases + the ACXD chain) — AUTO-EXTRACTED
+    acxd_runner/                # the Node runner an ACXD bundle ships — AUTO-EXTRACTED
     update_q_session/index.js   # FIXED Node.js Lambda — copy into the bundle, do not generate
   examples/
     sample_hotel_complete.md  sample_airline_english.md
@@ -724,15 +852,19 @@ skills/aicc-builder-skill/scripts/extract_prompts.sh --check  # CI/pre-commit dr
 the extractor — so the skill can't silently fall behind.
 
 **Auto-extracted (never hand-edit):** `resources/orchestrator/*.md`,
-`resources/sub-agents/*.md`, `resources/schemas/*.json`, and
+`resources/sub-agents/*.md` (incl. `acxd_flow_generator.md`, composed from the live
+service contract), `resources/schemas/*.json` and `resources/schemas/acxd/*`,
 `resources/scripts/lint_assets.py` (generated from `tools/asset_linters.py` with the
 `@tool` S3 wrappers stripped — that is how the API-verified Contact Flow tables stay
-in sync).
+in sync), `resources/templates/deploy_workshop.sh` (the bundle's `deploy.sh`) and
+`resources/templates/acxd_runner/` (the ACXD Node runner).
 
-**Authored / hand-maintained:** `resources/reference/*`, `resources/templates/*`
-(incl. `update_q_session/index.js` and `deploy_workshop.sh`), `resources/examples/*`,
-`resources/scripts/validate_consistency.py`, `resources/scripts/shape_parity.py`,
-`resources/scripts/check_spec_complete.py`, `resources/scripts/clues_format.py`, and
-these SKILL.md files. `validate_consistency.py` and `shape_parity.py` are ports of
+**Authored / hand-maintained:** `resources/reference/*`,
+`resources/templates/update_q_session/index.js`, `resources/templates/pre_questionnaire_template.md`,
+`resources/examples/*`, `resources/scripts/validate_consistency.py`,
+`resources/scripts/shape_parity.py`, `resources/scripts/check_spec_complete.py`,
+`resources/scripts/clues_format.py`, `resources/scripts/acxd_local.py` (a thin CLI over
+the backend's ACXD modules — it copies nothing, so it never drifts), and these
+SKILL.md files. `validate_consistency.py` and `shape_parity.py` are ports of
 `backend/ecs/src/tools/{validate_consistency,shape_parity}.py` — when a check changes
 there, port it here by hand and re-run the smoke tests.

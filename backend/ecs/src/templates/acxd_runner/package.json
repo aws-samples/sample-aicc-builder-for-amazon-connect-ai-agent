@@ -1,0 +1,16 @@
+{
+  "name": "aicc-acxd-deploy-runner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static, tested deploy runner for AICC Builder ACXD bundles. Reads deploy-manifest.json (LLM-generated, schema-validated) and executes the deployment steps against the ACXD SDK. Do not edit in generated bundles.",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "amazon-connect-acxd-sdk": "0.1.0"
+  },
+  "scripts": {
+    "test": "node --test __tests__/*.test.js"
+  }
+}

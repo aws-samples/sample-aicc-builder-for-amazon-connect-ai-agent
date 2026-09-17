@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint . --ext ts,tsx"
+    "lint": "eslint . --ext ts,tsx",
+    "test": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity": "^3.700.0",
@@ -19,7 +20,7 @@
     "@xyflow/react": "^12.11.1",
     "amazon-cognito-identity-js": "^6.3.0",
     "clsx": "^2.1.0",
-    "dompurify": "^3.4.12",
+    "dompurify": "^3.4.13",
     "lucide-react": "^0.460.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
@@ -36,9 +37,12 @@
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@types/react-syntax-highlighter": "^15.5.13",
+    "@typescript-eslint/eslint-plugin": "8.70.0",
+    "@typescript-eslint/parser": "8.70.0",
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.0",
     "eslint": "^9.16.0",
+    "eslint-plugin-react-hooks": "7.1.1",
     "postcss": "^8.5.25",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.7.0",
