@@ -176,6 +176,9 @@ import re as _aicc_re
 
 _AICC_FIELD_PATTERNS = {patterns}
 _AICC_RESPONSE_TYPES = {response_types}
+_AICC_REQUEST_TYPES = {request_types}
+_AICC_YES = ("true", "1", "yes", "y", "예", "네", "응", "그래", "동의", "동의합니다", "동의해요", "맞아요", "はい", "ええ", "うん", "同意します")
+_AICC_NO = ("false", "0", "no", "n", "아니요", "아니오", "아뇨", "아니", "동의하지 않아요", "동의 안 해요", "いいえ", "いや", "同意しません")
 _AICC_SEPARATORS = set("-:/. ")
 _AICC_RUN = _aicc_re.compile(r"\\\\d\\{{(\\d+)\\}}|\\[0-9\\]\\{{(\\d+)\\}}|\\[A-Z\\]\\{{(\\d+)\\}}|\\[a-z\\]\\{{(\\d+)\\}}|\\[A-Za-z0-9\\]\\{{(\\d+)\\}}|\\[A-Za-z\\]\\{{(\\d+)\\}}|\\\\d")
 _AICC_LITERAL = _aicc_re.compile(r"\\\\([-.:/ ])|([A-Za-z0-9])|([-:/. ])")
@@ -288,6 +291,17 @@ def _aicc_restore_formats(event):
                 changed = True
         if _aicc_reassign_misfiled(data):
             changed = True
+        # Slot values arrive as text: a yesNo slot says "예"/"아니요" (or はい /
+        # yes), a number slot "2". Coerce to the request schema's declared type
+        # so a handler's bool()/int() sees what the API contract promised
+        # (live: "예" read as False → PRIVACY_CONSENT_REQUIRED on a consenting call).
+        for name, kind in _AICC_REQUEST_TYPES.items():
+            if name not in data:
+                continue
+            coerced = _aicc_coerce_request(data.get(name), kind)
+            if coerced is not data.get(name):
+                data[name] = coerced
+                changed = True
         if changed:
             event = dict(event)
             event["body"] = _aicc_json.dumps(data, ensure_ascii=False) if isinstance(body, str) else data
@@ -378,6 +392,29 @@ def _aicc_coerce(value, kind):
     return value
 
 
+def _aicc_coerce_request(value, kind):
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if kind == "boolean":
+        lowered = text.lower()
+        if lowered in _AICC_YES or any(lowered.startswith(w) for w in ("동의", "yes", "はい")):
+            return True
+        if lowered in _AICC_NO or lowered.startswith(("동의하지", "동의 안", "아니", "no ", "いいえ")):
+            return False
+        return value
+    if kind in ("integer", "number"):
+        digits = text.replace(",", "")
+        try:
+            if kind == "integer" and digits.lstrip("-").isdigit():
+                return int(digits)
+            number = float(digits)
+            return int(number) if kind == "integer" else number
+        except ValueError:
+            return value
+    return value
+
+
 _aicc_wrapped_handler = {handler}
 
 
@@ -387,7 +424,8 @@ def {handler}(event, context):
 
 
 def inject(code: str, field_patterns: dict, handler: Optional[str] = None,
-           response_types: Optional[dict] = None) -> tuple[str, list[str]]:
+           response_types: Optional[dict] = None,
+           request_types: Optional[dict] = None) -> tuple[str, list[str]]:
     """Append the format-restoring wrapper to a Python handler source.
 
     Returns (new_code, restored_fields). The code is returned unchanged when no
@@ -405,10 +443,13 @@ def inject(code: str, field_patterns: dict, handler: Optional[str] = None,
         return code, []
     types = {str(k): str(v) for k, v in (response_types or {}).items()
              if v in ("number", "integer", "boolean", "string")}
+    in_types = {str(k): str(v) for k, v in (request_types or {}).items()
+                if v in ("number", "integer", "boolean")}
     wrapper = _WRAPPER.format(
         marker=MARKER,
         patterns=json.dumps(patterns, ensure_ascii=False),
         response_types=json.dumps(types, ensure_ascii=False),
+        request_types=json.dumps(in_types, ensure_ascii=False),
         handler=handler,
     )
     return code.rstrip("\n") + "\n" + wrapper, sorted(patterns) or ["<response>"]

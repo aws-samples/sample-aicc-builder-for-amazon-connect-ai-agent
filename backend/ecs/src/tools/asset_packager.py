@@ -242,6 +242,13 @@ def _acxd_field_patterns(operation_folder: str) -> dict:
     return {}
 
 
+def _acxd_request_types(bundle: dict, operation_folder: str) -> dict:
+    """{request field: json type} from the Data Request that calls this Lambda —
+    the adapter coerces the slot strings ACXD posts ("예", "2") to these types
+    (live 2026-09-17: a boolean consent arrived as "예" and was read as False)."""
+    return _acxd_schema_types(bundle, operation_folder, "requestSchema")
+
+
 def _acxd_response_types(bundle: dict, operation_folder: str) -> dict:
     """{response field: json type} from the Data Request that calls this Lambda.
 
@@ -251,6 +258,11 @@ def _acxd_response_types(bundle: dict, operation_folder: str) -> dict:
     went silent). The request is matched by its URL path (/tools/<operation>)
     or, failing that, by its id."""
 
+    return _acxd_schema_types(bundle, operation_folder, "responseSchema")
+
+
+def _acxd_schema_types(bundle: dict, operation_folder: str, which: str) -> dict:
+    """{field: json type} of one schema of the Data Request that calls this Lambda."""
     def norm(value) -> str:
         return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
@@ -263,7 +275,7 @@ def _acxd_response_types(bundle: dict, operation_folder: str) -> dict:
         urls = [webhook.get("url")] + list((webhook.get("urls") or {}).values()) \
             if isinstance(webhook.get("urls"), dict) else [webhook.get("url")]
         paths = [str(u).rstrip("/").rsplit("/", 1)[-1] for u in urls if u]
-        schema = doc.get("responseSchema") if isinstance(doc.get("responseSchema"), dict) else {}
+        schema = doc.get(which) if isinstance(doc.get(which), dict) else {}
         props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         types = {str(k): v.get("type") for k, v in props.items() if isinstance(v, dict) and v.get("type")}
         if any(norm(p) == wanted for p in paths):
@@ -742,7 +754,8 @@ def package_assets_impl(
                         from tools.acxd_lambda_adapter import inject as _inject_adapter
                         new_content, restored = _inject_adapter(
                             content if isinstance(content, str) else content.decode("utf-8"), patterns,
-                            response_types=_acxd_response_types(acxd_plan[0], operation_id))
+                            response_types=_acxd_response_types(acxd_plan[0], operation_id),
+                            request_types=_acxd_request_types(acxd_plan[0], operation_id))
                         if restored:
                             content = new_content
                             logger.info(f"[packager] {operation_id}: ACXD boundary adapter added ({restored})")
