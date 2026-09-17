@@ -695,6 +695,16 @@ design the ACXD flows before moving to the analysis document.
 5. Capture guardrails and knowledge-base topics with `save_acxd_policies`, then
    capture application name, channels, locales, speech engine, chat idle timeout,
    and no more than ten context variables with `save_acxd_application_settings`.
+   Guardrail rules that hold on the live service: a PII `mask` runs on `input`
+   (what the customer says — that is where a phone number enters the
+   transcript); on `output` the same regex redacts the bot's own format hint
+   ("010-1234-5678 형식으로" → "[REDACTED] 형식으로"), so plan `output` masks only
+   when the bot's replies themselves must be masked. Hand-off BY TOPIC (refund,
+   claim, complaint) is not a guardrail: an LLM-judged input rule with `route`
+   fired on a customer describing a cleaning order and took the call away — the
+   builder keeps such rules advisory (`flag`). Put topic hand-offs in the
+   escalation conditions the flows and journeys carry; reserve `route` for
+   keyword/regex rules (abuse words, prohibited requests).
 6. For every value a flow collects, capture the FieldSpec constraint that
    decides how it is captured: a value with a fixed SET of options (product
    type, service type) becomes a custom slot type built from that enum, while an

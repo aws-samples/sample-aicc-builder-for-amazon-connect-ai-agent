@@ -288,7 +288,12 @@ def runtime_regex(pattern: Any) -> Optional[str]:
             re.compile(pattern)
         except re.error:
             return None
-        return pattern
+        # Live (2026-09-17): "^01[0-9]-[0-9]{3,4}-[0-9]{4}$" has a variable-width
+        # run the skeleton parser does not model, so the pattern was used as
+        # written — and "010-2345-6789" was refused ("형식에 맞지 않습니다")
+        # because NLX.PhoneNumber delivered the value without its dashes. Make
+        # every literal separator optional even when the shape is not fixed.
+        return _loosen_literal_separators(pattern)
     out = ["^"]
     for kind, text in parts:
         if kind == "sep":
@@ -299,6 +304,45 @@ def runtime_regex(pattern: Any) -> Optional[str]:
             out.append(("[0-9]" if text[0] == "d" else "[A-Za-z0-9]") + "{" + str(len(text)) + "}")
     out.append("$")
     return "".join(out)
+
+
+_SEPARATOR_CHARS = set("-. /:")
+
+
+def _loosen_literal_separators(pattern: str) -> str:
+    """Replace each literal separator OUTSIDE a character class with the optional
+    separator class, leaving classes, quantifiers, anchors and escapes intact."""
+    out: list[str] = []
+    in_class = False
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\" and i + 1 < len(pattern):
+            nxt = pattern[i + 1]
+            if not in_class and nxt in _SEPARATOR_CHARS:
+                out.append(_OPTIONAL_SEPARATOR)
+            else:
+                out.append(ch + nxt)
+            i += 2
+            continue
+        if in_class:
+            if ch == "]":
+                in_class = False
+            out.append(ch)
+        elif ch == "[":
+            in_class = True
+            out.append(ch)
+        elif ch in _SEPARATOR_CHARS and ch != ".":
+            out.append(_OPTIONAL_SEPARATOR)
+        else:
+            out.append(ch)  # "." stays a wildcard; an escaped "\." is handled above
+        i += 1
+    loosened = "".join(out)
+    try:
+        re.compile(loosened)
+    except re.error:
+        return pattern
+    return loosened
 
 
 def _has_status(edge: dict, status: str) -> bool:

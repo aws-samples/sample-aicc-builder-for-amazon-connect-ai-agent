@@ -319,6 +319,11 @@ def validate_acxd_consistency(
         _schema("guardrail", g, f"guardrails[{i}]")
     for i, k in enumerate(kbs):
         _schema("knowledge_base", k, f"knowledge_bases[{i}]")
+    # Live (2026-09-17): a mis-shaped context variable (the {"contextVariables": []}
+    # wrapper packaged as a variable) passed every gate and failed the runner at
+    # step 5 with "key is required" — validate them like every other resource.
+    for i, c in enumerate(bundle.get("context_variables") or []):
+        _schema("context_variable", c, f"context_variables[{i}]")
     if application is not None:
         _schema("application", application, "application")
 

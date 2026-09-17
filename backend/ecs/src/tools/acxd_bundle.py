@@ -369,8 +369,18 @@ def load_acxd_bundle(session_id: str) -> dict:
         if isinstance(doc, list):
             cvs.extend(d for d in doc if isinstance(d, dict))
         elif isinstance(doc, dict):
-            cvs.extend(d for d in (doc.get("contextVariables") or doc.get("context_variables") or [doc])
-                       if isinstance(d, dict))
+            # Live (2026-09-17): a wrapper {"contextVariables": []} — the normal
+            # shape for a project that defines no variable — fell through an
+            # `or` chain to [doc], so the wrapper itself was packaged as a
+            # variable and the runner failed with "key is required".
+            if "contextVariables" in doc or "context_variables" in doc:
+                items = doc.get("contextVariables")
+                if items is None:
+                    items = doc.get("context_variables")
+                items = items if isinstance(items, list) else []
+            else:
+                items = [doc]
+            cvs.extend(d for d in items if isinstance(d, dict))
     bundle["context_variables"] = cvs
 
     bundle["contact_flows"] = _dedupe_contact_flows(_read_json_docs(session_id, CLASSIC_CONTACT_FLOW_TYPE))

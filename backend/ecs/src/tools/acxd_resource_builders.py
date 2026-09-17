@@ -275,6 +275,29 @@ def _resolve_enforcement(plan: dict, spec: Optional[dict] = None) -> dict:
 _ADVISORY_RULE_NOTE = ("AICC: derived output rule kept as flag (false positive would mute the bot); "
                        "plan.message => modify")
 assert len(_ADVISORY_RULE_NOTE) <= 100
+_ADVISORY_INPUT_RULE_NOTE = ("AICC: derived input rule kept as flag (a false positive hijacks the call); "
+                             "hand-off = journey exits")
+assert len(_ADVISORY_INPUT_RULE_NOTE) <= 100
+
+
+def _mask_trigger(plan: dict) -> str:
+    """The trigger a guardrail rule runs on.
+
+    A PII ``mask`` belongs on what the CUSTOMER says: that is where a phone
+    number or an address enters the transcript. On ``output`` the same regex
+    rewrites the bot's own words — live (2026-09-14 and again 2026-09-17) it
+    turned "010-1234-5678 형식으로 말씀해 주세요" into "[REDACTED] 형식으로", twice,
+    the second time with a regex the review had written on purpose. So a mask
+    planned on ``output`` runs on ``input`` unless the plan says the bot's own
+    replies must be masked (``mask_bot_output: true``).
+    """
+    trigger = plan.get("trigger", "input")
+    if (trigger == "output" and plan.get("action") == "mask"
+            and not plan.get("mask_bot_output")):
+        logger.info("[ACXDGuardrails] %s: PII mask moved from output to input — an output "
+                    "mask redacts the bot's own format hints", plan.get("name"))
+        return "input"
+    return trigger
 
 
 def _keep_derived_output_rules_advisory(doc: dict, plan: dict) -> None:
@@ -313,6 +336,36 @@ def _keep_derived_output_rules_advisory(doc: dict, plan: dict) -> None:
     rule["description"] = _ADVISORY_RULE_NOTE
     logger.info("[ACXDGuardrails] %s: output rule with derived %s detection kept advisory "
                 "(flag) instead of %s — a false positive would silence the assistant",
+                doc.get("name"), method, action)
+
+
+def _keep_derived_input_routes_advisory(doc: dict, plan: dict) -> None:
+    """An input guardrail whose detection the builder DERIVED must not take the
+    conversation away from the flow.
+
+    Live (2026-09-17): an llmJudge input rule derived from the escalation policy
+    ("refund/claim requests go to an agent", threshold 0.8) fired on a customer
+    describing a cleaning order in detail — "냄새가 나서 … 종합으로 세척받고 싶어요"
+    — and ``route`` sent the caller to the escalation flow before the journey
+    could collect anything. A false positive on a routing rule ends the
+    self-service; a missed one costs only a log line. So an llmJudge input rule
+    with ``route`` / ``block`` is kept as ``flag``; keyword and regex rules match
+    deterministically and keep their action, and topic-based hand-off belongs to
+    the journey's own exit conditions, judged with the conversation in view.
+    """
+    if doc.get("trigger", "input") != "input":
+        return
+    rule = doc["rules"][0]
+    action = (rule.get("enforcement") or {}).get("action")
+    if action not in ("route", "block"):
+        return
+    method = (rule.get("detection") or {}).get("method")
+    if method != "llmJudge":
+        return  # keywords and regexes match deterministically: the interview's own rule
+    rule["enforcement"] = {"action": "flag"}
+    rule["description"] = _ADVISORY_INPUT_RULE_NOTE
+    logger.info("[ACXDGuardrails] %s: input rule with derived %s detection kept advisory "
+                "(flag) instead of %s — a false positive would hijack the conversation",
                 doc.get("name"), method, action)
 
 
@@ -405,7 +458,7 @@ def build_guardrails(spec: dict) -> tuple[list[dict], list[str]]:
 
         doc = {
             "name": name,
-            "trigger": plan.get("trigger", "input"),
+            "trigger": _mask_trigger(plan),
             "description": (plan.get("policy") or "")[:100],
             "active": True,
             "rules": [{
@@ -417,6 +470,7 @@ def build_guardrails(spec: dict) -> tuple[list[dict], list[str]]:
             "fallbackBehavior": {"type": "continue"},
         }
         _keep_derived_output_rules_advisory(doc, plan)
+        _keep_derived_input_routes_advisory(doc, plan)
         errors = validate_acxd_asset("guardrail", doc)
         if errors:
             problems.extend(f"guardrails[{i}] ({name}): {e}" for e in errors)
