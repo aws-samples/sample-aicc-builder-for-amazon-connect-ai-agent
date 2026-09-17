@@ -667,6 +667,22 @@ design the ACXD flows before moving to the analysis document.
    A strict-format slot listed in `captures` is removed by the tool and
    reported — plan a `user_choice` for it instead.
 
+   THE SENTENCES THE CALLER HEARS ARE PART OF THE PLAN. For every result step
+   (`generative_text` or `basic`) and every journey, propose the deterministic
+   sentence in the customer's register and store what they approve in the
+   step's `template` — with the placeholders the sentence will fill:
+   result: "예약이 접수되었습니다. 예약번호는 {createReservation.reservationId:NLX.Variable}이며,
+   방문 예정일은 {createReservation.visitDate:NLX.Variable}, 총 금액은
+   {createReservation.totalAmount:NLX.Variable}원입니다." (for a generative_text this
+   is the fallback spoken when the workspace has no model — the model paraphrases
+   it otherwise); journey: the read-back of the captured values in one sentence
+   ("{productType:NLX.Slot} {quantity:NLX.Slot}대 {serviceType:NLX.Slot}을
+   {preferredDate:NLX.Slot}에 {address:NLX.Slot}로 방문하는 것으로 확인했습니다.").
+   Show the proposed sentences with the step table and ask ONCE — "이 문구대로
+   할까요, 직접 정하시겠어요?" — then store the approved text. A sentence names
+   each value by its meaning, adds units (원, 대), never reads a code such as
+   CONFIRMED aloud, and never lists values after a colon or with slashes.
+
    `scripted` — the customer explicitly asked for a scenario-driven agent: one
    `user_choice` per value, `basic` messages, no journey. Everything else
    above (data_request, choice for decisions, follow-up redirect) is the same.

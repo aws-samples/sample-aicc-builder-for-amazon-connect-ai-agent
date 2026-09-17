@@ -1140,7 +1140,8 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
         "journey_steps": [
             {"captures": list(s.get("captures") or []),
              "journey_tools": list(s.get("journey_tools") or []),
-             "description": s.get("description")}
+             "description": s.get("description"),
+             "template": s.get("template")}
             for s in (plan.get("steps") or [])
             if isinstance(s, dict) and s.get("node_type") == "generative_journey"
         ],
@@ -1155,6 +1156,12 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
         # The flow's confirmed hand-off conditions: J4 turns the topic-shaped ones
         # (a refund/claim request, a complaint) into journey exit conditions.
         "escalation_topics": plan.get("escalation_conditions"),
+        # The customer-approved sentences of the plan's result steps, in order:
+        # M2 uses them as the generative_text fallback instead of synthesising.
+        "result_templates": [
+            s.get("template") for s in (plan.get("steps") or [])
+            if isinstance(s, dict) and s.get("node_type") == "generative_text"
+        ],
     }
 
 
