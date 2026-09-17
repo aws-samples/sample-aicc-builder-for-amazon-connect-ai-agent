@@ -164,3 +164,23 @@ def test_a_value_that_fits_only_another_field_is_moved_there():
     exec(compile(code, "h.py", "exec"), module.__dict__)
     out = module.lambda_handler({"body": json.dumps({"returnId": "GC20260902", "nlx_context": {}})}, None)
     assert json.loads(out["body"]) == {"orderNumber": "GC-20260902", "nlx_context": {}, "success": True}
+
+
+def test_injected_wrapper_coerces_request_fields_to_the_declared_types():
+    """Live (2026-09-17): the yesNo slot posted privacyConsent "예" and quantity
+    "2" as strings; the handler's bool parser knew only English words and
+    refused a consenting caller (PRIVACY_CONSENT_REQUIRED)."""
+    handler = ("import json\n"
+               "def lambda_handler(event, context):\n"
+               "    return {'statusCode': 200, 'body': event['body']}\n")
+    code, _ = inject(handler, {}, request_types={"privacyConsent": "boolean", "quantity": "integer",
+                                                 "customerName": "string"})
+    module = types.ModuleType("h2")
+    exec(compile(code, "h2.py", "exec"), module.__dict__)
+    out = module.lambda_handler({"body": json.dumps({"privacyConsent": "예", "quantity": "2",
+                                                     "customerName": "김민수"})}, None)
+    echoed = json.loads(out["body"])
+    assert echoed["privacyConsent"] is True and echoed["quantity"] == 2 and echoed["customerName"] == "김민수"
+    out = module.lambda_handler({"body": json.dumps({"privacyConsent": "아니요", "quantity": "두 대"})}, None)
+    echoed = json.loads(out["body"])
+    assert echoed["privacyConsent"] is False and echoed["quantity"] == "두 대"   # unparseable stays as said

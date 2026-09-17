@@ -1868,3 +1868,75 @@ def test_j4_topic_hand_offs_become_journey_exit_conditions():
     _, again = apply_runtime_contract(out, **_journey_kwargs(
         escalation_topics="상담원 요청 / 고객 불만 표출 / 환불·클레임 문의"))
     assert not any("(J4)" in n for n in again)
+
+
+def test_m1_repairs_placeholders_in_a_generative_text_prompt_too():
+    """Live (2026-09-17): a generative_text prompt named `getCleaningPrice.price`
+    while the response carries `unitPrice`; only the reviewer noticed."""
+    flow = broken("DeliveryStatusByOrderNumber")
+    generative = next(n for n in flow["nodes"].values() if n["type"] == "generative_text")
+    generative["metadata"]["generativeText"]["prompt"] = (
+        "배송 상태 {getDeliveryStatusByOrderNumber.status:NLX.Variable}를 안내하세요.")
+    out, notes = apply_runtime_contract(flow, **context("DeliveryStatusByOrderNumber"))
+    prompt = out["nodes"][generative["nodeId"]]["metadata"]["generativeText"]["prompt"]
+    assert "{getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}" in prompt
+    assert ".status:" not in prompt
+    assert any(".status → getDeliveryStatusByOrderNumber.deliveryStatus" in n for n in notes)
+
+
+def _outcome_flow(with_success_check: bool):
+    nodes = {
+        "s": {"nodeId": "s", "type": "start", "childNodes": [{"nodeId": "dr", "name": "next"}]},
+        "dr": {"nodeId": "dr", "type": "data_request",
+               "dataRequests": [{"dataRequestId": "createCleaningReservation",
+                                 "payload": {"customerName": "{customerName:NLX.Slot}"}}],
+               "childNodes": [{"nodeId": "chk" if with_success_check else "say", "name": "ok",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq",
+                                               "right": {"type": "constant", "value": "success"}}]},
+                              {"nodeId": "esc", "name": "failure",
+                               "conditions": [{"left": {"type": "node_status"}, "operator": "eq",
+                                               "right": {"type": "constant", "value": "failure"}}]}]},
+        "chk": {"nodeId": "chk", "type": "choice", "childNodes": [
+            {"nodeId": "say", "name": "yes", "conditions": [{
+                "left": {"type": "variable", "name": "createCleaningReservation.success"},
+                "operator": "eq", "right": {"type": "constant", "value": True}}]},
+            {"nodeId": "esc", "name": "no"}]},
+        "say": {"nodeId": "say", "type": "basic",
+                "messages": [{"type": "text", "body": "예약번호 {createCleaningReservation.reservationId:NLX.Variable}입니다."}],
+                "childNodes": [{"nodeId": "fu", "name": "next"}]},
+        "fu": {"nodeId": "fu", "type": "redirect", "metadata": {"redirect": {"type": "flow", "flowId": "FollowUpFlow"}},
+               "childNodes": [{"nodeId": "end", "name": "next"}]},
+        "esc": {"nodeId": "esc", "type": "redirect", "metadata": {"redirect": {"type": "flow", "flowId": "Escalation"}},
+                "childNodes": [{"nodeId": "end", "name": "next"}]},
+        "end": {"nodeId": "end", "type": "end"},
+    }
+    return {"flowId": "CreateCleaningReservation", "mainLanguageCode": "ko-KR", "languageCodes": ["ko-KR"],
+            "aiDescription": "Use this flow when the user wants to book a cleaning",
+            "slotTypes": [{"name": "customerName", "type": "NLX.Text", "sensitive": False}],
+            "nodes": nodes}
+
+
+def test_d7_tests_the_success_flag_before_announcing_a_result():
+    """Live (2026-09-17): the backend answered 200 with success:false (consent
+    not recognised) and the flow read back a result with every placeholder
+    empty — it had branched on node_status alone."""
+    out, notes = apply_runtime_contract(_outcome_flow(False), **context("CreateCleaningReservation"))
+    dr = out["nodes"]["dr"]
+    ok_edge = next(e for e in dr["childNodes"] if e["name"] == "ok")
+    choice = out["nodes"][ok_edge["nodeId"]]
+    assert choice["type"] == "choice"
+    accepted, refused = choice["childNodes"]
+    assert accepted["nodeId"] == "say"
+    assert accepted["conditions"][0]["left"] == {"type": "variable", "name": "createCleaningReservation.success"}
+    apology = out["nodes"][refused["nodeId"]]
+    assert apology["messages"][0]["body"] == "{createCleaningReservation.message:NLX.Variable}"
+    assert out["nodes"][apology["childNodes"][0]["nodeId"]]["type"] == "redirect"
+    assert any("(D7)" in n for n in notes)
+    # idempotent
+    _, again = apply_runtime_contract(out, **context("CreateCleaningReservation"))
+    assert not any("(D7)" in n for n in again)
+
+
+def test_d7_leaves_a_flow_that_already_tests_the_flag_alone():
+    _, notes = apply_runtime_contract(_outcome_flow(True), **context("CreateCleaningReservation"))
+    assert not any("(D7)" in n for n in notes)

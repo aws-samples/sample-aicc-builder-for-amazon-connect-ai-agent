@@ -227,8 +227,13 @@ def _resolve_detection(plan: dict) -> dict:
     if method == "keyword" or (
         method == "auto" and examples and all(len(e) <= 50 for e in examples)
     ):
-        keywords = [e[:50] for e in examples][:200] or ["placeholder"]
-        return {"method": "keyword", "keywords": keywords}
+        keywords = [e[:50] for e in examples][:200]
+        if keywords:
+            return {"method": "keyword", "keywords": keywords}
+        # Live (2026-09-17): a keyword rule the interview left without examples
+        # shipped as keywords ["placeholder"] — a rule that can never fire. With
+        # nothing to match, judge the policy instead (a judged input route is
+        # then kept advisory by _keep_derived_input_routes_advisory).
     prompt = (
         "Decide whether the following message violates this policy. "
         f"Policy: {plan.get('policy', '')} "

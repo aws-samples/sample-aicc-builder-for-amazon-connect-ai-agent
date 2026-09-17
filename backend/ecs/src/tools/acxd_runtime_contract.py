@@ -2355,6 +2355,98 @@ class _RuntimeContract:
                     stack.append(target)
         return None
 
+    def rule_d7(self) -> None:
+        """A backend that answers 200 with ``success: false`` (a business outcome —
+        consent missing, nothing found) must not be read back as a result.
+
+        Live (2026-09-17): the reservation request returned ``success: false``
+        and the flow, branching on ``node_status`` alone, announced "예약번호 ,
+        요청일 , 총 금액 , 원 상태 입니다." — every placeholder empty. When the
+        request's responseSchema carries a ``success`` flag and the HTTP-success
+        branch announces result fields without ever testing that flag, a
+        ``choice`` is put in front: ``success eq true`` continues to the
+        announcement, anything else speaks the API's own ``message`` (or a plain
+        apology) and offers further help.
+        """
+        for node_id, node in self.nodes_of_type("data_request"):
+            entries = [e for e in node.get("dataRequests") or [] if isinstance(e, dict)]
+            if not entries:
+                continue
+            request_id = str(entries[0].get("dataRequestId") or "")
+            document = self.data_requests.get(request_id)
+            if not isinstance(document, dict):
+                continue
+            properties = (document.get("responseSchema") or {}).get("properties") or {}
+            if not isinstance(properties, dict):
+                continue
+            success = next((n for n in properties if n.lower() == "success"), None)
+            if success is None:
+                continue
+            for edge in _edges(node):
+                if _has_status(edge, "failure") or _has_status(edge, "timeout"):
+                    continue
+                target_id = edge.get("nodeId")
+                if not isinstance(target_id, str) or target_id not in self.nodes:
+                    continue
+                if self._tests_success_flag(target_id, request_id):
+                    continue
+                if self._announces_result(target_id, request_id) is not True:
+                    continue
+                choice_id = _derived_id("4f1a00a4", f"{self.flow_id}#{node_id}#outcome")
+                if choice_id in self.nodes:
+                    continue
+                message_field = next((n for n in properties if n.lower() == "message"), None)
+                lang = self._language()
+                if message_field:
+                    body = f"{{{request_id}.{message_field}:NLX.Variable}}"
+                elif lang == "ja":
+                    body = "申し訳ありません。ご要望を処理できませんでした。"
+                elif lang == "en":
+                    body = "I'm sorry, that request could not be completed."
+                else:
+                    body = "죄송합니다. 요청을 처리하지 못했습니다."
+                apology_id = _derived_id("4f1a00a5", f"{self.flow_id}#{node_id}#refused")
+                end_id = next((nid for nid, _ in self.nodes_of_type("end")), None)
+                next_id = self._follow_up_redirect(end_id) if end_id else self._agent_request_redirect()
+                self.nodes[apology_id] = {
+                    "nodeId": apology_id, "type": "basic",
+                    "messages": [{"type": "text", "body": body}],
+                    "childNodes": [{"nodeId": next_id, "name": "next"}],
+                }
+                self.nodes[choice_id] = {
+                    "nodeId": choice_id, "type": "choice",
+                    "childNodes": [
+                        {"nodeId": target_id, "name": "accepted", "conditions": [{
+                            "left": {"type": "variable", "name": f"{request_id}.{success}"},
+                            "operator": "eq", "right": {"type": "constant", "value": True}}]},
+                        {"nodeId": apology_id, "name": "refused"},
+                    ],
+                }
+                edge["nodeId"] = choice_id
+                self.change(
+                    f"{_label(node_id, node)} edge {edge.get('name')!r}: {request_id}.{success} is tested "
+                    f"before the result is announced; success false speaks "
+                    f"{'the API message' if message_field else 'an apology'} then offers help (D7)")
+
+    def _tests_success_flag(self, start_id: str, request_id: str) -> bool:
+        """True when a choice on ``<request>.success`` sits between ``start_id``
+        and the first customer-facing message of that branch."""
+        seen: set[str] = set()
+        stack = [start_id]
+        while stack:
+            current = stack.pop()
+            if current in seen or current not in self.nodes:
+                continue
+            seen.add(current)
+            node = self.nodes[current]
+            for edge in _edges(node):
+                if self._success_polarity(edge, request_id) is not None:
+                    return True
+            if any(str(m.get("body") or "").strip() for m in node.get("messages") or [] if isinstance(m, dict)):
+                return False
+            stack.extend(e.get("nodeId") for e in _edges(node) if isinstance(e.get("nodeId"), str))
+        return False
+
     def rule_d6(self) -> None:
         """Generated (2026-09-16): the branch after the intake request had its
         conditions crossed — ``success eq true`` led to the failure message and
@@ -2382,15 +2474,28 @@ class _RuntimeContract:
                         f"announcing the result [{neg_target[:8]}] sat behind the negative test and the "
                         f"failure branch [{pos_target[:8]}] behind the positive one; conditions swapped (D6)")
 
+    def _texts_with_placeholders(self, node: dict) -> list[tuple[dict, str]]:
+        """(container, key) pairs whose text the runtime resolves placeholders in:
+        every message body, and a generative_text prompt (live, 2026-09-17: a
+        prompt named `getCleaningPrice.price`, the response has `unitPrice` — the
+        reviewer caught it, the gate had only looked at messages)."""
+        out: list[tuple[dict, str]] = []
+        for message in node.get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("body"), str):
+                out.append((message, "body"))
+        gen = ((node.get("metadata") or {}).get("generativeText")
+               if isinstance(node.get("metadata"), dict) else None)
+        if isinstance(gen, dict) and isinstance(gen.get("prompt"), str):
+            out.append((gen, "prompt"))
+        return out
+
     def rule_m1(self) -> None:
         slots = set(self.slot_names)
         for node_id, node in self.nodes.items():
             if not isinstance(node, dict):
                 continue
-            for message in node.get("messages") or []:
-                if not isinstance(message, dict) or not isinstance(message.get("body"), str):
-                    continue
-                body = message["body"]
+            for message, key in self._texts_with_placeholders(node):
+                body = message[key]
                 for match in list(_PLACEHOLDER.finditer(body)):
                     name, kind = match.group(1), match.group(2)
                     if kind == "Slot":
@@ -2420,7 +2525,7 @@ class _RuntimeContract:
                             f"an empty string at runtime")
                         continue
                     fixed = f"{{{request_id}.{replacement}:NLX.Variable}}"
-                    message["body"] = message["body"].replace(match.group(0), fixed)
+                    message[key] = message[key].replace(match.group(0), fixed)
                     self.change(
                         f"{_label(node_id, node)}: placeholder {request_id}.{field} → "
                         f"{request_id}.{replacement} (responseSchema field; M1)")
@@ -2935,6 +3040,7 @@ class _RuntimeContract:
         self.rule_d4()
         self.rule_d5()
         self.rule_d6()
+        self.rule_d7()
         self.rule_m1()
         self.rule_rx()
         self.rule_j2()
