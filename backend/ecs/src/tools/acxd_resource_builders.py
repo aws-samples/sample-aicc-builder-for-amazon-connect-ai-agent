@@ -609,6 +609,12 @@ def build_application(spec: dict) -> dict:
                              ("unknown", catch_all), ("escalation", escalation)):
             if target and role not in default_flows:
                 default_flows[role] = {"flowId": target}
+        # "customer expresses frustration → agent" is a hand-off condition every
+        # interview confirms; the service detects frustration itself, so the
+        # deterministic realisation is this default event — not an LLM-judged
+        # guardrail, which fired on ordinary requests (live, 2026-09-17).
+        if escalation and "frustration" not in default_flows:
+            default_flows["frustration"] = {"flowId": escalation}
 
     kb = build_knowledge_base(spec)
     if kb and "unknown" in default_flows:

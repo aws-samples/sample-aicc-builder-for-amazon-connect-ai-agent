@@ -471,3 +471,15 @@ def test_llm_judged_input_route_is_kept_advisory_but_keyword_route_stays():
     assert "hijacks" in scope["description"]
     abuse = by_name["Abuse Filter"]["rules"][0]
     assert abuse["enforcement"] == {"action": "route", "behavior": {"flowId": "EscalationFlow"}}
+
+
+def test_frustration_default_event_routes_to_the_escalation_flow():
+    """Live (2026-09-17): "customer expresses frustration → agent" was realised as
+    an LLM-judged input guardrail that fired on ordinary requests. The service
+    detects frustration itself; the deterministic realisation is the default
+    event pointing at the escalation flow."""
+    from tools.acxd_resource_builders import build_application
+    app = build_application(SPEC)
+    default_flows = app["settings"]["defaultFlows"]
+    assert default_flows["frustration"]["flowId"] == default_flows["escalation"]["flowId"]
+    assert validate_acxd_asset("application", app) == []

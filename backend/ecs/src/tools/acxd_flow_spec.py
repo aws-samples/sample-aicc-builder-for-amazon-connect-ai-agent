@@ -611,6 +611,49 @@ def is_strict_format_slot(slot: ACXDSlotPlan) -> bool:
     return lowered in {"phone", "phonenumber", "phone_number", "email", "alphanumeric", "identifier"}
 
 
+def generative_style_notes(spec, role: Optional[str], steps: List["ACXDNodeStep"],
+                           slots: List[ACXDSlotPlan]) -> List[str]:
+    """What a plan under the generative style still gets wrong — returned to the
+    interviewer as notes so it fixes the plan before the user sees it.
+
+    Live (2026-09-17): the first plan of a real interview had no journey in the
+    lookup flow and asked product/service type as menus; a person had to send
+    the plan back. Both are the two mistakes this reports:
+    - an operation flow without a generative_journey (nothing collects what the
+      customer explains in their own words)
+    - a user_choice over an enum slot whose values a person describes (product
+      type, reason) — a menu where a journey capture belongs; strict-format and
+      identity values stay user_choice
+    """
+    notes: List[str] = []
+    style = getattr(getattr(spec, "application", None), "conversation_style", "generative")
+    if style != "generative" or (role or "operation") != "operation" or not steps:
+        return notes
+    if not any(st.node_type == "generative_journey" for st in steps):
+        notes.append(
+            "generative style: this operation flow has no generative_journey step — values the "
+            "customer explains in their own words (reason, product, preferences, name, address) "
+            "belong to ONE journey with `captures`; keep user_choice only for strict-format values "
+            "and identity, data_request/choice/basic for the exact parts. Re-plan unless the "
+            "customer explicitly asked for a scripted flow.")
+    by_name = {sl.name: sl for sl in slots}
+    for st in steps:
+        if st.node_type != "user_choice" or not st.slot:
+            continue
+        slot = by_name.get(st.slot)
+        if slot is None or is_strict_format_slot(slot):
+            continue
+        # an enum slot in a plan is `type: custom` with its values as examples
+        vals = list(slot.examples or []) if str(slot.type or "").lower() in ("custom", "customenum", "enum") else []
+        if len(vals) >= 2:
+            notes.append(
+                f"step {st.step}: user_choice over enum slot '{st.slot}' ({len(vals)} values) is a menu; "
+                "under the generative style a value the customer describes belongs to the journey's "
+                "`captures` (the journey classifies the description onto the values). Keep user_choice "
+                "only if the customer wants a fixed menu here.")
+    return notes
+
+
 def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan]) -> List[str]:
     """Keep a generative_journey's ``captures`` to values a conversation may
     collect. Returns notes for every coercion; mutates ``step``.
@@ -948,6 +991,7 @@ def upsert_acxd_flow_plan(
                     s.confirmation_pending_reason = "decision changed since confirmation"
                 new_steps.append(s)
             new_steps.sort(key=lambda s: s.step)
+            notes.extend(generative_style_notes(spec, role, new_steps, new_slots))
 
             all_confirmed = bool(new_steps) and all(s.user_confirmed for s in new_steps)
             plan = ACXDFlowPlan(

@@ -97,8 +97,16 @@ def _orphan_operation_findings(session_id: str) -> list[dict]:
     if not specs:
         return []          # scoped runs without operation specs are not judged here
     known: set[str] = set()
-    for op_id in specs:
+    for op_id, spec in specs.items():
         known |= _spellings(op_id)
+        # A tool declared INSIDE an OperationSpec (role helper/session — "each
+        # tool = 1 Lambda + 1 API path") is covered by that spec's gates; live
+        # (2026-09-17) a quote helper of a reservation operation was reported
+        # here and the review round registered a duplicate spec for it.
+        for tool in getattr(spec, "tools", None) or []:
+            tool_id = getattr(tool, "tool_id", None) or (tool.get("tool_id") if isinstance(tool, dict) else None)
+            if tool_id:
+                known |= _spellings(str(tool_id))
 
     findings: list[dict] = []
 

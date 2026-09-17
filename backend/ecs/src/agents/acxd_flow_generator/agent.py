@@ -1145,6 +1145,16 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
             if isinstance(s, dict) and s.get("node_type") == "generative_journey"
         ],
         "kb_name": (spec.get("knowledge_base") or {}).get("name"),
+        # The plan's data_request steps, in order: D3p pins the n-th data_request
+        # node along the flow to the n-th confirmed request (live: the generator
+        # called the reservation endpoint for the price lookup).
+        "request_steps": [
+            str(s["data_request_id"]) for s in (plan.get("steps") or [])
+            if isinstance(s, dict) and s.get("node_type") == "data_request" and s.get("data_request_id")
+        ],
+        # The flow's confirmed hand-off conditions: J4 turns the topic-shaped ones
+        # (a refund/claim request, a complaint) into journey exit conditions.
+        "escalation_topics": plan.get("escalation_conditions"),
     }
 
 

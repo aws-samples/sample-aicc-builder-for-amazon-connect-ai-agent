@@ -1675,14 +1675,18 @@ _REASON_TYPE = {"slotTypeId": "reason", "values": [{"value": v} for v in ("단�
 _JOURNEY_STEPS = [{"captures": ["reason"], "journey_tools": ["knowledge_base"], "description": "사유 확인"}]
 
 
-def _apply_journey(flow, **overrides):
+def _journey_kwargs(**overrides):
     kwargs = dict(role="operation", data_requests={"requestReturn": _INTAKE_DOC},
                   flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
                   escalation_flow_id="Escalation", slot_type_ids={"yesNo", "reason"},
                   slot_type_docs={"reason": _REASON_TYPE}, journey_steps=_JOURNEY_STEPS,
                   kb_name="greencart-faq-kb")
     kwargs.update(overrides)
-    return apply_runtime_contract(flow, **kwargs)
+    return kwargs
+
+
+def _apply_journey(flow, **overrides):
+    return apply_runtime_contract(flow, **_journey_kwargs(**overrides))
 
 
 def test_j2_journey_gets_data_capture_from_the_plan_with_the_slots_enum_schema():
@@ -1701,9 +1705,18 @@ def test_j3_captured_edge_tests_the_slot_and_comes_first():
     test edge the runtime logged Error NoMessages and fell to Fallback."""
     out, notes = _apply_journey(_journey_flow())
     edges = out["nodes"]["gj"]["childNodes"]
-    assert edges[0]["name"] == "captured" and edges[0]["nodeId"] == "askP"
+    assert edges[0]["name"] == "captured"
     assert edges[0]["conditions"] == [{"left": {"type": "slot", "name": "reason"}, "operator": "exists"}]
     assert any("(J3)" in n for n in notes)
+    # J6: the captured branch first reads the values back (a templated basic),
+    # then continues to the node the model meant
+    confirm = out["nodes"][edges[0]["nodeId"]]
+    assert confirm["type"] == "basic" and "{reason:NLX.Slot}" in confirm["messages"][0]["body"]
+    assert confirm["childNodes"][0]["nodeId"] == "askP"
+    assert any("(J6)" in n for n in notes)
+    # idempotent: a second pass adds nothing
+    again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
+    assert not any("(J6)" in n or "(J3)" in n for n in notes_again)
     # a journey the model already wired with a slot test is left alone
     wired = _journey_flow(journey_edges=[{"nodeId": "askP", "name": "captured",
                                           "conditions": [{"left": {"type": "slot", "name": "reason"}, "operator": "exists"}]}])
@@ -1785,3 +1798,73 @@ def test_runtime_regex_loosens_separators_of_a_variable_width_pattern():
     # a class keeps its own hyphen; a wildcard dot is not a separator
     assert runtime_regex(r"^[A-Z-]{2}[0-9]+$") == r"^[A-Z-]{2}[0-9]+$"
     assert runtime_regex(r"^[0-9]{10}$") == r"^[0-9]{10}$"
+
+
+def test_d3p_pins_data_request_nodes_to_the_plan_order():
+    """Live (2026-09-17): the generator wrote the price lookup node against the
+    reservation request. The plan's data_request steps, in order, decide which
+    request each node calls; a re-pinned node's payload is rebuilt (D3)."""
+    flow = broken("CreateCleaningReservation")
+    request_nodes = nodes_of(flow, "data_request")
+    assert [n["dataRequests"][0]["dataRequestId"] for n in request_nodes] == [
+        "getCleaningPrice", "createCleaningReservation"]
+    # both nodes written against the reservation request, as the generator did
+    request_nodes[0]["dataRequests"][0]["dataRequestId"] = "createCleaningReservation"
+    request_nodes[0]["dataRequests"][0]["payload"] = {"customerName": "{customerName:NLX.Slot}"}
+    out, notes = apply_runtime_contract(
+        flow, **context("CreateCleaningReservation"),
+        request_steps=["getCleaningPrice", "createCleaningReservation"])
+    fixed = nodes_of(out, "data_request")
+    assert [n["dataRequests"][0]["dataRequestId"] for n in fixed] == [
+        "getCleaningPrice", "createCleaningReservation"]
+    assert any("D3p" in n for n in notes)
+    price_payload = fixed[0]["dataRequests"][0]["payload"]
+    assert "customerName" not in price_payload          # the stale payload is gone
+    assert all(v.endswith(":NLX.Slot}") or v.endswith(":NLX.Context}") for v in price_payload.values())
+
+
+def test_d3p_reports_a_plan_flow_mismatch_instead_of_guessing():
+    flow = broken("CreateCleaningReservation")
+    problems = runtime_contract_violations(
+        flow, **context("CreateCleaningReservation"),
+        request_steps=["getCleaningPrice"], scope="cross")
+    assert any("D3p" in p and "2 data_request node(s)" in p for p in problems)
+
+
+def test_d3p_is_a_no_op_without_a_plan():
+    flow = broken("CreateCleaningReservation")
+    _, notes = apply_runtime_contract(flow, **context("CreateCleaningReservation"))
+    assert not any("D3p" in n for n in notes)
+
+
+def test_j2_capture_prompt_names_the_values_to_collect():
+    """Live (2026-09-17): after a lookup miss the journey opened with "please
+    re-check the number" instead of asking for the name and address."""
+    out, notes = _apply_journey(_journey_flow())
+    capture = out["nodes"]["gj"]["metadata"]["generativeJourney"]["dataCapture"]
+    assert "reason" in capture["prompt"] and "이미 말한 값은 다시 묻지" in capture["prompt"]
+    assert any("dataCapture.prompt" in n for n in notes)
+
+
+def test_j4_topic_hand_offs_become_journey_exit_conditions():
+    """Live (2026-09-17): "refund/claim → agent" as an LLM-judged input guardrail
+    hijacked an ordinary reservation request; judged inside the journey it is an
+    exit condition. Agent-request / retry / failure wording is not a topic."""
+    out, notes = _apply_journey(
+        _journey_flow(),
+        escalation_topics="상담원 요청 / 3회 실패 / 고객 불만 표출 / 환불·클레임 문의 / AI 처리 불가")
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    names = [c["name"] for c in cfg["exitConditions"]]
+    assert names == ["agentRequested", "handOffTopic1", "handOffTopic2"]
+    assert "고객 불만 표출" in cfg["exitConditions"][1]["prompt"]
+    assert "환불·클레임 문의" in cfg["exitConditions"][2]["prompt"]
+    edges = out["nodes"]["gj"]["childNodes"]
+    by_index = {c["right"]["value"]: e for e in edges for c in e.get("conditions") or []
+                if (c.get("left") or {}).get("name") == "System.gjConditionIndex"}
+    assert {0, 1, 2} <= set(by_index)
+    assert len({by_index[i]["nodeId"] for i in (0, 1, 2)}) == 1      # all three to the agent request
+    assert sum("(J4)" in n for n in notes) == 3
+    # idempotent
+    _, again = apply_runtime_contract(out, **_journey_kwargs(
+        escalation_topics="상담원 요청 / 고객 불만 표출 / 환불·클레임 문의"))
+    assert not any("(J4)" in n for n in again)

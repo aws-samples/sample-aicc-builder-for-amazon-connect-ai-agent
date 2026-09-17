@@ -266,6 +266,33 @@ AGENT_REQUEST_WORDS = {
 }
 _OPTIONAL_SEPARATOR = "[-. /:]?"
 
+#: hand-off wording that other rules already realise (agent request → J4's
+#: agentRequested exit; retries → F1/Fallback; failures → status edges) and
+#: that a journey cannot judge from the conversation anyway
+_NON_TOPIC_ESCALATION = re.compile(
+    r"상담원|상담사|사람과|agent|operator|human|representative|オペレーター|担当者|"
+    r"[0-9]\s*회|세\s*번|three|retry|retries|실패|fail|timeout|타임아웃|무응답|no\s*match|"
+    r"처리\s*불가|처리할\s*수\s*없|cannot|unable|out of scope|범위\s*밖|範囲外|対応できない",
+    re.IGNORECASE)
+
+
+def _escalation_topics(raw: Any, limit: int = 3) -> list[str]:
+    """Topic-shaped hand-off conditions from a plan's free-text list —
+    "상담원 요청 / 3회 실패 / 고객 불만 표출 / 환불·클레임 문의 / AI 처리 불가"
+    yields ["고객 불만 표출", "환불·클레임 문의"]."""
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, (list, tuple)) else re.split(r"[/;,\n]| 또는 | or ", str(raw))
+    out: list[str] = []
+    for item in items:
+        text = str(item or "").strip().strip("-•·").strip()
+        if not text or _NON_TOPIC_ESCALATION.search(text) or text in out:
+            continue
+        out.append(text[:200])
+        if len(out) >= limit:
+            break
+    return out
+
 
 def runtime_regex(pattern: Any) -> Optional[str]:
     """The regex a ``matches_regex`` condition must use for a captured slot value.
@@ -384,8 +411,18 @@ class _RuntimeContract:
         field_enums: Optional[dict] = None,
         journey_steps: Optional[list] = None,
         kb_name: Optional[str] = None,
+        request_steps: Optional[list] = None,
+        escalation_topics: Optional[Any] = None,
     ) -> None:
         self.flow = flow
+        #: the plan's hand-off conditions that a journey can judge in conversation
+        #: (a refund/claim request, a complaint) — J4 makes each an exit condition
+        #: routed to the agent request; agent-request / retry-count / failure
+        #: wording is dropped because other rules already realise those
+        self.escalation_topics = _escalation_topics(escalation_topics)
+        #: the interview's data_request step ids of this flow, in plan order; the
+        #: n-th data_request node along the flow calls the n-th one (D3p)
+        self.request_steps = [str(r) for r in (request_steps or []) if isinstance(r, str) and r.strip()]
         self.role = (role or "").strip().lower() or None
         self.slot_type_ids = set(slot_type_ids) if slot_type_ids is not None else None
         self.slot_type_docs = dict(slot_type_docs or {})
@@ -1855,6 +1892,67 @@ class _RuntimeContract:
     # D3 / D4 — data requests
     # ==================================================================
 
+    def rule_d3p(self) -> None:
+        """Pin each data_request node to the request the plan confirmed for it.
+
+        Live (2026-09-17): the generator wrote both data_request nodes of a
+        reservation flow against the SAME request (create) — the price lookup
+        called the reservation endpoint — and, in a first attempt, the flow
+        referenced another operation's request altogether. The gates caught it
+        (D3, D:count) at the cost of a full regeneration and a review round.
+        The plan already says which request each step calls, in order, so the
+        n-th data_request node along the flow is made to call the n-th planned
+        request; a changed node loses its payload so D3 rebuilds it against the
+        right requestSchema.
+        """
+        if not self.request_steps:
+            return
+        ordered = self._nodes_in_flow_order("data_request")
+        if len(ordered) != len(self.request_steps):
+            self.violation(
+                "D3p", "cross",
+                f"flow {self.flow_id} has {len(ordered)} data_request node(s) but the plan "
+                f"confirmed {len(self.request_steps)} data_request step(s) {self.request_steps}")
+            return
+        for (node_id, node), planned in zip(ordered, self.request_steps):
+            entries = node.get("dataRequests")
+            if not isinstance(entries, list) or not entries or not isinstance(entries[0], dict):
+                node["dataRequests"] = entries = [{"dataRequestId": planned}]
+                self.change(f"{_label(node_id, node)}: data request set to {planned} from the plan (D3p)")
+                continue
+            entry = entries[0]
+            current = entry.get("dataRequestId")
+            if current == planned:
+                continue
+            entry["dataRequestId"] = planned
+            entry.pop("payload", None)
+            self.change(
+                f"{_label(node_id, node)}: data request {current!r} → {planned} — the plan's step "
+                f"calls {planned}; payload rebuilt against its requestSchema (D3p)")
+
+    def _nodes_in_flow_order(self, node_type: str) -> list[tuple[str, dict]]:
+        """Nodes of one type in the order a caller meets them: depth-first from
+        the start node, first edge first, each node once."""
+        nodes = self.nodes
+        start = next((nid for nid, n in nodes.items() if n.get("type") == "start"), None)
+        order: list[tuple[str, dict]] = []
+        seen: set[str] = set()
+        stack = [start] if start else []
+        while stack:
+            nid = stack.pop()
+            if not isinstance(nid, str) or nid in seen or nid not in nodes:
+                continue
+            seen.add(nid)
+            node = nodes[nid]
+            if node.get("type") == node_type:
+                order.append((nid, node))
+            children = [e.get("nodeId") for e in _edges(node)]
+            stack.extend(reversed(children))
+        for nid, node in nodes.items():  # unreachable nodes last, in document order
+            if nid not in seen and node.get("type") == node_type:
+                order.append((nid, node))
+        return order
+
     def rule_d3(self) -> None:
         if not self.data_requests:
             return
@@ -2467,6 +2565,74 @@ class _RuntimeContract:
                 return prompt
         return self.AGENT_EXIT_PROMPTS["ko"]
 
+    TOPIC_EXIT_PREFIX = "handOffTopic"
+
+    def _language(self) -> str:
+        code = str(self.flow.get("mainLanguageCode") or "").lower()
+        if code.startswith("ja"):
+            return "ja"
+        if code.startswith("en"):
+            return "en"
+        return "ko" if (code.startswith("ko") or self.is_korean) else "en"
+
+    def _capture_label(self, name: str) -> str:
+        """The interview's wording for a slot when it has one, else the slot name."""
+        plan = self.slot_plans.get(name) or {}
+        text = str(plan.get("description") or "").strip()
+        return text if text else name
+
+    def _capture_prompt(self, names: list[str]) -> str:
+        labels = ", ".join(self._capture_label(n) for n in names)
+        lang = self._language()
+        if lang == "ja":
+            return (f"会話の中で次の値を確認してください: {labels}。お客様がすでに述べた値は聞き直さず、"
+                    "足りない値だけを自然に尋ねてください。")
+        if lang == "en":
+            return (f"Collect these values in conversation: {labels}. Do not re-ask what the customer "
+                    "already said; ask naturally only for what is missing.")
+        return (f"대화 중에 다음 값을 확인해 주세요: {labels}. 고객이 이미 말한 값은 다시 묻지 말고, "
+                "빠진 값만 자연스럽게 물어보세요.")
+
+    def _topic_exit_prompt(self, topic: str) -> str:
+        lang = self._language()
+        if lang == "ja":
+            return f"お客様が次に該当する要望や状況をはっきり示している: {topic}"
+        if lang == "en":
+            return f"The customer clearly expresses a request or situation of this kind: {topic}"
+        return f"고객이 다음에 해당하는 요청이나 상황을 명확히 표현한다: {topic}"
+
+    def _insert_capture_confirmation(self, node_id: str, node: dict, captured_names: list[str]) -> None:
+        edges = _edges(node)
+        captured_edge = next(
+            (e for e in edges if all(_captures_slot(e, name) for name in captured_names)), None)
+        if captured_edge is None:
+            return
+        target_id = captured_edge.get("nodeId")
+        confirm_id = _derived_id("4f1a00a3", f"{self.flow_id}#{node_id}#confirm")
+        if target_id == confirm_id or confirm_id in self.nodes:
+            return  # already inserted (idempotent)
+        target = self.nodes.get(target_id) if isinstance(target_id, str) else None
+        if target is not None and target.get("type") == "basic":
+            return  # the generator planned its own acknowledgement
+        values = " / ".join(
+            (f"{self._capture_label(n)} {{{n}:NLX.Slot}}" if self._capture_label(n) != n else f"{{{n}:NLX.Slot}}")
+            for n in captured_names)
+        lang = self._language()
+        if lang == "ja":
+            body = f"承知しました。次の内容で進めます: {values}。"
+        elif lang == "en":
+            body = f"Thank you. I have noted: {values}."
+        else:
+            body = f"말씀하신 내용을 다음과 같이 확인했습니다: {values}."
+        self.nodes[confirm_id] = {
+            "nodeId": confirm_id, "type": "basic",
+            "messages": [{"type": "text", "body": body}],
+            **({"childNodes": [{"nodeId": target_id, "name": "next"}]} if isinstance(target_id, str) else {}),
+        }
+        captured_edge["nodeId"] = confirm_id
+        self.change(f"{_label(node_id, node)}: captured values read back by [{confirm_id[:8]}] before "
+                    f"the flow continues (J6)")
+
     def rule_j2(self) -> None:
         journeys = self.nodes_of_type("generative_journey")
         if not journeys:
@@ -2505,6 +2671,13 @@ class _RuntimeContract:
                     capture["exitEnabled"] = True
                     self.change(f"{label}: dataCapture.exitEnabled (the journey ends when every "
                                 f"required value is captured) (J2)")
+                if not str(capture.get("prompt") or "").strip():
+                    # Live (2026-09-17): after a lookup miss the journey opened with
+                    # "please re-check the number" instead of asking for the name
+                    # and address it was there to collect.
+                    capture["prompt"] = self._capture_prompt(
+                        [str(d["name"]) for d in data if isinstance(d, dict) and d.get("name")])
+                    self.change(f"{label}: dataCapture.prompt names the values to collect (J2)")
             elif isinstance(cfg.get("dataCapture"), dict) and cfg["dataCapture"].get("data"):
                 for entry in cfg["dataCapture"]["data"]:
                     if isinstance(entry, dict) and entry.get("name") and entry["name"] not in self.slot_names \
@@ -2560,6 +2733,34 @@ class _RuntimeContract:
                 self.change(f"{label}: exit condition {index} '{self.AGENT_EXIT_NAME}' → agent request (J4)")
             elif conditions and cfg.get("exitConditions") is not conditions:
                 cfg["exitConditions"] = conditions
+            if self.role == "operation" and self.escalation_topics:
+                # Live (2026-09-17): a topic hand-off ("refund/claim → agent") as an
+                # LLM-judged input guardrail fired on an ordinary reservation request
+                # and took the call away. Judged inside the journey, with the
+                # conversation in view, it is an exit condition like agentRequested.
+                present_names = {str(c.get("name") or "") for c in conditions}
+                for offset, topic in enumerate(self.escalation_topics):
+                    name = f"{self.TOPIC_EXIT_PREFIX}{offset + 1}"
+                    if name in present_names:
+                        continue
+                    conditions.append({"name": name, "prompt": self._topic_exit_prompt(topic)})
+                    cfg["exitConditions"] = conditions
+                    index = len(conditions) - 1
+                    node.setdefault("childNodes", []).append({
+                        "nodeId": self._agent_request_redirect(), "name": name,
+                        "conditions": [{
+                            "left": {"type": "system", "name": "System.gjConditionIndex"},
+                            "operator": "eq",
+                            "right": {"type": "constant", "value": index}}]})
+                    self.change(f"{label}: exit condition {index} '{name}' ({topic}) → agent request (J4)")
+
+            # --- confirmation of what was captured (J6) ------------------------
+            # Live (2026-09-17): the sentence a journey composes on the turn it
+            # exits is not delivered, so the caller hears the next question with
+            # no acknowledgement of six values just given. A templated basic in
+            # between reads them back; the flow then continues as planned.
+            if captured_names and self.role == "operation":
+                self._insert_capture_confirmation(node_id, node, captured_names)
 
             # --- tools ------------------------------------------------------
             tools = [t for t in (cfg.get("tools") or []) if isinstance(t, dict)]
@@ -2723,6 +2924,7 @@ class _RuntimeContract:
         self.rule_m2()
         self.rule_r7()
         self.rule_r6()
+        self.rule_d3p()
         self.rule_d3()
         self.rule_r8()
         self.rule_f1()
@@ -2783,6 +2985,8 @@ def apply_runtime_contract(
     field_enums: Optional[dict] = None,
     journey_steps: Optional[list] = None,
     kb_name: Optional[str] = None,
+    request_steps: Optional[list] = None,
+    escalation_topics: Optional[Any] = None,
 ) -> tuple[dict, list[str]]:
     """Normalize ``flow`` onto the live-verified runtime contract.
 
@@ -2819,7 +3023,8 @@ def apply_runtime_contract(
         flow_ids=flow_ids, context_variables=context_variables,
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
         slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
-        journey_steps=journey_steps, kb_name=kb_name)
+        journey_steps=journey_steps, kb_name=kb_name, request_steps=request_steps,
+        escalation_topics=escalation_topics)
     engine.run()
     return engine.flow, engine.changes
 
@@ -2841,6 +3046,8 @@ def runtime_contract_violations(
     field_enums: Optional[dict] = None,
     journey_steps: Optional[list] = None,
     kb_name: Optional[str] = None,
+    request_steps: Optional[list] = None,
+    escalation_topics: Optional[Any] = None,
 ) -> list[str]:
     """Report what the runtime contract cannot repair. Never mutates ``flow``.
 
@@ -2870,7 +3077,8 @@ def runtime_contract_violations(
         flow_ids=flow_ids, context_variables=context_variables,
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
         slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
-        journey_steps=journey_steps, kb_name=kb_name)
+        journey_steps=journey_steps, kb_name=kb_name, request_steps=request_steps,
+        escalation_topics=escalation_topics)
     engine.run()
     wanted = set(ALL_SCOPES) if scope == "all" else {scope}
     return [message for item_scope, _rule, message in engine.violations

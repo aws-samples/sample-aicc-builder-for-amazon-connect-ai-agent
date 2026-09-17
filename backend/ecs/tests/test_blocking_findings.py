@@ -79,6 +79,36 @@ def test_orphan_operation_gate_flags_specless_assets_but_not_supporting_lambdas(
     assert ids == ["SPEC:acxd_data_request:logCallResult", "SPEC:openapi:log_call_result"]
 
 
+
+def test_orphan_operation_gate_knows_helper_tools_declared_inside_a_spec(monkeypatch):
+    """Live (2026-09-17): a quote helper tool of a reservation operation had its
+    own Lambda, path and Data Request (by design: each tool = 1 Lambda + 1 API
+    path) and was reported as spec-less; the review round then registered a
+    duplicate OperationSpec for it."""
+    import tools.review_gates as rg
+    import tools.spec_manager as sm
+    import tools.s3_asset_storage as s3s
+    import tools.asset_loader as al
+
+    class _Tool:
+        tool_id = "quote_cleaning_price"
+
+    class _Spec:
+        tools = [_Tool()]
+
+    monkeypatch.setattr(sm, "get_all_specs", lambda: {"create_cleaning_reservation": _Spec()})
+    monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
+        "assets/s/lambda/create_cleaning_reservation/handler.py",
+        "assets/s/lambda/quote_cleaning_price/handler.py",
+        "assets/s/acxd_data_request/createCleaningReservation.json",
+        "assets/s/acxd_data_request/quoteCleaningPrice.json",
+    ])
+    monkeypatch.setattr(al, "load_existing_asset", lambda *a, **k: (
+        "openapi: 3.0.0\npaths:\n  /tools/create_cleaning_reservation:\n    post:\n"
+        "      operationId: create_cleaning_reservation\n"
+        "  /tools/quote_cleaning_price:\n    post:\n      operationId: quote_cleaning_price\n"))
+    assert rg._orphan_operation_findings("s") == []
+
 def test_d9_flags_agenticcx_reads_before_the_block():
     from tools.validate_consistency import _d9_agenticcx_refs_before_block
     actions = [

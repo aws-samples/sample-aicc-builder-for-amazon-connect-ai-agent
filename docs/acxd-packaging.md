@@ -47,8 +47,16 @@ edges; that exit sets neither `System.gjConditionIndex` nor `node_status`, so th
 FIRST child edge tests the captured slots with `exists` (without it: `Error
 NoMessages` and the fallback flow). `exitConditions[i]` map to
 `System.gjConditionIndex eq i`; the contract appends an `agentRequested` condition
-routed to the agent-request flow, `timeout`/`failure` edges to the escalation, a
-node-level `modelType` and `maxSteps`. A `dataRequest` or `mcpFlow` tool on a
+routed to the agent-request flow, one exit condition per topic-shaped hand-off the
+plan confirmed (a refund or claim request, a complaint — judged inside the journey,
+never as an LLM-judged input guardrail, which fired on ordinary requests),
+`timeout`/`failure` edges to the escalation, a node-level `modelType` and
+`maxSteps`. The sentence a journey composes on the turn it exits is not
+delivered, so the captured branch first passes a templated `basic` that reads the
+values back. `dataCapture.prompt` names the values to collect. The plan's
+`data_request` steps, in order, pin which request each `data_request` node calls
+(the generator once called the reservation endpoint for the price lookup), and the
+application's `frustration` default event points at the escalation flow. A `dataRequest` or `mcpFlow` tool on a
 journey is refused (the service drops the first, the second fails on invocation).
 `scripted` — one `user_choice` per value, no journey — is only the customer's
 explicit choice. Live record: probes 1–7 of 2026-09-17 in the validation log.
