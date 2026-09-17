@@ -644,8 +644,10 @@ design the ACXD flows before moving to the analysis document.
       (a regex, an order/booking number, a phone number, an id, a card digit
       group) and for identity verification. The runtime checks these
       character by character and re-asks on a format miss; an LLM paraphrase
-      of "GC-20260902" is not a lookup key. Put them BEFORE the journey when
-      the journey needs them (a lookup key), after it otherwise.
+      of an order number is not a lookup key. The format is ALWAYS the one the
+      customer stated (their document or answer) — never an example from
+      another project. Put them BEFORE the journey when the journey needs
+      them (a lookup key), after it otherwise.
    3. `generative_journey` — everything the customer would explain in their
       own words: a reason, a preference, a description, a choice among
       options, a date or quantity without a fixed format, a yes/no that is
