@@ -98,6 +98,19 @@
           "title": "Journey Tools",
           "type": "array"
         },
+        "template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The exact sentence the customer approved for this step, with placeholders: for a basic / generative_text result step the announcement (\"\uc608\uc57d\uc774 \uc811\uc218\ub418\uc5c8\uc2b5\ub2c8\ub2e4. \uc608\uc57d\ubc88\ud638\ub294 {createReservation.reservationId:NLX.Variable}\uc774\uba70 \u2026\" \u2014 for a generative_text it is the deterministic fallback spoken when the workspace has no model), for a generative_journey the read-back of the captured values. Propose one in the customer's register, ask once whether to keep it or change it, and store what they approved; the generator uses it verbatim.",
+          "title": "Template"
+        },
         "user_confirmed": {
           "default": false,
           "title": "User Confirmed",

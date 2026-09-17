@@ -392,6 +392,23 @@ def _prepare_acxd_package(session_id: str, project_name: str) -> tuple[dict, dic
     )
 
     bundle = _load_acxd_bundle(session_id)
+    # Last deterministic pass: a flow patched after generation (review-round
+    # fix, modification request) gets the same runtime contract the generator
+    # applies at write time — then D9 judges the result.
+    try:
+        from .validate_acxd_consistency import normalize_bundle_flows
+        spec = None
+        try:
+            from .acxd_flow_spec import get_acxd_flow_spec
+            flow_spec = get_acxd_flow_spec(session_id)
+            spec = flow_spec.model_dump() if flow_spec else None
+        except Exception as exc:
+            logger.debug("[packager] ACXD flow spec unavailable for the contract pass: %s", exc)
+        notes = normalize_bundle_flows(bundle, spec)
+        if notes:
+            logger.info("[packager] runtime contract pass at packaging: %d change(s)", len(notes))
+    except Exception as exc:  # pragma: no cover - never block packaging on the pass
+        logger.warning("[packager] runtime contract pass skipped: %s", exc)
     manifest = build_manifest(bundle, project_name=project_name)
     problems = [f"D9: {item}" for item in _run_d9_checks(session_id, bundle)]
     problems.extend(validate_deploy_manifest(manifest))

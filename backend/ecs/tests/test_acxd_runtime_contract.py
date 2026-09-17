@@ -677,9 +677,9 @@ def test_m2_generative_text_is_kept_with_a_templated_failure_fallback():
     # a prompt that already names its placeholders is left as the user approved it
     assert "다음 값만 사용해" not in flow["nodes"][generative[0]["nodeId"]]["metadata"]["generativeText"]["prompt"]
     assert answer == (
-        "조회 결과: 주문번호 {orderNumber:NLX.Slot}, "
-        "배송 상태 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}, "
-        "예상 배송일 "
+        "조회하신 내용을 안내드립니다. 주문번호는 {orderNumber:NLX.Slot}, "
+        "배송 상태는 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}, "
+        "예상 배송일은 "
         "{getDeliveryStatusByOrderNumber.expectedDeliveryDate:NLX.Variable}입니다.")
     assert any("M2" in note for note in notes)
 
@@ -713,8 +713,8 @@ def test_m2_without_placeholders_announces_the_data_request_result_fields():
     kwargs["field_labels"] = {request_id: {"deliveryStatus": "배송 상태"}}
     out, notes = apply_runtime_contract(flow, **kwargs)
     body = m2_fallback_body(out, generative["nodeId"])
-    assert body.startswith("조회 결과: ") and f"{{{request_id}.deliveryStatus:NLX.Variable}}" in body
-    assert "배송 상태 {" in body            # the interview's label, not the field name
+    assert body.startswith("조회하신 내용을 안내드립니다. ") and f"{{{request_id}.deliveryStatus:NLX.Variable}}" in body
+    assert "배송 상태는 {" in body            # the interview's label (with its particle), not the field name
     assert "success" not in body           # envelope fields are not announced
     assert any("M2)" in n for n in notes)
     assert not [p for p in runtime_contract_violations(flow, **kwargs, scope="flow") if "M2" in p]
@@ -1116,7 +1116,7 @@ def test_m2_prompt_labels_do_not_leak_fragments_of_earlier_placeholders():
     out, _ = apply_runtime_contract(flow, **context("DeliveryStatusByOrderNumber"))
     body = m2_fallback_body(out, generative["nodeId"])
     assert "Variable}" not in body.replace(":NLX.Variable}", "")
-    assert "배송 예정일 {" in body and "상태 {" in body
+    assert "배송 예정일은 {" in body and "상태는 {" in body
 
 
 def test_m2_result_labels_stay_in_the_callers_language():
@@ -1131,8 +1131,8 @@ def test_m2_result_labels_stay_in_the_callers_language():
     out, _ = apply_runtime_contract(flow, **kwargs)
     body = m2_fallback_body(out, generative["nodeId"])
     assert "Delivery status in English" not in body
-    assert "배송 상태 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}" in body   # dictionary word
-    assert "예상 배송일 {getDeliveryStatusByOrderNumber.expectedDeliveryDate:NLX.Variable}" in body  # Korean description kept
+    assert "배송 상태는 {getDeliveryStatusByOrderNumber.deliveryStatus:NLX.Variable}" in body   # dictionary word
+    assert "예상 배송일은 {getDeliveryStatusByOrderNumber.expectedDeliveryDate:NLX.Variable}" in body  # Korean description kept
 
 
 def test_d4_failure_edge_to_a_silent_followup_is_sent_to_the_escalation():
@@ -1940,3 +1940,79 @@ def test_d7_tests_the_success_flag_before_announcing_a_result():
 def test_d7_leaves_a_flow_that_already_tests_the_flag_alone():
     _, notes = apply_runtime_contract(_outcome_flow(True), **context("CreateCleaningReservation"))
     assert not any("(D7)" in n for n in notes)
+
+
+def test_synthesised_sentences_read_like_a_person_not_a_printout():
+    """Live (2026-09-17): the fallback read "조회 결과: 예약번호 R-…, 요청일 …, 총 금액
+    300000, 원 상태 CONFIRMED입니다." — a list. A create request now opens with
+    "접수되었습니다", labels take their particle, money gets its unit and an
+    all-caps status code is left out; the J6 read-back is a sentence too."""
+    flow = _outcome_flow(True)
+    # a generative_text announcement after the reservation request
+    flow["nodes"]["say"] = {"nodeId": "say", "type": "generative_text",
+                            "metadata": {"generativeText": {"prompt": "예약 결과를 안내하세요."}},
+                            "childNodes": [{"nodeId": "fu", "name": "next"}]}
+    kwargs = context("CreateCleaningReservation")
+    kwargs["field_labels"] = {"createCleaningReservation": {
+        "reservationId": "예약번호", "reservationDate": "방문 예정일", "totalAmount": "총 금액", "status": "예약 상태"}}
+    kwargs["field_enums"] = {"createCleaningReservation": {"status": ["CONFIRMED", "PENDING"]}}
+    out, _ = apply_runtime_contract(flow, **kwargs)
+    body = m2_fallback_body(out, "say")
+    assert body.startswith("요청하신 내용이 접수되었습니다. ")
+    assert "예약번호는 {createCleaningReservation.reservationId:NLX.Variable}" in body
+    assert "총 금액은 {createCleaningReservation.totalAmount:NLX.Variable}원" in body
+    assert "status" not in body and "예약 상태" not in body      # the machine code stays out
+    assert "조회 결과" not in body and " / " not in body
+
+    # J6 read-back on the journey fixture
+    j, _ = _apply_journey(_journey_flow())
+    confirm = j["nodes"][j["nodes"]["gj"]["childNodes"][0]["nodeId"]]["messages"][0]["body"]
+    assert confirm == "말씀하신 내용은 {reason:NLX.Slot}입니다. 이대로 진행하겠습니다."
+
+    # English and Japanese callers get their own sentence shapes
+    for code, opener in (("en-US", "Your request has been received. The"), ("ja-JP", "ご依頼を受け付けました。")):
+        f2 = _outcome_flow(True)
+        f2["mainLanguageCode"] = code; f2["languageCodes"] = [code]
+        f2["nodes"]["say"] = {"nodeId": "say", "type": "generative_text",
+                              "metadata": {"generativeText": {"prompt": "Announce the reservation."}},
+                              "childNodes": [{"nodeId": "fu", "name": "next"}]}
+        kw = context("CreateCleaningReservation")
+        kw["field_labels"] = {"createCleaningReservation": {"reservationId": "Reservation number", "totalAmount": "Total amount"}}
+        o, _ = apply_runtime_contract(f2, **kw)
+        assert m2_fallback_body(o, "say").startswith(opener)
+
+
+def test_approved_templates_from_the_plan_win_over_synthesis():
+    """The interview now proposes the sentences the caller hears and stores what
+    the customer approved on the step (`template`); the contract uses that text
+    for the generative_text fallback and the journey read-back."""
+    flow = _outcome_flow(True)
+    flow["nodes"]["say"] = {"nodeId": "say", "type": "generative_text",
+                            "metadata": {"generativeText": {"prompt": "예약 결과를 안내하세요."}},
+                            "childNodes": [{"nodeId": "fu", "name": "next"}]}
+    approved = ("예약이 접수되었습니다. 예약번호는 {createCleaningReservation.reservationId:NLX.Variable}이며, "
+                "총 금액은 {createCleaningReservation.totalAmount:NLX.Variable}원입니다.")
+    out, _ = apply_runtime_contract(flow, **context("CreateCleaningReservation"), result_templates=[approved])
+    assert m2_fallback_body(out, "say") == approved
+
+    steps = [{"captures": ["reason"], "journey_tools": [],
+              "template": "반품 사유를 {reason:NLX.Slot}(으)로 접수하겠습니다."}]
+    j, _ = _apply_journey(_journey_flow(), journey_steps=steps)
+    confirm = j["nodes"][j["nodes"]["gj"]["childNodes"][0]["nodeId"]]["messages"][0]["body"]
+    assert confirm == "반품 사유를 {reason:NLX.Slot}(으)로 접수하겠습니다."
+
+
+def test_m4_reports_a_sentence_that_reads_a_status_code_aloud():
+    """Live (2026-09-17): "현재 예약 상태는 CONFIRMED입니다" — the enum is the
+    backend's vocabulary, not the caller's."""
+    flow = _outcome_flow(True)
+    flow["nodes"]["say"]["messages"][0]["body"] = (
+        "예약번호는 {createCleaningReservation.reservationId:NLX.Variable}, "
+        "상태는 {createCleaningReservation.status:NLX.Variable}입니다.")
+    kwargs = context("CreateCleaningReservation")
+    kwargs["field_enums"] = {"createCleaningReservation": {"status": ["CONFIRMED", "PENDING"]}}
+    problems = runtime_contract_violations(flow, **kwargs, scope="cross")
+    assert any("M4" in p and "createCleaningReservation.status" in p for p in problems)
+    # a text field the backend fills with the spoken label is fine
+    flow["nodes"]["say"]["messages"][0]["body"] = "예약번호는 {createCleaningReservation.reservationId:NLX.Variable}입니다."
+    assert not [p for p in runtime_contract_violations(flow, **kwargs, scope="cross") if "M4" in p]

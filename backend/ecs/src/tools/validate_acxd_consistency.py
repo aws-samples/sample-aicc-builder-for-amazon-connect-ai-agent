@@ -549,6 +549,81 @@ def _flow_roles(bundle: dict, follow_up_flow_id: str) -> dict[str, str]:
     return roles
 
 
+def bundle_contract_kwargs(bundle: dict, spec: Optional[dict] = None) -> Optional[dict]:
+    """The runtime-contract keyword arguments the bundle's own documents can
+    supply (slot types, data requests, flow ids, context variables, enum values
+    from the spec's data integrations) — for the packaging pass. None when the
+    bundle has no flows."""
+    flows = [f for f in (bundle.get("flows") or []) if isinstance(f, dict)]
+    if not flows:
+        return None
+    from tools.acxd_runtime_contract import field_enums_from_integrations
+    field_enums = field_enums_from_integrations(
+        (spec or {}).get("data_integrations") if isinstance(spec, dict) else None)
+    slot_type_docs = {
+        str(doc["slotTypeId"]): doc
+        for doc in (bundle.get("slot_types") or [])
+        if isinstance(doc, dict) and doc.get("slotTypeId")
+    }
+    data_requests = {
+        str(doc["dataRequestId"]): doc
+        for doc in (bundle.get("data_requests") or [])
+        if isinstance(doc, dict) and doc.get("dataRequestId")
+    }
+    context_variables = {
+        str(doc["name"]) for doc in (bundle.get("context_variables") or [])
+        if isinstance(doc, dict) and doc.get("name")
+    }
+    flow_ids = {str(f["flowId"]) for f in flows if f.get("flowId")}
+    roles = _flow_roles(bundle, "FollowUpFlow")
+    known_targets = flow_ids | set(roles)
+    follow_up_flow_id = next(
+        (fid for fid in sorted(known_targets) if fid.lower().startswith("followup")), "FollowUpFlow")
+    escalation_flow_id = next(
+        (fid for fid in sorted(known_targets) if fid.lower().startswith("escalation")), "EscalationFlow")
+    return {
+        "roles": roles,
+        "kwargs": dict(
+            slot_type_ids=set(slot_type_docs), slot_type_docs=slot_type_docs,
+            data_requests=data_requests, flow_ids=known_targets,
+            context_variables=context_variables, follow_up_flow_id=follow_up_flow_id,
+            escalation_flow_id=escalation_flow_id, field_enums=field_enums),
+    }
+
+
+def normalize_bundle_flows(bundle: dict, spec: Optional[dict] = None) -> list[str]:
+    """Run the runtime contract over the bundle's operation flows IN PLACE, as a
+    last deterministic pass before packaging.
+
+    The generator normalises a flow when it writes it; a flow patched afterwards
+    (a modification request, a review-round fix) keeps whatever it had, and a
+    rule added later never reaches it. Live (2026-09-17): a flow patched after
+    generation still branched on node_status alone and read back an empty
+    result; the same contract applied at packaging inserts the outcome check.
+    System flows are the builder's own and are left alone. Returns the notes.
+    """
+    context = bundle_contract_kwargs(bundle, spec)
+    if not context:
+        return []
+    from tools.acxd_runtime_contract import apply_runtime_contract
+    notes: list[str] = []
+    for index, flow in enumerate(bundle.get("flows") or []):
+        if not isinstance(flow, dict):
+            continue
+        flow_id = str(flow.get("flowId") or "")
+        role = context["roles"].get(flow_id, "operation")
+        if role != "operation":
+            continue
+        try:
+            normalized, flow_notes = apply_runtime_contract(flow, role=role, **context["kwargs"])
+        except Exception as exc:  # never block packaging on the pass itself
+            logger.warning("[acxd_consistency] contract pass skipped for %s: %s", flow_id, exc)
+            continue
+        bundle["flows"][index] = normalized
+        notes.extend(f"{flow_id}: {n}" for n in flow_notes)
+    return notes
+
+
 def _check_runtime_contract(bundle: dict, out: list, spec: Optional[dict] = None) -> None:
     """The cross-asset half of the live runtime contract (S5, D3, D5, M1, RX).
 

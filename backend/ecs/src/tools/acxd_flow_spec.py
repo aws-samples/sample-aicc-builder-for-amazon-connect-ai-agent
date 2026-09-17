@@ -399,6 +399,15 @@ class ACXDNodeStep(_Model):
         default_factory=list,
         description="generative_journey steps only: 'knowledge_base' lets the journey answer "
                     "side questions from the FAQ knowledge base while it collects values.")
+    template: Optional[str] = Field(
+        default=None,
+        description="The exact sentence the customer approved for this step, with placeholders: "
+                    "for a basic / generative_text result step the announcement (\"예약이 접수되었습니다. "
+                    "예약번호는 {createReservation.reservationId:NLX.Variable}이며 …\" — for a "
+                    "generative_text it is the deterministic fallback spoken when the workspace has "
+                    "no model), for a generative_journey the read-back of the captured values. "
+                    "Propose one in the customer's register, ask once whether to keep it or change "
+                    "it, and store what they approved; the generator uses it verbatim.")
     user_confirmed: bool = Field(default=False)
     confirmation_pending_reason: Optional[str] = Field(
         default=None, description="Set when a re-upsert changed the decision and reset confirmation")
@@ -908,7 +917,9 @@ def upsert_acxd_flow_plan(
                  "determinism":"deterministic","determinism_rationale":"...",
                  "decision_category":"general|money|refund|...","data_request_id":"...",
                  "slot":"orderNumber" (user_choice), "captures":["reason"] and
-                 "journey_tools":["knowledge_base"] (generative_journey)}]
+                 "journey_tools":["knowledge_base"] (generative_journey),
+                 "template":"예약이 접수되었습니다. 예약번호는 {createReservation.reservationId:NLX.Variable}…"
+                 (the sentence the customer approved for a result step or a journey's read-back)}]
         slots: [{"name":"orderId","type":"text","field_name":"order_id","sensitive":false,
                  "examples":[...],"regex":"..."}]. Omitting `steps` on a re-upsert keeps
                  the planned steps; omitting `slots` keeps the slots.
