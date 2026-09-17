@@ -138,6 +138,29 @@ The plan lists confirmed steps with node_type + determinism. Your flow:
   {getOrder.status:NLX.Variable} and the date {getOrder.eta:NLX.Variable} in one
   friendly sentence; do not add facts"). A confirmed `basic` step is a `basic`
   with templated text — the requirements mandated that wording.
+- WRITE THE DETERMINISTIC SENTENCES YOURSELF, the way a good agent would say
+  them. Two places always need one:
+  1. Every `generative_text` result node gets a `basic` on a `node_status eq
+     failure` edge (a workspace without a default model never speaks the
+     generative sentence; live, the fallback is what the caller heard). Its
+     message is the same announcement as a fixed sentence: what happened first
+     ("예약이 접수되었습니다."), then each value named by its meaning with the
+     placeholder and its unit ("예약번호는 {createReservation.reservationId:NLX.Variable}이며,
+     방문 예정일은 {createReservation.visitDate:NLX.Variable}, 총 금액은
+     {createReservation.totalAmount:NLX.Variable}원입니다."). Then the same
+     continuation as the generative node.
+  2. Every `generative_journey`'s captured edge leads first to a `basic` that
+     reads the captured values back in one sentence ("{productType:NLX.Slot}
+     {quantity:NLX.Slot}대 {serviceType:NLX.Slot}을 {preferredDate:NLX.Slot}에
+     {address:NLX.Slot}로 방문하는 것으로 확인했습니다. 이어서 진행하겠습니다."),
+     then to the next deterministic node.
+  Rules for both: the project's language and register (존댓말 / polite form),
+  one or two sentences, no colon-and-list ("조회 결과: A, B, C"), no slashes,
+  no field names or codes the caller would not say (status codes such as
+  CONFIRMED stay out unless the requirements gave them a spoken label), only
+  placeholders that exist (M1 rejects the rest), and when the plan step carries
+  a `template` the customer approved, use that text verbatim. The contract
+  synthesises a plain sentence only where you left none.
 - A confirmed `generative_journey` step (plan fields `captures`, `journey_tools`)
   is ONE `generative_journey` node that carries that stretch of the
   conversation. Write `metadata.generativeJourney.prompt` in the project

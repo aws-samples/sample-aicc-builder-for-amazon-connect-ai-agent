@@ -413,8 +413,14 @@ class _RuntimeContract:
         kb_name: Optional[str] = None,
         request_steps: Optional[list] = None,
         escalation_topics: Optional[Any] = None,
+        result_templates: Optional[list] = None,
     ) -> None:
         self.flow = flow
+        #: the customer-approved sentences of the plan's generative_text steps, in
+        #: order (None where the plan has none): M2 uses the n-th as the n-th
+        #: generative_text node's fallback instead of synthesising one
+        self.result_templates = [t if isinstance(t, str) and t.strip() else None
+                                 for t in (result_templates or [])]
         #: the plan's hand-off conditions that a journey can judge in conversation
         #: (a refund/claim request, a complaint) — J4 makes each an exit condition
         #: routed to the agent request; agent-request / retry-count / failure
@@ -1128,7 +1134,9 @@ class _RuntimeContract:
                     f"{_label(node_id, node)}: generative_text after the result was already "
                     f"announced → silent pass-through (M2)")
                 continue
-            body = self._template_from_prompt(prompt if isinstance(prompt, str) else "")
+            body = self._approved_result_template(node_id)
+            if not body:
+                body = self._template_from_prompt(prompt if isinstance(prompt, str) else "")
             if not body:
                 # Live (GAON v3): "성공 시 배송상태와 예정일을 자연스럽게 안내한다" has no
                 # placeholders and the node said nothing — the caller heard
@@ -1149,6 +1157,18 @@ class _RuntimeContract:
             # generative_text stays — the user approved generative wording —
             # and the templated sentence rides along as its measured fallback.
             self._attach_generative_fallback(node_id, node, body)
+
+    def _approved_result_template(self, node_id: str) -> Optional[str]:
+        """The plan's approved sentence for this generative_text node (by position
+        among the flow's generative_text nodes), when its placeholders resolve."""
+        if not self.result_templates:
+            return None
+        ordered = [nid for nid, _ in self._nodes_in_flow_order("generative_text")]
+        if node_id not in ordered:
+            return None
+        position = ordered.index(node_id)
+        template = self.result_templates[position] if position < len(self.result_templates) else None
+        return template.strip() if template else None
 
     def _attach_generative_fallback(self, node_id: str, node: dict, body: str) -> None:
         edges = _edges(node)
@@ -1242,13 +1262,72 @@ class _RuntimeContract:
             placeholders.append((self._prompt_label(prompt, match.start()), token))
         if not placeholders:
             return None
-        parts = [f"{label} {token}".strip() if label else token
-                 for label, token in placeholders]
-        if self.is_korean():
-            return "조회 결과: " + ", ".join(parts) + "입니다."
-        return "Here is what I found: " + ", ".join(parts) + "."
+        clauses = []
+        for label, token in placeholders:
+            m = _PLACEHOLDER.match(token)
+            field = m.group(1).rpartition(".")[2] if m else token
+            clauses.append((label, token, field))
+        request_id = next((m.group(1).partition(".")[0] for _, t in placeholders
+                           for m in [_PLACEHOLDER.match(t)] if m and "." in m.group(1)), "")
+        return self._compose_sentence(clauses, request_id)
 
     _ENVELOPE_FIELDS = frozenset({"success", "errorCode", "errorcode", "message"})
+    _MONEY_WORDS = ("amount", "price", "fee", "cost", "total", "balance", "refund", "charge",
+                    "금액", "가격", "요금", "단가", "비용", "잔액", "환불", "料金", "金額", "価格")
+    _CREATE_WORDS = ("create", "register", "reserve", "book", "submit", "request", "cancel", "update", "apply")
+
+    @staticmethod
+    def _ko_topic_particle(label: str) -> str:
+        """은 after a syllable with a final consonant, 는 otherwise; a label that
+        does not end in Hangul gets 은(는) rather than a wrong guess."""
+        last = label.strip()[-1:] if label.strip() else ""
+        code = ord(last) if last else 0
+        if 0xAC00 <= code <= 0xD7A3:
+            return "은" if (code - 0xAC00) % 28 else "는"
+        return "은(는)" if last else ""
+
+    def _is_money(self, field: str, label: str) -> bool:
+        hay = f"{field} {label}".lower()
+        return any(w in hay for w in self._MONEY_WORDS)
+
+    def _compose_sentence(self, clauses: list[tuple[str, str, str]], request_id: str = "") -> str:
+        """A spoken sentence from (label, token, field) clauses — one idea per
+        clause, the value named by its meaning, a unit for money, and an opening
+        that says what happened. Live (2026-09-17): the earlier list form
+        ("조회 결과: 예약번호 …, 요청일 …, 총 금액 …, 원 상태 …입니다") read like a
+        printout; a caller expects a sentence a person would say.
+        """
+        lang = self._language()
+        created = any(w in request_id.lower() for w in self._CREATE_WORDS)
+        if lang == "ko":
+            intro = "요청하신 내용이 접수되었습니다." if created else "조회하신 내용을 안내드립니다."
+            bits = []
+            for label, token, field in clauses:
+                unit = "원" if self._is_money(field, label) else ""
+                bits.append(f"{label}{self._ko_topic_particle(label)} {token}{unit}" if label else f"{token}{unit}")
+            if len(bits) > 3:
+                return f"{intro} {', '.join(bits[:3])}입니다. {', '.join(bits[3:])}입니다."
+            return f"{intro} {', '.join(bits)}입니다."
+        if lang == "ja":
+            intro = "ご依頼を受け付けました。" if created else "ご確認いただいた内容をお伝えします。"
+            bits = [(f"{label}は{token}" if label else token) + ("円" if self._is_money(field, label) else "")
+                    for label, token, field in clauses]
+            return f"{intro}{'、'.join(bits)}です。"
+        intro = "Your request has been received." if created else "Here is what I found."
+        bits = [f"the {label.lower()} is {token}" if label else token for label, token, _ in clauses]
+        if len(bits) > 1:
+            body = ", ".join(bits[:-1]) + f", and {bits[-1]}"
+        else:
+            body = bits[0]
+        return f"{intro} {body[0].upper() + body[1:]}."
+
+    def _machine_code_field(self, request_id: str, field: str, schema: dict) -> bool:
+        """An enum of ASCII codes (CONFIRMED, PENDING) is not something to read
+        aloud; the announcement leaves it out unless nothing else is left."""
+        enum = schema.get("enum") if isinstance(schema.get("enum"), list) else None
+        if not enum:
+            enum = self.field_enums.get(request_id, {}).get(field)
+        return bool(enum) and all(isinstance(v, str) and re.fullmatch(r"[A-Z0-9_]+", v) for v in enum)
 
     def _template_from_result(self, node_id: str) -> Optional[str]:
         """A deterministic announcement of the fields the nearest upstream data
@@ -1263,7 +1342,8 @@ class _RuntimeContract:
             return None
         labels = self.field_labels.get(request_id, {})
         korean = self.is_korean()
-        parts: list[str] = []
+        clauses: list[tuple[str, str, str]] = []
+        codes: list[tuple[str, str, str]] = []
         for field, schema in properties.items():
             if field in self._ENVELOPE_FIELDS or not isinstance(schema, dict):
                 continue
@@ -1271,14 +1351,14 @@ class _RuntimeContract:
                 continue
             label = self._result_label(field, labels.get(field), korean)
             token = f"{{{request_id}.{field}:NLX.Variable}}"
-            parts.append(f"{label} {token}" if label else token)
-            if len(parts) >= 6:
+            (codes if self._machine_code_field(request_id, field, schema) else clauses).append((label, token, field))
+            if len(clauses) >= 5:
                 break
-        if not parts:
+        if not clauses:
+            clauses = codes[:3]
+        if not clauses:
             return None
-        if self.is_korean():
-            return "조회 결과: " + ", ".join(parts) + "입니다."
-        return "Here is what I found: " + ", ".join(parts) + "."
+        return self._compose_sentence(clauses, request_id)
 
     #: Korean labels for result fields the interview described in English (live:
     #: "Air conditioner product type {…}" read aloud to a Korean caller).
@@ -2716,7 +2796,8 @@ class _RuntimeContract:
             return f"The customer clearly expresses a request or situation of this kind: {topic}"
         return f"고객이 다음에 해당하는 요청이나 상황을 명확히 표현한다: {topic}"
 
-    def _insert_capture_confirmation(self, node_id: str, node: dict, captured_names: list[str]) -> None:
+    def _insert_capture_confirmation(self, node_id: str, node: dict, captured_names: list[str],
+                                     template: Optional[str] = None) -> None:
         edges = _edges(node)
         captured_edge = next(
             (e for e in edges if all(_captures_slot(e, name) for name in captured_names)), None)
@@ -2729,16 +2810,19 @@ class _RuntimeContract:
         target = self.nodes.get(target_id) if isinstance(target_id, str) else None
         if target is not None and target.get("type") == "basic":
             return  # the generator planned its own acknowledgement
-        values = " / ".join(
+        parts = [
             (f"{self._capture_label(n)} {{{n}:NLX.Slot}}" if self._capture_label(n) != n else f"{{{n}:NLX.Slot}}")
-            for n in captured_names)
+            for n in captured_names]
         lang = self._language()
         if lang == "ja":
-            body = f"承知しました。次の内容で進めます: {values}。"
+            body = f"ご希望の内容は {'、'.join(parts)} ですね。このまま進めます。"
         elif lang == "en":
-            body = f"Thank you. I have noted: {values}."
+            joined = ", ".join(parts[:-1]) + f" and {parts[-1]}" if len(parts) > 1 else parts[0]
+            body = f"Let me confirm: {joined}. I will go ahead with that."
         else:
-            body = f"말씀하신 내용을 다음과 같이 확인했습니다: {values}."
+            body = f"말씀하신 내용은 {', '.join(parts)}입니다. 이대로 진행하겠습니다."
+        if template and template.strip():
+            body = template.strip()      # the sentence the customer approved in the plan
         self.nodes[confirm_id] = {
             "nodeId": confirm_id, "type": "basic",
             "messages": [{"type": "text", "body": body}],
@@ -2875,7 +2959,8 @@ class _RuntimeContract:
             # no acknowledgement of six values just given. A templated basic in
             # between reads them back; the flow then continues as planned.
             if captured_names and self.role == "operation":
-                self._insert_capture_confirmation(node_id, node, captured_names)
+                self._insert_capture_confirmation(node_id, node, captured_names,
+                                                  template=step.get("template"))
 
             # --- tools ------------------------------------------------------
             tools = [t for t in (cfg.get("tools") or []) if isinstance(t, dict)]
@@ -3103,6 +3188,7 @@ def apply_runtime_contract(
     kb_name: Optional[str] = None,
     request_steps: Optional[list] = None,
     escalation_topics: Optional[Any] = None,
+    result_templates: Optional[list] = None,
 ) -> tuple[dict, list[str]]:
     """Normalize ``flow`` onto the live-verified runtime contract.
 
@@ -3140,7 +3226,7 @@ def apply_runtime_contract(
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
         slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
         journey_steps=journey_steps, kb_name=kb_name, request_steps=request_steps,
-        escalation_topics=escalation_topics)
+        escalation_topics=escalation_topics, result_templates=result_templates)
     engine.run()
     return engine.flow, engine.changes
 
@@ -3164,6 +3250,7 @@ def runtime_contract_violations(
     kb_name: Optional[str] = None,
     request_steps: Optional[list] = None,
     escalation_topics: Optional[Any] = None,
+    result_templates: Optional[list] = None,
 ) -> list[str]:
     """Report what the runtime contract cannot repair. Never mutates ``flow``.
 
@@ -3194,7 +3281,7 @@ def runtime_contract_violations(
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
         slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
         journey_steps=journey_steps, kb_name=kb_name, request_steps=request_steps,
-        escalation_topics=escalation_topics)
+        escalation_topics=escalation_topics, result_templates=result_templates)
     engine.run()
     wanted = set(ALL_SCOPES) if scope == "all" else {scope}
     return [message for item_scope, _rule, message in engine.violations
