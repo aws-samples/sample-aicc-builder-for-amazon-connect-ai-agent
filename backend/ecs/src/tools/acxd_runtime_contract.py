@@ -2579,6 +2579,41 @@ class _RuntimeContract:
             out.append((gen, "prompt"))
         return out
 
+    def rule_m4(self) -> None:
+        """A customer-facing sentence must not read a machine code aloud.
+
+        Live (2026-09-17): the authored fallback ended with "현재 예약 상태는
+        CONFIRMED입니다" — the response field's enum is [CONFIRMED, PENDING], codes
+        the backend uses, not words a person says. The spec can give such a field
+        a spoken label (then the Lambda returns it in a text field), or the
+        sentence leaves the field out; either way the placeholder is a defect.
+        """
+        for node_id, node in self.nodes.items():
+            if not isinstance(node, dict):
+                continue
+            for message, key in self._texts_with_placeholders(node):
+                if key != "body":
+                    continue           # a prompt may name the code; the model paraphrases it
+                for match in _PLACEHOLDER.finditer(message[key]):
+                    name, kind = match.group(1), match.group(2)
+                    if kind != "Variable" or "." not in name:
+                        continue
+                    request_id, _, field = name.partition(".")
+                    document = self.data_requests.get(request_id)
+                    if not isinstance(document, dict):
+                        continue
+                    properties = (document.get("responseSchema") or {}).get("properties") or {}
+                    schema = properties.get(field) if isinstance(properties, dict) else None
+                    if not isinstance(schema, dict):
+                        continue
+                    if self._machine_code_field(request_id, field, schema):
+                        enum = schema.get("enum") or self.field_enums.get(request_id, {}).get(field)
+                        self.violation(
+                            "M4", "cross",
+                            f"{_label(node_id, node)} reads the code {request_id}.{field} aloud "
+                            f"(values {list(enum)[:4]}) — give the field a spoken label in the spec "
+                            f"(a text field the backend fills) or leave it out of the sentence")
+
     def rule_m1(self) -> None:
         slots = set(self.slot_names)
         for node_id, node in self.nodes.items():
@@ -3137,6 +3172,7 @@ class _RuntimeContract:
         self.rule_d6()
         self.rule_d7()
         self.rule_m1()
+        self.rule_m4()
         self.rule_rx()
         self.rule_j2()
         self.rule_j()

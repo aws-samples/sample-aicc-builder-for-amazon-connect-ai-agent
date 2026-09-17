@@ -2000,3 +2000,19 @@ def test_approved_templates_from_the_plan_win_over_synthesis():
     j, _ = _apply_journey(_journey_flow(), journey_steps=steps)
     confirm = j["nodes"][j["nodes"]["gj"]["childNodes"][0]["nodeId"]]["messages"][0]["body"]
     assert confirm == "반품 사유를 {reason:NLX.Slot}(으)로 접수하겠습니다."
+
+
+def test_m4_reports_a_sentence_that_reads_a_status_code_aloud():
+    """Live (2026-09-17): "현재 예약 상태는 CONFIRMED입니다" — the enum is the
+    backend's vocabulary, not the caller's."""
+    flow = _outcome_flow(True)
+    flow["nodes"]["say"]["messages"][0]["body"] = (
+        "예약번호는 {createCleaningReservation.reservationId:NLX.Variable}, "
+        "상태는 {createCleaningReservation.status:NLX.Variable}입니다.")
+    kwargs = context("CreateCleaningReservation")
+    kwargs["field_enums"] = {"createCleaningReservation": {"status": ["CONFIRMED", "PENDING"]}}
+    problems = runtime_contract_violations(flow, **kwargs, scope="cross")
+    assert any("M4" in p and "createCleaningReservation.status" in p for p in problems)
+    # a text field the backend fills with the spoken label is fine
+    flow["nodes"]["say"]["messages"][0]["body"] = "예약번호는 {createCleaningReservation.reservationId:NLX.Variable}입니다."
+    assert not [p for p in runtime_contract_violations(flow, **kwargs, scope="cross") if "M4" in p]
