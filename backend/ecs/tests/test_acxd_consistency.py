@@ -435,3 +435,24 @@ def test_a_planned_redirect_target_must_be_wired():
     start["childNodes"].append({"nodeId": "b0000000-0000-4000-8000-000000000099", "name": "alt"})
     problems = [str(v) for v in validate_acxd_consistency(wired, spec=spec)]
     assert not any("DETERMINISM_REDIRECT_TARGET" in p for p in problems)
+
+
+def test_normalize_bundle_flows_applies_the_contract_to_operation_flows_only():
+    """Live (2026-09-17): a flow patched after generation still branched on
+    node_status alone; the packaging pass applies the same contract the
+    generator does, and leaves the builder's system flows alone."""
+    import json
+    from tools.validate_acxd_consistency import normalize_bundle_flows
+    bundle = coherent_bundle()
+    flow = bundle["flows"][0]
+    # strip the flow's success test so the pass has something to do: point the
+    # data request's success edge straight at the announcement
+    before = json.dumps(bundle["flows"], ensure_ascii=False)
+    notes = normalize_bundle_flows(bundle, spec=matching_spec())
+    assert isinstance(notes, list)
+    system = [f for f in bundle["flows"] if str(f.get("flowId", "")).lower().startswith(("welcome", "fallback", "escalation"))]
+    for f in system:
+        assert json.dumps(f, ensure_ascii=False) in before      # untouched
+    # idempotent: a second pass changes nothing
+    again = normalize_bundle_flows(bundle, spec=matching_spec())
+    assert again == []
