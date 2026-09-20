@@ -124,3 +124,32 @@ def test_d9_flags_agenticcx_reads_before_the_block():
     ]
     before = _d9_agenticcx_refs_before_block({"StartAction": "lookup"}, actions)
     assert before == {"check": ["$.AgenticCX.ContextVariables.isKnownCustomer"]}   # 'log' is after the block
+
+
+def test_iam_action_derivation_ignores_python_dict_methods():
+    """Live (2026-09-20): a handler iterated its schema map as ``table`` and
+    called ``table.get("logical_id")``; the gate read it as ``dynamodb:Get`` —
+    an action that does not exist — and blocked three Lambdas whose role
+    granted ``dynamodb:GetItem``. Only real Table-resource methods (and real
+    client operations) derive actions."""
+    from tools.validate_consistency import _extract_required_iam_actions
+    code = '''
+import boto3
+dynamodb = boto3.resource("dynamodb")
+ssm = boto3.client("ssm")
+def _find(schema, logical_id):
+    for table in schema["tables"]:
+        if table.get("logical_id") == logical_id:
+            return table
+def handler(event, context):
+    cfg = {}
+    cfg.get("x")
+    ssm.get_parameter(Name="p")
+    table = dynamodb.Table("t")
+    table.get_item(Key={"pk": "1"})
+    table.query(KeyConditionExpression="pk = :v")
+    with table.batch_writer() as bw:
+        bw.put_item(Item={})
+'''
+    actions = _extract_required_iam_actions(code)
+    assert actions == {"ssm:GetParameter", "dynamodb:GetItem", "dynamodb:Query", "dynamodb:BatchWriteItem"}
