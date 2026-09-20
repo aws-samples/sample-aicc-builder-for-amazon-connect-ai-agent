@@ -65,6 +65,28 @@ _JS_CLIENT_PREFIXES = {
 # Actions implicitly granted (basic execution role) — never reported
 _IMPLICITLY_GRANTED = {"logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"}
 
+#: Method names that are Python dict/str/list methods, not SDK operations. A
+#: handler that iterates a schema map as ``table`` (``table.get("logical_id")``)
+#: or names its client ``client`` and then calls ``client.get(...)`` on a dict
+#: would otherwise be read as needing ``dynamodb:Get`` — an action that does
+#: not exist — and a template granting ``dynamodb:GetItem`` was reported as a
+#: blocking D9 finding on three Lambdas (live, 2026-09-20).
+_NOT_SDK_METHODS = {
+    "get", "items", "keys", "values", "update", "pop", "copy", "setdefault", "append",
+    "extend", "insert", "remove", "clear", "index", "count", "sort", "format", "join",
+    "split", "strip", "lower", "upper", "replace", "startswith", "endswith", "encode",
+    "decode", "isdigit", "isalpha", "find", "add", "discard", "reverse",
+}
+
+#: boto3 DynamoDB Table-resource methods and the API actions they call.
+_DYNAMODB_TABLE_METHODS = {
+    "get_item": "GetItem", "put_item": "PutItem", "update_item": "UpdateItem",
+    "delete_item": "DeleteItem", "query": "Query", "scan": "Scan",
+    "batch_writer": "BatchWriteItem", "batch_get_item": "BatchGetItem",
+    "batch_write_item": "BatchWriteItem", "transact_write_items": "TransactWriteItems",
+    "transact_get_items": "TransactGetItems", "describe_table": "DescribeTable",
+}
+
 
 def _snake_to_pascal(name: str) -> str:
     return "".join(w.capitalize() for w in name.split("_"))
@@ -90,14 +112,17 @@ def _extract_required_iam_actions(code: str) -> set:
             method = cm.group(1)
             if method in ("close", "get_paginator", "get_waiter", "Table", "meta"):
                 continue
+            if method in _NOT_SDK_METHODS:
+                continue  # a dict/str method on a same-named variable, not an API call
             required.add(f"{prefix}:{_snake_to_pascal(method)}")
     # boto3 dynamodb resource Table(...) usage
     if re.search(r'boto3\.resource\(\s*[\'"]dynamodb[\'"]', code):
         for cm in re.finditer(r'\btable\.([a-z_]+)\(', code, re.IGNORECASE):
-            method = cm.group(1)
-            if method in ("close",):
-                continue
-            required.add(f"dynamodb:{_snake_to_pascal(method)}")
+            method = cm.group(1).lower()
+            action = _DYNAMODB_TABLE_METHODS.get(method)
+            if action is None:
+                continue  # ``table.get("logical_id")`` on a schema dict, not a Table call
+            required.add(f"dynamodb:{action}")
 
     # ---- JS SDK v3: new XClient(...) + new YCommand(...) via .send() ----
     js_prefixes = {
@@ -1259,13 +1284,18 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
     openapi_count = len(openapi_fields) if openapi_fields else 0
 
     if tool_count > len(expected):
-        # Multi-tool mode: check tool-level counts
-        if lambda_count > 0 and lambda_count < tool_count:
-            missing = set(tool_expected.keys()) - set(lambda_code.keys())
+        # Multi-tool mode: check tool-level counts. A tool that is not an
+        # OperationSpec of its own (a session tool such as log_call_result) is
+        # generated into a supporting folder, which only lambda_all_code sees —
+        # live (2026-09-20) the file existed and the count check still reported
+        # it missing, a blocking finding the user could not act on.
+        present_lambdas = set(lambda_code) | set(lambda_all_code)
+        missing = set(tool_expected.keys()) - present_lambdas
+        if lambda_count > 0 and missing:
             mismatches.append({
                 "operation_id": "__all__", "field": "",
                 "asset_type": "count",
-                "issue": f"Lambda count ({lambda_count}) < tool count ({tool_count}). Missing: {missing}",
+                "issue": f"Lambda count ({len(present_lambdas & set(tool_expected))}) < tool count ({tool_count}). Missing: {missing}",
             })
         if openapi_count > 0 and openapi_count < tool_count:
             missing_openapi = set(tool_expected.keys()) - set(openapi_fields.keys()) if openapi_fields else set()
