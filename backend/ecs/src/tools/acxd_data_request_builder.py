@@ -66,6 +66,35 @@ _MOCK_VALUES = {
 }
 
 
+def _ascii_field_description(name: str, field: dict, json_type: str) -> str | None:
+    """The description the model will read for a request/response field.
+
+    Interview descriptions are usually in the customer's language; ACXD metadata
+    must be ASCII. Stripping the non-ASCII characters left residue such as
+    ``"(, CL-YYYYMMDD-NNNN)"`` or ``"= unitPrice quantity ( )"`` (live review,
+    2026-09-20) — words with no meaning. A description that is not ASCII is
+    replaced by one synthesised from what the field spec states in machine form:
+    type, allowed values and format. An ASCII description passes through.
+    """
+    raw = str(field.get("description") or "").strip()
+    if not raw:
+        return None
+    if all(ord(ch) < 0x7F for ch in raw):
+        return raw
+    is_ascii = lambda v: all(ord(ch) < 0x7F for ch in str(v))  # noqa: E731
+    parts = [f"{name} ({json_type})"]
+    enum_values = [str(v) for v in (field.get("enum_values") or field.get("enum") or [])]
+    if enum_values and all(is_ascii(v) for v in enum_values):
+        parts.append("one of " + ", ".join(enum_values))
+    pattern = field.get("regex") or field.get("pattern")
+    if pattern and is_ascii(pattern):
+        parts.append(f"format {pattern}")
+    example = field.get("example")
+    if isinstance(example, (str, int, float)) and is_ascii(example):
+        parts.append(f"e.g. {example}")
+    return "; ".join(parts)
+
+
 def fields_to_json_schema(fields: list[dict]) -> dict:
     """Convert interview field specs to a JSON Schema object."""
     properties = {}
@@ -77,8 +106,9 @@ def fields_to_json_schema(fields: list[dict]) -> dict:
         json_type = _FIELD_TYPE_MAP.get(
             str(field.get("type") or field.get("field_type") or "text").lower(), "string")
         prop: dict = {"type": json_type}
-        if field.get("description"):
-            prop["description"] = field["description"]
+        description = _ascii_field_description(str(name), field, json_type)
+        if description:
+            prop["description"] = description
         enum_values = field.get("enum_values") or field.get("enum")
         if enum_values:
             prop["enum"] = list(enum_values)

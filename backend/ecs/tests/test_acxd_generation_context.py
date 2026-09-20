@@ -198,6 +198,29 @@ def test_a_step_naming_a_request_by_another_operation_s_snake_case_id_is_mapped(
     assert steps[1]["data_request_id"] == "rescheduleAppointment"   # named by snake_case → resolved
 
 
+def test_non_ascii_field_descriptions_are_rewritten_not_stripped():
+    """Live review (2026-09-20): stripping Korean from ``"총액 = unitPrice × quantity (서버 산정)"``
+    left ``"= unitPrice quantity ( )"`` for the model to read. A non-ASCII
+    description is replaced by one synthesised from the field's machine facts;
+    an ASCII description passes through; a field without one stays bare."""
+    from tools.acxd_data_request_builder import fields_to_json_schema
+    props = fields_to_json_schema([
+        {"name": "totalAmount", "type": "number", "description": "총액 = unitPrice × quantity (서버 산정)"},
+        {"name": "reservationId", "type": "string", "description": "예약번호 (형식 CL-YYYYMMDD-NNNN)",
+         "regex": "^CL-\\d{8}-\\d{4}$"},
+        {"name": "status", "type": "string", "description": "예약 상태", "enum_values": ["예약", "취소"]},
+        {"name": "note", "type": "string", "description": "Free text from the customer"},
+        {"name": "bare", "type": "string"},
+    ])["properties"]
+    assert props["totalAmount"]["description"] == "totalAmount (number)"
+    assert props["reservationId"]["description"] == "reservationId (string); format ^CL-\\d{8}-\\d{4}$"
+    assert props["status"]["description"] == "status (string)"          # Korean enum values are not repeated
+    assert props["note"]["description"] == "Free text from the customer"
+    assert "description" not in props["bare"]
+    for prop in props.values():
+        assert all(ord(ch) < 0x7F for ch in prop.get("description", ""))
+
+
 def test_context_shim_returns_a_defensive_model_dump():
     shim = context.ACXDGenerationContext({"flows": [{"flow_id": "Welcome"}]})
     first = shim.model_dump()
