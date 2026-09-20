@@ -334,6 +334,14 @@ class ProjectWorkspace:
         filename = f"{op_id}_{doc_type}.txt" if op_id else f"{doc_type}.txt"
         return self._get(["requirements", filename])
 
+    # ── Requirement items ledger (document split item by item + mappings) ──
+    def save_requirement_items(self, data: dict):
+        self._save_json(["requirement_items.json"], data)
+        logger.info("[Workspace] Saved requirement items ledger (%d items)", len(data.get("items") or []))
+
+    def load_requirement_items(self) -> Optional[dict]:
+        return self._load_json(["requirement_items.json"])
+
     # ── Infrastructure Schema ───────────────────────────────────────────
     def save_schema(self, schema: dict):
         self._schema_cache = schema
@@ -488,13 +496,33 @@ def save_requirement_document(
     except Exception as e:
         logger.warning(f"[Workspace] Failed to stream requirement preview: {e}")
 
-    return {
+    result = {
         "success": True,
         "doc_type": doc_type,
         "operation_id": operation_id,
         "char_count": len(content),
         "message": f"Saved {doc_type} document ({len(content)} chars) to S3 workspace.",
     }
+    if doc_type == "raw_input":
+        # The document is kept item by item from here on: every item must be
+        # mapped to a spec (or excluded with the customer) before the interview
+        # can complete — see tools/requirement_items.py for why.
+        try:
+            from tools.requirement_items import register_document
+            ledger = register_document(content)
+        except Exception as e:
+            logger.warning(f"[Workspace] requirement items ledger not created: {e}")
+            ledger = None
+        if ledger:
+            result["requirement_items"] = ledger
+            result["message"] += (
+                f" Split into {ledger['item_count']} requirement items (R1..R{ledger['item_count']}); "
+                "map each to the spec that expresses it with map_requirement_items as you save specs — "
+                "complete_interview refuses while items are unmapped."
+            )
+            if ledger.get("signals"):
+                result["message"] += f" Literal statements to honour: {sorted(ledger['signals'].keys())}."
+    return result
 
 
 @tool

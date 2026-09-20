@@ -468,12 +468,33 @@ Before calling `save_requirement_document`, check conversation history:
 
 **When the user first provides ≥ 500 chars of requirements**:
 1. `save_requirement_document(doc_type="raw_input", content=<raw>)` — **once only**.
-   → the raw is auto-shown in the Asset Preview panel.
+   → the raw is auto-shown in the Asset Preview panel, and it is split into
+   **requirement items** (R1..Rn) — the return value lists their count and the
+   document's literal statements (`signals`).
 2. Extract the essentials: company, industry, operation count, per-operation summary (≤ 200 chars each).
 3. Show the summary back and ask for confirmation:
    → "I've captured your input. Here's my understanding — please confirm: ..." + summary
    → proceed only after confirmation.
 4. Keep only the summary in context; reference the raw from S3.
+
+**The summary is not the spec — the items are.** Live (2026-09-20): a document
+that said `include_customer_phone_lookup=true`, listed seven FAQ topics and named
+"3회 실패" as an escalation rule produced a build with the lookup off, no
+knowledge base and no FAQ — the summary had dropped them. So:
+- As you save specs, record what each item became with
+  `map_requirement_items([{item_id, target}])` — `operation:<id>`,
+  `field:<op>.<name>`, `flow:<flow_id>`, `kb`, `guardrail`, `session_config`,
+  `contact_flow`, `infrastructure`, `persona`. An item that spells a spec
+  identifier is covered automatically (`auto`).
+- An item the customer does not want is `excluded` WITH their reason in `note`
+  — ask before excluding anything that reads like a rule or a setting.
+- Literal statements have one correct expression and are checked as written:
+  `include_customer_phone_lookup=true` → `save_contact_flow_spec(include_customer_phone_lookup=True)`;
+  an FAQ section → `save_acxd_policies(kb_name, kb_topics=[...])` (ACXD) and the FAQ
+  generator runs in generation; "본인 확인 / identity verification" → verification
+  steps in the flow plan; "N회 실패" → the escalation rule.
+- Before `complete_interview`, call `list_requirement_items(status="unmapped")`;
+  it must be empty. The interview does not complete while items are unaccounted for.
 
 ⚠️ Always check the return value: if `success: false`, keep the raw in conversation context.
 

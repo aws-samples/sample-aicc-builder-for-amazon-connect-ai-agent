@@ -95,6 +95,7 @@ from tools.project_workspace import (
     save_requirement_document,
     load_requirement_document,
 )
+from tools.requirement_items import list_requirement_items, map_requirement_items
 from tools.interview_completion import complete_interview, check_interview_handoff
 from tools.acxd_flow_spec import (
     ACXD_INTERVIEW_TOOLS,
@@ -221,6 +222,8 @@ INTERVIEW_TOOLS = [
     infer_missing_tools,
     save_requirement_document,
     load_requirement_document,
+    list_requirement_items,
+    map_requirement_items,
     # NFS workspace file tools
     read_workspace_file,
     write_workspace_file,
@@ -411,6 +414,11 @@ def get_tools_for_phase(
     # session-config tool left was the read-only getter.
     if update_session_flow_config not in generation_tools:
         generation_tools.append(update_session_flow_config)
+    # The requirement ledger stays readable (and mappable) after the interview:
+    # a modification request is checked against the document, not memory.
+    for ledger_tool in (list_requirement_items, map_requirement_items):
+        if ledger_tool not in generation_tools:
+            generation_tools.append(ledger_tool)
     if not is_acxd:
         return generation_tools
 

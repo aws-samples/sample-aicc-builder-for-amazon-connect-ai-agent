@@ -402,6 +402,24 @@ operation spec 하나의 JSON payload는 매우 큽니다. 한 턴에 여러 개
 - `doc_type="script"`: operation당 최대 1회
 - `doc_type="analysis"`: 최대 1회 (Phase 4에서)
 
+### 요구사항 항목 장부 (문서가 있을 때 필수):
+- `raw_input` 저장 시 문서가 항목(R1..Rn)으로 나뉩니다. 요약은 스펙이 아닙니다 —
+  항목 하나하나가 스펙 어딘가에 들어가야 합니다. (실제 사례: 문서의
+  `include_customer_phone_lookup=true`, FAQ 절 7개, "3회 실패" 이관 규칙이 요약에서
+  빠져 생성물에 없었음.)
+- 스펙을 저장할 때마다 `map_requirement_items([{item_id, target}])`로 항목이 무엇이 됐는지
+  기록: `operation:<id>`, `field:<op>.<name>`, `flow:<flow_id>`, `kb`, `guardrail`,
+  `session_config`, `contact_flow`, `infrastructure`, `persona`. 스펙 식별자를 그대로 적은
+  항목은 자동으로 커버(`auto`)됩니다.
+- 고객이 빼기로 한 항목만 `excluded` + `note`(고객의 이유). 규칙·설정처럼 읽히는 항목은
+  빼기 전에 반드시 고객에게 확인.
+- 문서의 리터럴 문장은 그대로 반영: `include_customer_phone_lookup=true` →
+  `save_contact_flow_spec(include_customer_phone_lookup=True)`; FAQ 절 →
+  `save_acxd_policies(kb_name, kb_topics=[...])`(ACXD); "본인 확인" → 플로우 플랜의 확인 스텝;
+  "N회 실패" → 이관 조건.
+- `complete_interview` 전에 `list_requirement_items(status="unmapped")`가 비어 있어야 합니다.
+  비어 있지 않으면 인터뷰가 완료되지 않습니다.
+
 ## NESTED / ENUM FIELD COLLECTION (CRITICAL — PREVENTS FLATTENING)
 
 스칼라가 아닌 필드(배열, 객체, enum)는 **구조까지** 확정해서 저장해야 합니다.

@@ -228,3 +228,66 @@ def handler(event, context):
 '''
     actions = _extract_required_iam_actions(code)
     assert actions == {"ssm:GetParameter", "dynamodb:GetItem", "dynamodb:Query", "dynamodb:BatchWriteItem"}
+
+
+def test_missing_knowledge_family_is_blocking_when_documented_or_planned(monkeypatch):
+    """Live (2026-09-20): the document listed seven FAQ topics; no FAQ asset,
+    no ACXD knowledge base and no flow reading one were generated; the review
+    reported 0 blocking because every gate iterates over operations."""
+    import tools.review_gates as rg
+    import tools.spec_manager as sm
+    import tools.s3_asset_storage as s3s
+    import tools.asset_loader as al
+    import tools.acxd_flow_spec as afs
+    import tools.requirement_items as ri
+
+    class _Spec:
+        pass
+
+    class _KB:
+        topics = ["배송조회방법", "배송지연"]
+
+    class _Flow:
+        flow_id, uses_knowledge_base, steps = "DeliveryStatus", False, []
+
+    class _FS:
+        knowledge_base = _KB()
+        flows = [_Flow()]
+
+    monkeypatch.setattr(sm, "get_all_specs", lambda: {"get_delivery_status": _Spec()})
+    monkeypatch.setattr(afs, "is_acxd_target", lambda *a, **k: True)
+    monkeypatch.setattr(afs, "get_acxd_flow_spec", lambda *a, **k: _FS())
+    monkeypatch.setattr(ri, "load_ledger", lambda: None)
+    monkeypatch.setattr(al, "load_existing_asset", lambda *a, **k: None)
+    monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
+        "assets/s/lambda/get_delivery_status/handler.py",
+        "assets/s/acxd_data_request/getDeliveryStatus.json",
+    ])
+    ids = sorted(f["id"] for f in rg._missing_asset_findings("s"))
+    assert ids == ["MISSING:acxd_flow:faq", "MISSING:acxd_knowledge_base:__all__", "MISSING:faq:__all__"]
+
+    # the family present → nothing to report
+    _Flow.uses_knowledge_base = True
+    monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
+        "assets/s/lambda/get_delivery_status/handler.py",
+        "assets/s/acxd_data_request/getDeliveryStatus.json",
+        "assets/s/faq/knowledge_base/01_delivery.md",
+        "assets/s/acxd_knowledge_base/knowledge_base.json",
+    ])
+    assert rg._missing_asset_findings("s") == []
+
+    # neither planned nor documented → not required
+    _KB.topics = []
+    _Flow.uses_knowledge_base = False
+    monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
+        "assets/s/lambda/get_delivery_status/handler.py",
+        "assets/s/acxd_data_request/getDeliveryStatus.json",
+    ])
+    assert rg._missing_asset_findings("s") == []
+
+    # documented (FAQ section in the ledger, not excluded) → required again
+    monkeypatch.setattr(ri, "load_ledger", lambda: {
+        "items": [{"id": "R34", "section": "FAQ", "text": "배송조회방법, 배송지연"}],
+        "mappings": {}, "signals": {"faq": {"item_ids": ["R34"]}}})
+    assert [f["id"] for f in rg._missing_asset_findings("s")] == [
+        "MISSING:faq:__all__", "MISSING:acxd_knowledge_base:__all__", "MISSING:acxd_flow:faq"]
