@@ -2081,6 +2081,16 @@ class _RuntimeContract:
             return
         slots = set(self.slot_names)
         contexts = self._flow_contexts()
+        # Live (AnyCompany EN, 2026-09-20): the plan collected `orderNumber` and
+        # declared field_name `orderId` — the request field it fills — yet the
+        # payload was mapped by name only, so five attempts failed "requires
+        # field orderId that the flow never collects". The plan's field_name
+        # is the mapping; honour it (one slot per field).
+        by_field: dict[str, str] = {}
+        for slot_name, plan in self.slot_plans.items():
+            field_name = str(plan.get("field_name") or "").strip()
+            if field_name and slot_name in slots and field_name != slot_name:
+                by_field.setdefault(field_name, slot_name)
         for node_id, node in self.nodes_of_type("data_request"):
             for entry in node.get("dataRequests") or []:
                 if not isinstance(entry, dict):
@@ -2103,6 +2113,9 @@ class _RuntimeContract:
                     if field in slots:
                         payload[field] = f"{{{field}:NLX.Slot}}"
                         added.append(field)
+                    elif field in by_field:
+                        payload[field] = f"{{{by_field[field]}:NLX.Slot}}"
+                        added.append(f"{field}←{by_field[field]}")
                     elif field in contexts:
                         payload[field] = f"{{{field}:NLX.Context}}"
                         added.append(field)
