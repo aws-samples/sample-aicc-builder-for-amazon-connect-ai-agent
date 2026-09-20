@@ -2958,8 +2958,14 @@ ensure_acxd_credentials() {
     # the block with a visible placeholder to pick in the Connect designer.
     if [ -z "${ACXD_ALIAS_ID:-}" ] && [ "$IS_TTY" = "true" ] && [ "${AUTO_CONFIRM:-0}" != "1" ]; then
         read -r -p "   ACXD application alias ID (Enter to pick it in the console later): " ACXD_ALIAS_ID
-        [ -n "$ACXD_ALIAS_ID" ] && export ACXD_ALIAS_ID
+        # Live (2026-09-20, CloudShell): pressing Enter here ended the whole script
+        # without a word — `[ -n ] && export` was the function's last command, its
+        # status 1 became the function's, and `set -e` took the caller down.
+        if [ -n "$ACXD_ALIAS_ID" ]; then
+            export ACXD_ALIAS_ID
+        fi
     fi
+    return 0
 }
 
 run_acxd_runner() {
