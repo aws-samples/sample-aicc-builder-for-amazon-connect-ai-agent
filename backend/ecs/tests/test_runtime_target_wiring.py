@@ -47,6 +47,23 @@ def test_get_tools_for_phase_keeps_classic_and_swaps_acxd_prompt_generator(app_m
     assert set(app_mod.ACXD_INTERVIEW_TOOLS).issubset(acxd_interview)
 
 
+
+def test_session_flow_config_editor_is_available_after_the_interview(app_mod, monkeypatch):
+    """Live (2026-09-20): after the interview the orchestrator had only the
+    read-only getter for the session flow config, so a session tool the customer
+    had excluded from the PoC kept the count gate red and a corrupted Korean
+    retry message could not be fixed. The merge editor must be there in every
+    post-interview phase for both targets; the whole-config saver stays an
+    interview tool."""
+    monkeypatch.setattr(app_mod, "_load_acxd_application_tool", lambda: None)
+    monkeypatch.setattr(app_mod, "_load_acxd_asset_patcher", lambda: None)
+    for phase in ("generation", "review", "post_generation"):
+        for target in ("classic", "acxd"):
+            tools = app_mod.get_tools_for_phase(phase, runtime_target=target)
+            assert app_mod.update_session_flow_config in tools, (phase, target)
+            assert app_mod.save_session_flow_config not in tools, (phase, target)
+    assert app_mod.update_session_flow_config in app_mod.get_tools_for_phase("interview", runtime_target="acxd")
+
 def test_complete_interview_blocks_unready_acxd_flow_spec(monkeypatch):
     from tools import acxd_flow_spec
     from tools import interview_completion
