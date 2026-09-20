@@ -1173,3 +1173,60 @@ def test_a_routing_descriptor_that_says_do_not_route_here_makes_the_flow_untrain
     flow, problems, _ = run_flow_generation(PLAN, SPEC, lambda prompt: json.dumps(described))
     assert problems == []
     assert flow["untrained"] is True
+
+
+def test_repair_fixes_the_mechanical_mistakes_of_the_2026_09_20_runs():
+    """Live (TableNow / AnyClinic, 2026-09-20): three defects each burned a
+    generation attempt on the SCHEMA or RX gate although the design was right:
+    the journey's exit edge wrote the system variable as the operand TYPE, an
+    attached slot spelled an optional key as null, and a redirect named the
+    ROLE ('followup') instead of the bundled flow id."""
+    from agents.acxd_flow_generator.agent import repair_generated_flow
+    plan = {
+        "flow_id": "RefundFlow", "purpose": "환불", "role": "operation",
+        "steps": [
+            {"step": 1, "description": "사유 청취", "node_type": "generative_journey",
+             "determinism": "generative", "user_confirmed": True},
+            {"step": 2, "description": "안내 후 마무리", "node_type": "redirect",
+             "determinism": "deterministic", "user_confirmed": True, "redirect_flow_id": "followup"},
+        ],
+    }
+    flow = {
+        "flowId": "RefundFlow",
+        "slotTypes": [{"name": "reason", "type": "NLX.Text", "regex": None, "aiDescription": None}],
+        "nodes": {
+            "a0000000-0000-4000-8000-000000000001": {
+                "nodeId": "a0000000-0000-4000-8000-000000000001", "type": "start",
+                "childNodes": [{"nodeId": "a0000000-0000-4000-8000-000000000002"}]},
+            "a0000000-0000-4000-8000-000000000002": {
+                "nodeId": "a0000000-0000-4000-8000-000000000002", "type": "generative_journey",
+                "metadata": {"generativeJourney": {"prompt": "사유를 들어 주세요", "maxSteps": 8,
+                                                   "exitConditions": [{"name": "agentRequested",
+                                                                       "prompt": "상담원을 원한다"}]}},
+                "childNodes": [
+                    {"nodeId": "a0000000-0000-4000-8000-000000000003", "name": "captured",
+                     "conditions": [{"left": {"type": "slot", "name": "reason"}, "operator": "exists"}]},
+                    {"nodeId": "a0000000-0000-4000-8000-000000000004", "name": "agentRequested",
+                     "conditions": [{"left": {"type": "System.gjConditionIndex"},
+                                     "operator": "eq", "right": {"type": "constant", "value": 0}}]},
+                ]},
+            "a0000000-0000-4000-8000-000000000003": {
+                "nodeId": "a0000000-0000-4000-8000-000000000003", "type": "redirect",
+                "metadata": {"redirect": {"type": "flow", "flowId": "followup"}}, "childNodes": []},
+            "a0000000-0000-4000-8000-000000000004": {
+                "nodeId": "a0000000-0000-4000-8000-000000000004", "type": "redirect",
+                "metadata": {"redirect": {"type": "flow", "flowId": "{System.capturedFlow:NLX.System}"}},
+                "childNodes": []},
+        },
+    }
+    fixed = repair_generated_flow(flow, plan, {**SPEC, "flows": [plan]})
+
+    assert fixed["slotTypes"][0] == {"name": "reason", "type": "NLX.Text"}
+    journey = fixed["nodes"]["a0000000-0000-4000-8000-000000000002"]
+    exit_edge = next(c for c in journey["childNodes"] if c.get("name") == "agentRequested")
+    assert exit_edge["conditions"][0]["left"] == {"type": "system", "name": "System.gjConditionIndex"}
+    redirects = {nid: n["metadata"]["redirect"]["flowId"]
+                 for nid, n in fixed["nodes"].items() if n.get("type") == "redirect"}
+    assert redirects["a0000000-0000-4000-8000-000000000003"] == "FollowUpFlow"
+    # a runtime placeholder is not an alias and passes through untouched
+    assert redirects["a0000000-0000-4000-8000-000000000004"] == "{System.capturedFlow:NLX.System}"

@@ -437,6 +437,29 @@ def test_a_planned_redirect_target_must_be_wired():
     assert not any("DETERMINISM_REDIRECT_TARGET" in p for p in problems)
 
 
+def test_a_planned_hand_off_named_by_role_matches_the_system_flow_it_means():
+    """Live (TableNow, 2026-09-20): the confirmed plan wrote
+    redirect_flow_id 'followup' (the ROLE) while the generated flow redirected
+    to 'FollowUpFlow'; the literal comparison failed five attempts in a row and
+    the retry that obeyed it redirected to a flow that does not exist."""
+    import copy
+    bundle = copy.deepcopy(coherent_bundle())
+    spec = matching_spec()
+    flow = next(f for f in bundle["flows"] if f["flowId"] == "RefundFlow")
+    end_id = next(nid for nid, n in flow["nodes"].items() if n.get("type") == "end")
+    flow["nodes"]["b0000000-0000-4000-8000-000000000098"] = {
+        "nodeId": "b0000000-0000-4000-8000-000000000098", "type": "redirect",
+        "metadata": {"redirect": {"type": "flow", "flowId": "FollowUpFlow"}},
+        "childNodes": [{"nodeId": end_id, "name": "next"}]}
+    start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
+    start["childNodes"].append({"nodeId": "b0000000-0000-4000-8000-000000000098", "name": "done"})
+    spec["flows"][0]["steps"].append({"step": 5, "description": "done → anything else?",
+                                      "node_type": "redirect", "determinism": "deterministic",
+                                      "user_confirmed": True, "redirect_flow_id": "followup"})
+    problems = [str(v) for v in validate_acxd_consistency(bundle, spec=spec)]
+    assert not any("DETERMINISM_REDIRECT_TARGET" in p for p in problems), problems
+
+
 def test_normalize_bundle_flows_applies_the_contract_to_operation_flows_only():
     """Live (2026-09-17): a flow patched after generation still branched on
     node_status alone; the packaging pass applies the same contract the
