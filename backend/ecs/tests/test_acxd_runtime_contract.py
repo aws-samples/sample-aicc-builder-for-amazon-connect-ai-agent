@@ -1727,12 +1727,16 @@ def test_j3_captured_edge_tests_the_slot_and_comes_first():
     assert edges[0]["name"] == "captured"
     assert edges[0]["conditions"] == [{"left": {"type": "slot", "name": "reason"}, "operator": "exists"}]
     assert any("(J3)" in n for n in notes)
-    # J6: the captured branch first reads the values back (a templated basic),
-    # then continues to the node the model meant
-    confirm = out["nodes"][edges[0]["nodeId"]]
-    assert confirm["type"] == "basic" and "{reason:NLX.Slot}" in confirm["messages"][0]["body"]
-    assert confirm["childNodes"][0]["nodeId"] == "askP"
-    assert any("(J6)" in n for n in notes)
+    # J6: the captured branch continues to the node the model meant (the phone
+    # question); the read-back of the captured values sits AFTER that last
+    # capture, right before the backend call — live (2026-09-21) the caller heard
+    # "…confirmed, I'll go ahead" and was then asked for the phone number.
+    assert edges[0]["nodeId"] == "askP"
+    into_dr = [(nid, n) for nid, n in out["nodes"].items()
+               if any(e.get("nodeId") == "dr" for e in n.get("childNodes") or [])]
+    confirm = next(n for _, n in into_dr if n["type"] == "basic" and "{reason:NLX.Slot}" in n["messages"][0]["body"])
+    assert confirm["childNodes"][0]["nodeId"] == "dr"
+    assert any("(J6)" in n and "right before the backend call" in n for n in notes)
     # idempotent: a second pass adds nothing
     again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
     assert not any("(J6)" in n or "(J3)" in n for n in notes_again)
@@ -1743,6 +1747,55 @@ def test_j3_captured_edge_tests_the_slot_and_comes_first():
     assert not any("(J3)" in n for n in notes2)
 
 
+def test_j6_read_back_follows_the_journey_when_nothing_is_collected_after_it():
+    """No later capture step: the read-back keeps its place right after the journey."""
+    flow = _journey_flow(journey_edges=[{"nodeId": "dr", "name": "done"}])   # journey → backend call
+    out, notes = _apply_journey(flow)
+    edges = out["nodes"]["gj"]["childNodes"]
+    confirm = out["nodes"][edges[0]["nodeId"]]
+    assert confirm["type"] == "basic" and "{reason:NLX.Slot}" in confirm["messages"][0]["body"]
+    # the read-back leads into the backend call (ids may be re-derived, so match by type)
+    cur, hops = confirm, 0
+    while out["nodes"][cur["childNodes"][0]["nodeId"]]["type"] != "data_request" and hops < 3:
+        cur, hops = out["nodes"][cur["childNodes"][0]["nodeId"]], hops + 1
+    assert out["nodes"][cur["childNodes"][0]["nodeId"]]["type"] == "data_request"
+    assert any("(J6)" in n for n in notes)
+
+
+def test_j6_moves_the_generators_own_read_back_after_the_last_capture():
+    """Live (2026-09-21): the generator rendered the plan's read-back template as
+    a basic right after the journey, then asked for the phone number."""
+    flow = _journey_flow(journey_edges=[{"nodeId": "rb", "name": "done"}])
+    flow["nodes"]["rb"] = {"nodeId": "rb", "type": "basic",
+                           "messages": [{"type": "text", "body": "반품 사유 {reason:NLX.Slot}(으)로 접수하겠습니다."}],
+                           "childNodes": [{"nodeId": "askP", "name": "next"}]}
+    out, notes = _apply_journey(flow)
+    assert out["nodes"]["gj"]["childNodes"][0]["nodeId"] == "askP"          # journey → phone question
+    assert out["nodes"]["rb"]["childNodes"][0]["nodeId"] == "dr"            # read-back → backend call
+    assert any("moved after" in n and "(J6)" in n for n in notes)
+    again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
+    assert not any("(J6)" in n for n in notes_again)
+
+
+def test_j7_journey_prompt_carries_conversation_style_rules():
+    """Live (2026-09-21): the Haiku journey echoed every answer, asked one value
+    per turn and accepted '다음주' as a date — the prompt said what to collect,
+    not how to talk."""
+    out, notes = _apply_journey(_journey_flow())
+    prompt = out["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
+    assert prompt.startswith("고객의 반품 사유를 자연스럽게 확인합니다.")      # the generator's text is kept
+    assert "[conversation style]" in prompt and "되풀이하지" in prompt and "구체적인 날짜" in prompt
+    assert any("(J7)" in n for n in notes)
+    again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
+    assert again["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"].count("[conversation style]") == 1
+    assert not any("(J7)" in n for n in notes_again)
+    # English callers get English rules
+    f2 = _journey_flow()
+    f2["mainLanguageCode"] = "en-US"; f2["languageCodes"] = ["en-US"]
+    o2, _ = _apply_journey(f2)
+    assert "Do not echo each answer back" in o2["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
+
+
 def test_j3_multiple_captures_are_one_edge_with_one_condition_per_slot():
     flow = _journey_flow()
     flow["slotTypes"].append({"name": "preferredDate", "type": "NLX.Date", "sensitive": False})
@@ -1751,7 +1804,8 @@ def test_j3_multiple_captures_are_one_edge_with_one_condition_per_slot():
     captured = out["nodes"]["gj"]["childNodes"][0]
     assert [c["left"]["name"] for c in captured["conditions"]] == ["reason", "preferredDate"]
     schemas = {d["name"]: d["schema"] for d in out["nodes"]["gj"]["metadata"]["generativeJourney"]["dataCapture"]["data"]}
-    assert schemas["preferredDate"] == {"type": "string"}
+    # a date slot that still reaches a journey classifies onto an ISO date, not the caller's words
+    assert schemas["preferredDate"] == {"type": "string", "format": "date"}
 
 
 def test_j4_agent_request_exit_condition_is_appended_and_routed():
@@ -1961,6 +2015,16 @@ def test_d7_leaves_a_flow_that_already_tests_the_flag_alone():
     assert not any("(D7)" in n for n in notes)
 
 
+def _read_back_before(flow, node_id):
+    """Body of the basic that leads into ``node_id`` and reads a slot back."""
+    for n in flow["nodes"].values():
+        if n.get("type") == "basic" and any(e.get("nodeId") == node_id for e in n.get("childNodes") or []):
+            body = n["messages"][0]["body"]
+            if ":NLX.Slot}" in body:
+                return body
+    return None
+
+
 def test_synthesised_sentences_read_like_a_person_not_a_printout():
     """Live (2026-09-17): the fallback read "조회 결과: 예약번호 R-…, 요청일 …, 총 금액
     300000, 원 상태 CONFIRMED입니다." — a list. A create request now opens with
@@ -1983,10 +2047,9 @@ def test_synthesised_sentences_read_like_a_person_not_a_printout():
     assert "status" not in body and "예약 상태" not in body      # the machine code stays out
     assert "조회 결과" not in body and " / " not in body
 
-    # J6 read-back on the journey fixture
+    # J6 read-back on the journey fixture (it sits right before the backend call)
     j, _ = _apply_journey(_journey_flow())
-    confirm = j["nodes"][j["nodes"]["gj"]["childNodes"][0]["nodeId"]]["messages"][0]["body"]
-    assert confirm == "말씀하신 내용은 {reason:NLX.Slot}입니다. 이대로 진행하겠습니다."
+    assert _read_back_before(j, "dr") == "말씀하신 내용은 {reason:NLX.Slot}입니다. 이대로 진행하겠습니다."
 
     # English and Japanese callers get their own sentence shapes
     for code, opener in (("en-US", "Your request has been received. The"), ("ja-JP", "ご依頼を受け付けました。")):
@@ -2017,8 +2080,7 @@ def test_approved_templates_from_the_plan_win_over_synthesis():
     steps = [{"captures": ["reason"], "journey_tools": [],
               "template": "반품 사유를 {reason:NLX.Slot}(으)로 접수하겠습니다."}]
     j, _ = _apply_journey(_journey_flow(), journey_steps=steps)
-    confirm = j["nodes"][j["nodes"]["gj"]["childNodes"][0]["nodeId"]]["messages"][0]["body"]
-    assert confirm == "반품 사유를 {reason:NLX.Slot}(으)로 접수하겠습니다."
+    assert _read_back_before(j, "dr") == "반품 사유를 {reason:NLX.Slot}(으)로 접수하겠습니다."
 
 
 def test_m4_reports_a_sentence_that_reads_a_status_code_aloud():

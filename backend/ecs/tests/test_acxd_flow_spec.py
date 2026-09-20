@@ -347,6 +347,42 @@ def _journey_steps():
     ]
 
 
+def test_capture_policy_keeps_dates_out_of_the_journey(monkeypatch):
+    """Live (2026-09-21): `preferredDate` (YYYY-MM-DD in the OperationSpec) was a
+    journey capture; the journey stored "다음주" verbatim and the confirmation,
+    the backend call and the result all repeated it. A date is strict-format:
+    it needs a user_choice (→ NLX.Date, an ISO date), whether the plan slot says
+    `date` or only the spec field carries a date_format."""
+    import tools.spec_manager as sm
+
+    class _F:
+        def __init__(self, name, **kw):
+            self.d = {"name": name, **kw}
+
+        def model_dump(self):
+            return dict(self.d)
+
+    class _Spec:
+        input_fields = [_F("preferredDate", field_type="string", date_format="YYYY-MM-DD"),
+                        _F("visitTime", field_type="string")]
+
+    monkeypatch.setattr(sm, "get_all_specs", lambda: {"process_return": _Spec()})
+    slots = _JOURNEY_SLOTS + [
+        {"name": "preferredDate", "type": "text", "field_name": "preferredDate"},   # date only in the spec
+        {"name": "visitTime", "type": "time"},                                      # date-like plan type
+    ]
+    steps = _journey_steps()
+    steps[1]["captures"] = ["reason", "preferredDate", "visitTime"]
+    res = _upsert(steps=steps, slots=slots)
+    assert res["success"], res
+    journey = next(s for s in afs.get_acxd_flow_spec().flow("ProcessReturn").steps
+                   if s.node_type == "generative_journey")
+    assert journey.captures == ["reason"]
+    notes = " | ".join(res["coerced"])
+    assert "preferredDate" in notes and "YYYY-MM-DD" in notes and "NLX.Date" in notes
+    assert "visitTime" in notes and "user_choice" in notes
+
+
 def test_capture_policy_keeps_journeys_to_conversational_values():
     res = _upsert(steps=_journey_steps(), slots=_JOURNEY_SLOTS)
     assert res["success"], res

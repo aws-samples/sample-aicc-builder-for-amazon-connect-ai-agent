@@ -2821,6 +2821,10 @@ class _RuntimeContract:
             return {"type": "string", "pattern": str(regex)}
         if slot_type == "NLX.Number":
             return {"type": "number"}
+        if slot_type == "NLX.Date":
+            # A plan saved before dates left the journey: at least classify onto
+            # an ISO date rather than storing "다음주" verbatim.
+            return {"type": "string", "format": "date"}
         return {"type": "string"}
 
     def _attach_plan_slot(self, slot_name: str) -> bool:
@@ -2887,6 +2891,50 @@ class _RuntimeContract:
             return f"The customer clearly expresses a request or situation of this kind: {topic}"
         return f"고객이 다음에 해당하는 요청이나 상황을 명확히 표현한다: {topic}"
 
+    _WALK_LIMIT = 24
+
+    def _first_continuation(self, node: dict) -> Optional[dict]:
+        """The edge a node takes when things go right: the captured / valid /
+        success / next branch — never a retry, timeout, failure or agent edge."""
+        edges = _edges(node)
+        if not edges:
+            return None
+        kind = node.get("type")
+        bad = ("invalid", "notcaptured", "retry", "again", "giveup", "timeout", "failure", "fail", "error",
+               "agent", "refused", "escalat", "handoff", "handofftopic")
+        ranked = sorted(
+            edges,
+            key=lambda e: (any(b in str(e.get("name") or "").lower() for b in bad),
+                           _has_status(e, "timeout") or _has_status(e, "failure")),
+        )
+        edge = ranked[0]
+        if kind == "data_request" or any(b in str(edge.get("name") or "").lower() for b in bad):
+            return None
+        return edge
+
+    def _path_to_data_request(self, start_id: Optional[str]) -> tuple[list[tuple[dict, dict]], Optional[str]]:
+        """Walk the happy path from ``start_id``; return the (node, edge) hops and the
+        id of the first data_request reached, or None when none is reached before
+        the flow ends, hands off or loops."""
+        hops: list[tuple[dict, dict]] = []
+        seen: set[str] = set()
+        current = start_id
+        while isinstance(current, str) and current not in seen and len(hops) < self._WALK_LIMIT:
+            node = self.nodes.get(current)
+            if node is None:
+                return hops, None
+            if node.get("type") == "data_request":
+                return hops, current
+            if node.get("type") in ("end", "redirect", "escalate", "generative_journey", "generative_text"):
+                return hops, None
+            seen.add(current)
+            edge = self._first_continuation(node)
+            if edge is None:
+                return hops, None
+            hops.append((node, edge))
+            current = edge.get("nodeId")
+        return hops, None
+
     def _insert_capture_confirmation(self, node_id: str, node: dict, captured_names: list[str],
                                      template: Optional[str] = None) -> None:
         edges = _edges(node)
@@ -2899,8 +2947,60 @@ class _RuntimeContract:
         if target_id == confirm_id or confirm_id in self.nodes:
             return  # already inserted (idempotent)
         target = self.nodes.get(target_id) if isinstance(target_id, str) else None
+        slot_refs = [f"{{{n}:NLX.Slot}}" for n in captured_names]
+
+        def _reads_back(n: Optional[dict]) -> bool:
+            if not n or n.get("type") != "basic":
+                return False
+            text = " ".join(str(m.get("body") or "") for m in (n.get("messages") or []) if isinstance(m, dict))
+            return any(ref in text for ref in slot_refs)
+
+        # --- placement: after the LAST value the flow collects ------------------
+        # Live (2026-09-21): the read-back followed the journey, then the flow
+        # asked for the phone number and only then called the backend — the
+        # caller heard "…confirmed, I'll go ahead" before being asked one more
+        # thing. When capture steps (user_choice) sit between the journey and the
+        # data_request, the confirmation goes right before the data_request.
+        planned = target if _reads_back(target) else None
+        walk_from = (_edges(planned)[0].get("nodeId") if planned and _edges(planned) else target_id)
+        hops, request_id = self._path_to_data_request(walk_from)
+        captures_between = [n for n, _ in hops if n.get("type") == "user_choice"]
+        if request_id and captures_between:
+            prev_node, prev_edge = hops[-1]           # the edge that enters the data_request
+            if _reads_back(prev_node) or any(_reads_back(n) for n, _ in hops):
+                return                                # a read-back already sits on this path (idempotent)
+            if planned is not None:
+                # move the generator's own read-back: journey → its successor; … → read-back → request
+                captured_edge["nodeId"] = walk_from
+                prev_edge["nodeId"] = planned["nodeId"]
+                planned["childNodes"] = [{"nodeId": request_id, "name": "next"}]
+                self.change(f"{_label(node_id, node)}: read-back [{str(planned['nodeId'])[:8]}] moved after "
+                            f"{len(captures_between)} later capture step(s), right before the backend call (J6)")
+                return
+            body = self._confirmation_body(captured_names, template)
+            self.nodes[confirm_id] = {
+                "nodeId": confirm_id, "type": "basic",
+                "messages": [{"type": "text", "body": body}],
+                "childNodes": [{"nodeId": request_id, "name": "next"}],
+            }
+            prev_edge["nodeId"] = confirm_id
+            self.change(f"{_label(node_id, node)}: captured values read back by [{confirm_id[:8]}] after "
+                        f"{len(captures_between)} later capture step(s), right before the backend call (J6)")
+            return
+
         if target is not None and target.get("type") == "basic":
-            return  # the generator planned its own acknowledgement
+            return  # the generator planned its own acknowledgement, and nothing is collected after it
+        body = self._confirmation_body(captured_names, template)
+        self.nodes[confirm_id] = {
+            "nodeId": confirm_id, "type": "basic",
+            "messages": [{"type": "text", "body": body}],
+            **({"childNodes": [{"nodeId": target_id, "name": "next"}]} if isinstance(target_id, str) else {}),
+        }
+        captured_edge["nodeId"] = confirm_id
+        self.change(f"{_label(node_id, node)}: captured values read back by [{confirm_id[:8]}] before "
+                    f"the flow continues (J6)")
+
+    def _confirmation_body(self, captured_names: list[str], template: Optional[str]) -> str:
         parts = [
             (f"{self._capture_label(n)} {{{n}:NLX.Slot}}" if self._capture_label(n) != n else f"{{{n}:NLX.Slot}}")
             for n in captured_names]
@@ -2914,14 +3014,7 @@ class _RuntimeContract:
             body = f"말씀하신 내용은 {', '.join(parts)}입니다. 이대로 진행하겠습니다."
         if template and template.strip():
             body = template.strip()      # the sentence the customer approved in the plan
-        self.nodes[confirm_id] = {
-            "nodeId": confirm_id, "type": "basic",
-            "messages": [{"type": "text", "body": body}],
-            **({"childNodes": [{"nodeId": target_id, "name": "next"}]} if isinstance(target_id, str) else {}),
-        }
-        captured_edge["nodeId"] = confirm_id
-        self.change(f"{_label(node_id, node)}: captured values read back by [{confirm_id[:8]}] before "
-                    f"the flow continues (J6)")
+        return body
 
     def rule_j2(self) -> None:
         journeys = self.nodes_of_type("generative_journey")
@@ -3082,6 +3175,46 @@ class _RuntimeContract:
                 cfg["modelType"] = self.JOURNEY_DEFAULT_MODEL
                 self.change(f"{label}: modelType {self.JOURNEY_DEFAULT_MODEL} (a workspace without a "
                             f"default model runs a silent journey) (J5)")
+
+            # --- how the journey talks (J7) -----------------------------------
+            # Live (2026-09-21): a Haiku journey echoed every answer ("벽걸이형이군요.
+            # 그럼…"), asked five values one per turn even when the caller had
+            # given two at once, and accepted "다음주" as a date. The generator's
+            # prompt says WHAT to collect; these lines say HOW to talk.
+            prompt_text = str(cfg.get("prompt") or "")
+            if self.JOURNEY_STYLE_MARKER not in prompt_text:
+                cfg["prompt"] = (prompt_text.rstrip() + ("\n\n" if prompt_text.strip() else "")
+                                 + self._journey_style_rules())
+                self.change(f"{label}: conversation-style rules appended to the journey prompt (J7)")
+
+    JOURNEY_STYLE_MARKER = "[conversation style]"
+
+    def _journey_style_rules(self) -> str:
+        lang = self._language()
+        if lang == "ja":
+            return (f"{self.JOURNEY_STYLE_MARKER}\n"
+                    "- お客様の回答を毎回繰り返さないでください。必要なときだけ一文で短く確認します。\n"
+                    "- 一度の発話に複数の値が含まれていればすべて受け取り、足りないものだけを尋ねます。\n"
+                    "- 質問は一度に一つか二つまで。すでに述べられた値は聞き直しません。\n"
+                    "- 日付や時間は「来週」のような相対表現のままにせず、具体的な日付に確定してから進めます。\n"
+                    "- 価格・規約・在庫など、渡されていない事実は作らず、分からないと伝えます。\n"
+                    "- 必要な値がそろったら、まとめて一度だけ確認して終了します。")
+        if lang == "en":
+            return (f"{self.JOURNEY_STYLE_MARKER}\n"
+                    "- Do not echo each answer back; acknowledge briefly and only when it helps.\n"
+                    "- If one utterance carries several values, take them all and ask only for what is missing.\n"
+                    "- Ask for at most one or two things per turn; never re-ask what the caller already said.\n"
+                    "- Resolve relative dates and times ('next week', 'tomorrow afternoon') to a concrete date "
+                    "before moving on.\n"
+                    "- Never invent prices, policies or availability you were not given; say you do not know.\n"
+                    "- Once every value is known, confirm them together once, then finish.")
+        return (f"{self.JOURNEY_STYLE_MARKER}\n"
+                "- 고객의 답을 매번 되풀이하지 마세요. 필요할 때만 한 문장으로 짧게 확인합니다.\n"
+                "- 한 발화에 여러 값이 들어 있으면 모두 받아들이고, 빠진 값만 물어보세요.\n"
+                "- 한 번에 한두 가지만 묻고, 고객이 이미 말한 값은 다시 묻지 마세요.\n"
+                "- '다음주', '내일 오후' 같은 상대적 날짜·시간은 구체적인 날짜로 확정한 뒤 진행하세요.\n"
+                "- 가격·정책·재고처럼 전달받지 않은 사실은 만들어 내지 말고 모른다고 말하세요.\n"
+                "- 필요한 값이 모두 모이면 한 번에 정리해 확인하고 마무리하세요.")
 
     def rule_j(self) -> None:
         for node_id, node in self.nodes_of_type("generative_journey"):
