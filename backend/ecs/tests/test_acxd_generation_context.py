@@ -156,6 +156,48 @@ def test_generation_context_adapts_classic_specs_openapi_and_faq(monkeypatch):
     assert payload["deployment"]["environment"] == "qa"
 
 
+def test_a_step_naming_a_request_by_another_operation_s_snake_case_id_is_mapped(monkeypatch):
+    """Live (AnyClinic, 2026-09-20): ManageAppointment's step called the
+    reschedule request by its operation id `reschedule_appointment`; the request
+    itself is `rescheduleAppointment`. The raw id was no key of the mapping (the
+    keys are the operations' own ids as the OperationSpec spells them), so the
+    step reached the generator unmapped and five attempts failed
+    DATA_REQUEST_REF_UNDEFINED. The normalized form is resolved as well."""
+    operations = {
+        "RescheduleAppointment": _Model({"operation_id": "RescheduleAppointment", "http_method": "POST",
+                                         "summary": "Reschedule", "input_fields": [], "output_fields": []}),
+        "get_appointment": _Model({"operation_id": "get_appointment", "http_method": "POST",
+                                   "summary": "Get", "input_fields": [], "output_fields": []}),
+    }
+    flow_spec = _Model({
+        "flows": [{
+            "flow_id": "ManageAppointment", "operation_id": "get_appointment", "role": "operation",
+            "purpose": "Look up and change an appointment",
+            "steps": [
+                {"step": 1, "node_type": "data_request", "determinism": "deterministic",
+                 "user_confirmed": True},
+                {"step": 2, "node_type": "data_request", "determinism": "deterministic",
+                 "user_confirmed": True, "data_request_id": "reschedule_appointment"},
+            ],
+            "slots": [],
+        }],
+        "guardrails": [], "knowledge_base": {}, "application": {"name": "Clinic", "locales": ["ko-KR"]},
+    })
+    monkeypatch.setattr(context, "get_all_specs", lambda: operations)
+    monkeypatch.setattr(context, "get_infrastructure_spec", lambda: _Model({"project_name": "clinic"}))
+    monkeypatch.setattr(context, "get_acxd_flow_spec", lambda _sid=None: flow_spec)
+    monkeypatch.setattr(context, "ensure_workspace", lambda: None)
+    monkeypatch.setattr(context, "_load_openapi_document", lambda _sid: {})
+    monkeypatch.setattr(context, "_load_faq_articles", lambda _sid: [])
+
+    payload = context.build_generation_context("session-2").model_dump()
+    request_ids = {d["data_request_id"] for d in payload["data_integrations"]}
+    assert request_ids == {"rescheduleAppointment", "getAppointment"}
+    steps = payload["flows"][0]["steps"]
+    assert steps[0]["data_request_id"] == "getAppointment"          # the flow's own operation
+    assert steps[1]["data_request_id"] == "rescheduleAppointment"   # named by snake_case → resolved
+
+
 def test_context_shim_returns_a_defensive_model_dump():
     shim = context.ACXDGenerationContext({"flows": [{"flow_id": "Welcome"}]})
     first = shim.model_dump()

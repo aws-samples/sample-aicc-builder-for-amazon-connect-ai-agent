@@ -48,9 +48,12 @@ from __future__ import annotations
 import copy
 import difflib
 import hashlib
+import logging
 import re
 import uuid
 from typing import Any, Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # vocabulary
@@ -166,6 +169,28 @@ def _derived_id(prefix: str, seed: str) -> str:
     """Deterministic node id that satisfies the service's v4 UUID regex."""
     digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
     return f"{prefix}-0000-4000-8000-{digest[:12]}"
+
+
+def _loose_id(value: Any) -> str:
+    """`reschedule_appointment`, `rescheduleAppointment` and `Reschedule-Appointment`
+    are the same request named three ways: compare ids by their letters and digits."""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _resolve_request_id(raw: str, data_requests: dict) -> Optional[str]:
+    """The bundled data request id a plan step means, or None when no request matches.
+
+    Exact first; otherwise the single request whose id matches ignoring case and
+    separators (an operation id in snake_case naming a camelCase request). Two
+    candidates is no answer — better to leave the node alone than to pin it to
+    the wrong endpoint."""
+    if raw in data_requests:
+        return raw
+    wanted = _loose_id(raw)
+    if not wanted:
+        return None
+    candidates = [rid for rid in data_requests if _loose_id(rid) == wanted]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _label(node_id: str, node: dict) -> str:
@@ -426,13 +451,27 @@ class _RuntimeContract:
         #: routed to the agent request; agent-request / retry-count / failure
         #: wording is dropped because other rules already realise those
         self.escalation_topics = _escalation_topics(escalation_topics)
-        #: the interview's data_request step ids of this flow, in plan order; the
-        #: n-th data_request node along the flow calls the n-th one (D3p)
-        self.request_steps = [str(r) for r in (request_steps or []) if isinstance(r, str) and r.strip()]
         self.role = (role or "").strip().lower() or None
         self.slot_type_ids = set(slot_type_ids) if slot_type_ids is not None else None
         self.slot_type_docs = dict(slot_type_docs or {})
         self.data_requests = dict(data_requests or {})
+        #: the interview's data_request step ids of this flow, in plan order; the
+        #: n-th data_request node along the flow calls the n-th one (D3p). Live
+        #: (AnyClinic, 2026-09-20): the plan named the OPERATION
+        #: (`reschedule_appointment`) where the request is `rescheduleAppointment`
+        #: and D3p pinned the node to the unknown id on five attempts in a row —
+        #: resolve each planned id against the real requests first, and never pin
+        #: to an id no request has.
+        self.request_steps = []
+        for raw in (request_steps or []):
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            resolved = _resolve_request_id(raw.strip(), self.data_requests)
+            if resolved is None:
+                logger.info("[ACXD contract] plan step names data request %r, which no bundled "
+                            "request matches — the node keeps its own request (D3p)", raw)
+                continue
+            self.request_steps.append(resolved)
         self.flow_ids = set(flow_ids) if flow_ids is not None else None
         self.context_variables = set(context_variables or ())
         self.follow_up_flow_id = follow_up_flow_id
@@ -1083,7 +1122,11 @@ class _RuntimeContract:
                                 f"(redirecting is the next node's job) (M3)")
                 else:
                     # No redirect node follows: turn the stray metadata into one.
-                    redirect_id = f"{node_id}-redirect"
+                    # Live (TableNow, 2026-09-20): the id used to be
+                    # f"{node_id}-redirect", which is not a v4 UUID — six attempts
+                    # across three flows failed the SCHEMA gate on a node this
+                    # rule itself had just added.
+                    redirect_id = _derived_id("4f1a0004", f"{self.flow_id}:{node_id}:redirect")
                     self.nodes[redirect_id] = {
                         "nodeId": redirect_id, "type": "redirect",
                         "metadata": {"redirect": metadata.pop("redirect")},

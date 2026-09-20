@@ -268,6 +268,53 @@ def resolve_system_flow_ids(spec: dict) -> dict:
     return resolved
 
 
+#: How a plan or a model names a system hand-off when it does not use the flow
+#: id: the role, in any casing or separator style, with or without "Flow".
+_ROLE_ALIASES = {
+    "welcome": "welcome", "greeting": "welcome",
+    "fallback": "fallback", "unknown": "fallback",
+    "escalation": "escalation", "escalate": "escalation", "handoff": "escalation",
+    "followup": "followup", "follow": "followup", "anythingelse": "followup",
+    "agentrequest": "agent_request", "requestagent": "agent_request", "agent": "agent_request",
+    "faq": "faq", "knowledgebase": "faq",
+}
+
+
+def _loose(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def resolve_flow_reference(target, known_flow_ids, spec: Optional[dict] = None) -> str:
+    """The flow id a hand-off means, given how plans and models actually write it.
+
+    Live (TableNow, 2026-09-20): the confirmed plan said ``redirect_flow_id:
+    "followup"`` — the ROLE — while the generated flow redirected to
+    ``FollowUpFlow``; the determinism gate compared the strings and failed the
+    flow, the retry then redirected to the literal ``followup``, which is not a
+    bundled flow, and the two gates ping-ponged for five attempts. Resolve both
+    sides through the same function: an exact id wins; otherwise a case- and
+    separator-insensitive match against the known ids (with or without a
+    trailing ``Flow``); otherwise a role alias mapped onto the system flow ids
+    the spec resolves to. Anything else is returned unchanged.
+    """
+    raw = str(target or "").strip()
+    if not raw:
+        return raw
+    known = [str(f) for f in (known_flow_ids or []) if f]
+    if raw in known:
+        return raw
+    wanted = _loose(raw)
+    for candidate in known:
+        loose = _loose(candidate)
+        if loose == wanted or loose == wanted + "flow" or wanted == loose + "flow":
+            return candidate
+    role = _ROLE_ALIASES.get(wanted) or _ROLE_ALIASES.get(wanted.removesuffix("flow"))
+    if role:
+        system_ids = resolve_system_flow_ids(spec or {})
+        return system_ids.get(role, raw)
+    return raw
+
+
 def _ids(spec: dict, flow_ids: Optional[dict]) -> dict:
     resolved = resolve_system_flow_ids(spec)
     if flow_ids:

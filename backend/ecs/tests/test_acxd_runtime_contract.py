@@ -2016,3 +2016,44 @@ def test_m4_reports_a_sentence_that_reads_a_status_code_aloud():
     # a text field the backend fills with the spoken label is fine
     flow["nodes"]["say"]["messages"][0]["body"] = "예약번호는 {createCleaningReservation.reservationId:NLX.Variable}입니다."
     assert not [p for p in runtime_contract_violations(flow, **kwargs, scope="cross") if "M4" in p]
+
+
+def test_m3_gives_the_split_redirect_node_a_v4_uuid():
+    """Live (TableNow, 2026-09-20): the redirect node M3 splits off a message
+    node was keyed f"{node_id}-redirect" — not a UUID — and the SCHEMA gate
+    failed the very flow the rule had just repaired, six attempts running."""
+    import re
+    flow = broken("GetCleaningPrice")
+    start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
+    flow["nodes"]["say"] = {"nodeId": "say", "type": "basic",
+                            "messages": [{"type": "text", "body": "단가는 100원입니다."}],
+                            "metadata": {"redirect": {"type": "flow", "flowId": "FollowUpFlow"}},
+                            "childNodes": [{"nodeId": "fin", "name": "next"}]}
+    flow["nodes"]["fin"] = {"nodeId": "fin", "type": "end"}
+    start["childNodes"] = [{"nodeId": "say", "name": "next"}]
+    out, notes = apply_runtime_contract(flow, **context("GetCleaningPrice"))
+    say = out["nodes"]["say"]
+    assert "redirect" not in (say.get("metadata") or {})
+    split_id = say["childNodes"][0]["nodeId"]
+    assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", split_id), split_id
+    assert out["nodes"][split_id]["type"] == "redirect"
+    assert out["nodes"][split_id]["metadata"]["redirect"]["flowId"] == "FollowUpFlow"
+    assert any("(M3)" in n for n in notes)
+
+
+def test_d3p_resolves_the_plan_s_request_id_against_the_bundled_requests():
+    """Live (AnyClinic, 2026-09-20): the plan step said `reschedule_appointment`
+    (the OPERATION id) where the bundled request is `rescheduleAppointment`;
+    D3p pinned the node to the unknown id and five attempts in a row failed
+    DATA_REQUEST_REF_UNDEFINED. The planned id is resolved first; an id no
+    request matches never gets pinned."""
+    from tools.acxd_runtime_contract import _RuntimeContract
+    ctx = context("CreateCleaningReservation")
+    request_ids = list(ctx["data_requests"])
+    assert request_ids
+    real = request_ids[0]
+    snake = "".join("_" + c.lower() if c.isupper() else c for c in real)  # camel → snake
+    contract = _RuntimeContract(broken("CreateCleaningReservation"),
+                                **{"follow_up_flow_id": "FollowUpFlow", "escalation_flow_id": "EscalationFlow",
+                                   **ctx, "request_steps": [snake, "no_such_request"]})
+    assert contract.request_steps == [real]

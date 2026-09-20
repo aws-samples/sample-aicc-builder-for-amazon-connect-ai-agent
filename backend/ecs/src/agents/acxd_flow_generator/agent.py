@@ -573,6 +573,11 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
         for entry in attached:
             if not isinstance(entry, dict):
                 continue
+            # Live (TableNow, 2026-09-20): `"regex": null` on two attached slots
+            # failed the SCHEMA gate ("None is not of type 'string'") — an
+            # optional key the model spelled out as null. Absent is what it meant.
+            for key in [k for k, v in entry.items() if v is None]:
+                entry.pop(key)
             for key in ("name", "type"):
                 value = str(entry.get(key) or "")
                 if not value or value.lower() in builtin_slot_types or value.startswith("NLX."):
@@ -782,6 +787,22 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 if not isinstance(cond, dict):
                     continue
                 left, right = cond.get("left"), cond.get("right")
+                # Live (AnyClinic, 2026-09-20): the journey's exit edges came
+                # back as {"type": "System.gjConditionIndex"} — the system
+                # variable written where the operand TYPE goes — and the SCHEMA
+                # gate failed three attempts on it. The service shape is
+                # {"type": "system", "name": "System.<var>"}.
+                for operand in (left, right):
+                    if not isinstance(operand, dict):
+                        continue
+                    kind = str(operand.get("type") or "")
+                    if kind.lower().startswith("system.") or kind in ("gjConditionIndex", "capturedFlow", "lastFlow"):
+                        operand["name"] = kind if kind.lower().startswith("system.") else f"System.{kind}"
+                        operand["type"] = "system"
+                    elif kind == "system":
+                        name = str(operand.get("name") or "")
+                        if name and not name.lower().startswith("system."):
+                            operand["name"] = f"System.{name}"
                 if isinstance(left, dict) and left.get("type") in _TYPED_EDGE_LEFT_TYPES:
                     fixed_conds.append(cond)      # already canonical
                     continue
@@ -898,6 +919,21 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 rd["type"] = "page" if rd.get("pageName") else ("parent_application" if rd.get("parentApplication") else "flow")
             if rd["type"] == "flow" and not rd.get("flowId") and meta.get("flowId"):
                 rd["flowId"] = meta["flowId"]
+            # Live (TableNow, 2026-09-20): told by the gate that the plan hands
+            # off to 'followup', the model redirected to the literal 'followup'
+            # — a role, not a bundled flow. Names that mean a system flow are
+            # resolved to the id the bundle ships; placeholders and real ids pass
+            # through unchanged.
+            if rd["type"] == "flow" and rd.get("flowId"):
+                from tools.acxd_system_flows import resolve_flow_reference, resolve_system_flow_ids
+                known = [p.get("flow_id") for p in spec.get("flows") or []
+                         if isinstance(p, dict) and p.get("flow_id")]
+                known += list(resolve_system_flow_ids(spec).values())
+                resolved = resolve_flow_reference(rd["flowId"], known, spec)
+                if resolved != rd["flowId"]:
+                    logger.info("[ACXDFlowGen] repaired %s: redirect target %r → %r",
+                                flow.get("flowId"), rd["flowId"], resolved)
+                    rd["flowId"] = resolved
         elif ntype == "define":
             df = meta.get("define") if isinstance(meta.get("define"), dict) else {}
             meta["define"] = df

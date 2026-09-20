@@ -990,6 +990,20 @@ def upsert_acxd_flow_plan(
                 raw["node_type"] = canonical
                 if canonical == "data_request" and not raw.get("data_request_id"):
                     raw["data_request_id"] = operation_id
+                if canonical == "redirect" and raw.get("redirect_flow_id"):
+                    # Live (TableNow, 2026-09-20): the proposer wrote the ROLE
+                    # ("followup") and the determinism gate later compared it
+                    # literally with the generated redirect's "FollowUpFlow".
+                    # Store the id the bundle will ship.
+                    from tools.acxd_system_flows import resolve_flow_reference
+                    known_flow_ids = [f.flow_id for f in spec.flows] + [flow_id]
+                    resolved_target = resolve_flow_reference(
+                        raw["redirect_flow_id"], known_flow_ids,
+                        {"flows": [{"role": f.role, "flow_id": f.flow_id} for f in spec.flows]})
+                    if resolved_target != raw["redirect_flow_id"]:
+                        notes.append(f"step {raw.get('step')}: redirect_flow_id "
+                                     f"'{raw['redirect_flow_id']}' resolved to '{resolved_target}'")
+                        raw["redirect_flow_id"] = resolved_target
                 s = ACXDNodeStep.model_validate(raw)
                 note = enforce_determinism_policy(s)
                 if note:
