@@ -106,8 +106,12 @@ def _weak_claim(pattern: str, text: str) -> bool:
 
 
 def _name_verb_pattern(name: str, verbs: str) -> str:
-    # `name` ... verb within ~80 chars, or verb ... `name` (Korean puts the verb last)
-    return rf"`?{re.escape(name)}`?[^\n`]{{0,80}}?{verbs}|{verbs}[^\n`]{{0,40}}?`?{re.escape(name)}`?"
+    # `name` ... verb within ~80 chars, or verb ... `name` (Korean puts the verb last).
+    # A name written as a JSON key — "generate_lambda": true — is data the model is
+    # quoting (live 2026-09-20: a session tool's flags inside a ```json block), not a
+    # narrated call, so a double-quoted spelling never matches.
+    quoted = rf'(?<!")`?{re.escape(name)}`?(?!")'
+    return rf"{quoted}[^\n`]{{0,80}}?{verbs}|{verbs}[^\n`]{{0,40}}?{quoted}"
 
 
 def _claimed_tools(text: str) -> set[str]:
@@ -121,7 +125,7 @@ def _claimed_tools(text: str) -> set[str]:
         if _weak_claim(_name_verb_pattern(name, _WEAK_VERBS), text):
             claimed.add(name)
             continue
-        block = rf"`?{re.escape(name)}`?[^`]{{0,120}}?{_RESULT_BLOCK}"
+        block = rf'(?<!")`?{re.escape(name)}`?(?!")[^`]{{0,120}}?{_RESULT_BLOCK}'
         if re.search(block, text, re.I | re.S):
             claimed.add(name)
     return claimed

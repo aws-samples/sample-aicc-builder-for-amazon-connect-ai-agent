@@ -21,7 +21,7 @@ from .db_introspector import introspect_database, convert_to_infrastructure_sche
 from .lambda_generator import generate_lambda_function
 from .openapi_generator import generate_openapi_spec
 from .prompt_generator import generate_ai_prompt
-from .spec_manager import save_operation_spec, get_operation_spec, list_operations, get_all_operation_ids, get_all_tool_ids, update_operation_spec, format_operation_summary, save_session_flow_config, get_session_flow_config_tool, save_infrastructure_spec, get_infrastructure_spec_tool, infer_missing_tools, save_contact_flow_spec, get_contact_flow_spec_tool
+from .spec_manager import save_operation_spec, get_operation_spec, list_operations, get_all_operation_ids, get_all_tool_ids, update_operation_spec, format_operation_summary, save_session_flow_config, update_session_flow_config, get_session_flow_config_tool, save_infrastructure_spec, get_infrastructure_spec_tool, infer_missing_tools, save_contact_flow_spec, get_contact_flow_spec_tool
 from .asset_packager import package_and_upload_assets
 from .contact_flow_generator import (
     generate_contact_flow,
@@ -100,6 +100,7 @@ __all__ = [
     "update_operation_spec",
     "format_operation_summary",
     "save_session_flow_config",
+    "update_session_flow_config",
     "get_session_flow_config_tool",
     "save_contact_flow_spec",
     "get_contact_flow_spec_tool",

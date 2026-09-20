@@ -96,3 +96,19 @@ def test_the_live_nameless_completion_with_output_keys_is_caught():
     assert not unbacked_execution_claim("problems: 0 이하로 줄이는 것이 목표입니다.", [])
     assert not unbacked_execution_claim("재생성을 완료하겠습니다. 이어서 검증을 호출할 예정입니다.", [])
     assert not unbacked_execution_claim(text, ["generate_acxd_application", "validate_parameter_consistency"])
+
+
+def test_a_tool_name_quoted_as_a_json_key_is_data_not_a_claim():
+    """Live (2026-09-20): the orchestrator quoted a session tool's flags —
+    ```json {"tool_id": "log_call_result", "generate_lambda": true,
+    "generate_openapi": true} ``` — while explaining why a count gate fired, and
+    the audit appended 'generate_lambda / generate_openapi were mentioned but
+    not called'. A double-quoted name is a key the model is reading back."""
+    text = ("get_session_flow_config_tool() 실제 반환값:\n```json\n"
+            "\"session_tools\": [{\"tool_id\": \"log_call_result\", \"role\": \"session\",\n"
+            "  \"generate_lambda\": true, \"generate_openapi\": true}]\n```\n"
+            "즉 도구 개수 5는 session_tools 등록에서 나옵니다.")
+    assert unbacked_tool_claims(text, ["get_session_flow_config_tool"]) == []
+    assert audit_notice(text, ["get_session_flow_config_tool"], "ko") is None
+    # the bare spelling with a call verb is still a claim
+    assert unbacked_tool_claims("generate_lambda 호출 결과: 4건 생성 완료", []) == ["generate_lambda"]

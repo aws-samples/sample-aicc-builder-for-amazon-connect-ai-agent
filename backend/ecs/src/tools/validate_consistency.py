@@ -1031,20 +1031,33 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
     # Build expected field sets per tool (multi-tool architecture)
     all_tools = get_all_tools()
     tool_expected: Dict[str, Dict[str, set]] = {}
+    # Which tools must have a Lambda / an OpenAPI path. A ToolSpec declares this
+    # with generate_lambda / generate_openapi (default True); a session tool the
+    # customer excluded from the PoC sets them False and must not be counted.
+    tools_needing_lambda: set = set()
+    tools_needing_openapi: set = set()
     for tool in all_tools:
         if isinstance(tool, dict):
             t_id = tool.get("tool_id") or tool.get("toolId") or ""
             t_in_list = tool.get("input_fields") or []
             t_out_list = tool.get("output_fields") or []
+            t_gen_lambda = tool.get("generate_lambda", True)
+            t_gen_openapi = tool.get("generate_openapi", True)
         else:
             t_id = getattr(tool, "tool_id", "") or ""
             t_in_list = getattr(tool, "input_fields", None) or []
             t_out_list = getattr(tool, "output_fields", None) or []
+            t_gen_lambda = getattr(tool, "generate_lambda", True)
+            t_gen_openapi = getattr(tool, "generate_openapi", True)
         if not t_id:
             continue
         t_inp = {_fname(f) for f in t_in_list if _fname(f)}
         t_out = {_fname(f) for f in t_out_list if _fname(f)}
         tool_expected[t_id] = {"input": t_inp, "output": t_out, "all": t_inp | t_out}
+        if t_gen_lambda is not False:
+            tools_needing_lambda.add(t_id)
+        if t_gen_openapi is not False:
+            tools_needing_openapi.add(t_id)
 
     # Load assets from S3
     asset_keys = list_session_assets(session_id) if session_id else []
@@ -1288,21 +1301,28 @@ def _validate_parameter_consistency_impl(session_id: str) -> dict:
         # OperationSpec of its own (a session tool such as log_call_result) is
         # generated into a supporting folder, which only lambda_all_code sees —
         # live (2026-09-20) the file existed and the count check still reported
-        # it missing, a blocking finding the user could not act on.
+        # it missing, a blocking finding the user could not act on. Only tools
+        # whose generate_lambda / generate_openapi flag is on are expected.
         present_lambdas = set(lambda_code) | set(lambda_all_code)
-        missing = set(tool_expected.keys()) - present_lambdas
+
+        def _loose(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+        present_lambda_loose = {_loose(k) for k in present_lambdas}
+        missing = {t for t in tools_needing_lambda if _loose(t) not in present_lambda_loose}
         if lambda_count > 0 and missing:
             mismatches.append({
                 "operation_id": "__all__", "field": "",
                 "asset_type": "count",
-                "issue": f"Lambda count ({len(present_lambdas & set(tool_expected))}) < tool count ({tool_count}). Missing: {missing}",
+                "issue": f"Lambda count ({len(tools_needing_lambda) - len(missing)}) < tool count ({len(tools_needing_lambda)}). Missing: {missing}",
             })
-        if openapi_count > 0 and openapi_count < tool_count:
-            missing_openapi = set(tool_expected.keys()) - set(openapi_fields.keys()) if openapi_fields else set()
+        present_openapi_loose = {_loose(k) for k in (openapi_fields or {}).keys()}
+        missing_openapi = {t for t in tools_needing_openapi if _loose(t) not in present_openapi_loose} if openapi_fields else set()
+        if openapi_count > 0 and missing_openapi:
             mismatches.append({
                 "operation_id": "__all__", "field": "",
                 "asset_type": "count",
-                "issue": f"OpenAPI path count ({openapi_count}) < tool count ({tool_count}). Missing: {missing_openapi}",
+                "issue": f"OpenAPI path count ({len(tools_needing_openapi) - len(missing_openapi)}) < tool count ({len(tools_needing_openapi)}). Missing: {missing_openapi}",
             })
     else:
         # Legacy mode: operation-level counts

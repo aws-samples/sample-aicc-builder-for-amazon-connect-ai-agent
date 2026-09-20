@@ -65,6 +65,7 @@ from tools import (
     update_operation_spec,
     format_operation_summary,
     save_session_flow_config,
+    update_session_flow_config,
     get_session_flow_config_tool,
     save_contact_flow_spec,
     get_contact_flow_spec_tool,
@@ -211,6 +212,7 @@ INTERVIEW_TOOLS = [
     update_operation_spec,
     format_operation_summary,
     save_session_flow_config,
+    update_session_flow_config,
     get_session_flow_config_tool,
     save_contact_flow_spec,
     get_contact_flow_spec_tool,
@@ -402,6 +404,13 @@ def get_tools_for_phase(
     for spec_tool in (update_operation_spec, save_operation_spec):
         if spec_tool not in generation_tools:
             generation_tools.append(spec_tool)
+    # The session flow config is a source too (session tools, persona, the
+    # no-response messages). Live (2026-09-20): a session tool the customer
+    # excluded from the PoC kept the count gate red, and corrupted Korean in the
+    # retry message could not be fixed, because after the interview the only
+    # session-config tool left was the read-only getter.
+    if update_session_flow_config not in generation_tools:
+        generation_tools.append(update_session_flow_config)
     if not is_acxd:
         return generation_tools
 

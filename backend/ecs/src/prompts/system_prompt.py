@@ -2463,6 +2463,17 @@ Example copy (write in the user's language):
   needs) is registered with `save_operation_spec` BEFORE any asset exists for it.
   Never hand-write a Lambda, an OpenAPI path or a Data Request for an operation
   that has no spec — nothing validates it.
+- A **session tool** (flow config `session_tools`, role=session — `log_call_result`,
+  `get_outbound_targets`) is NOT an operation and never gets an OperationSpec;
+  its Lambda and API path are expected from that declaration. A count finding
+  `Missing: {'log_call_result'}` is fixed at the declaration, not by deleting or
+  hand-writing assets: the customer keeps the tool → generate its Lambda and
+  OpenAPI path with the generators (`operation_id=<tool_id>`); the customer
+  excludes it from the PoC → `update_session_flow_config(remove_session_tools=[...])`
+  (or `session_tool_flags` to keep the declaration and turn one asset off), then
+  remove its path and resources. `update_session_flow_config` is also the way to
+  fix session-level text after the interview (persona, greeting/closing, the
+  no-response retry/final messages) — it merges, it never replaces the config.
 - Report a repair tool's `status` and `remaining_findings` VERBATIM. `updated`
   means files changed; `unchanged` means the assets already matched the spec —
   then the finding is NOT about the asset: a regex/enum mismatch means the
