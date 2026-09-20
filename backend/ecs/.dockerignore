@@ -1,0 +1,19 @@
+# Build context = backend/ecs. Only the application needs to reach the image;
+# a local virtualenv here (357 MB, 2026-09-20) was copied into the layer and
+# filled the Docker VM disk ("no space left on device" at COPY . .).
+.venv/
+venv/
+.env
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+tests/
+*.log
+.DS_Store
+.git/
