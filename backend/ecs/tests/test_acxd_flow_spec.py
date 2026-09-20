@@ -383,6 +383,20 @@ def test_capture_policy_keeps_dates_out_of_the_journey(monkeypatch):
     assert "visitTime" in notes and "user_choice" in notes
 
 
+def test_plan_tools_return_the_state_of_every_flow():
+    """Live (2026-09-21): after a history reload the orchestrator re-saved two
+    already-confirmed flows twice in a row — it had nothing to read the state
+    from but its own earlier words."""
+    res = _upsert(steps=_journey_steps(), slots=_JOURNEY_SLOTS)
+    assert res["plans"]["ProcessReturn"].startswith("saved, steps [")
+    res2 = afs.confirm_acxd_flow_steps("ProcessReturn")
+    assert res2["plans"]["ProcessReturn"].startswith("confirmed (")
+    res3 = _upsert(flow_id="CleaningPrice", purpose="Prices", operation_id="get_cleaning_price",
+                   steps=[{"step": 1, "description": "가격 안내", "node_type": "basic"}])
+    assert set(res3["plans"]) == {"ProcessReturn", "CleaningPrice"}
+    assert res3["plans"]["ProcessReturn"].startswith("confirmed")
+
+
 def test_capture_policy_keeps_journeys_to_conversational_values():
     res = _upsert(steps=_journey_steps(), slots=_JOURNEY_SLOTS)
     assert res["success"], res

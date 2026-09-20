@@ -1091,12 +1091,30 @@ def upsert_acxd_flow_plan(
                 "coerced": notes,
                 "awaiting_confirmation": plan.unconfirmed_steps,
                 "flow_approved": plan.confirmed,
+                "plans": plan_state_summary(spec),
                 "message": ("Plan saved. Show the steps and their determinism labels to the user; "
                             "call confirm_acxd_flow_steps only after they explicitly agree."
                             if plan.unconfirmed_steps else "Plan saved; all decisions remain confirmed."),
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+
+def plan_state_summary(spec: "ACXDFlowSpec") -> dict:
+    """Every saved flow and where it stands — returned by the plan tools so the
+    model reads the state from the tool, not from its memory of earlier turns.
+    Live (2026-09-21): after a history reload the orchestrator re-saved two
+    already-confirmed flows twice in a row."""
+    out: dict = {}
+    for f in (getattr(spec, "flows", None) or []):
+        if f.confirmed:
+            state = "confirmed"
+        elif f.unconfirmed_steps:
+            state = f"saved, steps {f.unconfirmed_steps} await confirmation"
+        else:
+            state = "saved, awaiting approve_flow"
+        out[f.flow_id] = f"{state} ({len(f.steps)} steps, {f.role})"
+    return out
 
 
 @tool
@@ -1131,7 +1149,8 @@ def confirm_acxd_flow_steps(flow_id: str, step_numbers: Union[list[int], str] = 
             plan.confirmed = True
         save_acxd_flow_spec(spec)
         return {"success": True, "flow_id": flow_id, "confirmed": sorted(wanted),
-                "awaiting_confirmation": plan.unconfirmed_steps, "flow_approved": plan.confirmed}
+                "awaiting_confirmation": plan.unconfirmed_steps, "flow_approved": plan.confirmed,
+                "plans": plan_state_summary(spec)}
 
 
 @tool
