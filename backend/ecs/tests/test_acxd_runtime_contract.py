@@ -553,6 +553,25 @@ def test_d3_maps_a_context_variable_when_no_slot_has_the_name():
     assert payload["customerPhone"] == "{customerPhone:NLX.Context}"
 
 
+def test_d3_maps_a_request_field_through_the_plan_s_field_name():
+    """Live (AnyCompany EN, 2026-09-20): the plan collected `productType` under
+    the request field `itemCode` (slot plan field_name) — mapped by name only,
+    the field looked uncollected and five attempts failed D3."""
+    flow = broken("GetCleaningPrice")
+    requests = copy.deepcopy(LIVE["data_requests"])
+    schema = requests["getCleaningPrice"]["requestSchema"]
+    schema["properties"]["itemCode"] = schema["properties"].pop("productType")
+    schema["required"] = [f if f != "productType" else "itemCode" for f in schema.get("required", [])]
+    plans = {"productType": {"name": "productType", "type": "ProductType", "field_name": "itemCode"}}
+    out, notes = apply_runtime_contract(
+        flow, **context("GetCleaningPrice", data_requests=requests, slot_plans=plans))
+    payload = nodes_of(out, "data_request")[0]["dataRequests"][0]["payload"]
+    assert payload["itemCode"] == "{productType:NLX.Slot}"
+    assert "productType" not in payload
+    assert not any("requires field itemCode" in p for p in runtime_contract_violations(
+        out, **context("GetCleaningPrice", data_requests=requests, slot_plans=plans)))
+
+
 def test_d3_required_field_the_flow_never_collects_is_a_violation():
     flow = broken("GetCleaningPrice")
     requests = copy.deepcopy(LIVE["data_requests"])
