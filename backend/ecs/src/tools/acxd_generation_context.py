@@ -584,6 +584,13 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
             "project_slug": infrastructure.get("project_name"),
         })
 
+    # Live (AnyClinic, 2026-09-20): a plan step named its request by the
+    # OPERATION id (`reschedule_appointment`) while the bundled request is
+    # `rescheduleAppointment`; the raw id was not a key here, so it went to the
+    # generator unmapped, D3p pinned the node to it, and every one of five
+    # attempts failed DATA_REQUEST_REF_UNDEFINED. Resolve by the normalized
+    # form as well — the same normalization the request ids were built with.
+    known_request_ids = set(request_ids.values())
     for plan in plans:
         operation_id = plan.get("operation_id")
         for step in plan.get("steps") or []:
@@ -592,6 +599,8 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
             raw_id = step.get("data_request_id") or operation_id
             if raw_id in request_ids:
                 step["data_request_id"] = request_ids[raw_id]
+            elif raw_id and _normalise_data_request_id(raw_id) in known_request_ids:
+                step["data_request_id"] = _normalise_data_request_id(raw_id)
 
     slot_types = _derive_slot_types(plans, operations)
     kb_plan = copy.deepcopy(flow_data.get("knowledge_base") or {})

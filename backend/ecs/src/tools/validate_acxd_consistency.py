@@ -507,12 +507,21 @@ def validate_acxd_consistency(
             # regenerations in a row sent the "order not found → search by
             # customer info" step to EscalationFlow while the message promised a
             # customer-info search; only the plan knows the intended target.
+            # Live (TableNow, 2026-09-20): the plan wrote the ROLE ("followup")
+            # and the flow the id ("FollowUpFlow") — the same hand-off — and a
+            # literal comparison failed five attempts in a row. Both sides are
+            # resolved the way the generator resolves them.
+            from tools.acxd_system_flows import resolve_flow_reference
+            known_ids = list(flow_ids) + list(flows_by_id)
             planned_targets = {
-                str(s.get("redirect_flow_id")).strip() for s in plan.get("steps") or []
+                resolve_flow_reference(str(s.get("redirect_flow_id")).strip(), known_ids, spec)
+                for s in plan.get("steps") or []
                 if s.get("user_confirmed") and s.get("redirect_flow_id")}
             if planned_targets:
                 actual_targets = {
-                    str(((n.get("metadata") or {}).get("redirect") or {}).get("flowId") or "")
+                    resolve_flow_reference(
+                        str(((n.get("metadata") or {}).get("redirect") or {}).get("flowId") or ""),
+                        known_ids, spec)
                     for n in (generated.get("nodes") or {}).values()
                     if isinstance(n, dict) and n.get("type") == "redirect"}
                 for target in sorted(planned_targets - actual_targets):

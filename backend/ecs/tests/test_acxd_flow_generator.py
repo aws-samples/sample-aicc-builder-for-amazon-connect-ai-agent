@@ -424,6 +424,88 @@ def test_repair_fixes_all_mechanical_mistakes_at_once():
     assert validate_generated_flow(fixed, plan, {**SPEC, "flows": [plan]}) == []
 
 
+def test_repair_points_the_failure_branch_at_the_planned_operation_hand_off():
+    """Live (SELC, 2026-09-21): the confirmed plan said 'order not found → hand
+    off to SearchOrderByCustomerInfo'; the model sent that branch to Fallback
+    twice in a row and the determinism gate refused the whole application."""
+    from agents.acxd_flow_generator.agent import repair_generated_flow
+
+    plan = {"flow_id": "DeliveryStatusByOrder", "role": "operation", "steps": [
+        {"step": 1, "node_type": "user_choice", "slot": "orderNumber", "user_confirmed": True},
+        {"step": 2, "node_type": "data_request", "data_request_id": "getDeliveryStatus", "user_confirmed": True},
+        {"step": 3, "node_type": "generative_text", "user_confirmed": True},
+        {"step": 4, "node_type": "redirect", "redirect_flow_id": "SearchOrderByCustomerInfo", "user_confirmed": True},
+        {"step": 5, "node_type": "redirect", "redirect_flow_id": "followup", "user_confirmed": True},
+    ]}
+    spec = {"flows": [plan, {"flow_id": "SearchOrderByCustomerInfo", "role": "operation", "steps": []},
+                      {"flow_id": "FollowUpFlow", "role": "followup", "steps": []},
+                      {"flow_id": "FallbackFlow", "role": "fallback", "steps": []}],
+            "data_integrations": [{"data_request_id": "getDeliveryStatus"}]}
+    n = lambda i: f"b0000000-0000-4000-8000-00000000000{i}"
+    flow = {"flowId": "DeliveryStatusByOrder", "nodes": {
+        n(1): {"nodeId": n(1), "type": "start", "childNodes": [{"nodeId": n(2)}]},
+        n(2): {"nodeId": n(2), "type": "user_choice", "childNodes": [{"nodeId": n(3), "name": "captured"}]},
+        n(3): {"nodeId": n(3), "type": "data_request", "dataRequests": ["getDeliveryStatus"],
+               "childNodes": [{"nodeId": n(4), "name": "done"}]},
+        n(4): {"nodeId": n(4), "type": "choice", "childNodes": [
+            {"nodeId": n(5), "name": "found", "conditions": [{"left": {"type": "variable", "name": "getDeliveryStatus.found"},
+                                                              "operator": "eq", "right": {"type": "constant", "value": True}}]},
+            {"nodeId": n(7), "name": "notFound"}]},
+        n(5): {"nodeId": n(5), "type": "generative_text", "childNodes": [{"nodeId": n(6), "name": "next"}]},
+        n(6): {"nodeId": n(6), "type": "redirect", "metadata": {"redirect": {"type": "flow", "flowId": "FollowUpFlow"}}},
+        n(7): {"nodeId": n(7), "type": "basic", "messages": [{"type": "text", "body": "주문번호를 모르시거나 조회가 되지 않는 경우, 고객님의 정보로 조회를 도와드리겠습니다."}],
+               "childNodes": [{"nodeId": n(8), "name": "next"}]},
+        n(8): {"nodeId": n(8), "type": "redirect", "metadata": {"redirect": {"type": "flow", "flowId": "FallbackFlow"}}},
+    }}
+    fixed = repair_generated_flow(flow, plan, spec)
+    targets = {nid: (node.get("metadata") or {}).get("redirect", {}).get("flowId")
+               for nid, node in fixed["nodes"].items() if node.get("type") == "redirect"}
+    assert targets[n(8)] == "SearchOrderByCustomerInfo"     # the failure branch now hands off as planned
+    assert targets[n(6)] == "FollowUpFlow"                  # the success branch is untouched
+    assert fixed["nodes"][n(7)]["messages"][0]["body"].startswith("주문번호를 모르시거나")
+    # idempotent, and a plan without an operation hand-off changes nothing
+    again = repair_generated_flow(fixed, plan, spec)
+    assert again["nodes"][n(8)]["metadata"]["redirect"]["flowId"] == "SearchOrderByCustomerInfo"
+
+
+def test_repair_creates_the_planned_hand_off_when_the_miss_branch_just_ends():
+    """Live (SELC, 2026-09-21, five attempts): the model wrote no redirect at all
+    on the not-found branch — the edge dangled, the dangling-edge repair wired
+    it to an `end`, and the gate reported 'no redirect node targets it' with only
+    the contract's system redirects present."""
+    from agents.acxd_flow_generator.agent import repair_generated_flow
+
+    plan = {"flow_id": "DeliveryStatusByOrder", "role": "operation", "steps": [
+        {"step": 2, "node_type": "data_request", "data_request_id": "getDeliveryStatus", "user_confirmed": True},
+        {"step": 4, "node_type": "redirect", "redirect_flow_id": "SearchOrderByCustomerInfo", "user_confirmed": True},
+    ]}
+    spec = {"flows": [plan, {"flow_id": "SearchOrderByCustomerInfo", "role": "operation", "steps": []}],
+            "data_integrations": [{"data_request_id": "getDeliveryStatus"}]}
+    n = lambda i: f"c0000000-0000-4000-8000-00000000000{i}"
+    flow = {"flowId": "DeliveryStatusByOrder", "nodes": {
+        n(1): {"nodeId": n(1), "type": "start", "childNodes": [{"nodeId": n(3)}]},
+        n(3): {"nodeId": n(3), "type": "data_request", "dataRequests": ["getDeliveryStatus"],
+               "childNodes": [{"nodeId": n(4), "name": "success"}]},
+        n(4): {"nodeId": n(4), "type": "choice", "childNodes": [
+            {"nodeId": n(5), "name": "found"},
+            {"nodeId": n(7), "name": "notFound"}]},
+        n(5): {"nodeId": n(5), "type": "basic", "messages": [{"type": "text", "body": "배송 중입니다."}],
+               "childNodes": [{"nodeId": n(9), "name": "next"}]},
+        n(7): {"nodeId": n(7), "type": "basic",
+               "messages": [{"type": "text", "body": "주문번호를 모르시거나 조회가 되지 않는 경우, 고객님의 정보로 조회를 도와드리겠습니다."}]},
+        n(9): {"nodeId": n(9), "type": "end"},
+    }}
+    fixed = repair_generated_flow(flow, plan, spec)
+    redirects = {nid: node["metadata"]["redirect"]["flowId"] for nid, node in fixed["nodes"].items()
+                 if node.get("type") == "redirect"}
+    assert list(redirects.values()) == ["SearchOrderByCustomerInfo"]
+    new_id = next(iter(redirects))
+    assert fixed["nodes"][n(7)]["childNodes"][0]["nodeId"] == new_id       # message first, then the hand-off
+    assert fixed["nodes"][n(5)]["childNodes"][0]["nodeId"] == n(9)         # the found branch is untouched
+    again = repair_generated_flow(fixed, plan, spec)
+    assert sum(1 for x in again["nodes"].values() if x.get("type") == "redirect") == 1
+
+
 def test_repair_degrades_data_request_when_no_integrations_exist():
     from agents.acxd_flow_generator.agent import repair_generated_flow
     spec = {"flows": [PLAN], "data_integrations": []}
@@ -1173,3 +1255,60 @@ def test_a_routing_descriptor_that_says_do_not_route_here_makes_the_flow_untrain
     flow, problems, _ = run_flow_generation(PLAN, SPEC, lambda prompt: json.dumps(described))
     assert problems == []
     assert flow["untrained"] is True
+
+
+def test_repair_fixes_the_mechanical_mistakes_of_the_2026_09_20_runs():
+    """Live (TableNow / AnyClinic, 2026-09-20): three defects each burned a
+    generation attempt on the SCHEMA or RX gate although the design was right:
+    the journey's exit edge wrote the system variable as the operand TYPE, an
+    attached slot spelled an optional key as null, and a redirect named the
+    ROLE ('followup') instead of the bundled flow id."""
+    from agents.acxd_flow_generator.agent import repair_generated_flow
+    plan = {
+        "flow_id": "RefundFlow", "purpose": "환불", "role": "operation",
+        "steps": [
+            {"step": 1, "description": "사유 청취", "node_type": "generative_journey",
+             "determinism": "generative", "user_confirmed": True},
+            {"step": 2, "description": "안내 후 마무리", "node_type": "redirect",
+             "determinism": "deterministic", "user_confirmed": True, "redirect_flow_id": "followup"},
+        ],
+    }
+    flow = {
+        "flowId": "RefundFlow",
+        "slotTypes": [{"name": "reason", "type": "NLX.Text", "regex": None, "aiDescription": None}],
+        "nodes": {
+            "a0000000-0000-4000-8000-000000000001": {
+                "nodeId": "a0000000-0000-4000-8000-000000000001", "type": "start",
+                "childNodes": [{"nodeId": "a0000000-0000-4000-8000-000000000002"}]},
+            "a0000000-0000-4000-8000-000000000002": {
+                "nodeId": "a0000000-0000-4000-8000-000000000002", "type": "generative_journey",
+                "metadata": {"generativeJourney": {"prompt": "사유를 들어 주세요", "maxSteps": 8,
+                                                   "exitConditions": [{"name": "agentRequested",
+                                                                       "prompt": "상담원을 원한다"}]}},
+                "childNodes": [
+                    {"nodeId": "a0000000-0000-4000-8000-000000000003", "name": "captured",
+                     "conditions": [{"left": {"type": "slot", "name": "reason"}, "operator": "exists"}]},
+                    {"nodeId": "a0000000-0000-4000-8000-000000000004", "name": "agentRequested",
+                     "conditions": [{"left": {"type": "System.gjConditionIndex"},
+                                     "operator": "eq", "right": {"type": "constant", "value": 0}}]},
+                ]},
+            "a0000000-0000-4000-8000-000000000003": {
+                "nodeId": "a0000000-0000-4000-8000-000000000003", "type": "redirect",
+                "metadata": {"redirect": {"type": "flow", "flowId": "followup"}}, "childNodes": []},
+            "a0000000-0000-4000-8000-000000000004": {
+                "nodeId": "a0000000-0000-4000-8000-000000000004", "type": "redirect",
+                "metadata": {"redirect": {"type": "flow", "flowId": "{System.capturedFlow:NLX.System}"}},
+                "childNodes": []},
+        },
+    }
+    fixed = repair_generated_flow(flow, plan, {**SPEC, "flows": [plan]})
+
+    assert fixed["slotTypes"][0] == {"name": "reason", "type": "NLX.Text"}
+    journey = fixed["nodes"]["a0000000-0000-4000-8000-000000000002"]
+    exit_edge = next(c for c in journey["childNodes"] if c.get("name") == "agentRequested")
+    assert exit_edge["conditions"][0]["left"] == {"type": "system", "name": "System.gjConditionIndex"}
+    redirects = {nid: n["metadata"]["redirect"]["flowId"]
+                 for nid, n in fixed["nodes"].items() if n.get("type") == "redirect"}
+    assert redirects["a0000000-0000-4000-8000-000000000003"] == "FollowUpFlow"
+    # a runtime placeholder is not an alias and passes through untouched
+    assert redirects["a0000000-0000-4000-8000-000000000004"] == "{System.capturedFlow:NLX.System}"

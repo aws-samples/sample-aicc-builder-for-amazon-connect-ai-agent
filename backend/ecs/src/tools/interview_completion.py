@@ -79,6 +79,20 @@ def complete_interview(session_id: str, summary: str = "") -> dict:
                 "message": "ACXD flow design is incomplete. Confirm every flow step before generation.",
                 "problems": problems,
             }
+        # A yes/no the caller SAYS is a yesNo slot, and the data request posts the
+        # word; the OpenAPI, the Lambda and the parity gate must expect that word.
+        try:
+            from tools.acxd_flow_spec import get_acxd_flow_spec
+            from tools.spec_manager import normalize_boolean_inputs_for_acxd
+            app = getattr(get_acxd_flow_spec(), "application", None)
+            locales = list(getattr(app, "locales", None) or [])
+            language = str(getattr(app, "primary_locale", None) or (locales[0] if locales else "") or "ko")
+            normalized = normalize_boolean_inputs_for_acxd(language)
+        except Exception as exc:  # pragma: no cover — never block the interview on this
+            normalized = []
+            logger.warning("[complete_interview] boolean normalization skipped: %s", exc)
+    else:
+        normalized = []
 
     # What generation would have to guess must be in the spec first: response
     # fields with types, enum values, slots that name a real input field,
@@ -106,6 +120,7 @@ def complete_interview(session_id: str, summary: str = "") -> dict:
             "success": True,
             "message": "Interview complete. Generation phase will begin on next user message.",
             "handoff_summary": summary,
+            **({"acxd_boolean_inputs_normalized": normalized} if normalized else {}),
         }
     else:
         return {

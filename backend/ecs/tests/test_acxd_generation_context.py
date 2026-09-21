@@ -156,6 +156,71 @@ def test_generation_context_adapts_classic_specs_openapi_and_faq(monkeypatch):
     assert payload["deployment"]["environment"] == "qa"
 
 
+def test_a_step_naming_a_request_by_another_operation_s_snake_case_id_is_mapped(monkeypatch):
+    """Live (AnyClinic, 2026-09-20): ManageAppointment's step called the
+    reschedule request by its operation id `reschedule_appointment`; the request
+    itself is `rescheduleAppointment`. The raw id was no key of the mapping (the
+    keys are the operations' own ids as the OperationSpec spells them), so the
+    step reached the generator unmapped and five attempts failed
+    DATA_REQUEST_REF_UNDEFINED. The normalized form is resolved as well."""
+    operations = {
+        "RescheduleAppointment": _Model({"operation_id": "RescheduleAppointment", "http_method": "POST",
+                                         "summary": "Reschedule", "input_fields": [], "output_fields": []}),
+        "get_appointment": _Model({"operation_id": "get_appointment", "http_method": "POST",
+                                   "summary": "Get", "input_fields": [], "output_fields": []}),
+    }
+    flow_spec = _Model({
+        "flows": [{
+            "flow_id": "ManageAppointment", "operation_id": "get_appointment", "role": "operation",
+            "purpose": "Look up and change an appointment",
+            "steps": [
+                {"step": 1, "node_type": "data_request", "determinism": "deterministic",
+                 "user_confirmed": True},
+                {"step": 2, "node_type": "data_request", "determinism": "deterministic",
+                 "user_confirmed": True, "data_request_id": "reschedule_appointment"},
+            ],
+            "slots": [],
+        }],
+        "guardrails": [], "knowledge_base": {}, "application": {"name": "Clinic", "locales": ["ko-KR"]},
+    })
+    monkeypatch.setattr(context, "get_all_specs", lambda: operations)
+    monkeypatch.setattr(context, "get_infrastructure_spec", lambda: _Model({"project_name": "clinic"}))
+    monkeypatch.setattr(context, "get_acxd_flow_spec", lambda _sid=None: flow_spec)
+    monkeypatch.setattr(context, "ensure_workspace", lambda: None)
+    monkeypatch.setattr(context, "_load_openapi_document", lambda _sid: {})
+    monkeypatch.setattr(context, "_load_faq_articles", lambda _sid: [])
+
+    payload = context.build_generation_context("session-2").model_dump()
+    request_ids = {d["data_request_id"] for d in payload["data_integrations"]}
+    assert request_ids == {"rescheduleAppointment", "getAppointment"}
+    steps = payload["flows"][0]["steps"]
+    assert steps[0]["data_request_id"] == "getAppointment"          # the flow's own operation
+    assert steps[1]["data_request_id"] == "rescheduleAppointment"   # named by snake_case → resolved
+
+
+def test_non_ascii_field_descriptions_are_rewritten_not_stripped():
+    """Live review (2026-09-20): stripping Korean from ``"총액 = unitPrice × quantity (서버 산정)"``
+    left ``"= unitPrice quantity ( )"`` for the model to read. A non-ASCII
+    description is replaced by one synthesised from the field's machine facts;
+    an ASCII description passes through; a field without one stays bare."""
+    from tools.acxd_data_request_builder import fields_to_json_schema
+    props = fields_to_json_schema([
+        {"name": "totalAmount", "type": "number", "description": "총액 = unitPrice × quantity (서버 산정)"},
+        {"name": "reservationId", "type": "string", "description": "예약번호 (형식 CL-YYYYMMDD-NNNN)",
+         "regex": "^CL-\\d{8}-\\d{4}$"},
+        {"name": "status", "type": "string", "description": "예약 상태", "enum_values": ["예약", "취소"]},
+        {"name": "note", "type": "string", "description": "Free text from the customer"},
+        {"name": "bare", "type": "string"},
+    ])["properties"]
+    assert props["totalAmount"]["description"] == "totalAmount (number)"
+    assert props["reservationId"]["description"] == "reservationId (string); format ^CL-\\d{8}-\\d{4}$"
+    assert props["status"]["description"] == "status (string)"          # Korean enum values are not repeated
+    assert props["note"]["description"] == "Free text from the customer"
+    assert "description" not in props["bare"]
+    for prop in props.values():
+        assert all(ord(ch) < 0x7F for ch in prop.get("description", ""))
+
+
 def test_context_shim_returns_a_defensive_model_dump():
     shim = context.ACXDGenerationContext({"flows": [{"flow_id": "Welcome"}]})
     first = shim.model_dump()

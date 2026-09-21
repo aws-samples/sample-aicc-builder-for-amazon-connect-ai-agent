@@ -631,8 +631,16 @@ export const useBuilderStore = create<BuilderState>((set) => ({
 
       // Build base key including fileName for multiple files of same type
       // Key format: assetType-operationId-fileName or assetType-fileName or assetType
+      //
+      // ACXD assets are keyed by file name only. Their file names ARE the ids
+      // (WelcomeFlow.json, getOrderStatus.json, yesNo.json), and the two paths
+      // that deliver them disagree about operationId: the generator streams
+      // op=<id>, the session-restore replay streams op="" (flat folder). With
+      // the op in the key every flow, slot type and data request existed
+      // twice — the right pane showed "Flows 18" for 9 flows (live, 2026-09-20).
+      const isAcxdAsset = typeof preview.assetType === 'string' && preview.assetType.startsWith('acxd_');
       let baseKey: string;
-      if (preview.fileName && preview.operationId) {
+      if (preview.fileName && preview.operationId && !isAcxdAsset) {
         baseKey = `${preview.assetType}-${preview.operationId}-${preview.fileName}`;
       } else if (preview.fileName) {
         baseKey = `${preview.assetType}-${preview.fileName}`;
@@ -656,7 +664,25 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       // 1. There's NO incomplete preview (we're not already streaming)
       // 2. There IS a completed preview
       // 3. New chunk is incomplete (start of new stream)
-      const isRegeneration = !incompleteKey && completeKey && preview.isComplete === false;
+      //    — OR the asset arrives complete in one event (ACXD flows, slot types,
+      //    data requests, FAQ, packages are never streamed in chunks) with
+      //    DIFFERENT content than the completed one, once the first version has
+      //    been on screen for a while. Live (2026-09-20): the generator re-ran
+      //    the ACXD application three times; every flow was re-streamed under
+      //    its old key, the old card was updated in place far up the chat, the
+      //    right pane's counts never moved, and only the file tree showed the
+      //    files changing — to the user nothing was "streaming". The age guard
+      //    keeps the contact-flow lint re-stream (seconds after the original,
+      //    same document repaired) an in-place update.
+      const REGENERATION_MIN_AGE_MS = 30_000;
+      const arrivesWholeAndChanged = !!(
+        completeKey && preview.isComplete && !preview.isDelta && preview.content
+        && !preview.rehydrated
+        && preview.content !== state.assetPreviews[completeKey].content
+        && Date.now() - (state.assetPreviews[completeKey].createdAt || 0) > REGENERATION_MIN_AGE_MS
+      );
+      const isRegeneration = !incompleteKey && completeKey
+        && (preview.isComplete === false || arrivesWholeAndChanged);
 
       let key: string;
       let newPreview = { ...preview };

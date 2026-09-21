@@ -491,4 +491,17 @@ In addition to the Classic checklist, assess these ACXD dimensions:
 The report must distinguish confirmed facts from recommendations. A D9 result
 is a confirmed fact; copy it verbatim under Detailed Findings and do not soften
 or reinterpret it.
+
+A `count` finding (`Lambda count (N) < tool count (M). Missing: {...}` /
+`OpenAPI path count ...`) compares the assets against the DECLARED tool set:
+every OperationSpec (and the tools inside it) plus the flow config's
+`session_tools` that have `generate_lambda` / `generate_openapi` on — the same
+list `get_all_tool_ids()` returns. Its cause is therefore always a declaration
+the assets do not satisfy, never a file sitting in a supporting folder. Do not
+diagnose it from directory listings (live 2026-09-20: "delete
+`lambda/log_call_result/index.py`" was reported as the cause and was wrong — the
+tool stayed declared in `session_tools`). State the declaration and the two
+ways out: generate the missing asset for that tool, or drop / flag the tool in
+the session flow config (`update_session_flow_config`) when the customer
+excluded it.
 """

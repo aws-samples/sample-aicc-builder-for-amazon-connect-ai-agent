@@ -553,6 +553,25 @@ def test_d3_maps_a_context_variable_when_no_slot_has_the_name():
     assert payload["customerPhone"] == "{customerPhone:NLX.Context}"
 
 
+def test_d3_maps_a_request_field_through_the_plan_s_field_name():
+    """Live (AnyCompany EN, 2026-09-20): the plan collected `productType` under
+    the request field `itemCode` (slot plan field_name) — mapped by name only,
+    the field looked uncollected and five attempts failed D3."""
+    flow = broken("GetCleaningPrice")
+    requests = copy.deepcopy(LIVE["data_requests"])
+    schema = requests["getCleaningPrice"]["requestSchema"]
+    schema["properties"]["itemCode"] = schema["properties"].pop("productType")
+    schema["required"] = [f if f != "productType" else "itemCode" for f in schema.get("required", [])]
+    plans = {"productType": {"name": "productType", "type": "ProductType", "field_name": "itemCode"}}
+    out, notes = apply_runtime_contract(
+        flow, **context("GetCleaningPrice", data_requests=requests, slot_plans=plans))
+    payload = nodes_of(out, "data_request")[0]["dataRequests"][0]["payload"]
+    assert payload["itemCode"] == "{productType:NLX.Slot}"
+    assert "productType" not in payload
+    assert not any("requires field itemCode" in p for p in runtime_contract_violations(
+        out, **context("GetCleaningPrice", data_requests=requests, slot_plans=plans)))
+
+
 def test_d3_required_field_the_flow_never_collects_is_a_violation():
     flow = broken("GetCleaningPrice")
     requests = copy.deepcopy(LIVE["data_requests"])
@@ -1708,12 +1727,16 @@ def test_j3_captured_edge_tests_the_slot_and_comes_first():
     assert edges[0]["name"] == "captured"
     assert edges[0]["conditions"] == [{"left": {"type": "slot", "name": "reason"}, "operator": "exists"}]
     assert any("(J3)" in n for n in notes)
-    # J6: the captured branch first reads the values back (a templated basic),
-    # then continues to the node the model meant
-    confirm = out["nodes"][edges[0]["nodeId"]]
-    assert confirm["type"] == "basic" and "{reason:NLX.Slot}" in confirm["messages"][0]["body"]
-    assert confirm["childNodes"][0]["nodeId"] == "askP"
-    assert any("(J6)" in n for n in notes)
+    # J6: the captured branch continues to the node the model meant (the phone
+    # question); the read-back of the captured values sits AFTER that last
+    # capture, right before the backend call — live (2026-09-21) the caller heard
+    # "…confirmed, I'll go ahead" and was then asked for the phone number.
+    assert edges[0]["nodeId"] == "askP"
+    into_dr = [(nid, n) for nid, n in out["nodes"].items()
+               if any(e.get("nodeId") == "dr" for e in n.get("childNodes") or [])]
+    confirm = next(n for _, n in into_dr if n["type"] == "basic" and "{reason:NLX.Slot}" in n["messages"][0]["body"])
+    assert confirm["childNodes"][0]["nodeId"] == "dr"
+    assert any("(J6)" in n and "right before the backend call" in n for n in notes)
     # idempotent: a second pass adds nothing
     again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
     assert not any("(J6)" in n or "(J3)" in n for n in notes_again)
@@ -1724,6 +1747,107 @@ def test_j3_captured_edge_tests_the_slot_and_comes_first():
     assert not any("(J3)" in n for n in notes2)
 
 
+def test_j6_read_back_follows_the_journey_when_nothing_is_collected_after_it():
+    """No later capture step: the read-back keeps its place right after the journey."""
+    flow = _journey_flow(journey_edges=[{"nodeId": "dr", "name": "done"}])   # journey → backend call
+    out, notes = _apply_journey(flow)
+    edges = out["nodes"]["gj"]["childNodes"]
+    confirm = out["nodes"][edges[0]["nodeId"]]
+    assert confirm["type"] == "basic" and "{reason:NLX.Slot}" in confirm["messages"][0]["body"]
+    # the read-back leads into the backend call (ids may be re-derived, so match by type)
+    cur, hops = confirm, 0
+    while out["nodes"][cur["childNodes"][0]["nodeId"]]["type"] != "data_request" and hops < 3:
+        cur, hops = out["nodes"][cur["childNodes"][0]["nodeId"]], hops + 1
+    assert out["nodes"][cur["childNodes"][0]["nodeId"]]["type"] == "data_request"
+    assert any("(J6)" in n for n in notes)
+
+
+def test_j6_moves_the_generators_own_read_back_after_the_last_capture():
+    """Live (2026-09-21): the generator rendered the plan's read-back template as
+    a basic right after the journey, then asked for the phone number."""
+    flow = _journey_flow(journey_edges=[{"nodeId": "rb", "name": "done"}])
+    flow["nodes"]["rb"] = {"nodeId": "rb", "type": "basic",
+                           "messages": [{"type": "text", "body": "반품 사유 {reason:NLX.Slot}(으)로 접수하겠습니다."}],
+                           "childNodes": [{"nodeId": "askP", "name": "next"}]}
+    out, notes = _apply_journey(flow)
+    assert out["nodes"]["gj"]["childNodes"][0]["nodeId"] == "askP"          # journey → phone question
+    assert out["nodes"]["rb"]["childNodes"][0]["nodeId"] == "dr"            # read-back → backend call
+    assert any("moved after" in n and "(J6)" in n for n in notes)
+    again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
+    assert not any("(J6)" in n for n in notes_again)
+
+
+def test_r9_hand_off_copies_collected_slots_into_context_variables():
+    """Live (SELC, 2026-09-21): the Contact Flow read customerName / phoneNumber /
+    orderNumber from $.AgenticCX.ContextVariables and no node ever set them."""
+    flow = _intake_flow()
+    out, notes = apply_runtime_contract(
+        flow, role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+        flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
+        escalation_flow_id="Escalation", slot_type_ids={"yesNo"},
+        context_variables=["customerPhone", "failReason", "orderNumber", "contactPhone"])
+    esc = out["nodes"]["esc"]
+    mods = esc["metadata"]["stateModifications"]
+    copied = {m["name"]: m for m in mods if m.get("type") == "context"}
+    assert set(copied) >= {"orderNumber", "contactPhone"}                 # attached slots that are context variables
+    assert copied["orderNumber"]["value"] == {"type": "slot", "name": "orderNumber"}
+    assert "customerPhone" not in copied and "failReason" not in copied    # not slots of this flow
+    # the agent-request redirect the contract adds (E2) carries them too
+    agent = next(n for n in out["nodes"].values()
+                 if n.get("type") == "redirect" and n["metadata"]["redirect"]["flowId"] == "RequestAgentFlow")
+    assert {m["name"] for m in agent["metadata"]["stateModifications"] if m.get("type") == "context"} >= {"orderNumber"}
+    # the follow-up hand-back is not a hand-off
+    follow = [n for n in out["nodes"].values()
+              if n.get("type") == "redirect" and n["metadata"]["redirect"]["flowId"] == "FollowUpFlow"]
+    assert follow and not any((m.get("type"), m.get("name")) == ("context", "orderNumber")
+                              for m in (follow[0].get("metadata") or {}).get("stateModifications") or [])
+    assert any("(R9)" in n for n in notes)
+    again, notes_again = apply_runtime_contract(
+        out, role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+        flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
+        escalation_flow_id="Escalation", slot_type_ids={"yesNo"},
+        context_variables=["customerPhone", "failReason", "orderNumber", "contactPhone"])
+    assert not any("(R9)" in n for n in notes_again)
+
+
+def test_effective_context_variables_add_fail_reason_and_hand_off_slots():
+    from tools.acxd_resource_builders import effective_context_variables
+    spec = {"application": {"context_variables": [{"name": "customerPhone", "type": "string",
+                                                   "from_contact_attribute": "$.CustomerEndpoint.Address"}]},
+            "flows": [
+                {"flow_id": "SearchOrder", "role": "operation", "slots": [
+                    {"name": "customerName"}, {"name": "phoneNumber"}, {"name": "address"}, {"name": "note"}]},
+                {"flow_id": "Reserve", "role": "operation", "slots": [
+                    {"name": "productType"}, {"name": "orderNumber"}, {"name": "yesNo"}]},
+                {"flow_id": "FollowUpFlow", "role": "followup", "slots": [{"name": "moreHelpName"}]},
+            ]}
+    names = [v["name"] for v in effective_context_variables(spec)]
+    assert names[:2] == ["customerPhone", "failReason"]
+    assert {"customerName", "phoneNumber", "address", "orderNumber"} <= set(names)
+    assert "note" not in names and "productType" not in names and "moreHelpName" not in names
+    assert len(names) <= 10
+    assert effective_context_variables(spec)[0]["fromContactAttribute"] == "$.CustomerEndpoint.Address"
+
+
+def test_j7_journey_prompt_carries_conversation_style_rules():
+    """Live (2026-09-21): the Haiku journey echoed every answer, asked one value
+    per turn and accepted '다음주' as a date — the prompt said what to collect,
+    not how to talk."""
+    out, notes = _apply_journey(_journey_flow())
+    prompt = out["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
+    assert prompt.startswith("고객의 반품 사유를 자연스럽게 확인합니다.")      # the generator's text is kept
+    assert "[conversation style]" in prompt and "되풀이하지" in prompt and "구체적인 날짜" in prompt
+    assert any("(J7)" in n for n in notes)
+    again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
+    assert again["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"].count("[conversation style]") == 1
+    assert not any("(J7)" in n for n in notes_again)
+    # English callers get English rules
+    f2 = _journey_flow()
+    f2["mainLanguageCode"] = "en-US"; f2["languageCodes"] = ["en-US"]
+    o2, _ = _apply_journey(f2)
+    assert "Do not echo each answer back" in o2["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
+
+
 def test_j3_multiple_captures_are_one_edge_with_one_condition_per_slot():
     flow = _journey_flow()
     flow["slotTypes"].append({"name": "preferredDate", "type": "NLX.Date", "sensitive": False})
@@ -1732,7 +1856,8 @@ def test_j3_multiple_captures_are_one_edge_with_one_condition_per_slot():
     captured = out["nodes"]["gj"]["childNodes"][0]
     assert [c["left"]["name"] for c in captured["conditions"]] == ["reason", "preferredDate"]
     schemas = {d["name"]: d["schema"] for d in out["nodes"]["gj"]["metadata"]["generativeJourney"]["dataCapture"]["data"]}
-    assert schemas["preferredDate"] == {"type": "string"}
+    # a date slot that still reaches a journey classifies onto an ISO date, not the caller's words
+    assert schemas["preferredDate"] == {"type": "string", "format": "date"}
 
 
 def test_j4_agent_request_exit_condition_is_appended_and_routed():
@@ -1942,6 +2067,16 @@ def test_d7_leaves_a_flow_that_already_tests_the_flag_alone():
     assert not any("(D7)" in n for n in notes)
 
 
+def _read_back_before(flow, node_id):
+    """Body of the basic that leads into ``node_id`` and reads a slot back."""
+    for n in flow["nodes"].values():
+        if n.get("type") == "basic" and any(e.get("nodeId") == node_id for e in n.get("childNodes") or []):
+            body = n["messages"][0]["body"]
+            if ":NLX.Slot}" in body:
+                return body
+    return None
+
+
 def test_synthesised_sentences_read_like_a_person_not_a_printout():
     """Live (2026-09-17): the fallback read "조회 결과: 예약번호 R-…, 요청일 …, 총 금액
     300000, 원 상태 CONFIRMED입니다." — a list. A create request now opens with
@@ -1964,10 +2099,9 @@ def test_synthesised_sentences_read_like_a_person_not_a_printout():
     assert "status" not in body and "예약 상태" not in body      # the machine code stays out
     assert "조회 결과" not in body and " / " not in body
 
-    # J6 read-back on the journey fixture
+    # J6 read-back on the journey fixture (it sits right before the backend call)
     j, _ = _apply_journey(_journey_flow())
-    confirm = j["nodes"][j["nodes"]["gj"]["childNodes"][0]["nodeId"]]["messages"][0]["body"]
-    assert confirm == "말씀하신 내용은 {reason:NLX.Slot}입니다. 이대로 진행하겠습니다."
+    assert _read_back_before(j, "dr") == "말씀하신 내용은 {reason:NLX.Slot}입니다. 이대로 진행하겠습니다."
 
     # English and Japanese callers get their own sentence shapes
     for code, opener in (("en-US", "Your request has been received. The"), ("ja-JP", "ご依頼を受け付けました。")):
@@ -1998,8 +2132,7 @@ def test_approved_templates_from_the_plan_win_over_synthesis():
     steps = [{"captures": ["reason"], "journey_tools": [],
               "template": "반품 사유를 {reason:NLX.Slot}(으)로 접수하겠습니다."}]
     j, _ = _apply_journey(_journey_flow(), journey_steps=steps)
-    confirm = j["nodes"][j["nodes"]["gj"]["childNodes"][0]["nodeId"]]["messages"][0]["body"]
-    assert confirm == "반품 사유를 {reason:NLX.Slot}(으)로 접수하겠습니다."
+    assert _read_back_before(j, "dr") == "반품 사유를 {reason:NLX.Slot}(으)로 접수하겠습니다."
 
 
 def test_m4_reports_a_sentence_that_reads_a_status_code_aloud():
@@ -2016,3 +2149,44 @@ def test_m4_reports_a_sentence_that_reads_a_status_code_aloud():
     # a text field the backend fills with the spoken label is fine
     flow["nodes"]["say"]["messages"][0]["body"] = "예약번호는 {createCleaningReservation.reservationId:NLX.Variable}입니다."
     assert not [p for p in runtime_contract_violations(flow, **kwargs, scope="cross") if "M4" in p]
+
+
+def test_m3_gives_the_split_redirect_node_a_v4_uuid():
+    """Live (TableNow, 2026-09-20): the redirect node M3 splits off a message
+    node was keyed f"{node_id}-redirect" — not a UUID — and the SCHEMA gate
+    failed the very flow the rule had just repaired, six attempts running."""
+    import re
+    flow = broken("GetCleaningPrice")
+    start = next(n for n in flow["nodes"].values() if n.get("type") == "start")
+    flow["nodes"]["say"] = {"nodeId": "say", "type": "basic",
+                            "messages": [{"type": "text", "body": "단가는 100원입니다."}],
+                            "metadata": {"redirect": {"type": "flow", "flowId": "FollowUpFlow"}},
+                            "childNodes": [{"nodeId": "fin", "name": "next"}]}
+    flow["nodes"]["fin"] = {"nodeId": "fin", "type": "end"}
+    start["childNodes"] = [{"nodeId": "say", "name": "next"}]
+    out, notes = apply_runtime_contract(flow, **context("GetCleaningPrice"))
+    say = out["nodes"]["say"]
+    assert "redirect" not in (say.get("metadata") or {})
+    split_id = say["childNodes"][0]["nodeId"]
+    assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", split_id), split_id
+    assert out["nodes"][split_id]["type"] == "redirect"
+    assert out["nodes"][split_id]["metadata"]["redirect"]["flowId"] == "FollowUpFlow"
+    assert any("(M3)" in n for n in notes)
+
+
+def test_d3p_resolves_the_plan_s_request_id_against_the_bundled_requests():
+    """Live (AnyClinic, 2026-09-20): the plan step said `reschedule_appointment`
+    (the OPERATION id) where the bundled request is `rescheduleAppointment`;
+    D3p pinned the node to the unknown id and five attempts in a row failed
+    DATA_REQUEST_REF_UNDEFINED. The planned id is resolved first; an id no
+    request matches never gets pinned."""
+    from tools.acxd_runtime_contract import _RuntimeContract
+    ctx = context("CreateCleaningReservation")
+    request_ids = list(ctx["data_requests"])
+    assert request_ids
+    real = request_ids[0]
+    snake = "".join("_" + c.lower() if c.isupper() else c for c in real)  # camel → snake
+    contract = _RuntimeContract(broken("CreateCleaningReservation"),
+                                **{"follow_up_flow_id": "FollowUpFlow", "escalation_flow_id": "EscalationFlow",
+                                   **ctx, "request_steps": [snake, "no_such_request"]})
+    assert contract.request_steps == [real]

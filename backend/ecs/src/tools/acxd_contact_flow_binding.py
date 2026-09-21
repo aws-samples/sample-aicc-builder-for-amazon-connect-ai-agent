@@ -375,7 +375,12 @@ def _reachable_action_ids(document: dict) -> set[str]:
     return reachable
 
 
-def _context_variables(application: dict) -> list[dict]:
+def _context_variables(application: dict, plan_data: Optional[dict] = None) -> list[dict]:
+    """The block's context variables — the same list the application asset and
+    the runtime contract use (declared + failReason + hand-off slots)."""
+    if plan_data is not None:
+        from tools.acxd_resource_builders import effective_context_variables
+        return effective_context_variables(plan_data)
     variables: list[dict] = []
     for raw in (application.get("context_variables") or [])[:MAX_CONTEXT_VARIABLES]:
         if not isinstance(raw, dict) or not raw.get("name"):
@@ -398,8 +403,8 @@ def _find_or_add_action(actions: list[dict], action_type: str, identifier: str, 
     return identifier
 
 
-def _build_binding(application: dict, branches: dict[str, str]) -> dict:
-    context_variables = _context_variables(application)
+def _build_binding(application: dict, branches: dict[str, str], plan_data: Optional[dict] = None) -> dict:
+    context_variables = _context_variables(application, plan_data)
     return {
         "workspaceId": "{ACXD_WORKSPACE_ID}",
         "applicationId": "{ACXD_APPLICATION_ID}",
@@ -498,7 +503,7 @@ def normalize_acxd_contact_flow(
     # the block's dropdown.
     context_variable_map = {
         item["name"]: item.get("fromContactAttribute") or f"$.Attributes.{item['name']}"
-        for item in _context_variables(application)
+        for item in _context_variables(application, plan_data)
     }
     speech_engine = str(application.get("speech_engine") or "agentic_voice").lower()
     agent_parameters: dict = {
@@ -583,7 +588,7 @@ def normalize_acxd_contact_flow(
     metadata = document.get("Metadata")
     if not isinstance(metadata, dict):
         metadata = {}
-    metadata["acxdBinding"] = _build_binding(application, branches)
+    metadata["acxdBinding"] = _build_binding(application, branches, plan_data)
     document["Metadata"] = metadata
 
     context_names = {item["name"] for item in metadata["acxdBinding"]["contextVariables"]}

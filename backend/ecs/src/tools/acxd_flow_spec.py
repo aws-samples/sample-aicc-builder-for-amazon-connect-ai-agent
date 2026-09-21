@@ -609,15 +609,56 @@ def enforce_determinism_policy(step: ACXDNodeStep) -> Optional[str]:
     return None
 
 
-def is_strict_format_slot(slot: ACXDSlotPlan) -> bool:
-    """A value the runtime must check exactly — never a journey's to paraphrase."""
+DATE_LIKE_TYPES = frozenset({"date", "datetime", "time", "nlx.date", "nlx.time"})
+
+
+def is_strict_format_slot(slot: ACXDSlotPlan, field: Optional[dict] = None) -> bool:
+    """A value the runtime must check exactly — never a journey's to paraphrase.
+
+    ``field`` is the OperationSpec input field the slot fills, when known: a
+    field with a ``date_format`` (or a date/datetime ``field_type``) is strict
+    too. Live (2026-09-20): `preferredDate` (YYYY-MM-DD in the spec) was a
+    journey capture; the journey stored "다음주" verbatim, the backend got it,
+    and the confirmation and the result both repeated "다음주" instead of a date.
+    A user_choice over that slot becomes ``NLX.Date`` (S9) and delivers an ISO date."""
     kind = str(slot.type or "").strip()
     if slot.regex:
         return True
     if kind in STRICT_FORMAT_BUILTIN_TYPES:
         return True
     lowered = kind.lower()
+    if lowered in DATE_LIKE_TYPES:
+        return True
+    if isinstance(field, dict):
+        if field.get("date_format") or str(field.get("field_type") or "").lower() in ("date", "datetime"):
+            return True
+        if field.get("pattern"):
+            return True
     return lowered in {"phone", "phonenumber", "phone_number", "email", "alphanumeric", "identifier"}
+
+
+def spec_input_fields(operation_id: Optional[str]) -> dict[str, dict]:
+    """The OperationSpec's input fields by name (and by snake/camel spelling),
+    as plain dicts; empty when the spec is unavailable."""
+    if not operation_id:
+        return {}
+    try:
+        from tools.spec_manager import get_all_specs
+        spec = (get_all_specs() or {}).get(operation_id)
+    except Exception:
+        return {}
+    if spec is None:
+        return {}
+    out: dict[str, dict] = {}
+    for f in (getattr(spec, "input_fields", None) or []):
+        d = f.model_dump() if hasattr(f, "model_dump") else (dict(f) if isinstance(f, dict) else {})
+        name = str(d.get("name") or "")
+        if not name:
+            continue
+        out[name] = d
+        out[name.lower()] = d
+        out[re.sub(r"(?<!^)([A-Z])", r"_\1", name).lower()] = d
+    return out
 
 
 def generative_style_notes(spec, role: Optional[str], steps: List["ACXDNodeStep"],
@@ -663,12 +704,15 @@ def generative_style_notes(spec, role: Optional[str], steps: List["ACXDNodeStep"
     return notes
 
 
-def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan]) -> List[str]:
+def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan],
+                           spec_fields: Optional[dict] = None) -> List[str]:
     """Keep a generative_journey's ``captures`` to values a conversation may
     collect. Returns notes for every coercion; mutates ``step``.
 
-    - a strict-format slot (regex / phone / identifier) is dropped from the
-      journey: it needs its own user_choice step so F1 can re-ask on a miss
+    - a strict-format slot (regex / phone / identifier / date) is dropped from
+      the journey: it needs its own user_choice step so F1 can re-ask on a miss
+      (and a date slot becomes NLX.Date, which delivers an ISO date instead of
+      the words the caller used)
     - a name that is not one of the flow's slots is dropped (nothing to fill)
     - a non-journey step carries no captures at all
     """
@@ -679,6 +723,7 @@ def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan]) -> Lis
             notes.append(f"step {step.step}: captures/journey_tools apply to generative_journey steps only — cleared")
         return notes
     by_name = {s.name: s for s in slots}
+    fields = spec_fields or {}
     kept: List[str] = []
     for name in step.captures:
         name = str(name).strip()
@@ -688,10 +733,16 @@ def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan]) -> Lis
         if slot is None:
             notes.append(f"step {step.step}: captures '{name}' is not one of the flow's slots — dropped")
             continue
-        if is_strict_format_slot(slot):
-            notes.append(f"step {step.step}: '{name}' has a strict format ({slot.type}"
-                         f"{' + regex' if slot.regex else ''}) — a journey must not capture it; "
-                         "plan a user_choice step for it")
+        field = fields.get(slot.field_name or "") or fields.get(name) or fields.get(name.lower())
+        if is_strict_format_slot(slot, field):
+            date_like = bool(field and (field.get("date_format") or str(field.get("field_type") or "").lower()
+                                        in ("date", "datetime"))) or str(slot.type or "").lower() in DATE_LIKE_TYPES
+            why = (f"a date ({(field or {}).get('date_format') or 'YYYY-MM-DD'}) — a journey stores the words "
+                   f"the caller used ('다음주', 'next week'), a user_choice slot becomes NLX.Date and delivers "
+                   f"the ISO date" if date_like
+                   else f"a strict format ({slot.type}{' + regex' if slot.regex else ''}) — a journey must not "
+                        f"capture it")
+            notes.append(f"step {step.step}: '{name}' has {why}; plan a user_choice step for it")
             continue
         kept.append(name)
     step.captures = kept
@@ -754,6 +805,26 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
                         problems.append(f"flow '{f.flow_id}': slot '{sl.name}' has a strict format and no "
                                         f"user_choice step declares slot='{sl.name}' — collect it "
                                         "deterministically (the journey must not)")
+            # Live (SELC, 2026-09-21): "step 3 announce the result, step 4 hand off to
+            # the search-by-customer-info flow" with no step saying WHEN — the model
+            # generated the announcement path only, five attempts in a row, and the
+            # determinism gate refused the application each time. A hand-off to
+            # another operation flow is a branch: the plan must carry the choice
+            # step that decides it, so the generator has a condition to render.
+            operation_ids = {p.flow_id for p in spec.flows if p.role == "operation" and p.flow_id != f.flow_id}
+            from tools.acxd_system_flows import resolve_flow_reference
+            role_map = {"flows": [{"role": p.role, "flow_id": p.flow_id} for p in spec.flows]}
+            ordered = sorted(f.steps, key=lambda st: st.step)
+            for idx, s in enumerate(ordered):
+                if s.node_type != "redirect" or not s.redirect_flow_id:
+                    continue
+                if resolve_flow_reference(s.redirect_flow_id, [p.flow_id for p in spec.flows], role_map) not in operation_ids:
+                    continue
+                if not any(prev.node_type == "choice" for prev in ordered[:idx]):
+                    problems.append(
+                        f"flow '{f.flow_id}' step {s.step}: hands off to operation flow '{s.redirect_flow_id}' but no "
+                        "earlier step is a 'choice' that decides when — add a choice step after the data_request "
+                        "(e.g. 'success/found → announce, not found → hand off') so the branch is generated")
         if not f.confirmed:
             problems.append(f"flow '{f.flow_id}': flow plan not approved by the user")
     roles = spec.system_flows()
@@ -990,11 +1061,25 @@ def upsert_acxd_flow_plan(
                 raw["node_type"] = canonical
                 if canonical == "data_request" and not raw.get("data_request_id"):
                     raw["data_request_id"] = operation_id
+                if canonical == "redirect" and raw.get("redirect_flow_id"):
+                    # Live (TableNow, 2026-09-20): the proposer wrote the ROLE
+                    # ("followup") and the determinism gate later compared it
+                    # literally with the generated redirect's "FollowUpFlow".
+                    # Store the id the bundle will ship.
+                    from tools.acxd_system_flows import resolve_flow_reference
+                    known_flow_ids = [f.flow_id for f in spec.flows] + [flow_id]
+                    resolved_target = resolve_flow_reference(
+                        raw["redirect_flow_id"], known_flow_ids,
+                        {"flows": [{"role": f.role, "flow_id": f.flow_id} for f in spec.flows]})
+                    if resolved_target != raw["redirect_flow_id"]:
+                        notes.append(f"step {raw.get('step')}: redirect_flow_id "
+                                     f"'{raw['redirect_flow_id']}' resolved to '{resolved_target}'")
+                        raw["redirect_flow_id"] = resolved_target
                 s = ACXDNodeStep.model_validate(raw)
                 note = enforce_determinism_policy(s)
                 if note:
                     notes.append(note)
-                notes.extend(enforce_capture_policy(s, new_slots))
+                notes.extend(enforce_capture_policy(s, new_slots, spec_input_fields(operation_id)))
                 prev = prev_steps.get(s.step)
                 if prev and prev.user_confirmed and _decision_key(prev) == _decision_key(s):
                     s.user_confirmed = True                # unchanged decision keeps its confirmation
@@ -1026,12 +1111,30 @@ def upsert_acxd_flow_plan(
                 "coerced": notes,
                 "awaiting_confirmation": plan.unconfirmed_steps,
                 "flow_approved": plan.confirmed,
+                "plans": plan_state_summary(spec),
                 "message": ("Plan saved. Show the steps and their determinism labels to the user; "
                             "call confirm_acxd_flow_steps only after they explicitly agree."
                             if plan.unconfirmed_steps else "Plan saved; all decisions remain confirmed."),
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+
+def plan_state_summary(spec: "ACXDFlowSpec") -> dict:
+    """Every saved flow and where it stands — returned by the plan tools so the
+    model reads the state from the tool, not from its memory of earlier turns.
+    Live (2026-09-21): after a history reload the orchestrator re-saved two
+    already-confirmed flows twice in a row."""
+    out: dict = {}
+    for f in (getattr(spec, "flows", None) or []):
+        if f.confirmed:
+            state = "confirmed"
+        elif f.unconfirmed_steps:
+            state = f"saved, steps {f.unconfirmed_steps} await confirmation"
+        else:
+            state = "saved, awaiting approve_flow"
+        out[f.flow_id] = f"{state} ({len(f.steps)} steps, {f.role})"
+    return out
 
 
 @tool
@@ -1066,7 +1169,8 @@ def confirm_acxd_flow_steps(flow_id: str, step_numbers: Union[list[int], str] = 
             plan.confirmed = True
         save_acxd_flow_spec(spec)
         return {"success": True, "flow_id": flow_id, "confirmed": sorted(wanted),
-                "awaiting_confirmation": plan.unconfirmed_steps, "flow_approved": plan.confirmed}
+                "awaiting_confirmation": plan.unconfirmed_steps, "flow_approved": plan.confirmed,
+                "plans": plan_state_summary(spec)}
 
 
 @tool

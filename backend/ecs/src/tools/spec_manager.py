@@ -2383,6 +2383,159 @@ def save_session_flow_config(
         }
 
 
+YES_NO_BY_LANGUAGE = {"ko": ["예", "아니오"], "en": ["yes", "no"], "ja": ["はい", "いいえ"]}
+
+
+def normalize_boolean_inputs_for_acxd(language: str = "ko") -> list[str]:
+    """ACXD has no boolean built-in: a yes/no answer is a `yesNo` custom slot type
+    whose values are the spoken words, and the data request posts the slot as
+    is. Live (SELC, 2026-09-21): `privacyConsent` was `boolean` in the spec, so
+    the OpenAPI said boolean while the flow captured "예"/"아니오" — two blocking
+    parity findings and a runtime the Lambda would have rejected. Every boolean
+    INPUT field becomes a string enum of the locale's yes/no words before
+    generation, so the spec, the OpenAPI, the Lambda and the slot type agree.
+    Returns the fields changed as "operation.field"."""
+    code = str(language or "ko").lower()[:2]
+    values = YES_NO_BY_LANGUAGE.get(code, YES_NO_BY_LANGUAGE["ko"])
+    changed: list[str] = []
+    for op_id, spec in list(_specs_bucket().items()):
+        touched = False
+        for f in list(getattr(spec, "input_fields", None) or []):
+            ftype = str(getattr(f, "field_type", "") or "").lower()
+            if ftype not in ("boolean", "bool"):
+                continue
+            f.field_type = "string"
+            f.enum_values = list(values)
+            note = f"spoken yes/no: {values[0]} = true, {values[1]} = false"
+            f.description = f"{f.description} ({note})" if getattr(f, "description", None) else note
+            changed.append(f"{op_id}.{f.name}")
+            touched = True
+        if not touched:
+            continue
+        sid = _get_current_session_id()
+        if sid:
+            _nfs_persist_spec(sid, op_id, spec.model_dump())
+        try:
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
+            if ws:
+                ws.save_spec(op_id, spec.model_dump())
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"[SpecManager] S3 persist failed for {op_id}: {e}")
+    if changed:
+        logger.info("[SpecManager] ACXD boolean inputs normalized to %s: %s", values, changed)
+    return changed
+
+
+def _persist_flow_cfg(config: "SessionFlowConfig") -> None:
+    """Keep the in-memory config and both stores (NFS fast-path, S3) in step."""
+    _set_flow_cfg(config)
+    sid = _get_current_session_id()
+    if sid:
+        state_dir = _nfs_state_dir(sid)
+        if state_dir is not None:
+            try:
+                state_dir.mkdir(parents=True, exist_ok=True)
+                target = state_dir / "flow_config.json"
+                tmp = target.with_suffix(".tmp")
+                tmp.write_text(_json.dumps(config.model_dump(), ensure_ascii=False, default=str), encoding="utf-8")
+                tmp.rename(target)
+            except Exception as e:
+                logger.warning(f"[SpecManager] NFS persist failed for flow config: {e}")
+    try:
+        from tools.project_workspace import ensure_workspace
+        ws = ensure_workspace()
+        if ws:
+            ws.save_flow_config(config.model_dump())
+    except Exception as e:
+        logger.warning(f"[SpecManager] S3 persist failed for flow config: {e}")
+
+
+@tool
+def update_session_flow_config(
+    agent_persona: str = None,
+    common_greeting: str = None,
+    common_closing: str = None,
+    no_response_policy: dict = None,
+    shared_exceptions: list[dict] = None,
+    session_tools: list[dict] = None,
+    remove_session_tools: list[str] = None,
+    session_tool_flags: dict = None,
+) -> dict:
+    """
+    Change PART of the saved session flow configuration after the interview,
+    keeping everything else as it is. Use it when a review or the customer asks
+    for a session-level change: a typo in the retry / final / greeting message,
+    a session tool that is out of PoC scope, a tool that should not get a Lambda
+    or an API path. (`save_session_flow_config` REPLACES the whole configuration
+    and is an interview tool; this one merges.)
+
+    Args:
+        agent_persona / common_greeting / common_closing: replacement text (omit to keep).
+        no_response_policy: keys to change inside the policy, merged key by key —
+            e.g. {"retry_message": "고객님, 말씀을 잘 알아듣지 못했습니다. 다시 한 번 말씀해 주시겠어요?"}.
+        shared_exceptions: full replacement list (omit to keep).
+        session_tools: full replacement list of session tools (omit to keep).
+        remove_session_tools: tool_ids to drop from session_tools, e.g. ["log_call_result"]
+            when the customer excluded the tool from the PoC. The count gate then
+            stops expecting its Lambda and API path.
+        session_tool_flags: {tool_id: {"generate_lambda": bool, "generate_openapi": bool}}
+            to keep a tool declared but stop expecting one of its assets.
+
+    Returns:
+        The resulting configuration summary, or an error when nothing is saved yet.
+    """
+    try:
+        current = get_session_flow_config()
+        if current is None:
+            return {"success": False, "error": "no session flow config",
+                    "message": "No session flow config is saved yet — the interview saves it with save_session_flow_config."}
+        data = current.model_dump()
+        changed: list[str] = []
+        for key, value in (("agent_persona", agent_persona), ("common_greeting", common_greeting),
+                           ("common_closing", common_closing)):
+            if value is not None:
+                data[key] = value
+                changed.append(key)
+        if no_response_policy is not None:
+            merged = dict(data.get("no_response_policy") or {})
+            merged.update({k: v for k, v in no_response_policy.items() if v is not None})
+            data["no_response_policy"] = _safe_parse_model(NoResponsePolicy, merged).model_dump()
+            changed.append("no_response_policy")
+        if shared_exceptions is not None:
+            data["shared_exceptions"] = shared_exceptions
+            changed.append("shared_exceptions")
+        tools = [_safe_parse_model(ToolSpec, t).model_dump() for t in (session_tools if session_tools is not None
+                                                                     else (data.get("session_tools") or []))]
+        if session_tools is not None:
+            changed.append("session_tools")
+        if remove_session_tools:
+            drop = {str(t) for t in remove_session_tools}
+            before = len(tools)
+            tools = [t for t in tools if str(t.get("tool_id")) not in drop]
+            if len(tools) != before:
+                changed.append(f"removed {sorted(drop)}")
+        for tool_id, flags in (session_tool_flags or {}).items():
+            for t in tools:
+                if str(t.get("tool_id")) == str(tool_id) and isinstance(flags, dict):
+                    for flag in ("generate_lambda", "generate_openapi"):
+                        if flag in flags:
+                            t[flag] = bool(flags[flag])
+                    changed.append(f"{tool_id} flags")
+        data["session_tools"] = tools
+        config = _safe_parse_model(SessionFlowConfig, data)
+        _persist_flow_cfg(config)
+        return {
+            "success": True,
+            "message": f"Session flow configuration updated ({', '.join(changed) or 'no change'}).",
+            "session_tools": [{"tool_id": t.tool_id, "generate_lambda": t.generate_lambda,
+                               "generate_openapi": t.generate_openapi} for t in (config.session_tools or [])],
+            "no_response_policy": config.no_response_policy.model_dump() if config.no_response_policy else None,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e), "message": f"Failed to update session flow config: {e}"}
+
+
 @tool
 def get_session_flow_config_tool() -> dict:
     """

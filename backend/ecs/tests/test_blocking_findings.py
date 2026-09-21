@@ -64,6 +64,7 @@ def test_orphan_operation_gate_flags_specless_assets_but_not_supporting_lambdas(
     import tools.asset_loader as al
 
     monkeypatch.setattr(sm, "get_all_specs", lambda: {"get_cleaning_price": object()})
+    monkeypatch.setattr(sm, "get_session_flow_config", lambda: None)   # not declared as a session tool
     monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
         "assets/s/lambda/get_cleaning_price/handler.py",
         "assets/s/lambda/log_call_result/index.py",         # supporting-style file, but…
@@ -77,6 +78,80 @@ def test_orphan_operation_gate_flags_specless_assets_but_not_supporting_lambdas(
         "  /tools/log_call_result:\n    post:\n      operationId: log_call_result\n"))
     ids = sorted(f["id"] for f in rg._orphan_operation_findings("s"))
     assert ids == ["SPEC:acxd_data_request:logCallResult", "SPEC:openapi:log_call_result"]
+
+
+def test_orphan_operation_gate_knows_session_tools_declared_in_the_flow_config(monkeypatch):
+    """Live (2026-09-20): `log_call_result` was a declared session tool (flow
+    config session_tools, generate_lambda/generate_openapi true). This gate
+    reported its OpenAPI operation as spec-less and the orchestrator removed the
+    path and the API resources; the count gate then reported the path as missing.
+    The two blocking findings could not both be satisfied and the review never
+    converged. A session tool has no OperationSpec by design."""
+    import tools.review_gates as rg
+    import tools.spec_manager as sm
+    import tools.s3_asset_storage as s3s
+    import tools.asset_loader as al
+
+    class _Tool:
+        tool_id = "log_call_result"
+
+    class _Cfg:
+        session_tools = [_Tool()]
+
+    monkeypatch.setattr(sm, "get_all_specs", lambda: {"get_cleaning_price": object()})
+    monkeypatch.setattr(sm, "get_session_flow_config", lambda: _Cfg())
+    monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
+        "assets/s/lambda/get_cleaning_price/handler.py",
+        "assets/s/lambda/log_call_result/index.py",
+    ])
+    monkeypatch.setattr(al, "load_existing_asset", lambda *a, **k: (
+        "openapi: 3.0.0\npaths:\n  /tools/get_cleaning_price:\n    post:\n      operationId: get_cleaning_price\n"
+        "  /tools/log_call_result:\n    post:\n      operationId: log_call_result\n"))
+    assert rg._orphan_operation_findings("s") == []
+
+
+def test_count_gate_expects_only_tools_whose_generate_flags_are_on(monkeypatch, tmp_path):
+    """The D1-4 count gate must follow the ToolSpec's generate_lambda /
+    generate_openapi flags: a session tool excluded from the PoC (both flags
+    False) is not a missing Lambda or a missing path — live (2026-09-20) it kept
+    the review red after the customer had approved dropping it — and a tool id
+    spelled camelCase in the OpenAPI operationId is still found."""
+    monkeypatch.setenv("S3FILES_MOUNT_PATH", str(tmp_path))
+    import tools.validate_consistency as vc
+    from tools.spec_manager import OperationSpec, ToolSpec
+
+    specs = {op: OperationSpec(operation_id=op, input_fields=[], output_fields=[])
+             for op in ("get_cleaning_price", "create_cleaning_reservation")}
+    monkeypatch.setattr(vc, "get_all_specs", lambda: specs)
+    monkeypatch.setattr(vc, "get_all_tools", lambda: [
+        ToolSpec(tool_id="get_cleaning_price", role="primary"),
+        ToolSpec(tool_id="create_cleaning_reservation", role="primary"),
+        ToolSpec(tool_id="log_call_result", role="session", generate_lambda=False, generate_openapi=False),
+    ])
+    assets = {
+        "sessions/s1/lambda/get_cleaning_price/handler.py": "def lambda_handler(e, c):\n    return {}\n",
+        "sessions/s1/lambda/create_cleaning_reservation/handler.py": "def lambda_handler(e, c):\n    return {}\n",
+        "sessions/s1/openapi/openapi.yaml": (
+            "openapi: 3.0.0\npaths:\n"
+            "  /tools/get_cleaning_price:\n    post:\n      operationId: getCleaningPrice\n"
+            "  /tools/create_cleaning_reservation:\n    post:\n      operationId: createCleaningReservation\n"),
+    }
+    monkeypatch.setattr(vc, "list_session_assets", lambda sid: list(assets.keys()))
+    monkeypatch.setattr(vc, "get_asset_from_s3", lambda key: assets.get(key))
+
+    result = vc.validate_parameter_consistency("s1")
+    count_issues = [m["issue"] for m in result["mismatches"] if m.get("asset_type") == "count"]
+    assert count_issues == []
+
+    # …and with the flags on, the very same assets ARE short of that tool.
+    monkeypatch.setattr(vc, "get_all_tools", lambda: [
+        ToolSpec(tool_id="get_cleaning_price", role="primary"),
+        ToolSpec(tool_id="create_cleaning_reservation", role="primary"),
+        ToolSpec(tool_id="log_call_result", role="session"),
+    ])
+    result = vc.validate_parameter_consistency("s1")
+    count_issues = [m["issue"] for m in result["mismatches"] if m.get("asset_type") == "count"]
+    assert len(count_issues) == 2 and all("log_call_result" in i for i in count_issues)
 
 
 
@@ -124,3 +199,95 @@ def test_d9_flags_agenticcx_reads_before_the_block():
     ]
     before = _d9_agenticcx_refs_before_block({"StartAction": "lookup"}, actions)
     assert before == {"check": ["$.AgenticCX.ContextVariables.isKnownCustomer"]}   # 'log' is after the block
+
+
+def test_iam_action_derivation_ignores_python_dict_methods():
+    """Live (2026-09-20): a handler iterated its schema map as ``table`` and
+    called ``table.get("logical_id")``; the gate read it as ``dynamodb:Get`` —
+    an action that does not exist — and blocked three Lambdas whose role
+    granted ``dynamodb:GetItem``. Only real Table-resource methods (and real
+    client operations) derive actions."""
+    from tools.validate_consistency import _extract_required_iam_actions
+    code = '''
+import boto3
+dynamodb = boto3.resource("dynamodb")
+ssm = boto3.client("ssm")
+def _find(schema, logical_id):
+    for table in schema["tables"]:
+        if table.get("logical_id") == logical_id:
+            return table
+def handler(event, context):
+    cfg = {}
+    cfg.get("x")
+    ssm.get_parameter(Name="p")
+    table = dynamodb.Table("t")
+    table.get_item(Key={"pk": "1"})
+    table.query(KeyConditionExpression="pk = :v")
+    with table.batch_writer() as bw:
+        bw.put_item(Item={})
+'''
+    actions = _extract_required_iam_actions(code)
+    assert actions == {"ssm:GetParameter", "dynamodb:GetItem", "dynamodb:Query", "dynamodb:BatchWriteItem"}
+
+
+def test_missing_knowledge_family_is_blocking_when_documented_or_planned(monkeypatch):
+    """Live (2026-09-20): the document listed seven FAQ topics; no FAQ asset,
+    no ACXD knowledge base and no flow reading one were generated; the review
+    reported 0 blocking because every gate iterates over operations."""
+    import tools.review_gates as rg
+    import tools.spec_manager as sm
+    import tools.s3_asset_storage as s3s
+    import tools.asset_loader as al
+    import tools.acxd_flow_spec as afs
+    import tools.requirement_items as ri
+
+    class _Spec:
+        pass
+
+    class _KB:
+        topics = ["배송조회방법", "배송지연"]
+
+    class _Flow:
+        flow_id, uses_knowledge_base, steps = "DeliveryStatus", False, []
+
+    class _FS:
+        knowledge_base = _KB()
+        flows = [_Flow()]
+
+    monkeypatch.setattr(sm, "get_all_specs", lambda: {"get_delivery_status": _Spec()})
+    monkeypatch.setattr(afs, "is_acxd_target", lambda *a, **k: True)
+    monkeypatch.setattr(afs, "get_acxd_flow_spec", lambda *a, **k: _FS())
+    monkeypatch.setattr(ri, "load_ledger", lambda: None)
+    monkeypatch.setattr(al, "load_existing_asset", lambda *a, **k: None)
+    monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
+        "assets/s/lambda/get_delivery_status/handler.py",
+        "assets/s/acxd_data_request/getDeliveryStatus.json",
+    ])
+    ids = sorted(f["id"] for f in rg._missing_asset_findings("s"))
+    assert ids == ["MISSING:acxd_flow:faq", "MISSING:acxd_knowledge_base:__all__", "MISSING:faq:__all__"]
+
+    # the family present → nothing to report
+    _Flow.uses_knowledge_base = True
+    monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
+        "assets/s/lambda/get_delivery_status/handler.py",
+        "assets/s/acxd_data_request/getDeliveryStatus.json",
+        "assets/s/faq/knowledge_base/01_delivery.md",
+        "assets/s/acxd_knowledge_base/knowledge_base.json",
+    ])
+    assert rg._missing_asset_findings("s") == []
+
+    # neither planned nor documented → not required
+    _KB.topics = []
+    _Flow.uses_knowledge_base = False
+    monkeypatch.setattr(s3s, "list_session_assets", lambda sid: [
+        "assets/s/lambda/get_delivery_status/handler.py",
+        "assets/s/acxd_data_request/getDeliveryStatus.json",
+    ])
+    assert rg._missing_asset_findings("s") == []
+
+    # documented (FAQ section in the ledger, not excluded) → required again
+    monkeypatch.setattr(ri, "load_ledger", lambda: {
+        "items": [{"id": "R34", "section": "FAQ", "text": "배송조회방법, 배송지연"}],
+        "mappings": {}, "signals": {"faq": {"item_ids": ["R34"]}}})
+    assert [f["id"] for f in rg._missing_asset_findings("s")] == [
+        "MISSING:faq:__all__", "MISSING:acxd_knowledge_base:__all__", "MISSING:acxd_flow:faq"]

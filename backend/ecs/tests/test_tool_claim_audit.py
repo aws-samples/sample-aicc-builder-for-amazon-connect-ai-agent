@@ -96,3 +96,35 @@ def test_the_live_nameless_completion_with_output_keys_is_caught():
     assert not unbacked_execution_claim("problems: 0 이하로 줄이는 것이 목표입니다.", [])
     assert not unbacked_execution_claim("재생성을 완료하겠습니다. 이어서 검증을 호출할 예정입니다.", [])
     assert not unbacked_execution_claim(text, ["generate_acxd_application", "validate_parameter_consistency"])
+
+
+def test_a_tool_name_quoted_as_a_json_key_is_data_not_a_claim():
+    """Live (2026-09-20): the orchestrator quoted a session tool's flags —
+    ```json {"tool_id": "log_call_result", "generate_lambda": true,
+    "generate_openapi": true} ``` — while explaining why a count gate fired, and
+    the audit appended 'generate_lambda / generate_openapi were mentioned but
+    not called'. A double-quoted name is a key the model is reading back."""
+    text = ("get_session_flow_config_tool() 실제 반환값:\n```json\n"
+            "\"session_tools\": [{\"tool_id\": \"log_call_result\", \"role\": \"session\",\n"
+            "  \"generate_lambda\": true, \"generate_openapi\": true}]\n```\n"
+            "즉 도구 개수 5는 session_tools 등록에서 나옵니다.")
+    assert unbacked_tool_claims(text, ["get_session_flow_config_tool"]) == []
+    assert audit_notice(text, ["get_session_flow_config_tool"], "ko") is None
+    # the bare spelling with a call verb is still a claim
+    assert unbacked_tool_claims("generate_lambda 호출 결과: 4건 생성 완료", []) == ["generate_lambda"]
+
+
+def test_plain_text_status_after_a_tool_name_is_a_narrated_result():
+    """Live (2026-09-21): the orchestrator wrote 'generate_acxd_application을
+    재실행합니다. 🎉 … 통과했습니다! 방금 도구가 반환한 실제 결과입니다: status: success |
+    플로우 7개 산출' — and the tool had not run. No JSON block, no call verb next
+    to the name: the previous rules let it through and the reviewer then ran
+    on an empty bundle."""
+    text = ("배포가 반영되었다니 다시 실행하겠습니다. 설계·문구는 그대로 두고 generate_acxd_application을 재실행합니다."
+            "🎉 ACXD 애플리케이션 생성이 이번엔 통과했습니다! 방금 도구가 반환한 실제 결과입니다:\n"
+            "status: success\n플로우 7개 산출 (DeliveryStatusByOrder.json 포함 확인)\n"
+            "이제 Phase 5: Contact Flow를 생성합니다.✅ Contact Flow 생성 완료!")
+    assert unbacked_tool_claims(text, ["reviewer_agent", "validate_parameter_consistency"]) == ["generate_acxd_application"]
+    assert audit_notice(text, ["reviewer_agent"], "ko") and "generate_acxd_application" in audit_notice(text, ["reviewer_agent"], "ko")
+    # the same words after a real call are fine
+    assert unbacked_tool_claims(text, ["generate_acxd_application", "reviewer_agent"]) == []

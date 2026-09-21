@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from typing import Callable, Optional
 
 from strands import tool
@@ -542,6 +543,152 @@ def _helper_flow_id_for(data_request_id: str) -> str:
     from tools.acxd_data_request_builder import helper_flow_id
     return helper_flow_id(data_request_id)
 
+_FAILURE_EDGE = re.compile(r"not[_ ]?found|fail|miss|error|invalid|no[_ ]?match|false|absent|unknown|else|미조회|실패|없음|오류|불일치|見つか|失敗|不明", re.I)
+
+
+def _repair_planned_hand_offs(flow: dict, plan: dict, spec: dict) -> None:
+    """The plan's operation-to-operation hand-off wins over the model's redirect.
+
+    Live (SELC, 2026-09-21): the confirmed plan said "order not found → hand off
+    to SearchOrderByCustomerInfo" and the model — twice in a row — sent that
+    branch to a system flow (Fallback / FollowUp). The determinism gate refused
+    the whole application each time (DETERMINISM_REDIRECT_TARGET), so no flow
+    file was written and nothing could be patched. When a confirmed redirect
+    step names an operation flow that no redirect node targets, the redirect on
+    the failure branch of the backend call is re-pointed at it; the message
+    the customer approved stays where it is.
+    """
+    nodes = flow.get("nodes")
+    if not isinstance(nodes, dict) or not isinstance(plan, dict):
+        return
+    try:
+        from tools.acxd_system_flows import resolve_flow_reference, resolve_system_flow_ids
+    except Exception:  # pragma: no cover
+        return
+    operation_ids = [p.get("flow_id") for p in (spec.get("flows") or [])
+                     if isinstance(p, dict) and p.get("flow_id")
+                     and str(p.get("role") or "operation") == "operation"]
+    system_ids = set(resolve_system_flow_ids(spec).values())
+    known = operation_ids + sorted(system_ids)
+    planned = []
+    for step in plan.get("steps") or []:
+        if not isinstance(step, dict) or not step.get("redirect_flow_id"):
+            continue
+        target = resolve_flow_reference(str(step["redirect_flow_id"]).strip(), known, spec)
+        if target in operation_ids and target != flow.get("flowId"):
+            planned.append(target)
+    if not planned:
+        return
+
+    def _target(node: dict) -> str:
+        rd = ((node.get("metadata") or {}).get("redirect") or {}) if isinstance(node.get("metadata"), dict) else {}
+        return str(rd.get("flowId") or "") if isinstance(rd, dict) else ""
+
+    actual = {_target(n) for n in nodes.values() if isinstance(n, dict) and n.get("type") == "redirect"}
+    # redirect nodes on a failure-looking edge, most specific first: reached from the
+    # choice that follows a data_request, else from any choice, else any system redirect
+    parents: dict[str, list[tuple[dict, dict]]] = {}
+    for n in nodes.values():
+        if not isinstance(n, dict):
+            continue
+        for edge in n.get("childNodes") or []:
+            if isinstance(edge, dict) and isinstance(edge.get("nodeId"), str):
+                parents.setdefault(edge["nodeId"], []).append((n, edge))
+    request_children = {e.get("nodeId") for n in nodes.values() if isinstance(n, dict) and n.get("type") == "data_request"
+                        for e in (n.get("childNodes") or []) if isinstance(e, dict)}
+
+    def _rank(node_id: str) -> int:
+        """How much the path into ``node_id`` looks like the backend call's failure
+        branch: walk up to four hops through the nodes before it (a message basic
+        usually sits between the choice and the redirect)."""
+        score = 0
+        frontier = [(node_id, 0)]
+        seen: set[str] = set()
+        while frontier:
+            current, depth = frontier.pop()
+            if current in seen or depth > 4:
+                continue
+            seen.add(current)
+            for parent, edge in parents.get(current, []):
+                name = str(edge.get("name") or "")
+                failure_like = bool(_FAILURE_EDGE.search(name)
+                                    or _FAILURE_EDGE.search(json.dumps(edge.get("conditions") or [], ensure_ascii=False)))
+                if failure_like:
+                    score = max(score, 2)
+                    if parent.get("type") == "choice" and parent.get("nodeId") in request_children:
+                        score = 3
+                if parent.get("type") in ("basic", "choice", "generative_text"):
+                    frontier.append((str(parent.get("nodeId")), depth + 1))
+        return score
+
+    for target in planned:
+        if target in actual:
+            continue
+        candidates = [(nid, n) for nid, n in nodes.items()
+                      if isinstance(n, dict) and n.get("type") == "redirect" and _target(n) in system_ids]
+        candidates.sort(key=lambda kv: -_rank(kv[0]))
+        if candidates and (_rank(candidates[0][0]) > 0 or len(candidates) == 1):
+            best_id, best = candidates[0]
+            previous = _target(best)
+            best["metadata"]["redirect"]["flowId"] = target
+            best["metadata"]["redirect"]["type"] = "flow"
+            actual.add(target)
+            logger.info("[ACXDFlowGen] repaired %s: failure-branch redirect %r → planned hand-off %r",
+                        flow.get("flowId"), previous, target)
+            continue
+        # No redirect to re-point (live: the model left the not-found branch
+        # dangling, so it was wired to an `end`). Give the failure-looking edge a
+        # redirect node of its own; a message basic on the way keeps its text.
+        edge_ref = _failure_edge_to_terminal(nodes, request_children)
+        if edge_ref is None:
+            continue
+        holder, edge = edge_ref
+        new_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"acxd-handoff:{flow.get('flowId')}:{target}"))
+        nodes[new_id] = {"nodeId": new_id, "type": "redirect",
+                         "metadata": {"redirect": {"type": "flow", "flowId": target}}}
+        previous = edge.get("nodeId")
+        edge["nodeId"] = new_id
+        actual.add(target)
+        logger.info("[ACXDFlowGen] repaired %s: failure branch of [%s] (%r) → new redirect to planned hand-off %r",
+                    flow.get("flowId"), str(holder.get("nodeId"))[:8], previous, target)
+
+
+def _failure_edge_to_terminal(nodes: dict, request_children: set) -> Optional[tuple[dict, dict]]:
+    """The (node, edge) whose failure-looking branch ends the flow: a choice edge
+    (preferably on the choice after the backend call) named like a miss whose
+    target is missing, an `end`, or a message basic that only leads to an `end`.
+    Returns the edge to re-point — the basic's own edge when a message sits first."""
+    best: Optional[tuple[int, dict, dict]] = None
+    for node in nodes.values():
+        if not isinstance(node, dict) or node.get("type") != "choice":
+            continue
+        for edge in node.get("childNodes") or []:
+            if not isinstance(edge, dict):
+                continue
+            name = str(edge.get("name") or "")
+            if not (_FAILURE_EDGE.search(name)
+                    or _FAILURE_EDGE.search(json.dumps(edge.get("conditions") or [], ensure_ascii=False))):
+                continue
+            target_id = edge.get("nodeId")
+            target = nodes.get(target_id) if isinstance(target_id, str) else None
+            holder, hop = node, edge
+            if target is not None and target.get("type") == "basic":
+                kids = [c for c in (target.get("childNodes") or []) if isinstance(c, dict)]
+                nxt = nodes.get(kids[0].get("nodeId")) if kids and isinstance(kids[0].get("nodeId"), str) else None
+                if kids and nxt is not None and nxt.get("type") not in ("end",):
+                    continue                      # the message leads somewhere real
+                if not kids:
+                    target["childNodes"] = [{"nodeId": None, "name": "next"}]
+                    kids = target["childNodes"]
+                holder, hop = target, kids[0]
+            elif target is not None and target.get("type") != "end":
+                continue                          # the branch goes somewhere real
+            score = 2 + (1 if node.get("nodeId") in request_children else 0)
+            if best is None or score > best[0]:
+                best = (score, holder, hop)
+    return (best[1], best[2]) if best else None
+
+
 def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
     """Deterministically repair the mechanical mistakes the model repeats.
 
@@ -573,6 +720,11 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
         for entry in attached:
             if not isinstance(entry, dict):
                 continue
+            # Live (TableNow, 2026-09-20): `"regex": null` on two attached slots
+            # failed the SCHEMA gate ("None is not of type 'string'") — an
+            # optional key the model spelled out as null. Absent is what it meant.
+            for key in [k for k, v in entry.items() if v is None]:
+                entry.pop(key)
             for key in ("name", "type"):
                 value = str(entry.get(key) or "")
                 if not value or value.lower() in builtin_slot_types or value.startswith("NLX."):
@@ -782,6 +934,22 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 if not isinstance(cond, dict):
                     continue
                 left, right = cond.get("left"), cond.get("right")
+                # Live (AnyClinic, 2026-09-20): the journey's exit edges came
+                # back as {"type": "System.gjConditionIndex"} — the system
+                # variable written where the operand TYPE goes — and the SCHEMA
+                # gate failed three attempts on it. The service shape is
+                # {"type": "system", "name": "System.<var>"}.
+                for operand in (left, right):
+                    if not isinstance(operand, dict):
+                        continue
+                    kind = str(operand.get("type") or "")
+                    if kind.lower().startswith("system.") or kind in ("gjConditionIndex", "capturedFlow", "lastFlow"):
+                        operand["name"] = kind if kind.lower().startswith("system.") else f"System.{kind}"
+                        operand["type"] = "system"
+                    elif kind == "system":
+                        name = str(operand.get("name") or "")
+                        if name and not name.lower().startswith("system."):
+                            operand["name"] = f"System.{name}"
                 if isinstance(left, dict) and left.get("type") in _TYPED_EDGE_LEFT_TYPES:
                     fixed_conds.append(cond)      # already canonical
                     continue
@@ -898,6 +1066,21 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 rd["type"] = "page" if rd.get("pageName") else ("parent_application" if rd.get("parentApplication") else "flow")
             if rd["type"] == "flow" and not rd.get("flowId") and meta.get("flowId"):
                 rd["flowId"] = meta["flowId"]
+            # Live (TableNow, 2026-09-20): told by the gate that the plan hands
+            # off to 'followup', the model redirected to the literal 'followup'
+            # — a role, not a bundled flow. Names that mean a system flow are
+            # resolved to the id the bundle ships; placeholders and real ids pass
+            # through unchanged.
+            if rd["type"] == "flow" and rd.get("flowId"):
+                from tools.acxd_system_flows import resolve_flow_reference, resolve_system_flow_ids
+                known = [p.get("flow_id") for p in spec.get("flows") or []
+                         if isinstance(p, dict) and p.get("flow_id")]
+                known += list(resolve_system_flow_ids(spec).values())
+                resolved = resolve_flow_reference(rd["flowId"], known, spec)
+                if resolved != rd["flowId"]:
+                    logger.info("[ACXDFlowGen] repaired %s: redirect target %r → %r",
+                                flow.get("flowId"), rd["flowId"], resolved)
+                    rd["flowId"] = resolved
         elif ntype == "define":
             df = meta.get("define") if isinstance(meta.get("define"), dict) else {}
             meta["define"] = df
@@ -932,6 +1115,8 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 kb["name"] = m.group(1) if m else (kb_name or str(kb_id))
             for unknown in [k for k in kb if k not in _KB_NODE_KEYS]:
                 kb.pop(unknown, None)
+
+    _repair_planned_hand_offs(flow, plan, spec)
 
     # 2. Map map-key/nodeId disagreements onto the map key (the key wins).
     for nid, node in list(nodes.items()):
@@ -1092,9 +1277,13 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
     for flow_id in system_ids.values():
         if flow_id not in flow_ids:
             flow_ids.append(flow_id)
-    context_variables = [var["name"] for var
-                         in ((spec.get("application") or {}).get("context_variables") or [])
-                         if isinstance(var, dict) and var.get("name")]
+    try:
+        from tools.acxd_resource_builders import effective_context_variables
+        context_variables = [v["name"] for v in effective_context_variables(spec)]
+    except Exception:  # pragma: no cover — the builder module is part of this package
+        context_variables = [var["name"] for var
+                             in ((spec.get("application") or {}).get("context_variables") or [])
+                             if isinstance(var, dict) and var.get("name")]
     # Customer-facing labels for result fields (the deployed data-request
     # document keeps ASCII-only descriptions; the interview's wording lives on
     # the spec's response_fields). M2 announces results with these.
@@ -1378,6 +1567,20 @@ def run_flow_generation(
             "[ACXDFlowGen] %s attempt %d failed: %s",
             plan.get("flow_id"), attempt, " | ".join(problems[:5]),
         )
+        try:
+            # The shape the model produced, so a repeated gate failure can be
+            # diagnosed from CloudWatch without the flow file (live: five failed
+            # attempts and no way to see which branch lacked the hand-off).
+            shape = []
+            for nid, node in (flow.get("nodes") or {}).items():
+                if not isinstance(node, dict):
+                    continue
+                edges = ",".join(str(e.get("name") or "?") for e in (node.get("childNodes") or []) if isinstance(e, dict))
+                rd = ((node.get("metadata") or {}).get("redirect") or {}) if isinstance(node.get("metadata"), dict) else {}
+                shape.append(f"{str(nid)[:8]}:{node.get('type')}[{edges}]" + (f"->{rd.get('flowId')}" if rd else ""))
+            logger.warning("[ACXDFlowGen] %s attempt %d shape: %s", plan.get("flow_id"), attempt, " ".join(shape)[:1800])
+        except Exception:  # pragma: no cover — diagnostics never fail the run
+            pass
     return None, problems, attempts
 
 

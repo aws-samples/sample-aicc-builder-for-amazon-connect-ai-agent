@@ -65,6 +65,7 @@ from tools import (
     update_operation_spec,
     format_operation_summary,
     save_session_flow_config,
+    update_session_flow_config,
     get_session_flow_config_tool,
     save_contact_flow_spec,
     get_contact_flow_spec_tool,
@@ -94,6 +95,7 @@ from tools.project_workspace import (
     save_requirement_document,
     load_requirement_document,
 )
+from tools.requirement_items import list_requirement_items, map_requirement_items
 from tools.interview_completion import complete_interview, check_interview_handoff
 from tools.acxd_flow_spec import (
     ACXD_INTERVIEW_TOOLS,
@@ -211,6 +213,7 @@ INTERVIEW_TOOLS = [
     update_operation_spec,
     format_operation_summary,
     save_session_flow_config,
+    update_session_flow_config,
     get_session_flow_config_tool,
     save_contact_flow_spec,
     get_contact_flow_spec_tool,
@@ -219,6 +222,8 @@ INTERVIEW_TOOLS = [
     infer_missing_tools,
     save_requirement_document,
     load_requirement_document,
+    list_requirement_items,
+    map_requirement_items,
     # NFS workspace file tools
     read_workspace_file,
     write_workspace_file,
@@ -402,6 +407,18 @@ def get_tools_for_phase(
     for spec_tool in (update_operation_spec, save_operation_spec):
         if spec_tool not in generation_tools:
             generation_tools.append(spec_tool)
+    # The session flow config is a source too (session tools, persona, the
+    # no-response messages). Live (2026-09-20): a session tool the customer
+    # excluded from the PoC kept the count gate red, and corrupted Korean in the
+    # retry message could not be fixed, because after the interview the only
+    # session-config tool left was the read-only getter.
+    if update_session_flow_config not in generation_tools:
+        generation_tools.append(update_session_flow_config)
+    # The requirement ledger stays readable (and mappable) after the interview:
+    # a modification request is checked against the document, not memory.
+    for ledger_tool in (list_requirement_items, map_requirement_items):
+        if ledger_tool not in generation_tools:
+            generation_tools.append(ledger_tool)
     if not is_acxd:
         return generation_tools
 
@@ -787,8 +804,8 @@ def summarize_response_for_history(response_text: str, max_length: int = 2000) -
 # Conversation History — Full Strands Format
 # ========================================
 MAX_HISTORY_MESSAGES = 60  # 30 turns (user + assistant)
-MAX_TOOL_RESULT_LENGTH = 1500  # Truncate large tool results
-MAX_TOOL_INPUT_LENGTH = 1000   # Truncate large tool inputs
+MAX_TOOL_RESULT_LENGTH = 2500  # Truncate large tool results (kept readable: the model re-reads them every turn)
+MAX_TOOL_INPUT_LENGTH = 2500   # Shrink large tool inputs, shape preserved (see _truncate_tool_payload)
 
 
 def _extract_new_messages(all_messages: list, prev_count: int) -> list:
@@ -879,17 +896,94 @@ def _extract_new_messages(all_messages: list, prev_count: int) -> list:
 
 
 def _truncate_tool_payload(payload, max_length: int):
-    """Truncate tool input/output if its JSON representation is too large."""
+    """Shrink a tool input for the stored history WITHOUT changing its shape.
+
+    Live (2026-09-21): inputs over the limit were replaced by
+    ``{"_truncated": "<json prefix>... [truncated]"}``. Every turn rebuilds the
+    agent from this history, so the model saw all of its earlier plan saves in
+    that shape, called `upsert_acxd_flow_plan` with the arguments wrapped in
+    `_truncated` (pydantic: flow_id missing), and — unable to read what it had
+    saved — saved Flow 2 and Flow 3 again and again. Keys stay; only long values
+    are shortened, with the marker inside the value where a copy is harmless.
+    """
     if payload is None:
         return payload
     try:
         s = json.dumps(payload, ensure_ascii=False, default=str)
-        if len(s) <= max_length:
-            return payload
-        # Return a truncated text representation instead
-        return {"_truncated": s[:max_length] + "... [truncated]"}
     except Exception:
         return str(payload)[:max_length]
+    if len(s) <= max_length:
+        return payload
+    return _shrink_value(payload, max_length)
+
+
+def _shrink_value(value, budget: int):
+    """Recursively shorten strings and lists so the JSON stays within ``budget``
+    while every key of a dict survives."""
+    if isinstance(value, str):
+        if len(value) <= budget:
+            return value
+        keep = max(40, budget - 24)
+        return value[:keep] + f"… [{len(value) - keep} more chars]"
+    if isinstance(value, dict):
+        if not value:
+            return value
+        per_key = max(80, budget // len(value))
+        return {str(k): _shrink_value(v, per_key) for k, v in value.items()}
+    if isinstance(value, list):
+        kept, used = [], 2
+        for item in value:
+            piece = json.dumps(item, ensure_ascii=False, default=str)
+            if used + len(piece) > budget and kept:
+                kept.append(f"… {len(value) - len(kept)} more item(s)")
+                break
+            kept.append(_shrink_value(item, max(80, budget - used)) if len(piece) > budget - used else item)
+            used += len(piece) + 2
+        return kept
+    return value
+
+
+_TRUNCATED_FIELD = re.compile(
+    r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*("(?:[^"\\]|\\.)*"|true|false|null|-?\d+(?:\.\d+)?)')
+
+
+def _repair_truncated_tool_input(payload):
+    """Turn a legacy ``{"_truncated": "<json prefix>..."}`` history placeholder back
+    into a partial argument dict (the top-level scalar fields the prefix still
+    holds), so the model never sees — or copies — the placeholder shape."""
+    if not (isinstance(payload, dict) and set(payload.keys()) == {"_truncated"}
+            and isinstance(payload.get("_truncated"), str)):
+        return payload
+    prefix = payload["_truncated"]
+    if prefix.endswith("... [truncated]"):
+        prefix = prefix[: -len("... [truncated]")]
+    try:
+        return json.loads(prefix)
+    except Exception:
+        pass
+    repaired: dict = {}
+    for m in _TRUNCATED_FIELD.finditer(prefix):
+        key, raw = m.group(1), m.group(2)
+        if key in repaired:
+            continue
+        try:
+            repaired[key] = json.loads(raw)
+        except Exception:
+            repaired[key] = raw.strip('"')
+    return _shrink_value(repaired, MAX_TOOL_INPUT_LENGTH) if repaired else {}
+
+
+def _repair_history_tool_inputs(messages: list) -> list:
+    """Apply `_repair_truncated_tool_input` to every toolUse in the history."""
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("toolUse"), dict):
+                tu = block["toolUse"]
+                tu["input"] = _repair_truncated_tool_input(tu.get("input"))
+    return messages
 
 
 def _find_safe_cut_index(history: list, desired_start: int) -> int:
@@ -2403,6 +2497,9 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
 
     # Layer 3: sanitize messages before passing to agent
     strands_messages = _sanitize_messages_for_agent(strands_messages)
+    # Sessions stored before 2026-09-21 hold {"_truncated": ...} tool inputs;
+    # give the model real argument shapes, never a placeholder to imitate.
+    strands_messages = _repair_history_tool_inputs(strands_messages)
 
     # Capture message count before stream_async appends new messages
     pre_stream_message_count = len(strands_messages)

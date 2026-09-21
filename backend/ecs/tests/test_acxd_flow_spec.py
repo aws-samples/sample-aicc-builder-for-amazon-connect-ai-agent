@@ -347,6 +347,56 @@ def _journey_steps():
     ]
 
 
+def test_capture_policy_keeps_dates_out_of_the_journey(monkeypatch):
+    """Live (2026-09-21): `preferredDate` (YYYY-MM-DD in the OperationSpec) was a
+    journey capture; the journey stored "다음주" verbatim and the confirmation,
+    the backend call and the result all repeated it. A date is strict-format:
+    it needs a user_choice (→ NLX.Date, an ISO date), whether the plan slot says
+    `date` or only the spec field carries a date_format."""
+    import tools.spec_manager as sm
+
+    class _F:
+        def __init__(self, name, **kw):
+            self.d = {"name": name, **kw}
+
+        def model_dump(self):
+            return dict(self.d)
+
+    class _Spec:
+        input_fields = [_F("preferredDate", field_type="string", date_format="YYYY-MM-DD"),
+                        _F("visitTime", field_type="string")]
+
+    monkeypatch.setattr(sm, "get_all_specs", lambda: {"process_return": _Spec()})
+    slots = _JOURNEY_SLOTS + [
+        {"name": "preferredDate", "type": "text", "field_name": "preferredDate"},   # date only in the spec
+        {"name": "visitTime", "type": "time"},                                      # date-like plan type
+    ]
+    steps = _journey_steps()
+    steps[1]["captures"] = ["reason", "preferredDate", "visitTime"]
+    res = _upsert(steps=steps, slots=slots)
+    assert res["success"], res
+    journey = next(s for s in afs.get_acxd_flow_spec().flow("ProcessReturn").steps
+                   if s.node_type == "generative_journey")
+    assert journey.captures == ["reason"]
+    notes = " | ".join(res["coerced"])
+    assert "preferredDate" in notes and "YYYY-MM-DD" in notes and "NLX.Date" in notes
+    assert "visitTime" in notes and "user_choice" in notes
+
+
+def test_plan_tools_return_the_state_of_every_flow():
+    """Live (2026-09-21): after a history reload the orchestrator re-saved two
+    already-confirmed flows twice in a row — it had nothing to read the state
+    from but its own earlier words."""
+    res = _upsert(steps=_journey_steps(), slots=_JOURNEY_SLOTS)
+    assert res["plans"]["ProcessReturn"].startswith("saved, steps [")
+    res2 = afs.confirm_acxd_flow_steps("ProcessReturn")
+    assert res2["plans"]["ProcessReturn"].startswith("confirmed (")
+    res3 = _upsert(flow_id="CleaningPrice", purpose="Prices", operation_id="get_cleaning_price",
+                   steps=[{"step": 1, "description": "가격 안내", "node_type": "basic"}])
+    assert set(res3["plans"]) == {"ProcessReturn", "CleaningPrice"}
+    assert res3["plans"]["ProcessReturn"].startswith("confirmed")
+
+
 def test_capture_policy_keeps_journeys_to_conversational_values():
     res = _upsert(steps=_journey_steps(), slots=_JOURNEY_SLOTS)
     assert res["success"], res
@@ -388,6 +438,37 @@ def test_validate_requires_captures_and_deterministic_strict_slots_next_to_a_jou
     assert any("must name the slots it collects in 'captures'" in p for p in problems)
     assert any("slot 'contactPhone' has a strict format and no user_choice step declares" in p for p in problems)
     assert not any("slot 'orderNumber'" in p for p in problems)   # step 1 declares it
+
+
+def test_validate_requires_a_choice_before_an_operation_hand_off():
+    """Live (SELC, 2026-09-21): 'step 3 announce, step 4 hand off to the
+    customer-info search' with no step deciding when — the model generated the
+    announcement path only, five attempts in a row."""
+    _upsert(flow_id="SearchOrder", purpose="Find the order", operation_id="process_return",
+            steps=[{"step": 1, "description": "성명·주소", "node_type": "generative_journey",
+                    "determinism": "generative", "captures": ["reason"]}], slots=_JOURNEY_SLOTS)
+    afs.confirm_acxd_flow_steps("SearchOrder")
+    steps = [
+        {"step": 1, "description": "주문번호", "node_type": "user_choice", "slot": "orderNumber"},
+        {"step": 2, "description": "조회", "node_type": "data_request"},
+        {"step": 3, "description": "안내", "node_type": "generative_text", "determinism": "generative"},
+        {"step": 4, "description": "미조회 → 고객정보 조회로", "node_type": "redirect", "redirect_flow_id": "SearchOrder"},
+        {"step": 5, "description": "후속", "node_type": "redirect", "redirect_flow_id": "followup"},
+    ]
+    _upsert(steps=steps, slots=_JOURNEY_SLOTS)
+    afs.confirm_acxd_flow_steps("ProcessReturn")
+    problems = afs.validate_acxd_flow_spec(afs.get_acxd_flow_spec())
+    assert any("hands off to operation flow 'SearchOrder' but no earlier step is a 'choice'" in p for p in problems)
+    # the follow-up hand-back (a system flow) is not a branch to plan
+    assert not any("'followup'" in p and "choice" in p for p in problems)
+    # with the deciding choice in place the rule is satisfied
+    steps.insert(2, {"step": 3, "description": "조회 성공/미조회 분기", "node_type": "choice"})
+    for n, s in enumerate(steps, start=1):
+        s["step"] = n
+    _upsert(steps=steps, slots=_JOURNEY_SLOTS)
+    afs.confirm_acxd_flow_steps("ProcessReturn")
+    problems = afs.validate_acxd_flow_spec(afs.get_acxd_flow_spec())
+    assert not any("no earlier step is a 'choice'" in p for p in problems)
 
 
 def test_conversation_style_defaults_to_generative_and_accepts_aliases():

@@ -48,9 +48,12 @@ from __future__ import annotations
 import copy
 import difflib
 import hashlib
+import logging
 import re
 import uuid
 from typing import Any, Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # vocabulary
@@ -166,6 +169,28 @@ def _derived_id(prefix: str, seed: str) -> str:
     """Deterministic node id that satisfies the service's v4 UUID regex."""
     digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
     return f"{prefix}-0000-4000-8000-{digest[:12]}"
+
+
+def _loose_id(value: Any) -> str:
+    """`reschedule_appointment`, `rescheduleAppointment` and `Reschedule-Appointment`
+    are the same request named three ways: compare ids by their letters and digits."""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _resolve_request_id(raw: str, data_requests: dict) -> Optional[str]:
+    """The bundled data request id a plan step means, or None when no request matches.
+
+    Exact first; otherwise the single request whose id matches ignoring case and
+    separators (an operation id in snake_case naming a camelCase request). Two
+    candidates is no answer — better to leave the node alone than to pin it to
+    the wrong endpoint."""
+    if raw in data_requests:
+        return raw
+    wanted = _loose_id(raw)
+    if not wanted:
+        return None
+    candidates = [rid for rid in data_requests if _loose_id(rid) == wanted]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _label(node_id: str, node: dict) -> str:
@@ -426,13 +451,27 @@ class _RuntimeContract:
         #: routed to the agent request; agent-request / retry-count / failure
         #: wording is dropped because other rules already realise those
         self.escalation_topics = _escalation_topics(escalation_topics)
-        #: the interview's data_request step ids of this flow, in plan order; the
-        #: n-th data_request node along the flow calls the n-th one (D3p)
-        self.request_steps = [str(r) for r in (request_steps or []) if isinstance(r, str) and r.strip()]
         self.role = (role or "").strip().lower() or None
         self.slot_type_ids = set(slot_type_ids) if slot_type_ids is not None else None
         self.slot_type_docs = dict(slot_type_docs or {})
         self.data_requests = dict(data_requests or {})
+        #: the interview's data_request step ids of this flow, in plan order; the
+        #: n-th data_request node along the flow calls the n-th one (D3p). Live
+        #: (AnyClinic, 2026-09-20): the plan named the OPERATION
+        #: (`reschedule_appointment`) where the request is `rescheduleAppointment`
+        #: and D3p pinned the node to the unknown id on five attempts in a row —
+        #: resolve each planned id against the real requests first, and never pin
+        #: to an id no request has.
+        self.request_steps = []
+        for raw in (request_steps or []):
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            resolved = _resolve_request_id(raw.strip(), self.data_requests)
+            if resolved is None:
+                logger.info("[ACXD contract] plan step names data request %r, which no bundled "
+                            "request matches — the node keeps its own request (D3p)", raw)
+                continue
+            self.request_steps.append(resolved)
         self.flow_ids = set(flow_ids) if flow_ids is not None else None
         self.context_variables = set(context_variables or ())
         self.follow_up_flow_id = follow_up_flow_id
@@ -1083,7 +1122,11 @@ class _RuntimeContract:
                                 f"(redirecting is the next node's job) (M3)")
                 else:
                     # No redirect node follows: turn the stray metadata into one.
-                    redirect_id = f"{node_id}-redirect"
+                    # Live (TableNow, 2026-09-20): the id used to be
+                    # f"{node_id}-redirect", which is not a v4 UUID — six attempts
+                    # across three flows failed the SCHEMA gate on a node this
+                    # rule itself had just added.
+                    redirect_id = _derived_id("4f1a0004", f"{self.flow_id}:{node_id}:redirect")
                     self.nodes[redirect_id] = {
                         "nodeId": redirect_id, "type": "redirect",
                         "metadata": {"redirect": metadata.pop("redirect")},
@@ -1464,6 +1507,53 @@ class _RuntimeContract:
                     f"{_label(node_id, node)}: dropped childNodes — escalate is "
                     f"terminal; a child made Connect report Success instead of "
                     f"Escalation (R7)")
+
+    # ==================================================================
+    # R9 — a hand-off carries the values the conversation collected
+    # ==================================================================
+
+    def _is_hand_off_target(self, flow_id: Any) -> bool:
+        target = str(flow_id or "")
+        return bool(target) and (target == self.escalation_flow_id or target.lower().startswith("requestagent"))
+
+    def rule_r9(self) -> None:
+        """Live (SELC, 2026-09-21): the Contact Flow's escalation payload read
+        customerName / phoneNumber / address / orderNumber from
+        ``$.AgenticCX.ContextVariables`` and nothing ever set them — slots live in
+        the flow, context variables in the application, and no node copied one
+        into the other. At every hand-off out of an operation flow (a redirect to
+        the escalation or agent-request flow, or an escalate node) each attached
+        slot that is also an application context variable is copied into it, so
+        the agent's screen-pop shows what the caller already said."""
+        if self.role != "operation" or not self.context_variables:
+            return
+        names = [s.get("name") for s in self.attached if isinstance(s, dict) and s.get("name")]
+        carried = [n for n in names if n in self.context_variables]
+        if not carried:
+            return
+        for node_id, node in list(self.nodes.items()):
+            if not isinstance(node, dict):
+                continue
+            kind = node.get("type")
+            redirect = ((node.get("metadata") or {}).get("redirect") or {}) if isinstance(node.get("metadata"), dict) else {}
+            if kind == "redirect" and not self._is_hand_off_target(redirect.get("flowId")):
+                continue
+            if kind not in ("redirect", "escalate"):
+                continue
+            meta = node.setdefault("metadata", {})
+            mods = [m for m in (meta.get("stateModifications") or []) if isinstance(m, dict)]
+            present = {(m.get("type"), m.get("name")) for m in mods}
+            added = []
+            for name in carried:
+                if ("context", name) in present:
+                    continue
+                mods.append({"type": "context", "name": name, "modification": "set",
+                             "value": {"type": "slot", "name": name}})
+                added.append(name)
+            if added:
+                meta["stateModifications"] = mods
+                self.change(f"{_label(node_id, node)}: hand-off carries {added} into the application's "
+                            f"context variables (R9)")
 
     # ==================================================================
     # R6 — retry = recovery basic that CLEARS the slot, then re-asks
@@ -2038,6 +2128,16 @@ class _RuntimeContract:
             return
         slots = set(self.slot_names)
         contexts = self._flow_contexts()
+        # Live (AnyCompany EN, 2026-09-20): the plan collected `orderNumber` and
+        # declared field_name `orderId` — the request field it fills — yet the
+        # payload was mapped by name only, so five attempts failed "requires
+        # field orderId that the flow never collects". The plan's field_name
+        # is the mapping; honour it (one slot per field).
+        by_field: dict[str, str] = {}
+        for slot_name, plan in self.slot_plans.items():
+            field_name = str(plan.get("field_name") or "").strip()
+            if field_name and slot_name in slots and field_name != slot_name:
+                by_field.setdefault(field_name, slot_name)
         for node_id, node in self.nodes_of_type("data_request"):
             for entry in node.get("dataRequests") or []:
                 if not isinstance(entry, dict):
@@ -2060,6 +2160,9 @@ class _RuntimeContract:
                     if field in slots:
                         payload[field] = f"{{{field}:NLX.Slot}}"
                         added.append(field)
+                    elif field in by_field:
+                        payload[field] = f"{{{by_field[field]}:NLX.Slot}}"
+                        added.append(f"{field}←{by_field[field]}")
                     elif field in contexts:
                         payload[field] = f"{{{field}:NLX.Context}}"
                         added.append(field)
@@ -2765,6 +2868,10 @@ class _RuntimeContract:
             return {"type": "string", "pattern": str(regex)}
         if slot_type == "NLX.Number":
             return {"type": "number"}
+        if slot_type == "NLX.Date":
+            # A plan saved before dates left the journey: at least classify onto
+            # an ISO date rather than storing "다음주" verbatim.
+            return {"type": "string", "format": "date"}
         return {"type": "string"}
 
     def _attach_plan_slot(self, slot_name: str) -> bool:
@@ -2831,6 +2938,50 @@ class _RuntimeContract:
             return f"The customer clearly expresses a request or situation of this kind: {topic}"
         return f"고객이 다음에 해당하는 요청이나 상황을 명확히 표현한다: {topic}"
 
+    _WALK_LIMIT = 24
+
+    def _first_continuation(self, node: dict) -> Optional[dict]:
+        """The edge a node takes when things go right: the captured / valid /
+        success / next branch — never a retry, timeout, failure or agent edge."""
+        edges = _edges(node)
+        if not edges:
+            return None
+        kind = node.get("type")
+        bad = ("invalid", "notcaptured", "retry", "again", "giveup", "timeout", "failure", "fail", "error",
+               "agent", "refused", "escalat", "handoff", "handofftopic")
+        ranked = sorted(
+            edges,
+            key=lambda e: (any(b in str(e.get("name") or "").lower() for b in bad),
+                           _has_status(e, "timeout") or _has_status(e, "failure")),
+        )
+        edge = ranked[0]
+        if kind == "data_request" or any(b in str(edge.get("name") or "").lower() for b in bad):
+            return None
+        return edge
+
+    def _path_to_data_request(self, start_id: Optional[str]) -> tuple[list[tuple[dict, dict]], Optional[str]]:
+        """Walk the happy path from ``start_id``; return the (node, edge) hops and the
+        id of the first data_request reached, or None when none is reached before
+        the flow ends, hands off or loops."""
+        hops: list[tuple[dict, dict]] = []
+        seen: set[str] = set()
+        current = start_id
+        while isinstance(current, str) and current not in seen and len(hops) < self._WALK_LIMIT:
+            node = self.nodes.get(current)
+            if node is None:
+                return hops, None
+            if node.get("type") == "data_request":
+                return hops, current
+            if node.get("type") in ("end", "redirect", "escalate", "generative_journey", "generative_text"):
+                return hops, None
+            seen.add(current)
+            edge = self._first_continuation(node)
+            if edge is None:
+                return hops, None
+            hops.append((node, edge))
+            current = edge.get("nodeId")
+        return hops, None
+
     def _insert_capture_confirmation(self, node_id: str, node: dict, captured_names: list[str],
                                      template: Optional[str] = None) -> None:
         edges = _edges(node)
@@ -2843,8 +2994,60 @@ class _RuntimeContract:
         if target_id == confirm_id or confirm_id in self.nodes:
             return  # already inserted (idempotent)
         target = self.nodes.get(target_id) if isinstance(target_id, str) else None
+        slot_refs = [f"{{{n}:NLX.Slot}}" for n in captured_names]
+
+        def _reads_back(n: Optional[dict]) -> bool:
+            if not n or n.get("type") != "basic":
+                return False
+            text = " ".join(str(m.get("body") or "") for m in (n.get("messages") or []) if isinstance(m, dict))
+            return any(ref in text for ref in slot_refs)
+
+        # --- placement: after the LAST value the flow collects ------------------
+        # Live (2026-09-21): the read-back followed the journey, then the flow
+        # asked for the phone number and only then called the backend — the
+        # caller heard "…confirmed, I'll go ahead" before being asked one more
+        # thing. When capture steps (user_choice) sit between the journey and the
+        # data_request, the confirmation goes right before the data_request.
+        planned = target if _reads_back(target) else None
+        walk_from = (_edges(planned)[0].get("nodeId") if planned and _edges(planned) else target_id)
+        hops, request_id = self._path_to_data_request(walk_from)
+        captures_between = [n for n, _ in hops if n.get("type") == "user_choice"]
+        if request_id and captures_between:
+            prev_node, prev_edge = hops[-1]           # the edge that enters the data_request
+            if _reads_back(prev_node) or any(_reads_back(n) for n, _ in hops):
+                return                                # a read-back already sits on this path (idempotent)
+            if planned is not None:
+                # move the generator's own read-back: journey → its successor; … → read-back → request
+                captured_edge["nodeId"] = walk_from
+                prev_edge["nodeId"] = planned["nodeId"]
+                planned["childNodes"] = [{"nodeId": request_id, "name": "next"}]
+                self.change(f"{_label(node_id, node)}: read-back [{str(planned['nodeId'])[:8]}] moved after "
+                            f"{len(captures_between)} later capture step(s), right before the backend call (J6)")
+                return
+            body = self._confirmation_body(captured_names, template)
+            self.nodes[confirm_id] = {
+                "nodeId": confirm_id, "type": "basic",
+                "messages": [{"type": "text", "body": body}],
+                "childNodes": [{"nodeId": request_id, "name": "next"}],
+            }
+            prev_edge["nodeId"] = confirm_id
+            self.change(f"{_label(node_id, node)}: captured values read back by [{confirm_id[:8]}] after "
+                        f"{len(captures_between)} later capture step(s), right before the backend call (J6)")
+            return
+
         if target is not None and target.get("type") == "basic":
-            return  # the generator planned its own acknowledgement
+            return  # the generator planned its own acknowledgement, and nothing is collected after it
+        body = self._confirmation_body(captured_names, template)
+        self.nodes[confirm_id] = {
+            "nodeId": confirm_id, "type": "basic",
+            "messages": [{"type": "text", "body": body}],
+            **({"childNodes": [{"nodeId": target_id, "name": "next"}]} if isinstance(target_id, str) else {}),
+        }
+        captured_edge["nodeId"] = confirm_id
+        self.change(f"{_label(node_id, node)}: captured values read back by [{confirm_id[:8]}] before "
+                    f"the flow continues (J6)")
+
+    def _confirmation_body(self, captured_names: list[str], template: Optional[str]) -> str:
         parts = [
             (f"{self._capture_label(n)} {{{n}:NLX.Slot}}" if self._capture_label(n) != n else f"{{{n}:NLX.Slot}}")
             for n in captured_names]
@@ -2858,14 +3061,7 @@ class _RuntimeContract:
             body = f"말씀하신 내용은 {', '.join(parts)}입니다. 이대로 진행하겠습니다."
         if template and template.strip():
             body = template.strip()      # the sentence the customer approved in the plan
-        self.nodes[confirm_id] = {
-            "nodeId": confirm_id, "type": "basic",
-            "messages": [{"type": "text", "body": body}],
-            **({"childNodes": [{"nodeId": target_id, "name": "next"}]} if isinstance(target_id, str) else {}),
-        }
-        captured_edge["nodeId"] = confirm_id
-        self.change(f"{_label(node_id, node)}: captured values read back by [{confirm_id[:8]}] before "
-                    f"the flow continues (J6)")
+        return body
 
     def rule_j2(self) -> None:
         journeys = self.nodes_of_type("generative_journey")
@@ -3027,6 +3223,46 @@ class _RuntimeContract:
                 self.change(f"{label}: modelType {self.JOURNEY_DEFAULT_MODEL} (a workspace without a "
                             f"default model runs a silent journey) (J5)")
 
+            # --- how the journey talks (J7) -----------------------------------
+            # Live (2026-09-21): a Haiku journey echoed every answer ("벽걸이형이군요.
+            # 그럼…"), asked five values one per turn even when the caller had
+            # given two at once, and accepted "다음주" as a date. The generator's
+            # prompt says WHAT to collect; these lines say HOW to talk.
+            prompt_text = str(cfg.get("prompt") or "")
+            if self.JOURNEY_STYLE_MARKER not in prompt_text:
+                cfg["prompt"] = (prompt_text.rstrip() + ("\n\n" if prompt_text.strip() else "")
+                                 + self._journey_style_rules())
+                self.change(f"{label}: conversation-style rules appended to the journey prompt (J7)")
+
+    JOURNEY_STYLE_MARKER = "[conversation style]"
+
+    def _journey_style_rules(self) -> str:
+        lang = self._language()
+        if lang == "ja":
+            return (f"{self.JOURNEY_STYLE_MARKER}\n"
+                    "- お客様の回答を毎回繰り返さないでください。必要なときだけ一文で短く確認します。\n"
+                    "- 一度の発話に複数の値が含まれていればすべて受け取り、足りないものだけを尋ねます。\n"
+                    "- 質問は一度に一つか二つまで。すでに述べられた値は聞き直しません。\n"
+                    "- 日付や時間は「来週」のような相対表現のままにせず、具体的な日付に確定してから進めます。\n"
+                    "- 価格・規約・在庫など、渡されていない事実は作らず、分からないと伝えます。\n"
+                    "- 必要な値がそろったら、まとめて一度だけ確認して終了します。")
+        if lang == "en":
+            return (f"{self.JOURNEY_STYLE_MARKER}\n"
+                    "- Do not echo each answer back; acknowledge briefly and only when it helps.\n"
+                    "- If one utterance carries several values, take them all and ask only for what is missing.\n"
+                    "- Ask for at most one or two things per turn; never re-ask what the caller already said.\n"
+                    "- Resolve relative dates and times ('next week', 'tomorrow afternoon') to a concrete date "
+                    "before moving on.\n"
+                    "- Never invent prices, policies or availability you were not given; say you do not know.\n"
+                    "- Once every value is known, confirm them together once, then finish.")
+        return (f"{self.JOURNEY_STYLE_MARKER}\n"
+                "- 고객의 답을 매번 되풀이하지 마세요. 필요할 때만 한 문장으로 짧게 확인합니다.\n"
+                "- 한 발화에 여러 값이 들어 있으면 모두 받아들이고, 빠진 값만 물어보세요.\n"
+                "- 한 번에 한두 가지만 묻고, 고객이 이미 말한 값은 다시 묻지 마세요.\n"
+                "- '다음주', '내일 오후' 같은 상대적 날짜·시간은 구체적인 날짜로 확정한 뒤 진행하세요.\n"
+                "- 가격·정책·재고처럼 전달받지 않은 사실은 만들어 내지 말고 모른다고 말하세요.\n"
+                "- 필요한 값이 모두 모이면 한 번에 정리해 확인하고 마무리하세요.")
+
     def rule_j(self) -> None:
         for node_id, node in self.nodes_of_type("generative_journey"):
             edges = _edges(node)
@@ -3177,6 +3413,7 @@ class _RuntimeContract:
         self.rule_j2()
         self.rule_j()
         self.rule_a2()
+        self.rule_r9()
         self.prune_disconnected(before)
 
 

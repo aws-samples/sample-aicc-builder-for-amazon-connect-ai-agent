@@ -22,6 +22,22 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return ":".join([prefix, *bits])[:200]
 
 
+def _session_tool_ids() -> list[str]:
+    """tool_ids declared in the session flow config's `session_tools`."""
+    try:
+        from tools.spec_manager import get_session_flow_config
+        cfg = get_session_flow_config()
+    except Exception as exc:
+        logger.debug("[review_gates] session flow config unavailable: %s", exc)
+        return []
+    ids: list[str] = []
+    for tool in (getattr(cfg, "session_tools", None) or []) if cfg else []:
+        tool_id = getattr(tool, "tool_id", None) or (tool.get("tool_id") if isinstance(tool, dict) else None)
+        if tool_id:
+            ids.append(str(tool_id))
+    return ids
+
+
 def _consistency_findings(session_id: str) -> list[dict]:
     from tools.validate_consistency import _validate_parameter_consistency_impl
     try:
@@ -107,6 +123,15 @@ def _orphan_operation_findings(session_id: str) -> list[dict]:
             tool_id = getattr(tool, "tool_id", None) or (tool.get("tool_id") if isinstance(tool, dict) else None)
             if tool_id:
                 known |= _spellings(str(tool_id))
+    # A session tool (flow config `session_tools`, role=session — log_call_result,
+    # get_outbound_targets) has no OperationSpec BY DESIGN: it is declared once for
+    # the whole session and the count gate expects its Lambda and API path from
+    # that declaration. Live (2026-09-20) this gate reported the session tool's
+    # OpenAPI operation as an orphan and told the orchestrator to remove it; the
+    # count gate then reported the removed path as missing — two blocking findings
+    # that could not both be satisfied, and the review never converged.
+    for tool_id in _session_tool_ids():
+        known |= _spellings(tool_id)
 
     findings: list[dict] = []
 
@@ -228,6 +253,92 @@ def _missing_asset_findings(session_id: str) -> list[dict]:
                     "message": f"Operation {op_id!r} has a spec but no {label} — {remedy}; "
                                "a spec without its asset ships nothing for that operation",
                 })
+    findings.extend(_missing_knowledge_findings(session_id, acxd))
+    return findings
+
+
+def _missing_knowledge_findings(session_id: str, acxd: bool) -> list[dict]:
+    """The FAQ / knowledge-base family. Live (2026-09-20): the document listed
+    seven FAQ topics, the FAQ generator was never called, the ACXD bundle had no
+    knowledge base and no flow reading one, and the review reported 0 blocking —
+    every gate iterated over operations, and the FAQ is not an operation. The
+    family is required when the plan has KB topics or the document has an FAQ
+    section the customer did not exclude."""
+    planned_topics: list[str] = []
+    if acxd:
+        try:
+            from tools.acxd_flow_spec import get_acxd_flow_spec
+            fs = get_acxd_flow_spec()
+            planned_topics = list(getattr(getattr(fs, "knowledge_base", None), "topics", None) or [])
+        except Exception:
+            planned_topics = []
+    documented = False
+    try:
+        from tools.requirement_items import load_ledger
+        ledger = load_ledger() or {}
+        faq = (ledger.get("signals") or {}).get("faq") or {}
+        mappings = ledger.get("mappings") or {}
+        ids = list(faq.get("item_ids") or [])
+        documented = bool(ids) and not all(
+            str((mappings.get(i) or {}).get("target", "")).startswith("excluded") for i in ids)
+    except Exception:
+        documented = False
+    if not planned_topics and not documented:
+        return []
+
+    faq_files = kb_files = 0
+    kb_flows = 0
+    try:
+        from tools.s3_asset_storage import list_session_assets
+        for key in list_session_assets(session_id) or []:
+            parts = [p for p in str(key).split("/") if p]
+            if len(parts) >= 4 and parts[2] == "faq":
+                faq_files += 1
+            elif len(parts) >= 5 and parts[2] == "package" and parts[3] == "knowledge_base":
+                faq_files += 1          # the FAQ generator's knowledge-base zip
+            elif len(parts) >= 4 and parts[2] == "acxd_knowledge_base":
+                kb_files += 1
+    except Exception as exc:
+        logger.debug("[review_gates] knowledge scan skipped: %s", exc)
+        return []
+    if acxd:
+        try:
+            from tools.acxd_flow_spec import get_acxd_flow_spec
+            fs = get_acxd_flow_spec()
+            for f in (getattr(fs, "flows", None) or []):
+                if getattr(f, "uses_knowledge_base", False) or any(
+                        "knowledge_base" in [str(t) for t in (getattr(st, "journey_tools", None) or [])]
+                        for st in (getattr(f, "steps", None) or [])):
+                    kb_flows += 1
+        except Exception:
+            kb_flows = 0
+
+    why = (f"the plan has {len(planned_topics)} knowledge-base topic(s)" if planned_topics
+           else "the requirements document has an FAQ section")
+    findings: list[dict] = []
+    if faq_files == 0:
+        findings.append({
+            "id": _stable_id("MISSING", "faq", "__all__"), "gate": "spec", "severity": "error",
+            "asset_type": "faq", "operation_id": "__all__", "field": None,
+            "message": f"No FAQ asset was generated although {why} — run faq_generator_agent; "
+                       "without it the caller's side questions all end in the fallback",
+        })
+    if acxd and kb_files == 0:
+        findings.append({
+            "id": _stable_id("MISSING", "acxd_knowledge_base", "__all__"), "gate": "spec", "severity": "error",
+            "asset_type": "acxd_knowledge_base", "operation_id": "__all__", "field": None,
+            "message": f"No ACXD knowledge base was generated although {why} — save_acxd_policies(kb_name, "
+                       "kb_topics) if the plan lacks them, then generate the FAQ and re-run "
+                       "generate_acxd_application (it builds the knowledge base from the FAQ asset)",
+        })
+    if acxd and kb_flows == 0:
+        findings.append({
+            "id": _stable_id("MISSING", "acxd_flow", "faq"), "gate": "spec", "severity": "error",
+            "asset_type": "acxd_flow", "operation_id": "__all__", "field": None,
+            "message": f"No flow uses the knowledge base although {why} — plan a FAQ flow "
+                       "(uses_knowledge_base=true, or a journey with journey_tools=['knowledge_base']) so "
+                       "questions outside the operations are answered instead of falling back",
+        })
     return findings
 
 

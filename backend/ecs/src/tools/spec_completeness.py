@@ -122,4 +122,12 @@ def spec_completeness_problems(session_id: Optional[str] = None) -> list[str]:
                 problems.extend(acxd_plan_problems(flow_spec, specs))
     except Exception:  # ACXD readiness has its own gate; never block on an import here
         pass
+    # The document the customer handed over, item by item: an item no spec
+    # expresses is a requirement generation would silently drop (live
+    # 2026-09-20: the phone lookup flag, the FAQ section, the escalation rule).
+    try:
+        from tools.requirement_items import requirement_coverage_problems
+        problems.extend(requirement_coverage_problems(session_id))
+    except Exception as exc:  # pragma: no cover
+        problems.append(f"requirement coverage could not be checked: {exc}")
     return problems
