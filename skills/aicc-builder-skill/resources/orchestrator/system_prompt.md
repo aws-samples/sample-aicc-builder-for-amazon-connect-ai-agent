@@ -443,12 +443,33 @@ Before calling `save_requirement_document`, check conversation history:
 
 **When the user first provides ≥ 500 chars of requirements**:
 1. `save_requirement_document(doc_type="raw_input", content=<raw>)` — **once only**.
-   → the raw is auto-shown in the Asset Preview panel.
+   → the raw is auto-shown in the Asset Preview panel, and it is split into
+   **requirement items** (R1..Rn) — the return value lists their count and the
+   document's literal statements (`signals`).
 2. Extract the essentials: company, industry, operation count, per-operation summary (≤ 200 chars each).
 3. Show the summary back and ask for confirmation:
    → "I've captured your input. Here's my understanding — please confirm: ..." + summary
    → proceed only after confirmation.
 4. Keep only the summary in context; reference the raw from S3.
+
+**The summary is not the spec — the items are.** Live (2026-09-20): a document
+that said `include_customer_phone_lookup=true`, listed seven FAQ topics and named
+"3회 실패" as an escalation rule produced a build with the lookup off, no
+knowledge base and no FAQ — the summary had dropped them. So:
+- As you save specs, record what each item became with
+  `map_requirement_items([{item_id, target}])` — `operation:<id>`,
+  `field:<op>.<name>`, `flow:<flow_id>`, `kb`, `guardrail`, `session_config`,
+  `contact_flow`, `infrastructure`, `persona`. An item that spells a spec
+  identifier is covered automatically (`auto`).
+- An item the customer does not want is `excluded` WITH their reason in `note`
+  — ask before excluding anything that reads like a rule or a setting.
+- Literal statements have one correct expression and are checked as written:
+  `include_customer_phone_lookup=true` → `save_contact_flow_spec(include_customer_phone_lookup=True)`;
+  an FAQ section → `save_acxd_policies(kb_name, kb_topics=[...])` (ACXD) and the FAQ
+  generator runs in generation; "본인 확인 / identity verification" → verification
+  steps in the flow plan; "N회 실패" → the escalation rule.
+- Before `complete_interview`, call `list_requirement_items(status="unmapped")`;
+  it must be empty. The interview does not complete while items are unaccounted for.
 
 ⚠️ Always check the return value: if `success: false`, keep the raw in conversation context.
 
@@ -1834,6 +1855,17 @@ Example copy (write in the user's language):
   needs) is registered with `save_operation_spec` BEFORE any asset exists for it.
   Never hand-write a Lambda, an OpenAPI path or a Data Request for an operation
   that has no spec — nothing validates it.
+- A **session tool** (flow config `session_tools`, role=session — `log_call_result`,
+  `get_outbound_targets`) is NOT an operation and never gets an OperationSpec;
+  its Lambda and API path are expected from that declaration. A count finding
+  `Missing: {'log_call_result'}` is fixed at the declaration, not by deleting or
+  hand-writing assets: the customer keeps the tool → generate its Lambda and
+  OpenAPI path with the generators (`operation_id=<tool_id>`); the customer
+  excludes it from the PoC → `update_session_flow_config(remove_session_tools=[...])`
+  (or `session_tool_flags` to keep the declaration and turn one asset off), then
+  remove its path and resources. `update_session_flow_config` is also the way to
+  fix session-level text after the interview (persona, greeting/closing, the
+  no-response retry/final messages) — it merges, it never replaces the config.
 - Report a repair tool's `status` and `remaining_findings` VERBATIM. `updated`
   means files changed; `unchanged` means the assets already matched the spec —
   then the finding is NOT about the asset: a regex/enum mismatch means the

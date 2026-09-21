@@ -249,6 +249,10 @@ def test_response_schema_carries_no_value_constraints():
               {"name": "status", "type": "string", "enum_values": ["예약", "취소", "완료"], "max_length": 10},
               {"name": "appointmentId", "type": "string", "regex": "^A\\d{8}$"}]
     request_side = fields_to_json_schema(fields)["properties"]
-    assert request_side["status"]["enum"] == ["예약", "취소", "완료"] and request_side["appointmentId"]["pattern"]
+    # the request side keeps the enum (the journey model picks among the values) but no
+    # pattern / length: the runtime delivers slot values without separators and validates
+    # the request body BEFORE the call (live 2026-09-21: a dashed phone pattern failed it)
+    assert request_side["status"]["enum"] == ["예약", "취소", "완료"]
+    assert "pattern" not in request_side["appointmentId"] and "maxLength" not in request_side["status"]
     reply = response_json_schema(fields)["properties"]
     assert reply["status"] == {"type": "string"} and reply["appointmentId"] == {"type": "string"}

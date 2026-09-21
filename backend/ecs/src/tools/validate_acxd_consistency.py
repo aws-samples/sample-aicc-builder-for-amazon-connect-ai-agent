@@ -213,7 +213,9 @@ def _check_flow_graph(flow: dict, path: str, out: list) -> None:
 
 
 def _iter_flow_data_request_refs(flow: dict):
-    """Yield (path, dataRequestId) referenced by data_request nodes."""
+    """Yield (path, dataRequestId) referenced by data_request nodes and by the
+    `dataRequest` tools of generative journeys (a journey calls the request
+    itself — live 2026-09-21)."""
     for nid, node in (flow.get("nodes") or {}).items():
         if not isinstance(node, dict):
             continue
@@ -222,6 +224,14 @@ def _iter_flow_data_request_refs(flow: dict):
                 yield f"nodes[{nid!r}].dataRequests[{i}]", ref
             elif isinstance(ref, dict) and "dataRequestId" in ref:
                 yield f"nodes[{nid!r}].dataRequests[{i}]", ref["dataRequestId"]
+        journey = ((node.get("metadata") or {}).get("generativeJourney")
+                   if isinstance(node.get("metadata"), dict) else None)
+        for i, tool in enumerate((journey or {}).get("tools") or []):
+            if not isinstance(tool, dict) or tool.get("type") != "dataRequest":
+                continue
+            ref = tool.get("dataRequest") if isinstance(tool.get("dataRequest"), dict) else {}
+            if ref.get("dataRequestId"):
+                yield f"nodes[{nid!r}].metadata.generativeJourney.tools[{i}]", ref["dataRequestId"]
 
 
 def _iter_flow_kb_refs(flow: dict):

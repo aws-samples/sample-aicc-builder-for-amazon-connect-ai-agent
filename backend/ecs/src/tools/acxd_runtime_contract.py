@@ -2840,11 +2840,39 @@ class _RuntimeContract:
 
     JOURNEY_MAX_STEPS = 8
     JOURNEY_DEFAULT_MODEL = "anthropic.claude-haiku-4-5"
+    #: A journey that carries the operation — collects the values, calls the
+    #: Data Requests as tools, announces the result — needs the stronger model:
+    #: live (2026-09-21, ko-KR) Haiku computed "이번 주 금요일" as a Saturday and
+    #: read the result as a colon list, Sonnet 5 got both right (at 4-10 s per
+    #: turn against 1.5-3 s). Tool arguments become the backend's record, so
+    #: accuracy wins; the interview can still pin another model per plan.
+    JOURNEY_TOOL_MODEL = "anthropic.claude-sonnet-5"
+    JOURNEY_TOOL_MAX_STEPS = 16
     AGENT_EXIT_NAME = "agentRequested"
     AGENT_EXIT_PROMPTS = {
         "ko": "고객이 상담원, 상담사 또는 사람과 직접 통화하기를 원한다",
         "en": "The customer asks to talk to a human agent or representative",
         "ja": "お客様がオペレーターや担当者との通話を希望している",
+    }
+    DONE_EXIT_NAME = "done"
+    DONE_EXIT_PROMPTS = {
+        "ko": "결과를 안내한 뒤 고객이 더 필요한 것이 없다고 분명히 말했다(예: 아니요, 됐어요, 감사합니다, "
+              "끊을게요). 결과를 안내한 직후, 고객의 답을 듣기 전에는 해당하지 않는다",
+        "en": "After the result was announced the customer clearly says they need nothing else (no, that's "
+              "all, thanks, goodbye). Not right after the announcement, before the customer has answered",
+        "ja": "結果を案内した後、お客様が他に必要なことはないと明確に言った（いいえ、大丈夫です、ありがとう、以上です）。"
+              "結果を案内した直後、お客様の返答を聞く前は該当しない",
+    }
+    #: A request the journey has no tool for — another service, a different
+    #: operation — hands the conversation to the follow-up flow, which listens
+    #: and routes it (live 2026-09-21: "바꿔도 되나요?" after a booking landed in
+    #: the fallback because nothing was listening for it).
+    ANOTHER_REQUEST_EXIT_NAME = "anotherRequest"
+    ANOTHER_REQUEST_EXIT_PROMPTS = {
+        "ko": "고객이 이 대화의 도구로는 처리할 수 없는 다른 업무나 서비스를 요청한다(상담원 요청은 제외)",
+        "en": "The customer asks for a different service or operation that this conversation has no tool for "
+              "(not a request for a human agent)",
+        "ja": "お客様がこの会話のツールでは対応できない別の用件やサービスを求めている（オペレーター要請は除く）",
     }
 
     def _journey_config(self, node: dict) -> dict:
@@ -2901,6 +2929,187 @@ class _RuntimeContract:
             if code.startswith(prefix):
                 return prompt
         return self.AGENT_EXIT_PROMPTS["ko"]
+
+    def _done_exit_prompt(self) -> str:
+        return self.DONE_EXIT_PROMPTS.get(self._language(), self.DONE_EXIT_PROMPTS["ko"])
+
+    def _another_request_exit_prompt(self) -> str:
+        return self.ANOTHER_REQUEST_EXIT_PROMPTS.get(self._language(), self.ANOTHER_REQUEST_EXIT_PROMPTS["ko"])
+
+    # ------------------------------------------------------------------
+    # J8 — a journey that carries the operation (Data Requests as tools)
+    # ------------------------------------------------------------------
+    # Live (2026-09-21, the customer's workspace): a `dataRequest` tool on a
+    # generative_journey is stored as sent (`dataRequest: {dataRequestId,
+    # payload}`), the build passes, and at runtime the journey INVOKES it —
+    # the tool input is composed by the model against the request schema
+    # (`quantity: 2`, the phone in the schema's dashed format), the backend
+    # answered 200 and the journey announced the result while it still held
+    # the turn. The same probe showed what a journey must not rely on: the
+    # dataCapture extractor is a separate call that stored a different phone
+    # number than the one the journey read back, returned `{}` on some turns
+    # and errored on others — so a carrying journey keeps `exitEnabled` off,
+    # marks captures optional, ends through exit conditions (`done`,
+    # agentRequested, …) and gets no deterministic read-back.
+
+    def _plan_tool_request_ids(self, step: dict) -> list[str]:
+        """Data request ids the plan's ``journey_tools`` name: ``data_request``
+        (the flow's own request, from the plan's data_request steps or the sole
+        bundled request) or ``data_request:<id>``."""
+        ids: list[str] = []
+        for raw in (step.get("journey_tools") or []):
+            spec = str(raw).strip()
+            if not spec.startswith("data_request"):
+                continue
+            rid = spec.split(":", 1)[1].strip() if ":" in spec else ""
+            if not rid:
+                if self.request_steps:
+                    rid = self.request_steps[0]
+                elif len(self.data_requests) == 1:
+                    rid = next(iter(self.data_requests))
+            if not rid:
+                continue
+            resolved = _resolve_request_id(rid, self.data_requests) if self.data_requests else rid
+            if resolved and resolved not in ids:
+                ids.append(resolved)
+        return ids
+
+    def _tool_payload(self, request_id: str, existing: Any) -> dict:
+        """The tool's payload template: what the generator wrote when it wrote
+        one, else ``{field: {slot:NLX.Slot}}`` for the request fields the flow
+        has slots for (the runtime fills the call from the model's arguments;
+        the template only documents the mapping)."""
+        if isinstance(existing, dict) and existing:
+            return existing
+        document = self.data_requests.get(request_id) or {}
+        schema = document.get("requestSchema") if isinstance(document.get("requestSchema"), dict) else {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        return {name: f"{{{name}:NLX.Slot}}" for name in props if name in self.slot_names}
+
+    def _journey_carries_requests(self, cfg: dict, step: dict) -> bool:
+        tools = [t for t in (cfg.get("tools") or []) if isinstance(t, dict)]
+        if any(t.get("type") == "dataRequest" for t in tools):
+            return True
+        return bool(self._plan_tool_request_ids(step))
+
+    def _ensure_done_exit(self, node_id: str, node: dict, cfg: dict, label: str) -> None:
+        """A carrying journey ends through the `done` exit condition; its edge is
+        the continuation the generator meant (the captured / unconditioned
+        edge), else a redirect to the follow-up flow."""
+        conditions = [c for c in (cfg.get("exitConditions") or []) if isinstance(c, dict)]
+        done_index = next((i for i, c in enumerate(conditions)
+                           if str(c.get("name") or "") == self.DONE_EXIT_NAME), None)
+        if done_index is None:
+            conditions.append({"name": self.DONE_EXIT_NAME, "prompt": self._done_exit_prompt()})
+            done_index = len(conditions) - 1
+            self.change(f"{label}: exit condition {done_index} '{self.DONE_EXIT_NAME}' (J8)")
+        cfg["exitConditions"] = conditions
+        edges = _edges(node)
+        if any(self._journey_index(e) == done_index for e in edges):
+            return
+        gj_condition = {"left": {"type": "system", "name": "System.gjConditionIndex"},
+                        "operator": "eq", "right": {"type": "constant", "value": done_index}}
+
+        def _slot_exists_edge(edge: dict) -> bool:
+            conds = edge.get("conditions") or []
+            return bool(conds) and all(
+                isinstance(c, dict) and (c.get("left") or {}).get("type") == "slot"
+                and c.get("operator") in ("exists", "not_exists") for c in conds)
+
+        continuation = next((e for e in edges if _slot_exists_edge(e)), None)
+        if continuation is None:
+            continuation = next((e for e in edges if not (e.get("conditions") or e.get("generativeCondition"))
+                                 and not (_has_status(e, "timeout") or _has_status(e, "failure"))), None)
+        if continuation is not None:
+            continuation["conditions"] = [gj_condition]
+            continuation["name"] = self.DONE_EXIT_NAME
+            self.change(f"{label}: edge → [{str(continuation.get('nodeId'))[:8]}] is the '{self.DONE_EXIT_NAME}' "
+                        f"exit (index {done_index}); the journey itself reads back and announces (J8)")
+            return
+        if not self.follow_up_flow_id:
+            self.violation("J8", "flow", f"{label} has no edge to continue on when the journey is done")
+            return
+        target = self._follow_up_redirect(self._end_node_id())
+        node.setdefault("childNodes", []).append(
+            {"nodeId": target, "name": self.DONE_EXIT_NAME, "conditions": [gj_condition]})
+        self.change(f"{label}: '{self.DONE_EXIT_NAME}' exit (index {done_index}) → follow-up "
+                    f"[{target[:8]}] (J8)")
+
+    def _end_node_id(self) -> str:
+        end_ids = [nid for nid, _ in self.nodes_of_type("end")]
+        if end_ids:
+            return end_ids[0]
+        end_id = _derived_id("4f1a00e0", f"{self.flow_id}#end")
+        self.nodes[end_id] = {"nodeId": end_id, "type": "end", "childNodes": []}
+        return end_id
+
+    def _ensure_another_request_exit(self, node: dict, cfg: dict, label: str) -> None:
+        """A carrying journey hands a request it has no tool for to the follow-up
+        flow, which listens and routes it (J8)."""
+        if not self.follow_up_flow_id:
+            return
+        conditions = [c for c in (cfg.get("exitConditions") or []) if isinstance(c, dict)]
+        if any(str(c.get("name") or "") == self.ANOTHER_REQUEST_EXIT_NAME for c in conditions):
+            return
+        conditions.append({"name": self.ANOTHER_REQUEST_EXIT_NAME, "prompt": self._another_request_exit_prompt()})
+        cfg["exitConditions"] = conditions
+        index = len(conditions) - 1
+        target = self._follow_up_redirect(self._end_node_id())
+        node.setdefault("childNodes", []).append({
+            "nodeId": target, "name": self.ANOTHER_REQUEST_EXIT_NAME,
+            "conditions": [{"left": {"type": "system", "name": "System.gjConditionIndex"},
+                            "operator": "eq", "right": {"type": "constant", "value": index}}]})
+        self.change(f"{label}: exit condition {index} '{self.ANOTHER_REQUEST_EXIT_NAME}' → follow-up "
+                    f"[{target[:8]}] (J8)")
+
+    JOURNEY_TOOL_MARKER = "[tool use]"
+
+    def _journey_tool_rules(self, request_ids: list[str]) -> str:
+        """How a carrying journey uses its tools and announces results — the
+        counterpart of the conversation-style block (J7) for journeys that
+        call the backend themselves."""
+        names = ", ".join(request_ids) if request_ids else "the data request tools"
+        lang = self._language()
+        if lang == "ja":
+            return (f"{self.JOURNEY_TOOL_MARKER}\n"
+                    f"- 照会（読み取り）は必要な値がそろい次第 {names} を呼び出します。登録・変更・予約など状態を変える呼び出しは、"
+                    "内容をまとめて読み上げ、お客様が承諾してからにします。\n"
+                    "- ツールの結果だけを伝えます。結果にない金額・状態・番号は作りません。失敗（success が false）なら結果の message を伝え、"
+                    "再試行するか担当者への引き継ぎを提案します。\n"
+                    "- 結果は値の意味と単位（円、台）を添えて文で伝えます。コロンやスラッシュで並べず、CONFIRMED のようなコード値は読み上げません。\n"
+                    "- 「今週の金曜日」のような相対的な日付は自分で曜日計算をせず、お客様に何月何日かを確認して確定します。\n"
+                    "- 形式の決まった値（電話番号、注文番号）は読み上げて確認し、形式が合わなければ聞き直します。\n"
+                    "- 結果を案内した後は「他に必要なことはないか」を尋ねて会話を続けます。変更・取消・追加の質問には、ツールがあれば"
+                    "ツールで、なければ伝えられた規則を説明してオペレーターへの引き継ぎを提案します。お客様が明確に終わりだと言ったときだけ会話を終えます。")
+        if lang == "en":
+            return (f"{self.JOURNEY_TOOL_MARKER}\n"
+                    f"- Call {names} for a lookup as soon as the values it needs are known. A call that creates or "
+                    "changes something (a booking, a request) waits until you have read the details back and the "
+                    "customer agreed.\n"
+                    "- Say only what the tool returned; never invent an amount, a status or a number that is not in "
+                    "the result. When it fails (success is false), relay the result's message and offer to retry or "
+                    "hand off to an agent.\n"
+                    "- Announce results as sentences that name each value by its meaning with its unit; never list "
+                    "values after colons or slashes, and never read a code such as CONFIRMED aloud.\n"
+                    "- Do not compute weekdays yourself: turn a relative date ('this Friday') into a month and day "
+                    "by confirming it with the customer.\n"
+                    "- Read strict-format values (phone, order number) back and re-ask when the shape is wrong.\n"
+                    "- After announcing a result, ask whether anything else is needed and keep the conversation: "
+                    "handle changes, cancellations and follow-up questions here — with a tool when you have one, "
+                    "otherwise by explaining the rules you were given and offering an agent. Finish only when the "
+                    "customer clearly says they are done.")
+        return (f"{self.JOURNEY_TOOL_MARKER}\n"
+                f"- 조회(읽기)는 필요한 값이 모이면 바로 {names} 도구를 호출합니다. 예약·접수·변경처럼 상태를 바꾸는 호출은 "
+                "내용을 한 번에 되읽어 고객이 동의한 뒤에만 합니다.\n"
+                "- 도구 결과만 말합니다. 결과에 없는 금액·상태·번호는 만들지 않습니다. 실패(success가 false)면 결과의 message를 "
+                "전하고 다시 시도하거나 상담원 연결을 제안합니다.\n"
+                "- 결과는 값의 의미와 단위(원, 대)를 붙여 문장으로 말합니다. 콜론(:)이나 슬래시로 나열하지 않고, CONFIRMED 같은 "
+                "코드값은 읽지 않습니다.\n"
+                "- '이번 주 금요일' 같은 상대적 날짜는 스스로 요일을 계산하지 말고, 고객에게 몇 월 며칠인지 확인해 확정합니다.\n"
+                "- 전화번호·주문번호처럼 형식이 정해진 값은 되읽어 확인하고, 형식이 맞지 않으면 다시 묻습니다.\n"
+                "- 결과를 안내한 뒤에는 '더 필요한 것이 있으신지' 묻고 대화를 이어갑니다. 변경·취소·추가 질문 같은 반응은 이 대화에서 "
+                "계속 처리합니다: 도구가 있으면 도구로, 없으면 안내받은 규칙(예: 세척일 전 사전 연락)을 설명하고 상담원 연결을 제안합니다. "
+                "고객이 분명히 끝났다고 말할 때만 대화를 마칩니다.")
 
     TOPIC_EXIT_PREFIX = "handOffTopic"
 
@@ -3071,6 +3280,9 @@ class _RuntimeContract:
             step = self.journey_steps[position] if position < len(self.journey_steps) else {}
             cfg = self._journey_config(node)
             label = _label(node_id, node)
+            # A journey that calls the backend itself (J8) ends through its exit
+            # conditions, not when the extractor has filled every slot.
+            carrying = self._journey_carries_requests(cfg, step)
 
             # --- data capture from the plan -------------------------------
             captures = [str(c) for c in (step.get("captures") or []) if str(c).strip()]
@@ -3088,16 +3300,25 @@ class _RuntimeContract:
                         continue
                     if name in present:
                         continue
-                    data.append({"name": name, "type": "slot", "required": True,
+                    data.append({"name": name, "type": "slot", "required": not carrying,
                                  "schema": self._capture_schema(name)})
                     self.change(f"{label}: dataCapture collects slot {name!r} (J2)")
                 for entry in data:
                     entry.setdefault("type", "slot")
-                    entry.setdefault("required", True)
+                    if carrying:
+                        if entry.get("required") is not False:
+                            entry["required"] = False
+                    else:
+                        entry.setdefault("required", True)
                     if not isinstance(entry.get("schema"), dict):
                         entry["schema"] = self._capture_schema(str(entry["name"]))
                 capture["data"] = data
-                if capture.get("exitEnabled") is not True:
+                if carrying:
+                    if capture.get("exitEnabled") is not False:
+                        capture["exitEnabled"] = False
+                        self.change(f"{label}: dataCapture.exitEnabled off — the journey calls the backend "
+                                    f"itself and ends through its exit conditions (J8)")
+                elif capture.get("exitEnabled") is not True:
                     capture["exitEnabled"] = True
                     self.change(f"{label}: dataCapture.exitEnabled (the journey ends when every "
                                 f"required value is captured) (J2)")
@@ -3122,7 +3343,9 @@ class _RuntimeContract:
             has_captured_edge = any(
                 all(_captures_slot(e, name) for name in captured_names) for e in edges
             ) if captured_names else True
-            if not has_captured_edge:
+            if carrying:
+                self._ensure_done_exit(node_id, node, cfg, label)
+            elif not has_captured_edge:
                 # the continuation the model meant: the exit-condition-0 edge,
                 # else the first edge that is not a status/agent branch
                 target = None
@@ -3184,28 +3407,62 @@ class _RuntimeContract:
                             "right": {"type": "constant", "value": index}}]})
                     self.change(f"{label}: exit condition {index} '{name}' ({topic}) → agent request (J4)")
 
+            if carrying:
+                self._ensure_another_request_exit(node, cfg, label)
+
             # --- confirmation of what was captured (J6) ------------------------
             # Live (2026-09-17): the sentence a journey composes on the turn it
             # exits is not delivered, so the caller hears the next question with
             # no acknowledgement of six values just given. A templated basic in
-            # between reads them back; the flow then continues as planned.
-            if captured_names and self.role == "operation":
+            # between reads them back; the flow then continues as planned. A
+            # carrying journey (J8) reads back and confirms itself before it
+            # calls the backend, so it gets no deterministic read-back.
+            if captured_names and self.role == "operation" and not carrying:
                 self._insert_capture_confirmation(node_id, node, captured_names,
                                                   template=step.get("template"))
 
             # --- tools ------------------------------------------------------
             tools = [t for t in (cfg.get("tools") or []) if isinstance(t, dict)]
             kept = []
+            request_ids: list[str] = []
             for tool in tools:
                 kind = tool.get("type")
-                if kind in ("dataRequest", "mcpFlow"):
+                if kind == "mcpFlow":
                     self.violation(
                         "J5", "flow",
-                        f"{label} tool type {kind!r} is not deployable from a bundle (the service drops "
-                        f"a dataRequest tool's id; mcpFlow fails on invocation) — the flow's data_request "
-                        f"node calls the backend after the journey")
+                        f"{label} tool type 'mcpFlow' fails on invocation (\"Unknown tool type\", Canvas "
+                        f"debugger 2026-09-09) — bind a data request as a 'dataRequest' tool")
+                    continue
+                if kind == "dataRequest":
+                    dr = tool.get("dataRequest") if isinstance(tool.get("dataRequest"), dict) else {}
+                    raw_id = str(dr.get("dataRequestId") or (tool.get("payload") or {}).get("dataRequestId") or "")
+                    rid = (_resolve_request_id(raw_id, self.data_requests) if self.data_requests and raw_id
+                           else (raw_id or None))
+                    if not rid:
+                        self.violation("J5", "flow",
+                                       f"{label} has a dataRequest tool that names no bundled data request"
+                                       f"{f' ({raw_id!r})' if raw_id else ''}")
+                        continue
+                    if rid in request_ids:
+                        continue
+                    payload = self._tool_payload(rid, dr.get("payload"))
+                    if dr.get("dataRequestId") != rid or dr.get("payload") != payload or set(tool) - {
+                            "type", "dataRequest", "interimMessages", "prompt"}:
+                        tool = {k: v for k, v in tool.items() if k in ("type", "interimMessages", "prompt")}
+                        tool["dataRequest"] = {"dataRequestId": rid, "payload": payload}
+                        self.change(f"{label}: dataRequest tool {rid!r} normalised to "
+                                    f"{{dataRequestId, payload}} (J8)")
+                    request_ids.append(rid)
+                    kept.append(tool)
                     continue
                 kept.append(tool)
+            for rid in self._plan_tool_request_ids(step):
+                if rid in request_ids:
+                    continue
+                kept.append({"type": "dataRequest",
+                             "dataRequest": {"dataRequestId": rid, "payload": self._tool_payload(rid, None)}})
+                request_ids.append(rid)
+                self.change(f"{label}: dataRequest tool {rid!r} from the plan's journey_tools (J8)")
             wants_kb = "knowledge_base" in [str(t) for t in (step.get("journey_tools") or [])]
             if wants_kb and self.kb_name and not any(t.get("type") == "knowledgeBase" for t in kept):
                 kept.append({"type": "knowledgeBase", "knowledgeBaseId": f"{{KB:{self.kb_name}}}",
@@ -3215,13 +3472,17 @@ class _RuntimeContract:
                 cfg["tools"] = kept
 
             # --- bounds & model -----------------------------------------------
-            if not isinstance(cfg.get("maxSteps"), int) or cfg["maxSteps"] < 1:
-                cfg["maxSteps"] = self.JOURNEY_MAX_STEPS
-                self.change(f"{label}: maxSteps {self.JOURNEY_MAX_STEPS} (J5)")
+            max_steps = self.JOURNEY_TOOL_MAX_STEPS if carrying else self.JOURNEY_MAX_STEPS
+            if not isinstance(cfg.get("maxSteps"), int) or cfg["maxSteps"] < 1 \
+                    or (carrying and cfg["maxSteps"] < max_steps):
+                cfg["maxSteps"] = max_steps
+                self.change(f"{label}: maxSteps {max_steps} ({'J8' if carrying else 'J5'})")
             if not cfg.get("modelType"):
-                cfg["modelType"] = self.JOURNEY_DEFAULT_MODEL
-                self.change(f"{label}: modelType {self.JOURNEY_DEFAULT_MODEL} (a workspace without a "
-                            f"default model runs a silent journey) (J5)")
+                cfg["modelType"] = self.JOURNEY_TOOL_MODEL if carrying else self.JOURNEY_DEFAULT_MODEL
+                self.change(f"{label}: modelType {cfg['modelType']} "
+                            + ("(the journey composes the backend's arguments — accuracy over latency) (J8)"
+                               if carrying else
+                               "(a workspace without a default model runs a silent journey) (J5)"))
 
             # --- how the journey talks (J7) -----------------------------------
             # Live (2026-09-21): a Haiku journey echoed every answer ("벽걸이형이군요.
@@ -3230,9 +3491,13 @@ class _RuntimeContract:
             # prompt says WHAT to collect; these lines say HOW to talk.
             prompt_text = str(cfg.get("prompt") or "")
             if self.JOURNEY_STYLE_MARKER not in prompt_text:
-                cfg["prompt"] = (prompt_text.rstrip() + ("\n\n" if prompt_text.strip() else "")
-                                 + self._journey_style_rules())
+                prompt_text = (prompt_text.rstrip() + ("\n\n" if prompt_text.strip() else "")
+                               + self._journey_style_rules())
+                cfg["prompt"] = prompt_text
                 self.change(f"{label}: conversation-style rules appended to the journey prompt (J7)")
+            if carrying and self.JOURNEY_TOOL_MARKER not in prompt_text:
+                cfg["prompt"] = prompt_text.rstrip() + "\n\n" + self._journey_tool_rules(request_ids)
+                self.change(f"{label}: tool-use rules appended to the journey prompt (J8)")
 
     JOURNEY_STYLE_MARKER = "[conversation style]"
 
@@ -3243,7 +3508,7 @@ class _RuntimeContract:
                     "- お客様の回答を毎回繰り返さないでください。必要なときだけ一文で短く確認します。\n"
                     "- 一度の発話に複数の値が含まれていればすべて受け取り、足りないものだけを尋ねます。\n"
                     "- 質問は一度に一つか二つまで。すでに述べられた値は聞き直しません。\n"
-                    "- 日付や時間は「来週」のような相対表現のままにせず、具体的な日付に確定してから進めます。\n"
+                    "- 「来週」のような相対的な日付は自分で曜日計算をせず、お客様に何月何日かを確認して確定してから進めます。\n"
                     "- 価格・規約・在庫など、渡されていない事実は作らず、分からないと伝えます。\n"
                     "- 必要な値がそろったら、まとめて一度だけ確認して終了します。")
         if lang == "en":
@@ -3251,15 +3516,15 @@ class _RuntimeContract:
                     "- Do not echo each answer back; acknowledge briefly and only when it helps.\n"
                     "- If one utterance carries several values, take them all and ask only for what is missing.\n"
                     "- Ask for at most one or two things per turn; never re-ask what the caller already said.\n"
-                    "- Resolve relative dates and times ('next week', 'tomorrow afternoon') to a concrete date "
-                    "before moving on.\n"
+                    "- Turn relative dates and times ('next week', 'tomorrow afternoon') into a concrete month and day "
+                    "by confirming them with the caller — do not compute weekdays yourself.\n"
                     "- Never invent prices, policies or availability you were not given; say you do not know.\n"
                     "- Once every value is known, confirm them together once, then finish.")
         return (f"{self.JOURNEY_STYLE_MARKER}\n"
                 "- 고객의 답을 매번 되풀이하지 마세요. 필요할 때만 한 문장으로 짧게 확인합니다.\n"
                 "- 한 발화에 여러 값이 들어 있으면 모두 받아들이고, 빠진 값만 물어보세요.\n"
                 "- 한 번에 한두 가지만 묻고, 고객이 이미 말한 값은 다시 묻지 마세요.\n"
-                "- '다음주', '내일 오후' 같은 상대적 날짜·시간은 구체적인 날짜로 확정한 뒤 진행하세요.\n"
+                "- '다음주', '내일 오후' 같은 상대적 날짜·시간은 스스로 요일을 계산하지 말고, 고객에게 몇 월 며칠인지 확인해 확정한 뒤 진행하세요.\n"
                 "- 가격·정책·재고처럼 전달받지 않은 사실은 만들어 내지 말고 모른다고 말하세요.\n"
                 "- 필요한 값이 모두 모이면 한 번에 정리해 확인하고 마무리하세요.")
 

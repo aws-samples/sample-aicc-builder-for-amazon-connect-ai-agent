@@ -149,11 +149,12 @@ The plan lists confirmed steps with node_type + determinism. Your flow:
      방문 예정일은 {createReservation.visitDate:NLX.Variable}, 총 금액은
      {createReservation.totalAmount:NLX.Variable}원입니다."). Then the same
      continuation as the generative node.
-  2. Every `generative_journey`'s captured edge leads first to a `basic` that
-     reads the captured values back in one sentence ("{productType:NLX.Slot}
-     {quantity:NLX.Slot}대 {serviceType:NLX.Slot}을 {preferredDate:NLX.Slot}에
-     {address:NLX.Slot}로 방문하는 것으로 확인했습니다. 이어서 진행하겠습니다."),
-     then to the next deterministic node.
+  2. Every `generative_journey` WITHOUT a data request tool has a captured edge
+     that leads first to a `basic` that reads the captured values back in one
+     sentence ("{productType:NLX.Slot} {quantity:NLX.Slot}대 {serviceType:NLX.Slot}을
+     {preferredDate:NLX.Slot}에 {address:NLX.Slot}로 방문하는 것으로 확인했습니다.
+     이어서 진행하겠습니다."), then to the next deterministic node. A journey WITH
+     a data request tool reads back and confirms itself — no read-back node.
   Rules for both: the project's language and register (존댓말 / polite form),
   one or two sentences, no colon-and-list ("조회 결과: A, B, C"), no slashes,
   no field names or codes the caller would not say (status codes such as
@@ -163,24 +164,54 @@ The plan lists confirmed steps with node_type + determinism. Your flow:
   synthesises a plain sentence only where you left none.
 - A confirmed `generative_journey` step (plan fields `captures`, `journey_tools`)
   is ONE `generative_journey` node that carries that stretch of the
-  conversation. Write `metadata.generativeJourney.prompt` in the project
-  language: who the agent is, what it must find out (each captured slot by name
-  and what counts as a valid value), how to behave (empathise, do not invent
-  prices or policies, answer side questions from the knowledge base and come
-  back), and that it ends once the values are settled. The contract fills
-  `dataCapture` from `captures`, adds the knowledge-base tool, the agent-request
-  exit and bounds. Wire the exits yourself: the FIRST child edge is the
-  "captured" edge — one edge whose conditions test every captured slot
-  (`slot <name> exists`, one condition per slot) — leading to the next
-  deterministic node (the data_request, or a `basic` that confirms the values);
-  then `node_status eq timeout` and `node_status eq failure` edges to the
-  escalation redirect. Do not put a strict-format value (regex, phone,
-  identifier) into a journey: those are `user_choice` nodes before or after it.
+  conversation. Two shapes:
+  * **A journey whose `journey_tools` name a data request (`data_request`,
+    `data_request:<id>`) CARRIES THE OPERATION** (live 2026-09-21: it invoked
+    the request with arguments it composed from the conversation, the backend
+    answered and the journey announced the result while it still held the
+    turn). Render it as: `metadata.generativeJourney.tools` = one
+    `{"type": "dataRequest", "dataRequest": {"dataRequestId": "<id>", "payload":
+    {"<field>": "{<slot>:NLX.Slot}", …}}}` per named request (the operation's own
+    request for the bare `data_request`) plus the knowledge base when named;
+    `exitConditions` = `done` FIRST (index 0: "the result has been announced and
+    the customer says they need nothing else") and one condition per hand-off
+    the plan describes (a lookup miss that goes to another flow); `childNodes` =
+    the `done` edge with `System.gjConditionIndex eq 0` → the follow-up redirect,
+    one edge per hand-off condition → its redirect, then `node_status eq
+    timeout` and `node_status eq failure` → the escalation redirect. Put NO
+    `data_request` node, NO read-back `basic`, NO result `generative_text` and
+    NO `choice` after it — the journey does those itself. Write its prompt as an
+    operation brief in the project language: who the agent is; the goal; every
+    value to collect by slot name with what counts as valid (format, options,
+    unit); the business rules from the operation (order of questions when the
+    requirements prefer one, eligibility rules the backend applies); each tool
+    by its dataRequestId and WHEN to call it (a lookup as soon as its inputs are
+    known; a create/change only after reading the details back and getting a
+    yes); the sentences the requirements mandate after a result (verbatim); and
+    the result pattern from the plan's `template`. The contract appends the
+    conversation-style and tool-use rules, the agent-request exit, the
+    `anotherRequest` exit, `dataCapture` (optional captures, `exitEnabled:
+    false`) and bounds.
+  * **A journey without a data request only collects.** Write its prompt: who
+    the agent is, what it must find out (each captured slot by name and what
+    counts as a valid value), how to behave (empathise, do not invent prices or
+    policies, answer side questions from the knowledge base and come back), and
+    that it ends once the values are settled. The contract fills `dataCapture`
+    from `captures`, adds the knowledge-base tool, the agent-request exit and
+    bounds. Wire the exits yourself: the FIRST child edge is the "captured"
+    edge — one edge whose conditions test every captured slot (`slot <name>
+    exists`, one condition per slot) — leading to the next deterministic node
+    (the data_request, or a `basic` that confirms the values); then `node_status
+    eq timeout` and `node_status eq failure` edges to the escalation redirect.
+    Do not put a strict-format value (regex, phone, identifier) into such a
+    journey: those are `user_choice` nodes before or after it.
 - MUST NOT use `generative_journey` for intent routing, ever — even when the
   plan confirmed a journey, it covers a stretch of conversation INSIDE the
   operation, not the decision about what the customer wants.
 - Money, permissions, compliance, and eligibility decisions are ALWAYS
-  `choice` nodes with explicit conditions — never generative.
+  deterministic: a `choice` node with explicit conditions in a scripted flow,
+  and the BACKEND's result relayed by the journey in a carrying flow — never a
+  price or a decision the model computes.
 - Every node MUST be reachable from `start`; a node nothing points at is
   dropped and reported.
 

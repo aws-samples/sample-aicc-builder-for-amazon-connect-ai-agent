@@ -61,6 +61,19 @@ MORE_HELP_SLOT_NAME = "moreHelp"
 #: Context variables the system flows declare and use.
 FALLBACK_ATTEMPTS_VAR = "fallbackAttempts"
 FAIL_REASON_VAR = "failReason"
+#: Set to 1 once the greeting has been spoken. Live (voice, 2026-09-21): the
+#: caller heard the greeting five times in 23 seconds — the voice channel
+#: re-entered WelcomeFlow with structured requests while the greeting played,
+#: and "안녕하세요" was routed back to it — so a re-entry skips the greeting and
+#: goes straight to listening.
+WELCOME_GREETED_VAR = "welcomeGreeted"
+
+#: Routing text every untrained system flow carries. Live (2026-09-21): the
+#: welcome flow's aiDescription said it "greets the customer", and the router
+#: sent "안녕하세요" and "뭐 해줄 수 있어요?" to it although it is untrained —
+#: the greeting was repeated each time. A system flow's routing text must not
+#: describe anything a caller might say.
+SYSTEM_FLOW_AI_DESCRIPTION = "Internal system flow. Never select this flow for a customer utterance."
 
 #: Consecutive unrecognized turns before FallbackFlow hands over to a human.
 MAX_FALLBACK_ATTEMPTS = 3
@@ -473,6 +486,8 @@ def _ascii(text: str) -> str:
 
 
 _FALLBACK_ATTEMPTS_CONTEXT = [{"name": FALLBACK_ATTEMPTS_VAR, "type": "number"}]
+_WELCOME_CONTEXT = [{"name": FALLBACK_ATTEMPTS_VAR, "type": "number"},
+                    {"name": WELCOME_GREETED_VAR, "type": "number"}]
 _FAIL_REASON_CONTEXT = [{"name": FAIL_REASON_VAR, "type": "text"}]
 
 
@@ -500,6 +515,7 @@ def build_welcome_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict:
     greeting = _approved_greeting(spec) or _composed_greeting(spec, text, company)
 
     start = _node_id(flow_id, "start")
+    guard = _node_id(flow_id, "greetedGuard")
     greet = _node_id(flow_id, "greeting")
     listen = _node_id(flow_id, "intentCapture")
     recognized = _node_id(flow_id, "redirectRecognized")
@@ -508,23 +524,32 @@ def build_welcome_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict:
 
     flow = _flow_shell(
         flow_id, language, untrained=True,
-        description=(f"Greets the customer, captures the intent with a User input "
+        description=(f"Greets the customer once, captures the intent with a User input "
                      f"node and redirects to the recognized flow. Unrecognized "
-                     f"input goes to {ids['fallback']}."),
-        ai_description=("System welcome flow. Not a routing target: it greets the "
-                        "customer once, resets the fallback counter, listens with a "
-                        "User input node and redirects to whichever attached flow "
-                        "the application recognized."),
-        context_variables=_FALLBACK_ATTEMPTS_CONTEXT,
+                     f"input goes to {ids['fallback']}; a re-entry skips the greeting."),
+        ai_description=SYSTEM_FLOW_AI_DESCRIPTION,
+        context_variables=_WELCOME_CONTEXT,
     )
     flow["nodes"] = {
         start: {"nodeId": start, "type": "start",
-                "childNodes": [_child(greet, "toGreeting")]},
+                "childNodes": [_child(guard, "toGuard")]},
+        # Greet once per session: a re-entry (the voice channel's structured
+        # requests, an utterance routed back here) only listens again.
+        guard: {"nodeId": guard, "type": "choice",
+                "childNodes": [
+                    _child(listen, "alreadyGreeted", [{
+                        "left": {"type": "context", "name": WELCOME_GREETED_VAR},
+                        "operator": "gte",
+                        "right": {"type": "constant", "value": 1},
+                    }]),
+                    _child(greet, "firstVisit", []),
+                ]},
         greet: {"nodeId": greet, "type": "basic",
                 "messages": [_message(greeting)],
                 # Reset here, not in FallbackFlow: a session that starts over
                 # must not inherit the previous caller's failure count.
-                "metadata": {"stateModifications": [_set_context(FALLBACK_ATTEMPTS_VAR, 0)]},
+                "metadata": {"stateModifications": [_set_context(FALLBACK_ATTEMPTS_VAR, 0),
+                                                    _set_context(WELCOME_GREETED_VAR, 1)]},
                 "childNodes": [_child(listen, "toIntentCapture")]},
         listen: {"nodeId": listen, "type": "user_input",
                  "childNodes": [
@@ -571,12 +596,7 @@ def build_fallback_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict:
         flow_id, language, untrained=True,
         description=("Re-guides the customer when nothing was recognized, keeps "
                      "listening, and escalates on the third consecutive failure."),
-        ai_description=("System fallback flow. Not a routing target: increments the "
-                        "fallback counter, re-guides the customer with the supported "
-                        "services, listens again with a User input node and redirects "
-                        "to the recognized flow; after "
-                        f"{MAX_FALLBACK_ATTEMPTS} consecutive failures it hands over "
-                        f"to {ids['escalation']}."),
+        ai_description=SYSTEM_FLOW_AI_DESCRIPTION,
         context_variables=_FALLBACK_ATTEMPTS_CONTEXT,
     )
     flow["nodes"] = {
@@ -625,10 +645,22 @@ def build_follow_up_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict
     """"Anything else?" — the node that keeps the session alive after an answer.
 
     Every operation flow's success path redirects here instead of ending, which
-    is what turned a one-answer bot into a multi-turn conversation live. The
-    attached slot is cleared at the START of the flow (R6): slot values persist
-    for the whole session, and a filled ``moreHelp`` would answer the capture
-    node for the customer on its second visit.
+    is what turned a one-answer bot into a multi-turn conversation live.
+
+    Listen FIRST (R6b). Live (2026-09-21): after a booking the caller said
+    "음 바꿔도 되나요?" and, earlier, "세척 예약도 해주실 수 있나요 근데 세척요금이
+    어떻게 돼요" — a yes/no capture cannot route either (captured_flow is only
+    set by a user_input node), so each cost a failure count or an extra turn.
+    Now the question is asked by a message and the answer goes to a User input
+    node: a request is routed at once; an answer that names no flow is tested
+    for the language's "no" words (System.utterance contains, the operand E2
+    verified live) and ends the session; anything else is asked "anything
+    else? yes/no" once, the way it was before, so a bare "yes" still leads to
+    "how can I help you?" and a listen.
+
+    The attached slot is cleared at the START of the flow (R6): slot values
+    persist for the whole session, and a filled ``moreHelp`` would answer the
+    capture node for the customer on its second visit.
     """
     ids = _ids(spec, flow_ids)
     flow_id = ids["followup"]
@@ -638,10 +670,14 @@ def build_follow_up_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict
     start = _node_id(flow_id, "start")
     clear = _node_id(flow_id, "clearSlot")
     ask = _node_id(flow_id, "askMoreHelp")
+    listen = _node_id(flow_id, "listenFirst")
+    recognized = _node_id(flow_id, "redirectRecognized")
+    decide = _node_id(flow_id, "decideOnAnswer")
+    confirm = _node_id(flow_id, "askMoreHelpYesNo")
     branch = _node_id(flow_id, "branchOnAnswer")
     prompt = _node_id(flow_id, "askNextRequest")
-    listen = _node_id(flow_id, "listenAgain")
-    recognized = _node_id(flow_id, "redirectRecognized")
+    listen_again = _node_id(flow_id, "listenAgain")
+    recognized_again = _node_id(flow_id, "redirectRecognizedAgain")
     thanks = _node_id(flow_id, "thanks")
     unrecognized = _node_id(flow_id, "redirectFallback")
     end = _node_id(flow_id, "end")
@@ -649,11 +685,8 @@ def build_follow_up_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict
     flow = _flow_shell(
         flow_id, language, untrained=True,
         description=("Asked after an operation completes: offers further help, "
-                     "routes the next request, or ends the session politely."),
-        ai_description=("System follow-up flow. Not a routing target: asks whether "
-                        "the customer needs anything else (yes/no), listens for the "
-                        "next request and redirects to the recognized flow, or thanks "
-                        "the customer and exits the application."),
+                     "routes the next request at once, or ends the session politely."),
+        ai_description=SYSTEM_FLOW_AI_DESCRIPTION,
         context_variables=_FALLBACK_ATTEMPTS_CONTEXT,
         slot_types=[{
             "name": MORE_HELP_SLOT_NAME,
@@ -662,34 +695,47 @@ def build_follow_up_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict
             "aiDescription": "Whether the customer wants further help: yes or no",
         }],
     )
+    # `contains` is a substring test: an English "no" would match "I don't know",
+    # so only words of three characters or more are tested (Korean and Japanese
+    # negatives are distinctive at two characters).
+    no_words = [w for w in [text["no"], *text.get("no_synonyms", [])]
+                if w and (len(w) >= 3 or language in ("ko", "ja"))]
     flow["nodes"] = {
         start: {"nodeId": start, "type": "start",
                 "childNodes": [_child(clear, "toAsk")]},
         clear: {"nodeId": clear, "type": "basic",
                 "metadata": {"stateModifications": [
                     {"type": "slot", "name": MORE_HELP_SLOT_NAME,
-                     "modification": "clear"}]},
+                     "modification": "clear"},
+                    # The customer got an answer, so the failure streak is over.
+                    _set_context(FALLBACK_ATTEMPTS_VAR, 0)]},
                 "childNodes": [_child(ask, "next")]},
-        ask: {"nodeId": ask, "type": "user_choice",
+        ask: {"nodeId": ask, "type": "basic",
               "messages": [_message(text["more_help"])],
-              "metadata": {
-                  # S2: slotTypeId is stored verbatim as the internal slotId, so
-                  # it must be the attached slot's NAME, not the slot type id.
-                  "choice": {"source": "slotType", "slotTypeId": MORE_HELP_SLOT_NAME},
-                  # The customer got an answer, so the failure streak is over.
-                  "stateModifications": [_set_context(FALLBACK_ATTEMPTS_VAR, 0)],
-              },
-              "childNodes": [
-                  _child(branch, "captured", _slot_condition(MORE_HELP_SLOT_NAME, True)),
-                  # "Anything else?" is often answered with the next request
-                  # itself ("반품 신청하고 싶어요", live) rather than yes/no. A
-                  # user_choice cannot route it — captured_flow is only set by a
-                  # user_input node (live) — so treat the answer as "yes, and…":
-                  # ask what they need and listen, instead of the fallback's
-                  # "I did not understand" and a failure count.
-                  _child(prompt, "notCaptured",
-                         _slot_condition(MORE_HELP_SLOT_NAME, False)),
-              ]},
+              "childNodes": [_child(listen, "listen")]},
+        listen: {"nodeId": listen, "type": "user_input",
+                 "childNodes": [
+                     _child(recognized, "flowRecognized", _captured_flow_condition(True)),
+                     _child(decide, "noFlowRecognized", _captured_flow_condition(False)),
+                 ]},
+        recognized: _redirect_node(recognized, CAPTURED_FLOW_PLACEHOLDER, end),
+        decide: {"nodeId": decide, "type": "choice",
+                 "childNodes": [
+                     *[_child(thanks, f"no:{word}", [_utterance_contains(word)]) for word in no_words],
+                     _child(confirm, "unclear", []),
+                 ]},
+        confirm: {"nodeId": confirm, "type": "user_choice",
+                  "messages": [_message(text["more_help"])],
+                  "metadata": {
+                      # S2: slotTypeId is stored verbatim as the internal slotId, so
+                      # it must be the attached slot's NAME, not the slot type id.
+                      "choice": {"source": "slotType", "slotTypeId": MORE_HELP_SLOT_NAME},
+                  },
+                  "childNodes": [
+                      _child(branch, "captured", _slot_condition(MORE_HELP_SLOT_NAME, True)),
+                      _child(prompt, "notCaptured",
+                             _slot_condition(MORE_HELP_SLOT_NAME, False)),
+                  ]},
         branch: {"nodeId": branch, "type": "choice",
                  "childNodes": [
                      _child(prompt, "yes", [{
@@ -701,14 +747,14 @@ def build_follow_up_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict
                  ]},
         prompt: {"nodeId": prompt, "type": "basic",
                  "messages": [_message(text["next_request"])],
-                 "childNodes": [_child(listen, "listen")]},
-        listen: {"nodeId": listen, "type": "user_input",
-                 "childNodes": [
-                     _child(recognized, "flowRecognized", _captured_flow_condition(True)),
-                     _child(unrecognized, "noFlowRecognized",
-                            _captured_flow_condition(False)),
-                 ]},
-        recognized: _redirect_node(recognized, CAPTURED_FLOW_PLACEHOLDER, end),
+                 "childNodes": [_child(listen_again, "listen")]},
+        listen_again: {"nodeId": listen_again, "type": "user_input",
+                       "childNodes": [
+                           _child(recognized_again, "flowRecognized", _captured_flow_condition(True)),
+                           _child(unrecognized, "noFlowRecognized",
+                                  _captured_flow_condition(False)),
+                       ]},
+        recognized_again: _redirect_node(recognized_again, CAPTURED_FLOW_PLACEHOLDER, end),
         thanks: {"nodeId": thanks, "type": "basic",
                  "messages": [_message(text["thanks"])],
                  "childNodes": [_child(end, "toEnd")]},
@@ -716,6 +762,13 @@ def build_follow_up_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict
         end: {"nodeId": end, "type": "end"},
     }
     return flow
+
+
+def _utterance_contains(word: str) -> dict:
+    """The one operand shape a `System.utterance` test matches at runtime (E2)."""
+    return {"left": {"type": "system", "name": "System.utterance"},
+            "operator": "contains",
+            "right": {"type": "constant", "value": word}}
 
 
 # ---------------------------------------------------------------------------
@@ -845,10 +898,7 @@ def build_escalation_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dic
         flow_id, language, untrained=True,
         description=("Plays the handoff message and escalates to a human agent; "
                      "failReason is passed to the contact flow."),
-        ai_description=("System escalation flow. Not a routing target: it is reached "
-                        f"by redirect from {ids['agent_request']} or "
-                        f"{ids['fallback']}, plays the handoff message and escalates "
-                        "to a human agent queue."),
+        ai_description=SYSTEM_FLOW_AI_DESCRIPTION,
         context_variables=_FAIL_REASON_CONTEXT,
     )
     flow["nodes"] = {

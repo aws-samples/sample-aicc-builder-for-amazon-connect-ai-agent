@@ -112,12 +112,14 @@ def fields_to_json_schema(fields: list[dict]) -> dict:
         enum_values = field.get("enum_values") or field.get("enum")
         if enum_values:
             prop["enum"] = list(enum_values)
-        if field.get("regex") or field.get("pattern"):
-            prop["pattern"] = field.get("regex") or field.get("pattern")
-        if field.get("min_length") is not None:
-            prop["minLength"] = field["min_length"]
-        if field.get("max_length") is not None:
-            prop["maxLength"] = field["max_length"]
+        # No `pattern`, `minLength` or `maxLength` on the request side. Live
+        # (2026-09-21, voice): the phone field carried `^010\-\d{4}\-\d{4}$` while
+        # the runtime delivers a PhoneNumber slot without separators; the request
+        # failed its schema BEFORE the HTTP call (no DataRequestsRequested event)
+        # and the caller was escalated with a fabricated read-back. Lengths
+        # written for the display shape fail the same way. The format stays in
+        # the description, where the journey model reads it when it composes the
+        # call's arguments, and the Lambda adapter restores the display shape.
         properties[name] = prop
         if field.get("required", True):
             required.append(name)

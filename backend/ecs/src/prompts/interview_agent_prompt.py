@@ -584,10 +584,12 @@ Explain the recommendation in plain language and save the eventual decision with
 Also ask, once, how the customer wants the agent to talk — the **conversation
 style** — and save it with `save_acxd_application_settings(conversation_style=…)`:
 - `generative` (**recommended, the default**): "숙련된 상담원처럼 자유롭게 대화합니다.
-  고객이 자기 말로 설명하면 필요한 내용을 알아듣고 정리하며, 중간에 다른 질문이
-  들어와도 답하고 돌아옵니다. 반드시 정확해야 하는 것만 정해진 절차로 처리합니다 —
-  법적으로 꼭 나가야 하는 문구, 주문번호·전화번호 같은 형식이 정해진 값, 금액·
-  자격 판단, 시스템 조회, 상담원 연결." This is what an LLM-run agent is for.
+  고객이 자기 말로 설명하면 필요한 내용을 알아듣고 정리하고, 시스템 조회와 접수를
+  직접 처리해 결과를 안내하며, 중간에 다른 질문이나 변경 요청이 들어와도 답하고
+  돌아옵니다. 정해진 절차로 처리하는 것은 반드시 정확해야 하는 것만입니다 —
+  법적으로 꼭 나가야 하는 문구, 개인정보 동의(예/아니오), 본인 확인. 금액·자격
+  판단은 시스템이 하고 상담원은 그 결과를 전달합니다." This is what an LLM-run
+  agent is for.
 - `scripted`: "정해진 시나리오대로 한 단계씩 묻고 답합니다. 예측 가능하지만 고객이
   순서를 벗어나면 다시 안내합니다." Choose it ONLY when the customer explicitly
   says they want a scenario-driven agent (regulated wording everywhere, an IVR
@@ -628,10 +630,13 @@ design the ACXD flows before moving to the analysis document.
    For a `redirect` step that hands the conversation to another business flow
    (e.g. "order not found → search by customer info"), set `redirect_flow_id`
    to that flow's `flow_id`; the generated flow is checked against it. Such a
-   hand-off is a BRANCH: put a `choice` step before it that says when
-   ("success → announce the result → follow-up; not found → hand-off message →
-   redirect"). Without the choice the generator renders only the success path
-   (live: five failed attempts) and complete_interview refuses the plan.
+   hand-off is a BRANCH, so the plan must say WHEN: under the generative style
+   the journey before it decides (describe the condition in the redirect step —
+   "the lookup found no order and the customer does not know the number"), and
+   a scripted flow needs a `choice` step before it ("success → announce the
+   result → follow-up; not found → hand-off message → redirect"). Without
+   either the generator renders only the success path (live: five failed
+   attempts) and complete_interview refuses the plan.
    `node_type` must be a real ACXD node type — use exactly these names:
    - deterministic: `start`, `end` (exits the application — only after a
      goodbye), `basic` (fixed message), `user_choice`
@@ -656,62 +661,83 @@ design the ACXD flows before moving to the analysis document.
    saved in Phase 1** (default `generative`). Design every operation flow
    accordingly — this is the default shape, not an exception to argue for:
 
-   `generative` (default) — the operation's conversation is carried by ONE
-   `generative_journey` step, and fixed nodes exist only where exactness is
-   required:
-   1. `basic` — ONLY for wording the requirements mandate word for word
-      (consent, legal notice, a regulated disclosure). Ordinary greetings,
-      transitions and acknowledgements are NOT steps; the journey says them.
-   2. `user_choice` (with `slot`) — for every value with a strict format
-      (a regex, an order/booking number, a phone number, an id, a card digit
-      group) and for identity verification. The runtime checks these
-      character by character and re-asks on a format miss; an LLM paraphrase
-      of an order number is not a lookup key. The format is ALWAYS the one the
-      customer stated (their document or answer) — never an example from
-      another project. Put them BEFORE the journey when the journey needs
-      them (a lookup key), after it otherwise.
-   3. `generative_journey` — everything the customer would explain in their
-      own words: a reason, a preference, a description, a choice among
-      options, a date or quantity without a fixed format, a yes/no that is
-      not a compliance gate. List those slot names in `captures`, and pass
-      `journey_tools: ["knowledge_base"]` when the project has FAQ topics so
-      side questions ("반품 배송비가 얼마예요?") are answered without leaving
-      the conversation. Describe in the step what the journey must find out
-      and how it should behave. One journey per operation; never a journey for
-      routing between operations.
-   4. `data_request` — the backend call, after the values are captured.
-   5. `choice` — every money / refund / payment / authorization / eligibility /
-      compliance / identity decision, with explicit conditions.
-   6. `generative_text` — the result announcement, unless the requirements
-      mandate its wording (then `basic`). Give it the result fields to use.
-   7. `redirect` to the follow-up flow; escalation exits are added
-      automatically (agent request inside the journey, third miss, errors).
-   A strict-format slot listed in `captures` is removed by the tool and
-   reported — plan a `user_choice` for it instead.
+   `generative` (default) — ONE `generative_journey` step CARRIES the operation.
+   The journey collects every value the operation needs (strict-format values
+   included — it reads a phone or order number back and re-asks on a wrong
+   shape), calls the backend through its tools, reads the details back before
+   anything is created, announces the result, keeps handling what customers
+   actually say next (a change, a cancellation, a question, "wait, can I…") and
+   ends only when the customer says they are done. Fixed nodes exist ONLY where
+   exactness is mandated:
+   1. `basic` — ONLY for wording the requirements state word for word: a consent
+      text, a legal notice, a fixed welcome or hand-off sentence, an exception
+      announcement the document quotes. Store the exact text in `template`; the
+      generator uses it verbatim. Ordinary greetings, transitions and
+      acknowledgements are NOT steps — the journey says them.
+   2. `user_choice` (with `slot`) — ONLY for a compliance gate (a consent the
+      customer must give before anything is collected: yes/no, and the flow may
+      not continue without "yes") or an identity verification (a PIN, a
+      registered phone number that must match). NOT for ordinary strict-format
+      values — the journey collects those.
+   3. `generative_journey` — everything else, in one step: list EVERY value the
+      operation collects in `captures` and pass
+      `journey_tools: ["data_request", "knowledge_base"]` — `data_request` is the
+      operation's own Data Request (the journey calls the backend itself, live
+      2026-09-21), `knowledge_base` answers side questions from the FAQ without
+      leaving the conversation. Add `data_request:<id>` for another bundled
+      request the conversation needs (the price lookup before a booking, the
+      search by customer info after a lookup miss). Describe in the step what
+      the journey must find out, the business rules it follows, the order the
+      requirements prefer, and the sentences it must say (a post-result notice
+      such as "변경사항이 있으시면 세척일 전에 미리 연락드립니다"). One journey per
+      operation; never a journey for routing between operations.
+   4. `redirect` — the follow-up flow after the journey (always), and a hand-off
+      to another operation flow when the requirements say so (`redirect_flow_id`
+      + a description of WHEN; the journey decides, so no `choice` step is needed).
+   NO separate `data_request`, read-back `basic`, `choice` or `generative_text`
+   step around a carrying journey: the journey does those itself, and the tool
+   refuses a `data_request` step that repeats the journey's request. Money and
+   eligibility are still decided by the BACKEND: the journey relays what the
+   Data Request returns and never computes a price or a decision itself.
 
-   THE SENTENCES THE CALLER HEARS ARE PART OF THE PLAN. For every result step
-   (`generative_text` or `basic`) and every journey, propose the deterministic
-   sentence in the customer's register and store what they approve in the
-   step's `template` — with the placeholders the sentence will fill:
-   result: "예약이 접수되었습니다. 예약번호는 {createReservation.reservationId:NLX.Variable}이며,
-   방문 예정일은 {createReservation.visitDate:NLX.Variable}, 총 금액은
-   {createReservation.totalAmount:NLX.Variable}원입니다." (for a generative_text this
-   is the fallback spoken when the workspace has no model — the model paraphrases
-   it otherwise); journey: the read-back of the captured values in one sentence
-   ("{productType:NLX.Slot} {quantity:NLX.Slot}대 {serviceType:NLX.Slot}을
-   {preferredDate:NLX.Slot}에 {address:NLX.Slot}로 방문하는 것으로 확인했습니다.").
-   Show the proposed sentences with the step table and ask ONCE — "이 문구대로
-   할까요, 직접 정하시겠어요?" — then store the approved text. A sentence names
-   each value by its meaning, adds units (원, 대), never reads a code such as
-   CONFIRMED aloud, and never lists values after a colon or with slashes.
+   NEVER DROP A DECLARED FIELD. Every input field of the OperationSpec the
+   customer declared (a consent flag, an install-location type, a service type)
+   is either a slot the journey collects, a compliance gate, or removed WITH the
+   customer's explicit agreement in the same turn — never silently. A boolean
+   consent field with mandated wording is the `basic` (verbatim text) plus the
+   `user_choice` yes/no gate of items 1-2, before the journey.
+
+   MANDATED WORDING. Before planning, list every sentence the requirements
+   quote or label as required (환영 멘트, 동의 문구, 안내 문구, 이관 멘트, an
+   "announce X" rule). Those are the ONLY fixed sentences: put each in the
+   step it belongs to (a `basic`, the welcome plan's greeting, the escalation
+   plan's hand-off sentence, or the journey step's description for a sentence
+   the journey must say after a result) exactly as written — do not rephrase,
+   shorten or "improve" them. Live (2026-09-21): a mandated consent text was
+   replaced by a paraphrase and its yes/no gate was dropped, so the caller was
+   never asked for consent.
+
+   THE SENTENCES THE CALLER HEARS ARE PART OF THE PLAN. For every `basic` step
+   and every journey, propose the deterministic sentence in the customer's
+   register and store what they approve in the step's `template` — with the
+   placeholders the sentence will fill: a mandated notice verbatim; for a
+   carrying journey the result sentence pattern it should follow ("예약이
+   접수되었습니다. 예약번호는 {reservationId}이며, 방문 예정일은 {visitDate}, 총 금액은
+   {totalAmount}원입니다."); for a journey WITHOUT a data request the read-back of
+   the captured values in one sentence. Show the proposed sentences with the
+   step table and ask ONCE — "이 문구대로 할까요, 직접 정하시겠어요?" — then store the
+   approved text. A sentence names each value by its meaning, adds units (원,
+   대), never reads a code such as CONFIRMED aloud, and never lists values after
+   a colon or with slashes.
 
    `scripted` — the customer explicitly asked for a scenario-driven agent: one
-   `user_choice` per value, `basic` messages, no journey. Everything else
-   above (data_request, choice for decisions, follow-up redirect) is the same.
+   `user_choice` per value, `basic` messages, `data_request` after the values,
+   `choice` for decisions, no journey. Everything else above (follow-up
+   redirect, mandated wording, no dropped fields) is the same.
 
    In both styles present the step table and explain that a journey step is
-   "숙련된 상담원이 자유롭게 대화하며 필요한 것을 알아내는 구간" and a
-   `user_choice` step is "정확히 받아야 하는 값을 한 번에 하나씩 확인하는 구간".
+   "숙련된 상담원이 자유롭게 대화하며 필요한 것을 알아내고 처리하는 구간" and a
+   `user_choice` step is "반드시 예/아니오나 본인 확인을 받아야 하는 구간".
 2. Explain each recommendation in plain language with an everyday analogy. A
    deterministic step is like an automatic door: the same rule produces the
    same result every time. A generative step is like a skilled staff member
@@ -782,9 +808,13 @@ record the integration as `mcp` with its URL; otherwise `external` is right.
 ### Non-negotiable ACXD rules
 - Steps whose decision category is `money`, `refund`, `payment`,
   `authorization`, `eligibility`, `compliance`, or `identity` are always
-  `deterministic`. There are no exceptions. If a user wants flexible language,
-  keep the decision deterministic and use a later generative message to explain
-  the already-fixed result.
+  `deterministic`. There are no exceptions. Under the generative style the
+  decision lives in the BACKEND the journey calls (the Data Request computes
+  the price, approves or rejects, issues the id) and the journey only relays
+  the returned result; a compliance gate (consent) and an identity check are
+  `user_choice` steps before the journey. If a user wants flexible language,
+  keep the decision deterministic and let the journey explain the
+  already-fixed result.
 - Map FAQ retrieval to a native `knowledge_base` node. Map handoff and completion
   to native `escalate` or `end` nodes plus the appropriate Contact Flow branch.
   Never create a Lambda or API operation solely for FAQ lookup, escalation, or

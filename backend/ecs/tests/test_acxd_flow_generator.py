@@ -1143,13 +1143,13 @@ def test_journey_tools_and_intent_capture_are_repaired():
        server drops metadata.intentCapture, and a deployed flow using
        intent_capture + choice failed on the FIRST customer utterance with
        "We encountered an issue."
-    2) A dataRequest tool sent only as dataRequest.dataRequestId reads back as
-       dataRequest:{}. The fix is NOT to smuggle the id through
-       provider/action (the fields persist but the runtime does not resolve
-       that shape as a callable tool) — it is to wrap the data request in a
-       helper flow and attach it with type="flow". `mcpFlow` looks like the
-       documented "agent stays in control" option but fails on invocation
-       with {"error": "Unknown tool type"} (measured in the Canvas debugger).
+    2) A dataRequest tool is kept and normalised to
+       `{type, dataRequest: {dataRequestId, payload}}`. Live (2026-09-21, a
+       customer workspace): that shape is stored as sent, builds, and the
+       journey INVOKES it at runtime with model-composed arguments — the
+       2026-09-08 observation that the id is dropped no longer holds, and the
+       helper-flow detour is gone. `mcpFlow` still fails on invocation with
+       {"error": "Unknown tool type"} (Canvas debugger) and becomes a `flow`.
     """
     from agents.acxd_flow_generator import agent as mod
 
@@ -1177,13 +1177,8 @@ def test_journey_tools_and_intent_capture_are_repaired():
     assert "user_input" in types, types
     journey = next(n for n in out["nodes"].values() if n["type"] == "generative_journey")
     tool = journey["metadata"]["generativeJourney"]["tools"][0]
-    # A journey cannot call a data request directly. Smuggling the id through
-    # provider/action does keep the FIELDS on round-trip, but that shape is not
-    # what the runtime resolves as a callable tool, and the build succeeds
-    # either way — so a build is no evidence. The configuration that is
-    # actually DEPLOYED and passed a live multi-turn test binds each data
-    # request as an mcpFlow pointing at its generated helper flow.
-    assert tool == {"type": "flow", "flowId": "toolGetPrice"}, tool
+    assert tool == {"type": "dataRequest",
+                    "dataRequest": {"dataRequestId": "getPrice", "payload": {}}}, tool
 
 
 def test_knowledge_base_node_gets_required_name_and_only_sdk_keys():

@@ -1836,7 +1836,7 @@ def test_j7_journey_prompt_carries_conversation_style_rules():
     out, notes = _apply_journey(_journey_flow())
     prompt = out["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
     assert prompt.startswith("고객의 반품 사유를 자연스럽게 확인합니다.")      # the generator's text is kept
-    assert "[conversation style]" in prompt and "되풀이하지" in prompt and "구체적인 날짜" in prompt
+    assert "[conversation style]" in prompt and "되풀이하지" in prompt and "몇 월 며칠" in prompt
     assert any("(J7)" in n for n in notes)
     again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
     assert again["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"].count("[conversation style]") == 1
@@ -1877,9 +1877,10 @@ def test_j4_agent_request_exit_condition_is_appended_and_routed():
     assert {"timeout", "failure"} <= statuses
 
 
-def test_j5_tools_kb_added_unsupported_dropped_bounds_and_model_defaulted():
-    flow = _journey_flow(journey_cfg={"tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}]})
-    out, notes = _apply_journey(flow)
+def test_j5_tools_kb_added_mcpflow_refused_bounds_and_model_defaulted():
+    """A collecting journey (no data request tool) keeps Haiku and 8 steps and
+    gets the knowledge base; mcpFlow is still refused (it fails on invocation)."""
+    out, notes = _apply_journey(_journey_flow())
     cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
     assert cfg["tools"] == [{"type": "knowledgeBase", "knowledgeBaseId": "{KB:greencart-faq-kb}", "scopeTags": []}]
     assert cfg["maxSteps"] == 8 and cfg["modelType"] == "anthropic.claude-haiku-4-5"
@@ -1888,6 +1889,49 @@ def test_j5_tools_kb_added_unsupported_dropped_bounds_and_model_defaulted():
                                              escalation_flow_id="Escalation", slot_type_ids={"yesNo", "reason"},
                                              slot_type_docs={"reason": _REASON_TYPE}, journey_steps=_JOURNEY_STEPS)
     assert any("mcpFlow" in v and "J5" in v for v in violations)
+
+
+def test_j8_journey_with_a_data_request_tool_carries_the_operation():
+    """Live (2026-09-21, customer workspace): a dataRequest tool on a journey is
+    stored, built and INVOKED — the model composed the arguments, the backend
+    answered and the journey announced the result. Such a journey ends through
+    exit conditions, its captures are optional, it gets no read-back, the
+    stronger model and more steps."""
+    flow = _journey_flow(journey_cfg={"tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}]})
+    out, notes = _apply_journey(flow)
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    tool = next(t for t in cfg["tools"] if t["type"] == "dataRequest")
+    assert tool["dataRequest"]["dataRequestId"] == "requestReturn"
+    assert tool["dataRequest"]["payload"] == {"orderNumber": "{orderNumber:NLX.Slot}", "contactPhone": "{contactPhone:NLX.Slot}"}
+    assert any(t["type"] == "knowledgeBase" for t in cfg["tools"])
+    assert cfg["dataCapture"]["exitEnabled"] is False
+    assert all(d["required"] is False for d in cfg["dataCapture"]["data"])
+    assert cfg["modelType"] == "anthropic.claude-sonnet-5" and cfg["maxSteps"] == 16
+    names = [c["name"] for c in cfg["exitConditions"]]
+    assert "done" in names and "agentRequested" in names and "anotherRequest" in names
+    edges = out["nodes"]["gj"]["childNodes"]
+    done = next(e for e in edges if e["name"] == "done")
+    assert done["nodeId"] == "askP"                                   # the model's continuation became the done exit
+    assert done["conditions"][0]["right"]["value"] == names.index("done")
+    assert not any(all(c["left"].get("type") == "slot" for c in (e.get("conditions") or [{}])) and e.get("conditions")
+                   for e in edges), "no captured-slots edge on a carrying journey"
+    assert not any("(J6)" in n for n in notes), "no deterministic read-back after a carrying journey"
+    prompt = cfg["prompt"]
+    assert "[tool use]" in prompt and "requestReturn" in prompt and "더 필요한 것이 있으신지" in prompt
+    again, notes_again = _apply_journey(out)
+    assert again == out and not any("(J8)" in n for n in notes_again)
+
+
+def test_j8_plan_journey_tools_add_the_data_request_and_a_missing_id_is_refused():
+    steps = [{"captures": ["reason"], "journey_tools": ["data_request", "knowledge_base"], "description": "접수"}]
+    out, notes = _apply_journey(_journey_flow(), journey_steps=steps, request_steps=["requestReturn"])
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    assert [t["dataRequest"]["dataRequestId"] for t in cfg["tools"] if t["type"] == "dataRequest"] == ["requestReturn"]
+    assert any("from the plan's journey_tools (J8)" in n for n in notes)
+    violations = runtime_contract_violations(
+        _journey_flow(journey_cfg={"tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "noSuchRequest"}}]}),
+        **_journey_kwargs())
+    assert any("names no bundled data request" in v for v in violations)
 
 
 def test_j2_j5_are_idempotent_and_a_journey_without_a_plan_step_is_left_to_the_model():
