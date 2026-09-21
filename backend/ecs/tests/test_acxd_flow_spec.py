@@ -440,6 +440,37 @@ def test_validate_requires_captures_and_deterministic_strict_slots_next_to_a_jou
     assert not any("slot 'orderNumber'" in p for p in problems)   # step 1 declares it
 
 
+def test_validate_requires_a_choice_before_an_operation_hand_off():
+    """Live (SELC, 2026-09-21): 'step 3 announce, step 4 hand off to the
+    customer-info search' with no step deciding when — the model generated the
+    announcement path only, five attempts in a row."""
+    _upsert(flow_id="SearchOrder", purpose="Find the order", operation_id="process_return",
+            steps=[{"step": 1, "description": "성명·주소", "node_type": "generative_journey",
+                    "determinism": "generative", "captures": ["reason"]}], slots=_JOURNEY_SLOTS)
+    afs.confirm_acxd_flow_steps("SearchOrder")
+    steps = [
+        {"step": 1, "description": "주문번호", "node_type": "user_choice", "slot": "orderNumber"},
+        {"step": 2, "description": "조회", "node_type": "data_request"},
+        {"step": 3, "description": "안내", "node_type": "generative_text", "determinism": "generative"},
+        {"step": 4, "description": "미조회 → 고객정보 조회로", "node_type": "redirect", "redirect_flow_id": "SearchOrder"},
+        {"step": 5, "description": "후속", "node_type": "redirect", "redirect_flow_id": "followup"},
+    ]
+    _upsert(steps=steps, slots=_JOURNEY_SLOTS)
+    afs.confirm_acxd_flow_steps("ProcessReturn")
+    problems = afs.validate_acxd_flow_spec(afs.get_acxd_flow_spec())
+    assert any("hands off to operation flow 'SearchOrder' but no earlier step is a 'choice'" in p for p in problems)
+    # the follow-up hand-back (a system flow) is not a branch to plan
+    assert not any("'followup'" in p and "choice" in p for p in problems)
+    # with the deciding choice in place the rule is satisfied
+    steps.insert(2, {"step": 3, "description": "조회 성공/미조회 분기", "node_type": "choice"})
+    for n, s in enumerate(steps, start=1):
+        s["step"] = n
+    _upsert(steps=steps, slots=_JOURNEY_SLOTS)
+    afs.confirm_acxd_flow_steps("ProcessReturn")
+    problems = afs.validate_acxd_flow_spec(afs.get_acxd_flow_spec())
+    assert not any("no earlier step is a 'choice'" in p for p in problems)
+
+
 def test_conversation_style_defaults_to_generative_and_accepts_aliases():
     assert afs.ACXDFlowSpec().application.conversation_style == "generative"
     res = afs.save_acxd_application_settings(conversation_style="시나리오")

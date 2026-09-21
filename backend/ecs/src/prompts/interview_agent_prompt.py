@@ -627,7 +627,11 @@ design the ACXD flows before moving to the analysis document.
    document as written asked the caller for the refund amount).
    For a `redirect` step that hands the conversation to another business flow
    (e.g. "order not found → search by customer info"), set `redirect_flow_id`
-   to that flow's `flow_id`; the generated flow is checked against it.
+   to that flow's `flow_id`; the generated flow is checked against it. Such a
+   hand-off is a BRANCH: put a `choice` step before it that says when
+   ("success → announce the result → follow-up; not found → hand-off message →
+   redirect"). Without the choice the generator renders only the success path
+   (live: five failed attempts) and complete_interview refuses the plan.
    `node_type` must be a real ACXD node type — use exactly these names:
    - deterministic: `start`, `end` (exits the application — only after a
      goodbye), `basic` (fixed message), `user_choice`

@@ -805,6 +805,26 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
                         problems.append(f"flow '{f.flow_id}': slot '{sl.name}' has a strict format and no "
                                         f"user_choice step declares slot='{sl.name}' — collect it "
                                         "deterministically (the journey must not)")
+            # Live (SELC, 2026-09-21): "step 3 announce the result, step 4 hand off to
+            # the search-by-customer-info flow" with no step saying WHEN — the model
+            # generated the announcement path only, five attempts in a row, and the
+            # determinism gate refused the application each time. A hand-off to
+            # another operation flow is a branch: the plan must carry the choice
+            # step that decides it, so the generator has a condition to render.
+            operation_ids = {p.flow_id for p in spec.flows if p.role == "operation" and p.flow_id != f.flow_id}
+            from tools.acxd_system_flows import resolve_flow_reference
+            role_map = {"flows": [{"role": p.role, "flow_id": p.flow_id} for p in spec.flows]}
+            ordered = sorted(f.steps, key=lambda st: st.step)
+            for idx, s in enumerate(ordered):
+                if s.node_type != "redirect" or not s.redirect_flow_id:
+                    continue
+                if resolve_flow_reference(s.redirect_flow_id, [p.flow_id for p in spec.flows], role_map) not in operation_ids:
+                    continue
+                if not any(prev.node_type == "choice" for prev in ordered[:idx]):
+                    problems.append(
+                        f"flow '{f.flow_id}' step {s.step}: hands off to operation flow '{s.redirect_flow_id}' but no "
+                        "earlier step is a 'choice' that decides when — add a choice step after the data_request "
+                        "(e.g. 'success/found → announce, not found → hand off') so the branch is generated")
         if not f.confirmed:
             problems.append(f"flow '{f.flow_id}': flow plan not approved by the user")
     roles = spec.system_flows()

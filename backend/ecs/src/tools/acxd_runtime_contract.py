@@ -1509,6 +1509,53 @@ class _RuntimeContract:
                     f"Escalation (R7)")
 
     # ==================================================================
+    # R9 — a hand-off carries the values the conversation collected
+    # ==================================================================
+
+    def _is_hand_off_target(self, flow_id: Any) -> bool:
+        target = str(flow_id or "")
+        return bool(target) and (target == self.escalation_flow_id or target.lower().startswith("requestagent"))
+
+    def rule_r9(self) -> None:
+        """Live (SELC, 2026-09-21): the Contact Flow's escalation payload read
+        customerName / phoneNumber / address / orderNumber from
+        ``$.AgenticCX.ContextVariables`` and nothing ever set them — slots live in
+        the flow, context variables in the application, and no node copied one
+        into the other. At every hand-off out of an operation flow (a redirect to
+        the escalation or agent-request flow, or an escalate node) each attached
+        slot that is also an application context variable is copied into it, so
+        the agent's screen-pop shows what the caller already said."""
+        if self.role != "operation" or not self.context_variables:
+            return
+        names = [s.get("name") for s in self.attached if isinstance(s, dict) and s.get("name")]
+        carried = [n for n in names if n in self.context_variables]
+        if not carried:
+            return
+        for node_id, node in list(self.nodes.items()):
+            if not isinstance(node, dict):
+                continue
+            kind = node.get("type")
+            redirect = ((node.get("metadata") or {}).get("redirect") or {}) if isinstance(node.get("metadata"), dict) else {}
+            if kind == "redirect" and not self._is_hand_off_target(redirect.get("flowId")):
+                continue
+            if kind not in ("redirect", "escalate"):
+                continue
+            meta = node.setdefault("metadata", {})
+            mods = [m for m in (meta.get("stateModifications") or []) if isinstance(m, dict)]
+            present = {(m.get("type"), m.get("name")) for m in mods}
+            added = []
+            for name in carried:
+                if ("context", name) in present:
+                    continue
+                mods.append({"type": "context", "name": name, "modification": "set",
+                             "value": {"type": "slot", "name": name}})
+                added.append(name)
+            if added:
+                meta["stateModifications"] = mods
+                self.change(f"{_label(node_id, node)}: hand-off carries {added} into the application's "
+                            f"context variables (R9)")
+
+    # ==================================================================
     # R6 — retry = recovery basic that CLEARS the slot, then re-asks
     # ==================================================================
 
@@ -3366,6 +3413,7 @@ class _RuntimeContract:
         self.rule_j2()
         self.rule_j()
         self.rule_a2()
+        self.rule_r9()
         self.prune_disconnected(before)
 
 

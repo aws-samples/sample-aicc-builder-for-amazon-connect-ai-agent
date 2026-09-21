@@ -2383,6 +2383,50 @@ def save_session_flow_config(
         }
 
 
+YES_NO_BY_LANGUAGE = {"ko": ["예", "아니오"], "en": ["yes", "no"], "ja": ["はい", "いいえ"]}
+
+
+def normalize_boolean_inputs_for_acxd(language: str = "ko") -> list[str]:
+    """ACXD has no boolean built-in: a yes/no answer is a `yesNo` custom slot type
+    whose values are the spoken words, and the data request posts the slot as
+    is. Live (SELC, 2026-09-21): `privacyConsent` was `boolean` in the spec, so
+    the OpenAPI said boolean while the flow captured "예"/"아니오" — two blocking
+    parity findings and a runtime the Lambda would have rejected. Every boolean
+    INPUT field becomes a string enum of the locale's yes/no words before
+    generation, so the spec, the OpenAPI, the Lambda and the slot type agree.
+    Returns the fields changed as "operation.field"."""
+    code = str(language or "ko").lower()[:2]
+    values = YES_NO_BY_LANGUAGE.get(code, YES_NO_BY_LANGUAGE["ko"])
+    changed: list[str] = []
+    for op_id, spec in list(_specs_bucket().items()):
+        touched = False
+        for f in list(getattr(spec, "input_fields", None) or []):
+            ftype = str(getattr(f, "field_type", "") or "").lower()
+            if ftype not in ("boolean", "bool"):
+                continue
+            f.field_type = "string"
+            f.enum_values = list(values)
+            note = f"spoken yes/no: {values[0]} = true, {values[1]} = false"
+            f.description = f"{f.description} ({note})" if getattr(f, "description", None) else note
+            changed.append(f"{op_id}.{f.name}")
+            touched = True
+        if not touched:
+            continue
+        sid = _get_current_session_id()
+        if sid:
+            _nfs_persist_spec(sid, op_id, spec.model_dump())
+        try:
+            from tools.project_workspace import ensure_workspace
+            ws = ensure_workspace()
+            if ws:
+                ws.save_spec(op_id, spec.model_dump())
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"[SpecManager] S3 persist failed for {op_id}: {e}")
+    if changed:
+        logger.info("[SpecManager] ACXD boolean inputs normalized to %s: %s", values, changed)
+    return changed
+
+
 def _persist_flow_cfg(config: "SessionFlowConfig") -> None:
     """Keep the in-memory config and both stores (NFS fast-path, S3) in step."""
     _set_flow_cfg(config)

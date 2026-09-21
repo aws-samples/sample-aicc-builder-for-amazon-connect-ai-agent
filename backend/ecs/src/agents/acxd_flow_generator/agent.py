@@ -1277,9 +1277,13 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
     for flow_id in system_ids.values():
         if flow_id not in flow_ids:
             flow_ids.append(flow_id)
-    context_variables = [var["name"] for var
-                         in ((spec.get("application") or {}).get("context_variables") or [])
-                         if isinstance(var, dict) and var.get("name")]
+    try:
+        from tools.acxd_resource_builders import effective_context_variables
+        context_variables = [v["name"] for v in effective_context_variables(spec)]
+    except Exception:  # pragma: no cover — the builder module is part of this package
+        context_variables = [var["name"] for var
+                             in ((spec.get("application") or {}).get("context_variables") or [])
+                             if isinstance(var, dict) and var.get("name")]
     # Customer-facing labels for result fields (the deployed data-request
     # document keeps ASCII-only descriptions; the interview's wording lives on
     # the spec's response_fields). M2 announces results with these.

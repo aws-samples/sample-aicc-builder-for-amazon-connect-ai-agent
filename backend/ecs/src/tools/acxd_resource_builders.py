@@ -186,20 +186,56 @@ def build_slot_types(spec: dict) -> tuple[list[dict], list[str]]:
     return docs, problems
 
 
-def build_context_variables(spec: dict) -> list[dict]:
-    """Render the bounded Agentic CX context-variable contract."""
+MAX_CONTEXT_VARIABLES = 10
+HANDOFF_FAIL_REASON = "failReason"
+#: Slot names an agent hand-off carries when the flows collect them — the
+#: values a CRM screen-pop needs. Matched case-insensitively as substrings.
+_HANDOFF_SLOT_HINTS = ("customername", "name", "phone", "address", "ordernumber", "orderid",
+                       "reservationid", "reservationnumber", "email", "membernumber", "accountnumber")
+
+
+def effective_context_variables(spec: dict) -> list[dict]:
+    """The application's context variables: what the interview declared, plus
+    what an agent hand-off needs — `failReason` (the EscalationFlow sets it) and
+    the identity / reference slots the operation flows collect — within the
+    Agentic CX block's limit of 10.
+
+    Live (SELC, 2026-09-21): the Contact Flow's escalation payload read eight
+    `$.AgenticCX.ContextVariables.*` names, the application declared one
+    (`customerPhone`), and the review blocked on D9-6; the values themselves
+    were never set by any flow. One list, used by the resource builder, the
+    Contact Flow binding and the runtime contract (R9 copies the slots into
+    these variables at hand-off), keeps the three in step."""
     app = spec.get("application") or {}
     variables: list[dict] = []
-    for raw in (app.get("context_variables") or [])[:10]:
-        if not isinstance(raw, dict) or not raw.get("name"):
+    seen: set[str] = set()
+
+    def _add(name: str, description: str = "", var_type: str = "string", source=None) -> None:
+        if not name or name in seen or len(variables) >= MAX_CONTEXT_VARIABLES:
+            return
+        seen.add(name)
+        variables.append({"name": name, "type": var_type, "description": description,
+                          "fromContactAttribute": source})
+
+    for raw in (app.get("context_variables") or []):
+        if isinstance(raw, dict) and raw.get("name"):
+            _add(str(raw["name"]), str(raw.get("description") or ""), str(raw.get("type") or "string"),
+                 raw.get("from_contact_attribute"))
+    _add(HANDOFF_FAIL_REASON, "Why the conversation was handed to an agent (set by the escalation flow)")
+    for plan in spec.get("flows") or []:
+        if not isinstance(plan, dict) or str(plan.get("role") or "operation") != "operation":
             continue
-        variables.append({
-            "name": raw["name"],
-            "type": raw.get("type") or "string",
-            "description": raw.get("description") or "",
-            "fromContactAttribute": raw.get("from_contact_attribute"),
-        })
+        for slot in plan.get("slots") or []:
+            name = str((slot or {}).get("name") or "") if isinstance(slot, dict) else ""
+            lowered = re.sub(r"[^a-z0-9]", "", name.lower())
+            if lowered and any(h in lowered for h in _HANDOFF_SLOT_HINTS) and lowered not in ("yesno",):
+                _add(name, f"Collected by the conversation and passed to the agent on hand-off")
     return variables
+
+
+def build_context_variables(spec: dict) -> list[dict]:
+    """Render the bounded Agentic CX context-variable contract."""
+    return effective_context_variables(spec)
 
 
 # ---------------------------------------------------------------------------

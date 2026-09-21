@@ -586,7 +586,7 @@ def test_runtime_contract_hook_is_optional_and_used_when_present(monkeypatch):
     # the yesNo slot type is always available to the normalizer
     assert "yesNo" in calls[0]["slot_type_ids"]
     assert calls[0]["slot_type_docs"]["yesNo"]["values"]
-    assert calls[0]["context_variables"] == ["customerPhone"]
+    assert calls[0]["context_variables"] == ["customerPhone", "failReason"]   # every hand-off carries failReason
     assert "FollowUpFlow" in calls[0]["flow_ids"]
 
     # A broken normalizer must not take generation down with it.

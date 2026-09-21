@@ -1777,6 +1777,58 @@ def test_j6_moves_the_generators_own_read_back_after_the_last_capture():
     assert not any("(J6)" in n for n in notes_again)
 
 
+def test_r9_hand_off_copies_collected_slots_into_context_variables():
+    """Live (SELC, 2026-09-21): the Contact Flow read customerName / phoneNumber /
+    orderNumber from $.AgenticCX.ContextVariables and no node ever set them."""
+    flow = _intake_flow()
+    out, notes = apply_runtime_contract(
+        flow, role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+        flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
+        escalation_flow_id="Escalation", slot_type_ids={"yesNo"},
+        context_variables=["customerPhone", "failReason", "orderNumber", "contactPhone"])
+    esc = out["nodes"]["esc"]
+    mods = esc["metadata"]["stateModifications"]
+    copied = {m["name"]: m for m in mods if m.get("type") == "context"}
+    assert set(copied) >= {"orderNumber", "contactPhone"}                 # attached slots that are context variables
+    assert copied["orderNumber"]["value"] == {"type": "slot", "name": "orderNumber"}
+    assert "customerPhone" not in copied and "failReason" not in copied    # not slots of this flow
+    # the agent-request redirect the contract adds (E2) carries them too
+    agent = next(n for n in out["nodes"].values()
+                 if n.get("type") == "redirect" and n["metadata"]["redirect"]["flowId"] == "RequestAgentFlow")
+    assert {m["name"] for m in agent["metadata"]["stateModifications"] if m.get("type") == "context"} >= {"orderNumber"}
+    # the follow-up hand-back is not a hand-off
+    follow = [n for n in out["nodes"].values()
+              if n.get("type") == "redirect" and n["metadata"]["redirect"]["flowId"] == "FollowUpFlow"]
+    assert follow and not any((m.get("type"), m.get("name")) == ("context", "orderNumber")
+                              for m in (follow[0].get("metadata") or {}).get("stateModifications") or [])
+    assert any("(R9)" in n for n in notes)
+    again, notes_again = apply_runtime_contract(
+        out, role="operation", data_requests={"requestReturn": _INTAKE_DOC},
+        flow_ids=["RequestReturn", "RequestAgentFlow", "Fallback", "Escalation"],
+        escalation_flow_id="Escalation", slot_type_ids={"yesNo"},
+        context_variables=["customerPhone", "failReason", "orderNumber", "contactPhone"])
+    assert not any("(R9)" in n for n in notes_again)
+
+
+def test_effective_context_variables_add_fail_reason_and_hand_off_slots():
+    from tools.acxd_resource_builders import effective_context_variables
+    spec = {"application": {"context_variables": [{"name": "customerPhone", "type": "string",
+                                                   "from_contact_attribute": "$.CustomerEndpoint.Address"}]},
+            "flows": [
+                {"flow_id": "SearchOrder", "role": "operation", "slots": [
+                    {"name": "customerName"}, {"name": "phoneNumber"}, {"name": "address"}, {"name": "note"}]},
+                {"flow_id": "Reserve", "role": "operation", "slots": [
+                    {"name": "productType"}, {"name": "orderNumber"}, {"name": "yesNo"}]},
+                {"flow_id": "FollowUpFlow", "role": "followup", "slots": [{"name": "moreHelpName"}]},
+            ]}
+    names = [v["name"] for v in effective_context_variables(spec)]
+    assert names[:2] == ["customerPhone", "failReason"]
+    assert {"customerName", "phoneNumber", "address", "orderNumber"} <= set(names)
+    assert "note" not in names and "productType" not in names and "moreHelpName" not in names
+    assert len(names) <= 10
+    assert effective_context_variables(spec)[0]["fromContactAttribute"] == "$.CustomerEndpoint.Address"
+
+
 def test_j7_journey_prompt_carries_conversation_style_rules():
     """Live (2026-09-21): the Haiku journey echoed every answer, asked one value
     per turn and accepted '다음주' as a date — the prompt said what to collect,
