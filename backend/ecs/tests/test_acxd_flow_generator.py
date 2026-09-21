@@ -468,6 +468,44 @@ def test_repair_points_the_failure_branch_at_the_planned_operation_hand_off():
     assert again["nodes"][n(8)]["metadata"]["redirect"]["flowId"] == "SearchOrderByCustomerInfo"
 
 
+def test_repair_creates_the_planned_hand_off_when_the_miss_branch_just_ends():
+    """Live (SELC, 2026-09-21, five attempts): the model wrote no redirect at all
+    on the not-found branch — the edge dangled, the dangling-edge repair wired
+    it to an `end`, and the gate reported 'no redirect node targets it' with only
+    the contract's system redirects present."""
+    from agents.acxd_flow_generator.agent import repair_generated_flow
+
+    plan = {"flow_id": "DeliveryStatusByOrder", "role": "operation", "steps": [
+        {"step": 2, "node_type": "data_request", "data_request_id": "getDeliveryStatus", "user_confirmed": True},
+        {"step": 4, "node_type": "redirect", "redirect_flow_id": "SearchOrderByCustomerInfo", "user_confirmed": True},
+    ]}
+    spec = {"flows": [plan, {"flow_id": "SearchOrderByCustomerInfo", "role": "operation", "steps": []}],
+            "data_integrations": [{"data_request_id": "getDeliveryStatus"}]}
+    n = lambda i: f"c0000000-0000-4000-8000-00000000000{i}"
+    flow = {"flowId": "DeliveryStatusByOrder", "nodes": {
+        n(1): {"nodeId": n(1), "type": "start", "childNodes": [{"nodeId": n(3)}]},
+        n(3): {"nodeId": n(3), "type": "data_request", "dataRequests": ["getDeliveryStatus"],
+               "childNodes": [{"nodeId": n(4), "name": "success"}]},
+        n(4): {"nodeId": n(4), "type": "choice", "childNodes": [
+            {"nodeId": n(5), "name": "found"},
+            {"nodeId": n(7), "name": "notFound"}]},
+        n(5): {"nodeId": n(5), "type": "basic", "messages": [{"type": "text", "body": "배송 중입니다."}],
+               "childNodes": [{"nodeId": n(9), "name": "next"}]},
+        n(7): {"nodeId": n(7), "type": "basic",
+               "messages": [{"type": "text", "body": "주문번호를 모르시거나 조회가 되지 않는 경우, 고객님의 정보로 조회를 도와드리겠습니다."}]},
+        n(9): {"nodeId": n(9), "type": "end"},
+    }}
+    fixed = repair_generated_flow(flow, plan, spec)
+    redirects = {nid: node["metadata"]["redirect"]["flowId"] for nid, node in fixed["nodes"].items()
+                 if node.get("type") == "redirect"}
+    assert list(redirects.values()) == ["SearchOrderByCustomerInfo"]
+    new_id = next(iter(redirects))
+    assert fixed["nodes"][n(7)]["childNodes"][0]["nodeId"] == new_id       # message first, then the hand-off
+    assert fixed["nodes"][n(5)]["childNodes"][0]["nodeId"] == n(9)         # the found branch is untouched
+    again = repair_generated_flow(fixed, plan, spec)
+    assert sum(1 for x in again["nodes"].values() if x.get("type") == "redirect") == 1
+
+
 def test_repair_degrades_data_request_when_no_integrations_exist():
     from agents.acxd_flow_generator.agent import repair_generated_flow
     spec = {"flows": [PLAN], "data_integrations": []}

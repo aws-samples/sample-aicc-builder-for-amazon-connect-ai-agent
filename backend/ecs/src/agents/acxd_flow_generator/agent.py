@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from typing import Callable, Optional
 
 from strands import tool
@@ -542,7 +543,7 @@ def _helper_flow_id_for(data_request_id: str) -> str:
     from tools.acxd_data_request_builder import helper_flow_id
     return helper_flow_id(data_request_id)
 
-_FAILURE_EDGE = re.compile(r"not[_ ]?found|fail|miss|error|invalid|no[_ ]?match|false|absent|unknown|else", re.I)
+_FAILURE_EDGE = re.compile(r"not[_ ]?found|fail|miss|error|invalid|no[_ ]?match|false|absent|unknown|else|미조회|실패|없음|오류|불일치|見つか|失敗|不明", re.I)
 
 
 def _repair_planned_hand_offs(flow: dict, plan: dict, spec: dict) -> None:
@@ -625,18 +626,67 @@ def _repair_planned_hand_offs(flow: dict, plan: dict, spec: dict) -> None:
             continue
         candidates = [(nid, n) for nid, n in nodes.items()
                       if isinstance(n, dict) and n.get("type") == "redirect" and _target(n) in system_ids]
-        if not candidates:
-            continue
         candidates.sort(key=lambda kv: -_rank(kv[0]))
-        best_id, best = candidates[0]
-        if _rank(best_id) == 0 and len(candidates) > 1:
-            continue          # nothing looks like a failure branch: leave it to the gate
-        previous = _target(best)
-        best["metadata"]["redirect"]["flowId"] = target
-        best["metadata"]["redirect"]["type"] = "flow"
+        if candidates and (_rank(candidates[0][0]) > 0 or len(candidates) == 1):
+            best_id, best = candidates[0]
+            previous = _target(best)
+            best["metadata"]["redirect"]["flowId"] = target
+            best["metadata"]["redirect"]["type"] = "flow"
+            actual.add(target)
+            logger.info("[ACXDFlowGen] repaired %s: failure-branch redirect %r → planned hand-off %r",
+                        flow.get("flowId"), previous, target)
+            continue
+        # No redirect to re-point (live: the model left the not-found branch
+        # dangling, so it was wired to an `end`). Give the failure-looking edge a
+        # redirect node of its own; a message basic on the way keeps its text.
+        edge_ref = _failure_edge_to_terminal(nodes, request_children)
+        if edge_ref is None:
+            continue
+        holder, edge = edge_ref
+        new_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"acxd-handoff:{flow.get('flowId')}:{target}"))
+        nodes[new_id] = {"nodeId": new_id, "type": "redirect",
+                         "metadata": {"redirect": {"type": "flow", "flowId": target}}}
+        previous = edge.get("nodeId")
+        edge["nodeId"] = new_id
         actual.add(target)
-        logger.info("[ACXDFlowGen] repaired %s: failure-branch redirect %r → planned hand-off %r",
-                    flow.get("flowId"), previous, target)
+        logger.info("[ACXDFlowGen] repaired %s: failure branch of [%s] (%r) → new redirect to planned hand-off %r",
+                    flow.get("flowId"), str(holder.get("nodeId"))[:8], previous, target)
+
+
+def _failure_edge_to_terminal(nodes: dict, request_children: set) -> Optional[tuple[dict, dict]]:
+    """The (node, edge) whose failure-looking branch ends the flow: a choice edge
+    (preferably on the choice after the backend call) named like a miss whose
+    target is missing, an `end`, or a message basic that only leads to an `end`.
+    Returns the edge to re-point — the basic's own edge when a message sits first."""
+    best: Optional[tuple[int, dict, dict]] = None
+    for node in nodes.values():
+        if not isinstance(node, dict) or node.get("type") != "choice":
+            continue
+        for edge in node.get("childNodes") or []:
+            if not isinstance(edge, dict):
+                continue
+            name = str(edge.get("name") or "")
+            if not (_FAILURE_EDGE.search(name)
+                    or _FAILURE_EDGE.search(json.dumps(edge.get("conditions") or [], ensure_ascii=False))):
+                continue
+            target_id = edge.get("nodeId")
+            target = nodes.get(target_id) if isinstance(target_id, str) else None
+            holder, hop = node, edge
+            if target is not None and target.get("type") == "basic":
+                kids = [c for c in (target.get("childNodes") or []) if isinstance(c, dict)]
+                nxt = nodes.get(kids[0].get("nodeId")) if kids and isinstance(kids[0].get("nodeId"), str) else None
+                if kids and nxt is not None and nxt.get("type") not in ("end",):
+                    continue                      # the message leads somewhere real
+                if not kids:
+                    target["childNodes"] = [{"nodeId": None, "name": "next"}]
+                    kids = target["childNodes"]
+                holder, hop = target, kids[0]
+            elif target is not None and target.get("type") != "end":
+                continue                          # the branch goes somewhere real
+            score = 2 + (1 if node.get("nodeId") in request_children else 0)
+            if best is None or score > best[0]:
+                best = (score, holder, hop)
+    return (best[1], best[2]) if best else None
 
 
 def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
@@ -1513,6 +1563,20 @@ def run_flow_generation(
             "[ACXDFlowGen] %s attempt %d failed: %s",
             plan.get("flow_id"), attempt, " | ".join(problems[:5]),
         )
+        try:
+            # The shape the model produced, so a repeated gate failure can be
+            # diagnosed from CloudWatch without the flow file (live: five failed
+            # attempts and no way to see which branch lacked the hand-off).
+            shape = []
+            for nid, node in (flow.get("nodes") or {}).items():
+                if not isinstance(node, dict):
+                    continue
+                edges = ",".join(str(e.get("name") or "?") for e in (node.get("childNodes") or []) if isinstance(e, dict))
+                rd = ((node.get("metadata") or {}).get("redirect") or {}) if isinstance(node.get("metadata"), dict) else {}
+                shape.append(f"{str(nid)[:8]}:{node.get('type')}[{edges}]" + (f"->{rd.get('flowId')}" if rd else ""))
+            logger.warning("[ACXDFlowGen] %s attempt %d shape: %s", plan.get("flow_id"), attempt, " ".join(shape)[:1800])
+        except Exception:  # pragma: no cover — diagnostics never fail the run
+            pass
     return None, problems, attempts
 
 
