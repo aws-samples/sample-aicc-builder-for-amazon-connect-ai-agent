@@ -220,15 +220,31 @@ export function sendRuntimeTarget(target: RuntimeTarget): boolean {
 }
 
 /** Accept snake_case from the backend while tolerating the legacy camel alias.
- * An echo is the session's persisted truth, so it also consumes the pending
- * start-screen choice — otherwise a stale pick would leak into the next session. */
-function restoreRuntimeTarget(message: Pick<WebSocketMessage, 'runtime_target' | 'runtimeTarget'>): void {
+ *
+ * Only the echo of the user's own ``setRuntimeTarget`` consumes the pending
+ * start-screen pick. Every other echo (``connected``, ``session_created``,
+ * ``history_injected`` …) carries the session's persisted DEFAULT, and it can
+ * arrive after the click: "새 대화" shows the radio while the socket is still
+ * connecting, so a Classic pick made in that window never reached the backend
+ * (``sendRuntimeTarget`` returned false) and the ``session_created`` echo that
+ * followed used to wipe it — the radio snapped back to ACXD and Start rotated
+ * into an ACXD session (live on dev, 2026-09-21). Now the pick survives such an
+ * echo and is pushed again, since by then the socket is open. */
+function restoreRuntimeTarget(
+  message: Pick<WebSocketMessage, 'runtime_target' | 'runtimeTarget'>,
+  options: { answersPending?: boolean; resend?: boolean } = {},
+): void {
   const target = message.runtime_target ?? message.runtimeTarget;
-  if (target === 'classic' || target === 'acxd') {
-    const store = useBuilderStore.getState();
-    store.setRuntimeTarget(target);
-    if (store.pendingRuntimeTarget !== null) store.setPendingRuntimeTarget(null);
+  if (target !== 'classic' && target !== 'acxd') return;
+  const store = useBuilderStore.getState();
+  store.setRuntimeTarget(target);
+  const pending = store.pendingRuntimeTarget;
+  if (pending === null) return;
+  if (options.answersPending || pending === target) {
+    store.setPendingRuntimeTarget(null);
+    return;
   }
+  if (options.resend !== false) sendRuntimeTarget(pending);
 }
 
 // localStorage key for tracking last received message log sequence
@@ -1867,11 +1883,14 @@ export function useWebSocket() {
 
         case "runtime_target_updated":
           // Echo of a setRuntimeTarget action (start-screen radio on an empty
-          // session). `accepted: false` means the conversation had already
-          // started and the persisted target stands — the echo carries it.
-          restoreRuntimeTarget(data);
+          // session). `accepted: true` answers the pending pick. `accepted:
+          // false` means THIS session's conversation had already started, so its
+          // persisted target stands — but the radio is only shown on the start
+          // screen, and Start rotates into a fresh session that carries the
+          // pending pick, so the pick is kept (and not re-sent, which would loop).
+          restoreRuntimeTarget(data, { answersPending: data.accepted !== false, resend: false });
           if (data.accepted === false) {
-            console.warn("[useWebSocket] runtime target is fixed once the conversation has started");
+            console.warn("[useWebSocket] runtime target is fixed once the conversation has started; the pick applies to the next session");
           }
           break;
 
