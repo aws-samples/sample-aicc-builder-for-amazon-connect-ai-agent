@@ -542,6 +542,103 @@ def _helper_flow_id_for(data_request_id: str) -> str:
     from tools.acxd_data_request_builder import helper_flow_id
     return helper_flow_id(data_request_id)
 
+_FAILURE_EDGE = re.compile(r"not[_ ]?found|fail|miss|error|invalid|no[_ ]?match|false|absent|unknown|else", re.I)
+
+
+def _repair_planned_hand_offs(flow: dict, plan: dict, spec: dict) -> None:
+    """The plan's operation-to-operation hand-off wins over the model's redirect.
+
+    Live (SELC, 2026-09-21): the confirmed plan said "order not found → hand off
+    to SearchOrderByCustomerInfo" and the model — twice in a row — sent that
+    branch to a system flow (Fallback / FollowUp). The determinism gate refused
+    the whole application each time (DETERMINISM_REDIRECT_TARGET), so no flow
+    file was written and nothing could be patched. When a confirmed redirect
+    step names an operation flow that no redirect node targets, the redirect on
+    the failure branch of the backend call is re-pointed at it; the message
+    the customer approved stays where it is.
+    """
+    nodes = flow.get("nodes")
+    if not isinstance(nodes, dict) or not isinstance(plan, dict):
+        return
+    try:
+        from tools.acxd_system_flows import resolve_flow_reference, resolve_system_flow_ids
+    except Exception:  # pragma: no cover
+        return
+    operation_ids = [p.get("flow_id") for p in (spec.get("flows") or [])
+                     if isinstance(p, dict) and p.get("flow_id")
+                     and str(p.get("role") or "operation") == "operation"]
+    system_ids = set(resolve_system_flow_ids(spec).values())
+    known = operation_ids + sorted(system_ids)
+    planned = []
+    for step in plan.get("steps") or []:
+        if not isinstance(step, dict) or not step.get("redirect_flow_id"):
+            continue
+        target = resolve_flow_reference(str(step["redirect_flow_id"]).strip(), known, spec)
+        if target in operation_ids and target != flow.get("flowId"):
+            planned.append(target)
+    if not planned:
+        return
+
+    def _target(node: dict) -> str:
+        rd = ((node.get("metadata") or {}).get("redirect") or {}) if isinstance(node.get("metadata"), dict) else {}
+        return str(rd.get("flowId") or "") if isinstance(rd, dict) else ""
+
+    actual = {_target(n) for n in nodes.values() if isinstance(n, dict) and n.get("type") == "redirect"}
+    # redirect nodes on a failure-looking edge, most specific first: reached from the
+    # choice that follows a data_request, else from any choice, else any system redirect
+    parents: dict[str, list[tuple[dict, dict]]] = {}
+    for n in nodes.values():
+        if not isinstance(n, dict):
+            continue
+        for edge in n.get("childNodes") or []:
+            if isinstance(edge, dict) and isinstance(edge.get("nodeId"), str):
+                parents.setdefault(edge["nodeId"], []).append((n, edge))
+    request_children = {e.get("nodeId") for n in nodes.values() if isinstance(n, dict) and n.get("type") == "data_request"
+                        for e in (n.get("childNodes") or []) if isinstance(e, dict)}
+
+    def _rank(node_id: str) -> int:
+        """How much the path into ``node_id`` looks like the backend call's failure
+        branch: walk up to four hops through the nodes before it (a message basic
+        usually sits between the choice and the redirect)."""
+        score = 0
+        frontier = [(node_id, 0)]
+        seen: set[str] = set()
+        while frontier:
+            current, depth = frontier.pop()
+            if current in seen or depth > 4:
+                continue
+            seen.add(current)
+            for parent, edge in parents.get(current, []):
+                name = str(edge.get("name") or "")
+                failure_like = bool(_FAILURE_EDGE.search(name)
+                                    or _FAILURE_EDGE.search(json.dumps(edge.get("conditions") or [], ensure_ascii=False)))
+                if failure_like:
+                    score = max(score, 2)
+                    if parent.get("type") == "choice" and parent.get("nodeId") in request_children:
+                        score = 3
+                if parent.get("type") in ("basic", "choice", "generative_text"):
+                    frontier.append((str(parent.get("nodeId")), depth + 1))
+        return score
+
+    for target in planned:
+        if target in actual:
+            continue
+        candidates = [(nid, n) for nid, n in nodes.items()
+                      if isinstance(n, dict) and n.get("type") == "redirect" and _target(n) in system_ids]
+        if not candidates:
+            continue
+        candidates.sort(key=lambda kv: -_rank(kv[0]))
+        best_id, best = candidates[0]
+        if _rank(best_id) == 0 and len(candidates) > 1:
+            continue          # nothing looks like a failure branch: leave it to the gate
+        previous = _target(best)
+        best["metadata"]["redirect"]["flowId"] = target
+        best["metadata"]["redirect"]["type"] = "flow"
+        actual.add(target)
+        logger.info("[ACXDFlowGen] repaired %s: failure-branch redirect %r → planned hand-off %r",
+                    flow.get("flowId"), previous, target)
+
+
 def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
     """Deterministically repair the mechanical mistakes the model repeats.
 
@@ -968,6 +1065,8 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 kb["name"] = m.group(1) if m else (kb_name or str(kb_id))
             for unknown in [k for k in kb if k not in _KB_NODE_KEYS]:
                 kb.pop(unknown, None)
+
+    _repair_planned_hand_offs(flow, plan, spec)
 
     # 2. Map map-key/nodeId disagreements onto the map key (the key wins).
     for nid, node in list(nodes.items()):

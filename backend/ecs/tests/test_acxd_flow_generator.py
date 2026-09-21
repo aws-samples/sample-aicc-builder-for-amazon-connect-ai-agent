@@ -424,6 +424,50 @@ def test_repair_fixes_all_mechanical_mistakes_at_once():
     assert validate_generated_flow(fixed, plan, {**SPEC, "flows": [plan]}) == []
 
 
+def test_repair_points_the_failure_branch_at_the_planned_operation_hand_off():
+    """Live (SELC, 2026-09-21): the confirmed plan said 'order not found → hand
+    off to SearchOrderByCustomerInfo'; the model sent that branch to Fallback
+    twice in a row and the determinism gate refused the whole application."""
+    from agents.acxd_flow_generator.agent import repair_generated_flow
+
+    plan = {"flow_id": "DeliveryStatusByOrder", "role": "operation", "steps": [
+        {"step": 1, "node_type": "user_choice", "slot": "orderNumber", "user_confirmed": True},
+        {"step": 2, "node_type": "data_request", "data_request_id": "getDeliveryStatus", "user_confirmed": True},
+        {"step": 3, "node_type": "generative_text", "user_confirmed": True},
+        {"step": 4, "node_type": "redirect", "redirect_flow_id": "SearchOrderByCustomerInfo", "user_confirmed": True},
+        {"step": 5, "node_type": "redirect", "redirect_flow_id": "followup", "user_confirmed": True},
+    ]}
+    spec = {"flows": [plan, {"flow_id": "SearchOrderByCustomerInfo", "role": "operation", "steps": []},
+                      {"flow_id": "FollowUpFlow", "role": "followup", "steps": []},
+                      {"flow_id": "FallbackFlow", "role": "fallback", "steps": []}],
+            "data_integrations": [{"data_request_id": "getDeliveryStatus"}]}
+    n = lambda i: f"b0000000-0000-4000-8000-00000000000{i}"
+    flow = {"flowId": "DeliveryStatusByOrder", "nodes": {
+        n(1): {"nodeId": n(1), "type": "start", "childNodes": [{"nodeId": n(2)}]},
+        n(2): {"nodeId": n(2), "type": "user_choice", "childNodes": [{"nodeId": n(3), "name": "captured"}]},
+        n(3): {"nodeId": n(3), "type": "data_request", "dataRequests": ["getDeliveryStatus"],
+               "childNodes": [{"nodeId": n(4), "name": "done"}]},
+        n(4): {"nodeId": n(4), "type": "choice", "childNodes": [
+            {"nodeId": n(5), "name": "found", "conditions": [{"left": {"type": "variable", "name": "getDeliveryStatus.found"},
+                                                              "operator": "eq", "right": {"type": "constant", "value": True}}]},
+            {"nodeId": n(7), "name": "notFound"}]},
+        n(5): {"nodeId": n(5), "type": "generative_text", "childNodes": [{"nodeId": n(6), "name": "next"}]},
+        n(6): {"nodeId": n(6), "type": "redirect", "metadata": {"redirect": {"type": "flow", "flowId": "FollowUpFlow"}}},
+        n(7): {"nodeId": n(7), "type": "basic", "messages": [{"type": "text", "body": "주문번호를 모르시거나 조회가 되지 않는 경우, 고객님의 정보로 조회를 도와드리겠습니다."}],
+               "childNodes": [{"nodeId": n(8), "name": "next"}]},
+        n(8): {"nodeId": n(8), "type": "redirect", "metadata": {"redirect": {"type": "flow", "flowId": "FallbackFlow"}}},
+    }}
+    fixed = repair_generated_flow(flow, plan, spec)
+    targets = {nid: (node.get("metadata") or {}).get("redirect", {}).get("flowId")
+               for nid, node in fixed["nodes"].items() if node.get("type") == "redirect"}
+    assert targets[n(8)] == "SearchOrderByCustomerInfo"     # the failure branch now hands off as planned
+    assert targets[n(6)] == "FollowUpFlow"                  # the success branch is untouched
+    assert fixed["nodes"][n(7)]["messages"][0]["body"].startswith("주문번호를 모르시거나")
+    # idempotent, and a plan without an operation hand-off changes nothing
+    again = repair_generated_flow(fixed, plan, spec)
+    assert again["nodes"][n(8)]["metadata"]["redirect"]["flowId"] == "SearchOrderByCustomerInfo"
+
+
 def test_repair_degrades_data_request_when_no_integrations_exist():
     from agents.acxd_flow_generator.agent import repair_generated_flow
     spec = {"flows": [PLAN], "data_integrations": []}
