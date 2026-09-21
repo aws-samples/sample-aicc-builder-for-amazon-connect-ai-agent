@@ -3640,6 +3640,9 @@ async def handle_set_runtime_target_ws(websocket: WebSocket, session_id: str, da
         and (_live.get("conversation_history") or _live.get("_handoff_processed"))
     ) or _detect_phase(_eff) != "interview"
     if started:
+        logger.info("[setRuntimeTarget] refused %s for %s: conversation started (history=%s, handoff=%s, phase=%s)",
+                    requested, _eff, bool(isinstance(_live, dict) and _live.get("conversation_history")),
+                    bool(isinstance(_live, dict) and _live.get("_handoff_processed")), _detect_phase(_eff))
         await safe_send_json(websocket, {
             "type": "runtime_target_updated",
             "sessionId": session_id,
