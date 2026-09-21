@@ -24,7 +24,14 @@ import { PHASE_ORDER } from '../types';
 // API's save_history now merges non-destructively as a backstop, but the cap
 // must still cover a realistic session so the on-screen timeline stays whole.
 const MAX_MESSAGES = 1000;          // Keep last 1000 messages in memory
-const MAX_ASSET_PREVIEWS = 50;      // Keep last 50 asset previews
+// Keep the newest previews in memory. A full ACXD bundle streams ~75 files
+// (24 ACXD resources, 10 FAQ articles, 5 Lambdas, …); with the old cap of 50 the
+// OLDEST previews — the Lambdas, OpenAPI and CloudFormation generated first —
+// were evicted, and the right pane's "Generated Assets" list, which is derived
+// from these previews, dropped whole asset types although every file was in
+// the bundle (live on dev, 2026-09-21). Eviction also never removes the last
+// preview of an asset type, so the list stays complete however large the run.
+const MAX_ASSET_PREVIEWS = 300;
 
 export type Theme = 'light' | 'dark' | 'system';
 
@@ -759,16 +766,31 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       // here (that would interrupt the user) — the chat marker / tab does that.
       const nextActiveAssetKey = key;
 
-      // Limit asset previews to prevent memory issues
+      // Limit asset previews to prevent memory issues — oldest first, but never
+      // the last preview of an asset type (the Generated Assets list is derived
+      // from the types present here).
       const keys = Object.keys(newAssetPreviews);
       if (keys.length > MAX_ASSET_PREVIEWS) {
-        // Sort by createdAt and remove oldest
         const sortedKeys = keys.sort((a, b) => {
           const aCreated = newAssetPreviews[a].createdAt || 0;
           const bCreated = newAssetPreviews[b].createdAt || 0;
           return aCreated - bCreated;
         });
-        const keysToRemove = new Set(sortedKeys.slice(0, keys.length - MAX_ASSET_PREVIEWS));
+        const perType = new Map<string, number>();
+        for (const k of keys) {
+          const t = newAssetPreviews[k].assetType;
+          perType.set(t, (perType.get(t) || 0) + 1);
+        }
+        const keysToRemove = new Set<string>();
+        let excess = keys.length - MAX_ASSET_PREVIEWS;
+        for (const k of sortedKeys) {
+          if (excess <= 0) break;
+          const t = newAssetPreviews[k].assetType;
+          if ((perType.get(t) || 0) <= 1) continue;
+          keysToRemove.add(k);
+          perType.set(t, (perType.get(t) || 0) - 1);
+          excess -= 1;
+        }
         newAssetPreviews = Object.fromEntries(
           Object.entries(newAssetPreviews).filter(([k]) => !keysToRemove.has(k))
         );
