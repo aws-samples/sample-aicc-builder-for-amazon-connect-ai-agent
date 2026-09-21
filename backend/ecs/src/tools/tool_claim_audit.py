@@ -39,7 +39,14 @@ _WEAK_VERBS = r"(?:호출\s*(?:\)|:|：)|`?\s*[:：](?=\s)|output|result(?:s)?)"
 
 # A tool name followed closely by a result-shaped block is a narrated result
 # even without a verb: "`generate_acxd_application` (실제 호출):\n```json {…}".
-_RESULT_BLOCK = r"(?:```json|\{\s*\"(?:status|success|blocking|counts)\")"
+# Live (2026-09-21): "generate_acxd_application을 재실행합니다. 🎉 … 통과했습니다!
+# 방금 도구가 반환한 실제 결과입니다: status: success | 플로우 7개 산출" — no JSON,
+# no call verb next to the name, and no tool had run. Plain-text result keys
+# and "the tool's actual result" phrasing count as a result block too.
+_RESULT_BLOCK = (r"(?:```json|\{\s*\"(?:status|success|blocking|counts)\"|"
+                 r"\bstatus\s*[:：]\s*(?:success|error|ok|fail(?:ed|ure)?)\b|"
+                 r"(?:도구|툴|tool)\s*(?:가|이|의)?\s*(?:반환한|돌려준|returned)\s*(?:실제\s*)?(?:결과|result)|"
+                 r"실제\s*결과(?:입니다|이다|:)|actual\s+result)")
 
 # What a narrated RESULT looks like on the line after a weak spelling (live:
 # "`validate_parameter_consistency`: 불일치 0건, D9 위반 0건" with no tool call).
