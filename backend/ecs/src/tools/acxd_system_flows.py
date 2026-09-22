@@ -130,9 +130,47 @@ def conditional_system_roles(spec: dict, plans=None) -> tuple[str, ...]:
     planned one itself.
     """
     plans = plans if plans is not None else (spec.get("flows") or [])
+    roles: tuple[str, ...] = ()
     if knowledge_base_name(spec) and not plans_cover_faq(plans):
-        return ("faq",)
-    return ()
+        roles += ("faq",)
+    return roles + tuple(handoff_notice_roles(spec))
+
+
+HANDOFF_NOTICE_ROLE_PREFIX = "handoff_notice:"
+
+
+def handoff_notice_plans(spec: dict) -> list[dict]:
+    """The route guardrails that carry a mandated sentence, with the id of the
+    flow that says it: ``[{name, message, keywords, flow_id, role}]``.
+
+    Live (Hanbit e2e, 2026-09-22): a keyword guardrail can route the caller to
+    a flow, but the escalation flow speaks its generic line — the document's
+    "응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요" was never said on that
+    path. Each such rule gets its own deterministic flow: the sentence, then a
+    terminal escalate."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for plan in spec.get("guardrails") or []:
+        if not isinstance(plan, dict) or str(plan.get("action") or "") != "route":
+            continue
+        message = str(plan.get("message") or "").strip()
+        if not message:
+            continue
+        slug = "".join(w.capitalize() for w in re.split(r"[^A-Za-z0-9]+", str(plan.get("name") or "")) if w)
+        if not re.search(r"[A-Za-z]", slug):
+            slug = f"Notice{len(out) + 1}"
+        flow_id = f"{slug}HandoffFlow"
+        if flow_id in seen:
+            flow_id = f"{slug}{len(out) + 1}HandoffFlow"
+        seen.add(flow_id)
+        out.append({"name": plan.get("name"), "message": message,
+                    "keywords": [str(e) for e in (plan.get("examples") or []) if str(e).strip()],
+                    "flow_id": flow_id, "role": f"{HANDOFF_NOTICE_ROLE_PREFIX}{flow_id}"})
+    return out
+
+
+def handoff_notice_roles(spec: dict) -> list[str]:
+    return [n["role"] for n in handoff_notice_plans(spec)]
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +310,8 @@ def resolve_system_flow_ids(spec: dict) -> dict:
     bundle really ships, so resolve once and pass the mapping around.
     """
     resolved = dict(DEFAULT_SYSTEM_FLOW_IDS)
+    for notice in handoff_notice_plans(spec):
+        resolved[notice["role"]] = notice["flow_id"]
     for plan in spec.get("flows") or []:
         if not isinstance(plan, dict):
             continue
@@ -952,6 +992,49 @@ def format_retry_message(language: str) -> str:
 # dispatch
 # ---------------------------------------------------------------------------
 
+def build_handoff_notice_flow(spec: dict, role: str, *, flow_ids: Optional[dict] = None) -> Optional[dict]:
+    """The mandated sentence of one route guardrail, then a TERMINAL escalate.
+
+    Same shape as the escalation flow (no ``end`` after the escalate — R7), so
+    the caller who said a trigger word hears the sentence the requirements
+    dictate and reaches the contact flow's Escalation branch.
+    """
+    notice = next((n for n in handoff_notice_plans(spec) if n["role"] == role), None)
+    if notice is None:
+        return None
+    flow_id = notice["flow_id"]
+    language = system_flow_language(spec)
+    text = _texts(language)
+    start = _node_id(flow_id, "start")
+    intro = _node_id(flow_id, "notice")
+    escalate = _node_id(flow_id, "escalate")
+    words = ", ".join(notice["keywords"][:6])
+    flow = _flow_shell(
+        flow_id, language, untrained=True,
+        description=(f"Says the mandated notice for guardrail {notice['name']!r}"
+                     + (f" (trigger words: {words})" if words else "")
+                     + " and escalates to a human agent."),
+        ai_description=SYSTEM_FLOW_AI_DESCRIPTION,
+        context_variables=_FAIL_REASON_CONTEXT,
+    )
+    flow["nodes"] = {
+        start: {"nodeId": start, "type": "start",
+                "childNodes": [_child(intro, "start")]},
+        intro: {"nodeId": intro, "type": "basic",
+                "messages": [_message(notice["message"])],
+                "childNodes": [_child(escalate, "toEscalate")]},
+        # TERMINAL — no childNodes.
+        escalate: {"nodeId": escalate, "type": "escalate",
+                   "messages": [_message(text["escalation_wait"])],
+                   "metadata": {"stateModifications": [{
+                       "type": "context", "name": FAIL_REASON_VAR,
+                       "modification": "set",
+                       "value": {"type": "variable", "name": FAIL_REASON_VAR},
+                   }]}},
+    }
+    return flow
+
+
 SYSTEM_FLOW_BUILDERS: dict[str, Callable[..., dict]] = {
     "welcome": build_welcome_flow,
     "fallback": build_fallback_flow,
@@ -963,12 +1046,14 @@ SYSTEM_FLOW_BUILDERS: dict[str, Callable[..., dict]] = {
 
 
 def is_system_flow_role(role: Optional[str]) -> bool:
-    return str(role or "") in SYSTEM_FLOW_BUILDERS
+    return str(role or "") in SYSTEM_FLOW_BUILDERS or str(role or "").startswith(HANDOFF_NOTICE_ROLE_PREFIX)
 
 
 def build_system_flow(role: str, spec: dict, *,
                       flow_ids: Optional[dict] = None) -> Optional[dict]:
     """Deterministic flow document for *role*, or ``None`` for an unknown role."""
+    if str(role or "").startswith(HANDOFF_NOTICE_ROLE_PREFIX):
+        return build_handoff_notice_flow(spec, str(role), flow_ids=flow_ids)
     builder = SYSTEM_FLOW_BUILDERS.get(str(role or ""))
     if builder is None:
         return None

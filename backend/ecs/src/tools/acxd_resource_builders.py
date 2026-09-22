@@ -476,6 +476,15 @@ def build_guardrails(spec: dict) -> tuple[list[dict], list[str]]:
 
         action = plan.get("action")
         route_target = plan.get("route_flow_id")
+        if action == "route" and str(plan.get("message") or "").strip():
+            # A route rule with a mandated sentence goes to the flow that says
+            # it (built deterministically by tools.acxd_system_flows), not to
+            # the generic escalation line.
+            from tools.acxd_system_flows import handoff_notice_plans
+            notice = next((n for n in handoff_notice_plans(spec) if n["name"] == plan.get("name")), None)
+            if notice:
+                route_target = notice["flow_id"]
+                plan = {**plan, "route_flow_id": route_target}
         if action == "route" and not route_target:
             # Prefer an escalation flow the bundle actually has; otherwise stop
             # routing rather than failing — the detection still fires and the
@@ -554,7 +563,7 @@ def _attached_flows(flow_plans: list, spec: Optional[dict] = None) -> list[dict]
 
     attached = [p["flow_id"] for p in flow_plans if isinstance(p, dict) and p.get("flow_id")]
     if attached:
-        resolved = resolve_system_flow_ids({"flows": flow_plans})
+        resolved = resolve_system_flow_ids({**(spec if isinstance(spec, dict) else {}), "flows": flow_plans})
         roles = ALWAYS_GENERATED_SYSTEM_ROLES + (
             conditional_system_roles(spec, flow_plans) if isinstance(spec, dict) else ())
         for role in roles:

@@ -738,3 +738,46 @@ def test_application_attaches_the_faq_flow_with_the_knowledge_base():
     without = [f["flowId"] for f in build_application(KO_SPEC)["flows"]]
     assert "FaqFlow" in with_kb and "FaqFlow" not in without
     assert with_kb.index("FaqFlow") > with_kb.index("RequestAgentFlow")
+
+
+def test_a_route_guardrail_with_a_mandated_sentence_gets_its_own_handoff_flow():
+    """Live (Hanbit e2e, 2026-09-22): the document's emergency rule ("응급/피가/숨이"
+    → say the 119 sentence, hand off) reached no flow or guardrail. A route
+    guardrail carrying a message gets a deterministic flow that says the
+    sentence verbatim and escalates; the guardrail routes to it; the
+    application attaches it."""
+    from tools.acxd_resource_builders import build_application, build_guardrails
+    from tools.acxd_system_flows import (
+        build_system_flow, conditional_system_roles, handoff_notice_plans, is_system_flow_role,
+        resolve_system_flow_ids)
+
+    sentence = "응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요."
+    spec = {**KO_SPEC, "guardrails": [
+        {"name": "Emergency", "trigger": "input", "policy": "emergency → human", "detection_method": "keyword",
+         "action": "route", "route_flow_id": "EscalationFlow", "examples": ["응급", "피가", "숨이"],
+         "message": sentence},
+        {"name": "Abuse", "trigger": "input", "policy": "abuse → human", "detection_method": "keyword",
+         "action": "route", "examples": ["욕설"]}]}
+    notices = handoff_notice_plans(spec)
+    assert [n["flow_id"] for n in notices] == ["EmergencyHandoffFlow"]
+    role = notices[0]["role"]
+    assert is_system_flow_role(role) and role in conditional_system_roles(spec)
+    assert resolve_system_flow_ids(spec)[role] == "EmergencyHandoffFlow"
+    assert conditional_system_roles(KO_SPEC) == ()
+
+    flow = build_system_flow(role, spec)
+    assert flow["flowId"] == "EmergencyHandoffFlow" and flow["untrained"] is True
+    assert _walk(flow) == ["start", "basic", "escalate"]
+    assert _node_of_type(flow, "basic")["messages"][0]["body"] == sentence
+    assert validate_acxd_asset("flow", flow) == []
+
+    docs, problems = build_guardrails(spec)
+    assert problems == []
+    by_name = {d["name"]: d for d in docs}
+    emergency = next(d for n, d in by_name.items() if "emergency" in n.lower())
+    assert emergency["rules"][0]["enforcement"] == {"action": "route", "behavior": {"flowId": "EmergencyHandoffFlow"}}
+    abuse = next(d for n, d in by_name.items() if "abuse" in n.lower())
+    assert abuse["rules"][0]["enforcement"]["behavior"]["flowId"] == "EscalationFlow"  # no message: generic hand-off
+
+    attached = [f["flowId"] for f in build_application(spec)["flows"]]
+    assert "EmergencyHandoffFlow" in attached
