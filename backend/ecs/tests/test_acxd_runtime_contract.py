@@ -2234,3 +2234,19 @@ def test_d3p_resolves_the_plan_s_request_id_against_the_bundled_requests():
                                 **{"follow_up_flow_id": "FollowUpFlow", "escalation_flow_id": "EscalationFlow",
                                    **ctx, "request_steps": [snake, "no_such_request"]})
     assert contract.request_steps == [real]
+
+
+def test_j_system_operands_written_as_variable_are_retyped():
+    """e2e (2026-09-22): the generator wrote the journey's done exit as
+    `{"type": "variable", "name": "System.gjConditionIndex"}`; a System value is
+    matched only through the `system` operand (E2), so the exit never fired."""
+    edges = [{"nodeId": "askP", "name": "Done", "conditions": [{
+        "left": {"type": "variable", "name": "System.gjConditionIndex"},
+        "operator": "eq", "right": {"type": "constant", "value": 0}}]}]
+    flow = _journey_flow(journey_edges=edges,
+                         journey_cfg={"exitConditions": [{"name": "done", "prompt": "끝"}],
+                                      "tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}]})
+    out, notes = _apply_journey(flow)
+    done = next(e for e in out["nodes"]["gj"]["childNodes"] if e["name"] == "Done")
+    assert done["conditions"][0]["left"] == {"type": "system", "name": "System.gjConditionIndex"}
+    assert any("typed 'system'" in n for n in notes)

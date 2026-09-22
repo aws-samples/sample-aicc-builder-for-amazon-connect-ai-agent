@@ -3529,6 +3529,25 @@ class _RuntimeContract:
                 "- 필요한 값이 모두 모이면 한 번에 정리해 확인하고 마무리하세요.")
 
     def rule_j(self) -> None:
+        # A `System.*` value is testable only through the `system` operand type
+        # (E2: `variable/System.utterance` was stored but never matched). The
+        # generator writes `{"type": "variable", "name": "System.gjConditionIndex"}`
+        # on journey exits (e2e 2026-09-22, two of three English runs), which
+        # would leave the `done` exit unmatched → NoMessages → fallback.
+        for node_id, node in list(self.nodes.items()):
+            if not isinstance(node, dict):
+                continue
+            for edge in _edges(node):
+                for condition in edge.get("conditions") or []:
+                    if not isinstance(condition, dict):
+                        continue
+                    left = condition.get("left")
+                    if isinstance(left, dict) and str(left.get("name") or "").startswith("System.") \
+                            and left.get("type") != "system":
+                        left["type"] = "system"
+                        self.change(f"{_label(node_id, node)} edge {edge.get('name')!r}: operand "
+                                    f"{left['name']} typed 'system' (a System value is only testable as "
+                                    f"the system operand; J)")
         for node_id, node in self.nodes_of_type("generative_journey"):
             edges = _edges(node)
             if not edges:

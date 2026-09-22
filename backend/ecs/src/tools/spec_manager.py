@@ -1820,6 +1820,35 @@ def get_all_operation_ids() -> dict:
     }
 
 
+KB_NATIVE_DB_TYPES = frozenset({"knowledge_base", "knowledgebase", "kb", "faq"})
+
+
+def is_kb_native_spec(spec) -> bool:
+    """True for an OperationSpec that is answered by the knowledge base, not by
+    a backend: its data source is the knowledge base, or every tool has both
+    generation flags off. Live (e2e 2026-09-22, two Korean runs): the interview
+    saved `answer_faq` / `department_faq` OperationSpecs although FAQ is a
+    native `knowledge_base` node; the Lambda-count gate then demanded a FAQ
+    Lambda, one run built a FAQ Data Request and Lambda, and no tool could
+    delete the spec. Such a spec is left in place but counts for nothing:
+    no tool id, no Data Request, no Lambda / OpenAPI expectation."""
+    if spec is None:
+        return False
+    source = getattr(spec, "data_source", None)
+    if source is None and isinstance(spec, dict):
+        source = spec.get("data_source")
+    db_type = getattr(source, "db_type", None) if source is not None and not isinstance(source, dict) \
+        else (source or {}).get("db_type") if isinstance(source, dict) else None
+    if str(db_type or "").strip().lower().replace("-", "_") in KB_NATIVE_DB_TYPES:
+        return True
+    tools = getattr(spec, "tools", None) if not isinstance(spec, dict) else spec.get("tools")
+    if tools:
+        def _flag(t, name):
+            return getattr(t, name, None) if not isinstance(t, dict) else t.get(name, True)
+        return all(_flag(t, "generate_lambda") is False and _flag(t, "generate_openapi") is False for t in tools)
+    return False
+
+
 @tool
 def get_all_tool_ids() -> dict:
     """
@@ -1842,6 +1871,8 @@ def get_all_tool_ids() -> dict:
     by_operation = {}
 
     for op_id, spec in all_specs.items():
+        if is_kb_native_spec(spec):
+            continue
         op_tools = []
         if spec.tools:
             for t in spec.tools:
