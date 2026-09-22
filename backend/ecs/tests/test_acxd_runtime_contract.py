@@ -1954,6 +1954,32 @@ def test_j8_a_carrying_journey_pinned_to_a_fast_model_is_moved_to_the_tool_model
     assert talk_only["nodes"]["gj"]["metadata"]["generativeJourney"]["modelType"] == "anthropic.claude-haiku-4-5"
 
 
+def test_j9_mandated_handoff_notice_is_written_into_every_journey_prompt():
+    """Live (Hanbit e2e, 2026-09-22): the document's emergency rule ("응급/피가/숨이"
+    → say the 119 sentence, hand off) reached no flow, guardrail or prompt. A
+    route guardrail plan with a message becomes a rule of every journey."""
+    from tools.acxd_flow_spec import handoff_notices_from_spec
+    spec = {"guardrails": [
+        {"name": "Emergency", "trigger": "input", "policy": "emergency → human", "detection_method": "keyword",
+         "action": "route", "route_flow_id": "Escalation", "examples": ["응급", "피가", "숨이"],
+         "message": "응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요."},
+        {"name": "PII", "trigger": "input", "policy": "mask phones", "action": "mask", "message": "ignored"},
+        {"name": "Abuse", "trigger": "input", "policy": "abuse → human", "action": "route", "examples": ["욕설"]}]}
+    notices = handoff_notices_from_spec(spec)
+    assert notices == [{"keywords": ["응급", "피가", "숨이"],
+                        "message": "응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요."}]
+    out, notes = _apply_journey(_journey_flow(), handoff_notices=notices)
+    prompt = out["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
+    assert "[hand-off notices]" in prompt
+    assert "'응급', '피가', '숨이' 같은 말을 하면" in prompt
+    assert "'응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요.'" in prompt and "agentRequested" in prompt
+    assert any("(J9)" in n for n in notes)
+    again, notes_again = _apply_journey(out, handoff_notices=notices)
+    assert again == out and not any("(J9)" in n for n in notes_again)
+    plain, plain_notes = _apply_journey(_journey_flow())
+    assert "[hand-off notices]" not in plain["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
+
+
 def test_j8_plan_journey_tools_add_the_data_request_and_a_missing_id_is_refused():
     steps = [{"captures": ["reason"], "journey_tools": ["data_request", "knowledge_base"], "description": "접수"}]
     out, notes = _apply_journey(_journey_flow(), journey_steps=steps, request_steps=["requestReturn"])

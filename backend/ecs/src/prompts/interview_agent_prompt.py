@@ -769,6 +769,17 @@ design the ACXD flows before moving to the analysis document.
    builder keeps such rules advisory (`flag`). Put topic hand-offs in the
    escalation conditions the flows and journeys carry; reserve `route` for
    keyword/regex rules (abuse words, prohibited requests).
+   SAFETY / EMERGENCY HAND-OFFS ARE NEVER DROPPED. When the requirements name
+   trigger words or situations that must reach a human at once (응급, 피가, 숨이,
+   chest pain, "connect me to a person", a legal threat) — usually with a
+   sentence to say first — record ONE guardrail per rule with `trigger:
+   "input"`, `detection_method: "keyword"`, `examples: [<the trigger words>]`,
+   `action: "route"`, `route_flow_id: <the escalation flow>` and `message: <the
+   sentence exactly as written>`. The builder writes that sentence into every
+   journey's rules (said verbatim, then the agent hand-off), so the caller hears
+   it wherever the words are spoken. Live (2026-09-22): a hospital document's
+   emergency rule was mentioned in the interview and then landed only inside a
+   FAQ article — no flow, guardrail or journey carried it.
 6. For every value a flow collects, capture the FieldSpec constraint that
    decides how it is captured: a value with a fixed SET of options (product
    type, service type) becomes a custom slot type built from that enum, while an

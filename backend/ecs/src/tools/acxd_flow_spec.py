@@ -467,6 +467,31 @@ class ACXDGuardrailPlan(_Model):
     action: str = Field(default="flag", description="'mask', 'modify', 'route' or 'flag'")
     route_flow_id: Optional[str] = None
     examples: List[str] = Field(default_factory=list)
+    message: Optional[str] = Field(
+        default=None,
+        description="The sentence to say VERBATIM when the rule fires, copied from the requirements "
+                    "(e.g. an emergency notice before the hand-off). A route rule with a message is "
+                    "also written into every journey's rules, so the caller hears it wherever the "
+                    "trigger words are said")
+
+
+def handoff_notices_from_spec(spec: Any) -> List[dict]:
+    """The plan's route guardrails that carry a mandated sentence, as
+    ``[{"keywords": [...], "message": "..."}]`` for the runtime contract (J9).
+    Accepts the spec model or its dict dump."""
+    plans = getattr(spec, "guardrails", None)
+    if plans is None and isinstance(spec, dict):
+        plans = spec.get("guardrails")
+    out: List[dict] = []
+    for plan in plans or []:
+        if not isinstance(plan, dict):
+            plan = plan.model_dump() if hasattr(plan, "model_dump") else {}
+        message = str(plan.get("message") or "").strip()
+        if not message or str(plan.get("action") or "") != "route":
+            continue
+        out.append({"keywords": [str(e) for e in (plan.get("examples") or []) if str(e).strip()],
+                    "message": message})
+    return out
 
 
 class ACXDKnowledgeBasePlan(_Model):
@@ -1252,7 +1277,9 @@ def save_acxd_policies(guardrails: Union[list[dict], str] = None, kb_name: str =
     Args:
         guardrails: [{"name":"PII Filter","trigger":"input|output","policy":"...",
                       "detection_method":"regex|keyword|llmJudge|auto","action":"mask|modify|route|flag",
-                      "route_flow_id":"EscalationFlow","examples":[...]}]
+                      "route_flow_id":"EscalationFlow","examples":[...],
+                      "message":"<sentence to say verbatim when the rule fires — a mandated
+                      emergency notice; with action route it is written into every journey>"}]
         kb_name: Knowledge base name (articles come from the FAQ asset).
         kb_topics: FAQ topics the KB should cover.
     """

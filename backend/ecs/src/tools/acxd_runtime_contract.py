@@ -439,8 +439,18 @@ class _RuntimeContract:
         request_steps: Optional[list] = None,
         escalation_topics: Optional[Any] = None,
         result_templates: Optional[list] = None,
+        handoff_notices: Optional[list] = None,
     ) -> None:
         self.flow = flow
+        #: the plan's route guardrails that carry a mandated sentence
+        #: ([{"keywords": [...], "message": "..."}]): every journey of an
+        #: operation flow says the sentence verbatim and hands off when the
+        #: trigger words are said (J9). Live (Hanbit e2e, 2026-09-22): the
+        #: document's emergency rule reached no flow, guardrail or prompt.
+        self.handoff_notices = [
+            {"keywords": [str(k) for k in (n.get("keywords") or []) if str(k).strip()],
+             "message": str(n.get("message") or "").strip()}
+            for n in (handoff_notices or []) if isinstance(n, dict) and str(n.get("message") or "").strip()]
         #: the customer-approved sentences of the plan's generative_text steps, in
         #: order (None where the plan has none): M2 uses the n-th as the n-th
         #: generative_text node's fallback instead of synthesising one
@@ -3550,6 +3560,39 @@ class _RuntimeContract:
             if carrying and self.JOURNEY_TOOL_MARKER not in prompt_text:
                 cfg["prompt"] = prompt_text.rstrip() + "\n\n" + self._journey_tool_rules(request_ids)
                 self.change(f"{label}: tool-use rules appended to the journey prompt (J8)")
+            # --- mandated hand-off notices (J9) ---------------------------------
+            # Live (Hanbit e2e, 2026-09-22): the requirements said "응급/피가/숨이
+            # → say '응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요' and hand
+            # off"; the bundle carried it nowhere. A route guardrail with a
+            # mandated sentence becomes a rule of every journey, so the sentence
+            # is said verbatim wherever the trigger words are heard.
+            if self.role == "operation" and self.handoff_notices \
+                    and self.HANDOFF_NOTICE_MARKER not in str(cfg.get("prompt") or ""):
+                cfg["prompt"] = str(cfg.get("prompt") or "").rstrip() + "\n\n" + self._handoff_notice_rules()
+                self.change(f"{label}: {len(self.handoff_notices)} mandated hand-off notice(s) appended "
+                            f"to the journey prompt (J9)")
+
+    HANDOFF_NOTICE_MARKER = "[hand-off notices]"
+
+    def _handoff_notice_rules(self) -> str:
+        lang = self._language()
+        lines = [self.HANDOFF_NOTICE_MARKER]
+        for notice in self.handoff_notices:
+            words = ", ".join(f"'{w}'" for w in notice["keywords"]) or None
+            message = notice["message"]
+            if lang == "ja":
+                when = f"お客様が {words} のような言葉を口にしたら" if words else "この状況になったら"
+                lines.append(f"- {when}、他の案内より先に次の文をそのまま伝えます: 「{message}」 "
+                             "その後すぐにオペレーターへの引き継ぎ（agentRequested）で終了します。")
+            elif lang == "en":
+                when = f"If the caller says anything like {words}" if words else "When this situation arises"
+                lines.append(f"- {when}, before anything else say exactly: \"{message}\" "
+                             "Then end immediately through the agent hand-off (agentRequested).")
+            else:
+                when = f"고객이 {words} 같은 말을 하면" if words else "이 상황이 되면"
+                lines.append(f"- {when} 다른 안내를 하기 전에 다음 문구를 그대로 말합니다: '{message}' "
+                             "그런 다음 즉시 상담원 연결(agentRequested) 종료 조건으로 넘어갑니다.")
+        return "\n".join(lines)
 
     JOURNEY_STYLE_MARKER = "[conversation style]"
 
@@ -3798,6 +3841,7 @@ def apply_runtime_contract(
     request_steps: Optional[list] = None,
     escalation_topics: Optional[Any] = None,
     result_templates: Optional[list] = None,
+    handoff_notices: Optional[list] = None,
 ) -> tuple[dict, list[str]]:
     """Normalize ``flow`` onto the live-verified runtime contract.
 
@@ -3835,7 +3879,8 @@ def apply_runtime_contract(
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
         slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
         journey_steps=journey_steps, kb_name=kb_name, request_steps=request_steps,
-        escalation_topics=escalation_topics, result_templates=result_templates)
+        escalation_topics=escalation_topics, result_templates=result_templates,
+        handoff_notices=handoff_notices)
     engine.run()
     return engine.flow, engine.changes
 
@@ -3860,6 +3905,7 @@ def runtime_contract_violations(
     request_steps: Optional[list] = None,
     escalation_topics: Optional[Any] = None,
     result_templates: Optional[list] = None,
+    handoff_notices: Optional[list] = None,
 ) -> list[str]:
     """Report what the runtime contract cannot repair. Never mutates ``flow``.
 
@@ -3890,7 +3936,8 @@ def runtime_contract_violations(
         follow_up_flow_id=follow_up_flow_id, escalation_flow_id=escalation_flow_id,
         slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
         journey_steps=journey_steps, kb_name=kb_name, request_steps=request_steps,
-        escalation_topics=escalation_topics, result_templates=result_templates)
+        escalation_topics=escalation_topics, result_templates=result_templates,
+        handoff_notices=handoff_notices)
     engine.run()
     wanted = set(ALL_SCOPES) if scope == "all" else {scope}
     return [message for item_scope, _rule, message in engine.violations

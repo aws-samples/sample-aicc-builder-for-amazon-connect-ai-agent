@@ -641,13 +641,15 @@ def bundle_contract_kwargs(bundle: dict, spec: Optional[dict] = None) -> Optiona
         (fid for fid in sorted(known_targets) if fid.lower().startswith("followup")), "FollowUpFlow")
     escalation_flow_id = next(
         (fid for fid in sorted(known_targets) if fid.lower().startswith("escalation")), "EscalationFlow")
+    from tools.acxd_flow_spec import handoff_notices_from_spec
     return {
         "roles": roles,
         "kwargs": dict(
             slot_type_ids=set(slot_type_docs), slot_type_docs=slot_type_docs,
             data_requests=data_requests, flow_ids=known_targets,
             context_variables=context_variables, follow_up_flow_id=follow_up_flow_id,
-            escalation_flow_id=escalation_flow_id, field_enums=field_enums),
+            escalation_flow_id=escalation_flow_id, field_enums=field_enums,
+            handoff_notices=handoff_notices_from_spec(spec) if spec else None),
     }
 
 

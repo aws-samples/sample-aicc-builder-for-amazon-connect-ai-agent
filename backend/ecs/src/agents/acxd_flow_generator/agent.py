@@ -26,6 +26,7 @@ from typing import Callable, Optional
 from strands import tool
 
 from tools.acxd_generation_context import get_acxd_spec
+from tools.acxd_flow_spec import handoff_notices_from_spec as _handoff_notices
 from tools.session_context import current_session_id
 from tools.acxd_flow_canonicalizer import canonicalize_flow
 from tools.validate_acxd_flow import GENERATIVE_NODE_TYPES, prune_to_schema
@@ -1341,6 +1342,10 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
             s.get("template") for s in (plan.get("steps") or [])
             if isinstance(s, dict) and s.get("node_type") == "generative_text"
         ],
+        # Route guardrails carrying a mandated sentence (an emergency notice):
+        # J9 writes them into every journey so the sentence is said verbatim
+        # wherever the trigger words are heard, then the journey hands off.
+        "handoff_notices": _handoff_notices(spec),
     }
 
 
