@@ -45,6 +45,19 @@
       },
       "title": "Examples",
       "type": "array"
+    },
+    "message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The sentence to say VERBATIM when the rule fires, copied from the requirements (e.g. an emergency notice before the hand-off). A route rule with a message is also written into every journey's rules, so the caller hears it wherever the trigger words are said",
+      "title": "Message"
     }
   },
   "required": [
