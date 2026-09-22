@@ -120,11 +120,16 @@ def read_acxd_asset(asset_type: str, file_name: str,
     except OSError as e:
         return {"status": "error", "problems": [f"could not read {file_name}: {e}"]}
 
+    # NOTE: the payload key is `file_content`, NOT `content`. strands treats a
+    # tool return carrying both `status` and `content` as an already-formed
+    # ToolResult, so a string under `content` reaches Bedrock as the
+    # toolResult's content list and blows the turn up with
+    # "content_type=<{> | unsupported type".
     result = {
         "status": "ok",
         "asset_type": asset_type,
         "file_name": file_name,
-        "content": content,
+        "file_content": content,
         "line_count": content.count("\n") + 1,
     }
     if contains:
@@ -137,7 +142,7 @@ def read_acxd_asset(asset_type: str, file_name: str,
         result["match_count"] = len(matches)
         if not matches:
             result["hint"] = (
-                f"{contains!r} does not appear in this file — read the content "
+                f"{contains!r} does not appear in this file — read `file_content` "
                 "above and copy an excerpt from it verbatim."
             )
         elif len(matches) > 1:
@@ -153,9 +158,9 @@ def patch_acxd_asset(asset_type: str, file_name: str,
                      old_str: str, new_str: str) -> dict:
     """Apply a minimal patch to one generated ACXD asset (patch-only rule).
 
-    Call ``read_acxd_asset`` FIRST and copy ``old_str`` out of its content —
-    guessing the wording wastes attempts and cannot be relied on for
-    non-English text.
+    Call ``read_acxd_asset`` FIRST and copy ``old_str`` out of its
+    ``file_content`` — guessing the wording wastes attempts and cannot be
+    relied on for non-English text.
 
     The patch is applied, then the full deterministic validation stack
     runs (asset schema + cross-asset consistency + the interview's
@@ -190,10 +195,11 @@ def patch_acxd_asset(asset_type: str, file_name: str,
         # Hand back the content instead of only saying "not found". A live
         # session burned three attempts guessing Korean wording and then stopped,
         # because nothing in the failure told it what the file actually said.
+        # Keyed `file_content` — see read_acxd_asset on why it cannot be `content`.
         return {"status": "error",
                 "problems": ["old_str not found in the asset — copy an exact "
-                             "excerpt from `content` below (do not retype it)"],
-                "content": original,
+                             "excerpt from `file_content` below (do not retype it)"],
+                "file_content": original,
                 "line_count": original.count("\n") + 1,
                 "hint": "read_acxd_asset(asset_type, file_name, contains=...) "
                         "also locates candidate lines."}

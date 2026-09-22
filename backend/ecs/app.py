@@ -142,7 +142,7 @@ except ImportError:
 
 # S3 Files context store
 from context.s3files_store import S3FilesContextStore
-from context.bedrock_messages import fix_messages_for_bedrock
+from context.bedrock_messages import fix_messages_for_bedrock, normalize_content_blocks
 from context.message_log import get_message_log
 from context.generation_progress import update_from_new_messages as _update_generation_progress
 from context import task_protection as _task_protection
@@ -1230,6 +1230,7 @@ def _sanitize_messages_for_agent(messages: list) -> list:
 
     Applied after building strands_messages from conversation history, right before
     creating the streaming Agent.  Fixes:
+    0. Content blocks that are not dicts (a bare string where a content list belongs)
     1. First message must be user role
     2. Consecutive same-role messages merged (role alternation)
     3. toolUse/toolResult pair validation
@@ -1241,7 +1242,9 @@ def _sanitize_messages_for_agent(messages: list) -> list:
 
     sanitized = []
 
-    # 0. Filter out system-role messages (Bedrock only accepts user/assistant)
+    # 0. Coerce malformed content blocks, then filter out system-role messages
+    #    (Bedrock only accepts user/assistant)
+    messages = normalize_content_blocks(messages)
     messages = [m for m in messages if m.get("role") in ("user", "assistant")]
     if not messages:
         return []
