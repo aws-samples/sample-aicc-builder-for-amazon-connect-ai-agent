@@ -333,6 +333,34 @@ generator prompts (mandated wording verbatim, no dropped fields, the carrying
 shape), `fields_to_json_schema` (no request-side pattern / length), and the
 system flows (`WelcomeFlow` guard and routing text, listen-first `FollowUpFlow`).
 
+## 2026-09-22 — six fresh interviews on the journey-carries-the-operation build
+
+Three Korean and three English requirement documents (a home-appliance
+cleaning service, an e-commerce returns desk, a hospital, an order-tracking
+shop, a restaurant reservation line, a clinic) were interviewed end to end on
+the dev builder, each to a downloaded bundle. Every operation came out as one
+7-node flow whose generative journey holds the `dataRequest` tools, exits
+through `done` / `agentRequested` / `anotherRequest`, keeps its captures
+optional and carries the `[tool use]` and `[conversation style]` rules; the
+mandated sentences (a consent text with its yes/no gate, a refund notice, a
+911 line) were verbatim; request schemas carried no `pattern`. What the runs
+caught, and where it went:
+
+| Finding | Where it showed | Source |
+|---|---|---|
+| The generator wrote journey `done` exits with `left.type: "variable"` for `System.gjConditionIndex`; such an edge never matches at runtime. | All six bundles before the fix. | Rule J retypes `System.*` operands to `system`. |
+| The interview saved an OperationSpec for FAQ (`answer_faq`, `department_faq`). The Lambda-count, parity and missing-asset gates then demanded a FAQ Lambda and path; one run built them, another was stuck for an hour because no tool deletes a spec. | Two Korean runs. | `is_kb_native_spec` / `get_backend_specs`: a spec answered by the knowledge base (`data_source.db_type: knowledge_base`, or every tool flagged `generate_lambda/openapi: false`) counts for nothing — no tool id, no Data Request, and a stale or empty request file is dropped by the bundle loader. |
+| A journey tool payload omitted a field the request marks `required` (`action`, `patientName`); every call would have been a `VALIDATION_ERROR`, and only a reviewer advisory noticed. | Hospital run, twice. | J8 fills a missing required field from a same-named capture or reports it; `JOURNEY_PAYLOAD_MISSING_REQUIRED` in the consistency check. |
+| The generator pinned Haiku on 7 of 16 carrying journeys — the model the probes showed mis-computing weekdays and reading results as colon lists. | Four bundles. | J8 overrides a fast model on a carrying journey (it composes the backend's arguments). |
+| "'AC-' + 8 digits" derived `pattern ^\d{8}$` and length 8 for an 11-character id, contradicting the slot regex — a D9-4 blocking finding. | Three runs. | `_enforce_exact_length_phrase` honours a literal prefix next to the length phrase and keeps a prefixed pattern the interviewer wrote. |
+| The hospital document's emergency rule (trigger words → "응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요" → hand-off) reached no flow, guardrail or prompt; it survived only inside a FAQ article. | Hospital run. | `ACXDGuardrailPlan.message`; the interview records safety hand-offs as keyword `route` guardrails with the sentence; rule J9 writes the sentence into every journey's rules (said verbatim, then `agentRequested`). The guardrail path itself still lands in the escalation flow's generic line — not yet verified live. |
+| `read_acxd_asset` / `patch_acxd_asset` returned `{status, content}`; strands takes such a dict as a preformed ToolResult, so the file text reached Bedrock as a bare block and the turn died (`content_type=<{> unsupported type`). | One run, mid-review. | Payload keyed `file_content`; the message sanitizers coerce stray string blocks. |
+| The Korean journey tool rules carried an example from one customer's domain into another project's prompts. | Hospital bundle. | Example removed. |
+
+Wall time per run, interview to download: 40–45 minutes when the review was
+clean on the first round; 99–166 minutes for the two runs that hit the FAQ-spec
+gates before the fix (including three backend rollovers).
+
 ## Service contract facts (not in the SDK types, learned from the API)
 
 | Area | Fact | Where it is enforced now |
