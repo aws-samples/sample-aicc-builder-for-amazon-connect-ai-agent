@@ -65,3 +65,22 @@ def test_validator_count_ignores_kb_native_specs(monkeypatch):
     out = vc._validate_parameter_consistency_impl("session-test")
     counts = [m for m in out.get("mismatches", []) if m.get("asset_type") == "count"]
     assert counts == [], counts
+
+
+def test_review_gates_skip_kb_native_specs(monkeypatch):
+    """PARITY:<op>.requestBody / MISSING:openapi:<op> must not be raised for a
+    knowledge-base-only spec (Hanbit e2e, 2026-09-22: three blocking findings
+    for `department_faq` after the count gate was already fixed)."""
+    import tools.review_gates as rg
+    specs = {"department_faq": _spec(operation_id="department_faq",
+                                     input_fields=[{"name": "question", "type": "string"}],
+                                     output_fields=[{"name": "answer", "type": "string"}],
+                                     data_source={"db_type": "knowledge_base"})}
+    monkeypatch.setattr("tools.spec_manager.get_all_specs", lambda: specs)
+    monkeypatch.setattr("tools.spec_manager._get_flow_cfg", lambda: None)
+    monkeypatch.setattr("tools.asset_loader.load_existing_asset",
+                        lambda *a, **k: "openapi: 3.0.0\ninfo:\n  title: t\n  version: '1'\npaths: {}\n")
+    assert rg._parity_findings("session-test") == []
+    missing = [f for f in rg._missing_asset_findings("session-test")
+               if "department_faq" in f.get("id", "")] if hasattr(rg, "_missing_asset_findings") else []
+    assert missing == []

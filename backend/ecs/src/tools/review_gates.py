@@ -68,9 +68,9 @@ def _parity_findings(session_id: str) -> list[dict]:
     import yaml
     from tools.asset_loader import load_existing_asset
     from tools.shape_parity import ShapeParityError, validate_shape_parity
-    from tools.spec_manager import get_all_specs
+    from tools.spec_manager import get_backend_specs
 
-    specs = get_all_specs() or {}
+    specs = get_backend_specs()  # a knowledge-base-only spec has no path by design
     if not specs:
         return []
     openapi_yaml = load_existing_asset("openapi", file_name="openapi.yaml")
@@ -193,8 +193,8 @@ def _missing_asset_findings(session_id: str) -> list[dict]:
     the ACXD application without ever calling the Lambda generator; the review
     reported 0 blocking and only the packager refused ('manifest references
     lambda dir ... but the bundle has no generated handler')."""
-    from tools.spec_manager import get_all_specs
-    specs = get_all_specs() or {}
+    from tools.spec_manager import get_backend_specs
+    specs = get_backend_specs()  # a knowledge-base-only spec expects no asset
     if not specs:
         return []
     try:

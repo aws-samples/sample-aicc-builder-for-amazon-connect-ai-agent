@@ -1849,6 +1849,14 @@ def is_kb_native_spec(spec) -> bool:
     return False
 
 
+def get_backend_specs() -> "dict[str, OperationSpec]":
+    """Operation specs that expect a backend (Lambda, OpenAPI path, Data
+    Request) — every spec except the knowledge-base-only ones. Gates that judge
+    the backend against the specs (count, parity, missing-asset) read this."""
+    return {op_id: spec for op_id, spec in (get_all_specs() or {}).items()
+            if not is_kb_native_spec(spec)}
+
+
 @tool
 def get_all_tool_ids() -> dict:
     """
