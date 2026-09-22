@@ -1005,7 +1005,12 @@ def validate_parameter_consistency(session_id: str) -> dict:
 
 
 def _validate_parameter_consistency_impl(session_id: str) -> dict:
-    specs = get_all_specs()
+    # A spec the knowledge base answers (FAQ) has no Lambda and no path by
+    # design; counting it made the legacy operation-count branch demand a FAQ
+    # Lambda in two e2e runs (2026-09-22).
+    from tools.spec_manager import is_kb_native_spec
+    specs = {op_id: spec for op_id, spec in (get_all_specs() or {}).items()
+             if not is_kb_native_spec(spec)}
     if not specs:
         return {"success": True, "mismatches": [], "summary": "No operation specs found", "operations_checked": 0}
 

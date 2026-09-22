@@ -2255,6 +2255,8 @@ def get_all_tools() -> list[ToolSpec]:
     result: list[ToolSpec] = []
 
     for op_id, spec in all_specs.items():
+        if is_kb_native_spec(spec):
+            continue  # answered by the knowledge base: no tool, no Lambda, no path
         if spec.tools:
             result.extend(spec.tools)
         else:
