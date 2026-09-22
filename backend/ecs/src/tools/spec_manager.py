@@ -1353,6 +1353,33 @@ def _exact_length_pattern(text: str, n: int) -> Optional[str]:
     return None
 
 
+# A literal prefix written next to the length phrase: 'AC-' + 8 digits,
+# `GC-`+8자리, "RT-" + 6자리, AC- 뒤 숫자 8자리, prefix "AC-". Letters/digits
+# ending in a separator (or 2–4 upper-case letters) — never a bare word.
+_LITERAL_PREFIX_RE = re.compile(
+    r"""(?:^|[\s(（:：,，])['"`“‘]?([A-Z][A-Z0-9]{0,4}[-_#/]|[A-Z]{2,4})['"`”’]?\s*(?:\+|＋|뒤|다음|に続|followed by|then|and then)""",
+    re.UNICODE)
+
+
+def _literal_prefix(text: str) -> Optional[str]:
+    """The fixed prefix an id carries before its N-character body, when the
+    description spells it out. e2e (2026-09-22, three of six runs): "'AC-' + 8
+    digits" / "GC-+8자리" derived `^\\d{8}$` and min/max 8, contradicting the
+    slot regex `^AC-\\d{8}$` and every real id — D9-4 blocking in each run."""
+    m = _LITERAL_PREFIX_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _exact_length_pattern_with_prefix(text: str, n: int) -> tuple[Optional[str], int]:
+    """(pattern, total_length) for an exact-length phrase, honouring a literal
+    prefix written next to it."""
+    body = _exact_length_pattern(text, n)
+    prefix = _literal_prefix(text)
+    if body is None or not prefix:
+        return body, n
+    return "^" + re.escape(prefix) + body[1:], n + len(prefix)
+
+
 def _enforce_exact_length_phrase(data: dict) -> dict:
     """The customer's words win over the model's numbers.
 
@@ -1383,15 +1410,22 @@ def _enforce_exact_length_phrase(data: dict) -> dict:
     if not ex or _LEN_RANGE_RE.search(text):
         return data
     n = int(ex.group(1))
+    derived, total = _exact_length_pattern_with_prefix(text, n)
+    existing = data.get("pattern") if isinstance(data.get("pattern"), str) else None
+    if existing and existing != derived and re.match(r"^\^[A-Za-z0-9\\\-_#/]+", existing) \
+            and not existing.startswith(("^\\d", "^[")):
+        # The interviewer already wrote a prefixed pattern (^AC-\d{8}$): the
+        # phrase's N counts the body only, so the lengths follow the pattern.
+        total = n + len(re.sub(r"\\(.)", r"\1", re.match(r"^\^([^\\\[(]+)", existing).group(1)))
     for key in ("min_length", "max_length"):
-        if data.get(key) is not None and data.get(key) != n:
-            data[key] = n
+        if data.get(key) is not None and data.get(key) != total:
+            data[key] = total
     if data.get("min_length") is None:
-        data["min_length"] = n
+        data["min_length"] = total
     if data.get("max_length") is None:
-        data["max_length"] = n
+        data["max_length"] = total
     if data.get("pattern") is None:
-        data["pattern"] = _exact_length_pattern(text, n)
+        data["pattern"] = derived
     return data
 
 
