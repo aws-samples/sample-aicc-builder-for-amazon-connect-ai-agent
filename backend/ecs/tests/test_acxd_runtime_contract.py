@@ -1922,6 +1922,38 @@ def test_j8_journey_with_a_data_request_tool_carries_the_operation():
     assert again == out and not any("(J8)" in n for n in notes_again)
 
 
+def test_j8_payload_gets_every_required_request_field_or_the_gap_is_reported():
+    """Live (Hanbit e2e, 2026-09-22): `cancelAppointment` required `action`,
+    `bookAppointment` required `patientName`; the journeys sent neither and only
+    a reviewer advisory noticed. A required field the flow has a slot for is
+    mapped into the payload; one it has no value for is a J8 violation."""
+    partial = {"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn",
+                                                       "payload": {"orderNumber": "{orderNumber:NLX.Slot}"}}}
+    out, notes = _apply_journey(_journey_flow(journey_cfg={"tools": [partial]}))
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    tool = next(t for t in cfg["tools"] if t["type"] == "dataRequest")
+    assert tool["dataRequest"]["payload"] == {"orderNumber": "{orderNumber:NLX.Slot}",
+                                              "contactPhone": "{contactPhone:NLX.Slot}"}
+    assert any("payload now carries required ['contactPhone']" in n for n in notes)
+    doc = dict(_INTAKE_DOC, requestSchema={"type": "object", "required": ["orderNumber", "action"],
+                                           "properties": {"orderNumber": {"type": "string"}, "action": {"type": "string"}}})
+    violations = runtime_contract_violations(
+        _journey_flow(journey_cfg={"tools": [partial]}), **_journey_kwargs(data_requests={"requestReturn": doc}))
+    assert any("J8" in v and "omits required request field(s) ['action']" in v for v in violations)
+
+
+def test_j8_a_carrying_journey_pinned_to_a_fast_model_is_moved_to_the_tool_model():
+    """e2e 2026-09-22: the generator pinned Haiku on 7 of 16 carrying journeys;
+    the probe had shown Haiku mis-computing weekdays and reading results as
+    colon lists. The pin is overridden, a talk-only journey keeps its model."""
+    tool = {"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}
+    out, notes = _apply_journey(_journey_flow(journey_cfg={"tools": [tool], "modelType": "anthropic.claude-haiku-4-5"}))
+    assert out["nodes"]["gj"]["metadata"]["generativeJourney"]["modelType"] == "anthropic.claude-sonnet-5"
+    assert any("anthropic.claude-haiku-4-5 → anthropic.claude-sonnet-5" in n for n in notes)
+    talk_only, _ = _apply_journey(_journey_flow(journey_cfg={"modelType": "anthropic.claude-haiku-4-5"}))
+    assert talk_only["nodes"]["gj"]["metadata"]["generativeJourney"]["modelType"] == "anthropic.claude-haiku-4-5"
+
+
 def test_j8_plan_journey_tools_add_the_data_request_and_a_missing_id_is_refused():
     steps = [{"captures": ["reason"], "journey_tools": ["data_request", "knowledge_base"], "description": "접수"}]
     out, notes = _apply_journey(_journey_flow(), journey_steps=steps, request_steps=["requestReturn"])

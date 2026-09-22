@@ -230,6 +230,15 @@ def _mutated(mutate):
      "SLOT_REF_UNDEFINED"),
     (lambda b: b["flows"][0]["nodes"][D].update(dataRequests=["nosuchDR"]),
      "DATA_REQUEST_REF_UNDEFINED"),
+    # a journey tool payload that omits a field the request requires (Hanbit e2e 2026-09-22)
+    (lambda b: (b["data_requests"][0].update(requestSchema={
+                    "type": "object", "required": ["orderNumber", "action"],
+                    "properties": {"orderNumber": {"type": "string"}, "action": {"type": "string"}}}),
+                b["flows"][0]["nodes"][G].update(type="generative_journey", metadata={"generativeJourney": {
+                    "prompt": "p", "tools": [{"type": "dataRequest", "dataRequest": {
+                        "dataRequestId": "getOrderStatus",
+                        "payload": {"orderNumber": "{orderNumber:NLX.Slot}"}}}]}})),
+     "JOURNEY_PAYLOAD_MISSING_REQUIRED"),
     (lambda b: b["flows"][1]["nodes"][K]["metadata"]["knowledgeBase"].update(
         knowledgeBaseId="{KB:No Such KB}"), "KB_REF_UNDEFINED"),
     (lambda b: b["guardrails"][0]["rules"][0]["enforcement"]["behavior"].update(

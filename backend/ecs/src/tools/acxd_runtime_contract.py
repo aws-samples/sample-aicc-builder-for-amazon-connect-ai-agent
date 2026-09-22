@@ -2986,6 +2986,45 @@ class _RuntimeContract:
         props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         return {name: f"{{{name}:NLX.Slot}}" for name in props if name in self.slot_names}
 
+    def _complete_payload(self, request_id: str, payload: dict, capture_names: set,
+                          label: str) -> dict:
+        """Every field the request marks ``required`` must be in the payload,
+        or the backend rejects every call. Live (Hanbit e2e, 2026-09-22):
+        `cancelAppointment` needed `action`, `bookAppointment` needed
+        `patientName`; the journeys sent neither and only a reviewer advisory
+        noticed. A missing field the journey already captures (or the flow has
+        a slot for) is mapped in; one it does not is reported so the generator
+        adds the capture."""
+        document = self.data_requests.get(request_id) or {}
+        schema = document.get("requestSchema") if isinstance(document.get("requestSchema"), dict) else {}
+        required = [r for r in (schema.get("required") or []) if isinstance(r, str)]
+        missing = [r for r in required if r not in payload]
+        if not missing:
+            return payload
+        known = set(self.slot_names) | set(capture_names)
+        filled = [r for r in missing if r in known]
+        if filled:
+            payload = dict(payload, **{r: f"{{{r}:NLX.Slot}}" for r in filled})
+            self.change(f"{label}: dataRequest tool {request_id!r} payload now carries required "
+                        f"{filled} from the journey's captures (J8)")
+        unfilled = [r for r in missing if r not in known]
+        if unfilled:
+            self.violation(
+                "J8", "flow",
+                f"{label} tool {request_id!r} payload omits required request field(s) {unfilled} and the "
+                f"journey captures no value of that name — every call would fail VALIDATION_ERROR; add the "
+                f"field to the journey's captures and payload")
+        return payload
+
+    FAST_MODEL_MARKERS = ("haiku", "lite", "micro", "nova-lite", "nova-micro")
+
+    @classmethod
+    def _is_fast_model(cls, model_type: Any) -> bool:
+        """A latency-tier model (Haiku, Nova Lite/Micro): fine for a journey that
+        only talks, not for one that composes a backend call."""
+        name = str(model_type or "").lower()
+        return any(marker in name for marker in cls.FAST_MODEL_MARKERS)
+
     def _journey_carries_requests(self, cfg: dict, step: dict) -> bool:
         tools = [t for t in (cfg.get("tools") or []) if isinstance(t, dict)]
         if any(t.get("type") == "dataRequest" for t in tools):
@@ -3423,6 +3462,7 @@ class _RuntimeContract:
 
             # --- tools ------------------------------------------------------
             tools = [t for t in (cfg.get("tools") or []) if isinstance(t, dict)]
+            capture_names = set(captured_names)
             kept = []
             request_ids: list[str] = []
             for tool in tools:
@@ -3445,7 +3485,8 @@ class _RuntimeContract:
                         continue
                     if rid in request_ids:
                         continue
-                    payload = self._tool_payload(rid, dr.get("payload"))
+                    payload = self._complete_payload(
+                        rid, self._tool_payload(rid, dr.get("payload")), capture_names, label)
                     if dr.get("dataRequestId") != rid or dr.get("payload") != payload or set(tool) - {
                             "type", "dataRequest", "interimMessages", "prompt"}:
                         tool = {k: v for k, v in tool.items() if k in ("type", "interimMessages", "prompt")}
@@ -3460,7 +3501,9 @@ class _RuntimeContract:
                 if rid in request_ids:
                     continue
                 kept.append({"type": "dataRequest",
-                             "dataRequest": {"dataRequestId": rid, "payload": self._tool_payload(rid, None)}})
+                             "dataRequest": {"dataRequestId": rid,
+                                             "payload": self._complete_payload(
+                                                 rid, self._tool_payload(rid, None), capture_names, label)}})
                 request_ids.append(rid)
                 self.change(f"{label}: dataRequest tool {rid!r} from the plan's journey_tools (J8)")
             wants_kb = "knowledge_base" in [str(t) for t in (step.get("journey_tools") or [])]
@@ -3483,6 +3526,15 @@ class _RuntimeContract:
                             + ("(the journey composes the backend's arguments — accuracy over latency) (J8)"
                                if carrying else
                                "(a workspace without a default model runs a silent journey) (J5)"))
+            elif carrying and self._is_fast_model(cfg["modelType"]):
+                # Live (probe 2026-09-21, e2e 2026-09-22 — 7 of 16 generated
+                # carrying journeys were pinned to Haiku by the generator): the
+                # fast model mis-computed weekdays, read results as colon lists
+                # and echoed every answer. The journey composes the backend's
+                # arguments, so the pin is overridden, not just defaulted.
+                self.change(f"{label}: modelType {cfg['modelType']} → {self.JOURNEY_TOOL_MODEL} "
+                            f"(a carrying journey composes the backend's arguments) (J8)")
+                cfg["modelType"] = self.JOURNEY_TOOL_MODEL
 
             # --- how the journey talks (J7) -----------------------------------
             # Live (2026-09-21): a Haiku journey echoed every answer ("벽걸이형이군요.
