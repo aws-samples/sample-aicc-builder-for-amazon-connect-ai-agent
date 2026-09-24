@@ -500,14 +500,24 @@ def test_generative_style_notes_send_a_scripted_plan_back_to_the_interviewer():
     assert "enum slot 'productType'" in notes and "menu" in notes
     assert "orderNumber" not in notes.split("enum slot")[-1]   # a strict-format user_choice is right
 
-    # with a journey carrying the described value, nothing to report
+    # a journey that only collects: the tool asks for the carrying shape (data_request tool)
     with_journey = [
         {"step": 1, "description": "order number", "node_type": "user_choice", "slot": "orderNumber"},
         {"step": 2, "description": "explain", "node_type": "generative_journey", "captures": ["productType", "note"]},
         {"step": 3, "description": "lookup", "node_type": "data_request", "data_request_id": "requestReturn"},
     ]
     res = _upsert(steps=with_journey, slots=enum_slots)
+    assert any("no 'data_request' in `journey_tools`" in n for n in res["coerced"]), res["coerced"]
+    assert not any("menu" in n for n in res["coerced"]), res["coerced"]
+
+    # a journey carrying the request: nothing to report, strict-format captures are kept
+    carrying = [
+        {"step": 1, "description": "book", "node_type": "generative_journey",
+         "captures": ["orderNumber", "productType", "note"], "journey_tools": ["data_request", "knowledge_base"]},
+    ]
+    res = _upsert(steps=carrying, slots=enum_slots)
     assert not any("generative style" in n or "menu" in n for n in res["coerced"]), res["coerced"]
+    assert not any("orderNumber" in n for n in res["coerced"]), res["coerced"]
 
     # a customer who asked for a scripted agent gets no such notes
     afs.save_acxd_application_settings(conversation_style="scripted")

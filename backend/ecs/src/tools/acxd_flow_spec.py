@@ -386,19 +386,24 @@ class ACXDNodeStep(_Model):
     captures: List[str] = Field(
         default_factory=list,
         description="generative_journey steps only: names of the flow's slots the journey "
-                    "collects in free conversation (e.g. ['reason', 'preferredDate']). A value "
-                    "with a strict format — a regex, a phone number, an identifier — is never "
-                    "captured here: it gets its own user_choice step, which the runtime checks "
-                    "character by character.")
+                    "collects in conversation (e.g. ['acType', 'quantity', 'phoneNumber']). A "
+                    "journey that carries the operation (journey_tools names a data_request) "
+                    "collects every value, strict-format ones included — it reads them back and "
+                    "re-asks on a wrong shape. Only a journey WITHOUT a data request leaves "
+                    "strict-format values (a regex, a phone number, an identifier) to their own "
+                    "user_choice steps, which the runtime checks character by character.")
     slot: Optional[str] = Field(
         default=None,
-        description="user_choice steps: the flow slot this step collects (e.g. 'orderNumber'). "
-                    "Required for a strict-format slot when the flow also has a generative_journey, "
-                    "so the plan shows which values stay deterministic.")
+        description="user_choice steps: the flow slot this step collects (e.g. 'orderNumber', "
+                    "or the yes/no slot of a consent gate).")
     journey_tools: List[str] = Field(
         default_factory=list,
-        description="generative_journey steps only: 'knowledge_base' lets the journey answer "
-                    "side questions from the FAQ knowledge base while it collects values.")
+        description="generative_journey steps only. 'data_request' gives the journey the "
+                    "operation's own Data Request as a tool (the recommended shape: the journey "
+                    "collects, calls the backend and announces the result itself); "
+                    "'data_request:<id>' adds another bundled request (a price lookup before a "
+                    "booking, a search by customer info after a miss); 'knowledge_base' lets it "
+                    "answer side questions from the FAQ knowledge base.")
     template: Optional[str] = Field(
         default=None,
         description="The exact sentence the customer approved for this step, with placeholders: "
@@ -462,6 +467,31 @@ class ACXDGuardrailPlan(_Model):
     action: str = Field(default="flag", description="'mask', 'modify', 'route' or 'flag'")
     route_flow_id: Optional[str] = None
     examples: List[str] = Field(default_factory=list)
+    message: Optional[str] = Field(
+        default=None,
+        description="The sentence to say VERBATIM when the rule fires, copied from the requirements "
+                    "(e.g. an emergency notice before the hand-off). A route rule with a message is "
+                    "also written into every journey's rules, so the caller hears it wherever the "
+                    "trigger words are said")
+
+
+def handoff_notices_from_spec(spec: Any) -> List[dict]:
+    """The plan's route guardrails that carry a mandated sentence, as
+    ``[{"keywords": [...], "message": "..."}]`` for the runtime contract (J9).
+    Accepts the spec model or its dict dump."""
+    plans = getattr(spec, "guardrails", None)
+    if plans is None and isinstance(spec, dict):
+        plans = spec.get("guardrails")
+    out: List[dict] = []
+    for plan in plans or []:
+        if not isinstance(plan, dict):
+            plan = plan.model_dump() if hasattr(plan, "model_dump") else {}
+        message = str(plan.get("message") or "").strip()
+        if not message or str(plan.get("action") or "") != "route":
+            continue
+        out.append({"keywords": [str(e) for e in (plan.get("examples") or []) if str(e).strip()],
+                    "message": message})
+    return out
 
 
 class ACXDKnowledgeBasePlan(_Model):
@@ -679,19 +709,36 @@ def generative_style_notes(spec, role: Optional[str], steps: List["ACXDNodeStep"
     style = getattr(getattr(spec, "application", None), "conversation_style", "generative")
     if style != "generative" or (role or "operation") != "operation" or not steps:
         return notes
-    if not any(st.node_type == "generative_journey" for st in steps):
+    journeys = [st for st in steps if st.node_type == "generative_journey"]
+    if not journeys:
         notes.append(
-            "generative style: this operation flow has no generative_journey step — values the "
-            "customer explains in their own words (reason, product, preferences, name, address) "
-            "belong to ONE journey with `captures`; keep user_choice only for strict-format values "
-            "and identity, data_request/choice/basic for the exact parts. Re-plan unless the "
-            "customer explicitly asked for a scripted flow.")
+            "generative style: this operation flow has no generative_journey step — the operation's "
+            "conversation belongs to ONE journey with `captures` for every value and "
+            "`journey_tools: ['data_request', 'knowledge_base']` so it collects, calls the backend and "
+            "announces the result itself; keep `basic` only for wording the requirements mandate and "
+            "`user_choice` only for a compliance gate (consent yes/no) or identity verification. Re-plan "
+            "unless the customer explicitly asked for a scripted flow.")
+    elif not any(journey_carries_request(st) for st in journeys):
+        notes.append(
+            "generative style: the journey has no 'data_request' in `journey_tools`, so the flow needs "
+            "deterministic capture, read-back and data_request steps around it (live 2026-09-21: that "
+            "shape confirmed values a journey extractor had invented, and its request failed before the "
+            "call). Prefer `journey_tools: ['data_request', 'knowledge_base']` with every value in "
+            "`captures` and drop the separate data_request / read-back / result steps.")
     by_name = {sl.name: sl for sl in slots}
+    carrying = any(journey_carries_request(st) for st in journeys)
     for st in steps:
         if st.node_type != "user_choice" or not st.slot:
             continue
         slot = by_name.get(st.slot)
-        if slot is None or is_strict_format_slot(slot):
+        if slot is None:
+            continue
+        if is_strict_format_slot(slot):
+            if carrying:
+                notes.append(
+                    f"step {st.step}: user_choice over '{st.slot}' — the journey carries the request and "
+                    "collects strict-format values itself (it reads them back and re-asks on a wrong shape); "
+                    "keep this user_choice only for identity verification or a compliance gate.")
             continue
         # an enum slot in a plan is `type: custom` with its values as examples
         vals = list(slot.examples or []) if str(slot.type or "").lower() in ("custom", "customenum", "enum") else []
@@ -702,6 +749,18 @@ def generative_style_notes(spec, role: Optional[str], steps: List["ACXDNodeStep"
                 "`captures` (the journey classifies the description onto the values). Keep user_choice "
                 "only if the customer wants a fixed menu here.")
     return notes
+
+
+_DATA_REQUEST_TOOL_RE = re.compile(r"^data_request(?::\s*[A-Za-z0-9_\-]+)?$")
+
+
+def journey_carries_request(step: "ACXDNodeStep") -> bool:
+    """True when the plan gives this generative_journey a Data Request tool —
+    the journey then collects, calls the backend and announces the result
+    itself (live 2026-09-21), and the deterministic capture/read-back/
+    data_request scaffolding is not planned around it."""
+    return step.node_type == "generative_journey" and any(
+        _DATA_REQUEST_TOOL_RE.match(str(t).strip()) for t in (step.journey_tools or []))
 
 
 def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan],
@@ -724,6 +783,17 @@ def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan],
         return notes
     by_name = {s.name: s for s in slots}
     fields = spec_fields or {}
+    tools: List[str] = []
+    for tool in step.journey_tools:
+        tool = str(tool).strip()
+        if tool == "knowledge_base" or _DATA_REQUEST_TOOL_RE.match(tool):
+            if tool not in tools:
+                tools.append(tool)
+        elif tool:
+            notes.append(f"step {step.step}: journey tool '{tool}' is not supported — use 'data_request' "
+                         "(the operation's request), 'data_request:<id>' or 'knowledge_base'")
+    step.journey_tools = tools
+    carries = journey_carries_request(step)
     kept: List[str] = []
     for name in step.captures:
         name = str(name).strip()
@@ -734,6 +804,12 @@ def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan],
             notes.append(f"step {step.step}: captures '{name}' is not one of the flow's slots — dropped")
             continue
         field = fields.get(slot.field_name or "") or fields.get(name) or fields.get(name.lower())
+        if carries:
+            # The journey passes the values to the backend as tool arguments it
+            # composes itself (live 2026-09-21: the model formatted the phone to
+            # the request schema); the captured slot is only a mirror.
+            kept.append(name)
+            continue
         if is_strict_format_slot(slot, field):
             date_like = bool(field and (field.get("date_format") or str(field.get("field_type") or "").lower()
                                         in ("date", "datetime"))) or str(slot.type or "").lower() in DATE_LIKE_TYPES
@@ -746,15 +822,6 @@ def enforce_capture_policy(step: ACXDNodeStep, slots: List[ACXDSlotPlan],
             continue
         kept.append(name)
     step.captures = kept
-    tools = []
-    for tool in step.journey_tools:
-        tool = str(tool).strip()
-        if tool == "knowledge_base":
-            tools.append(tool)
-        elif tool:
-            notes.append(f"step {step.step}: journey tool '{tool}' is not supported — a journey collects values; "
-                         "the flow's data_request step calls the backend")
-    step.journey_tools = tools
     return notes
 
 
@@ -789,6 +856,7 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
                 problems.append(f"flow '{f.flow_id}' step {s.step}: determinism decision not confirmed by the user")
         if f.role == "operation":
             journeys = [s for s in f.steps if s.node_type == "generative_journey"]
+            carrying = [s for s in journeys if journey_carries_request(s)]
             slot_names = {sl.name for sl in f.slots}
             for s in journeys:
                 if not s.captures:
@@ -799,12 +867,31 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
                     if name not in slot_names:
                         problems.append(f"flow '{f.flow_id}' step {s.step}: captures '{name}' is not a slot of this flow")
             captured_by_choice = {s.slot for s in f.steps if s.node_type == "user_choice" and s.slot}
-            if journeys:
+            if journeys and not carrying:
                 for sl in f.slots:
                     if is_strict_format_slot(sl) and sl.name not in captured_by_choice:
                         problems.append(f"flow '{f.flow_id}': slot '{sl.name}' has a strict format and no "
                                         f"user_choice step declares slot='{sl.name}' — collect it "
-                                        "deterministically (the journey must not)")
+                                        "deterministically (a journey without a data request must not)")
+            if carrying:
+                # A request the journey calls as a tool is not called again by a
+                # data_request step of its own (live 2026-09-21: the journey
+                # announces the result while it holds the turn).
+                carried = set()
+                for s in carrying:
+                    for tool in s.journey_tools:
+                        raw = str(tool)
+                        rid = raw.split(":", 1)[1].strip() if ":" in raw else (f.operation_id or "")
+                        if rid:
+                            carried.add(rid.lower().replace("_", "").replace("-", ""))
+                for s in f.steps:
+                    if s.node_type != "data_request":
+                        continue
+                    rid = str(s.data_request_id or f.operation_id or "").lower().replace("_", "").replace("-", "")
+                    if rid and rid in carried:
+                        problems.append(f"flow '{f.flow_id}' step {s.step}: data_request "
+                                        f"'{s.data_request_id or f.operation_id}' is already a tool of the journey — "
+                                        "remove this step (the journey calls the backend and announces the result itself)")
             # Live (SELC, 2026-09-21): "step 3 announce the result, step 4 hand off to
             # the search-by-customer-info flow" with no step saying WHEN — the model
             # generated the announcement path only, five attempts in a row, and the
@@ -820,7 +907,7 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
                     continue
                 if resolve_flow_reference(s.redirect_flow_id, [p.flow_id for p in spec.flows], role_map) not in operation_ids:
                     continue
-                if not any(prev.node_type == "choice" for prev in ordered[:idx]):
+                if not any(prev.node_type == "choice" or journey_carries_request(prev) for prev in ordered[:idx]):
                     problems.append(
                         f"flow '{f.flow_id}' step {s.step}: hands off to operation flow '{s.redirect_flow_id}' but no "
                         "earlier step is a 'choice' that decides when — add a choice step after the data_request "
@@ -964,20 +1051,29 @@ def upsert_acxd_flow_plan(
 
     HOW MUCH IS GENERATIVE follows application.conversation_style (default
     'generative', saved with save_acxd_application_settings):
-      generative — ONE `generative_journey` step carries the operation's conversation:
-        it collects the values a person would explain in their own words (a reason, a
-        preference, a description, a choice among options) and answers side questions
-        from the FAQ. Name those slots in `captures` and pass
-        journey_tools=['knowledge_base'] when the project has an FAQ. Everything else
-        stays a fixed node ONLY because it must be exact: a `basic` for wording the
-        requirements mandate (consent, legal notice), a `user_choice` (with `slot`) for
-        every strict-format value — order number, phone, id, anything with a regex —
-        and for identity checks, `data_request` for the backend call, `choice` for a
-        money/eligibility/compliance rule, `escalate`/`redirect` for hand-off, and a
-        `generative_text` (or a `basic` when the wording is mandated) to announce the
-        result. A strict-format slot listed in `captures` is removed and reported.
+      generative — ONE `generative_journey` step CARRIES the operation: it collects
+        every value (strict-format ones included — it reads them back and re-asks on a
+        wrong shape), calls the backend through its tools, reads the details back
+        before anything is created, announces the result, keeps handling changes,
+        cancellations and follow-up questions, and ends only when the customer says
+        they are done. Name every slot in `captures` and pass
+        journey_tools=['data_request', 'knowledge_base'] ('data_request' = the
+        operation's own request; add 'data_request:<id>' for another bundled request
+        the conversation needs — a price lookup before a booking, a search by customer
+        info after a miss). Fixed nodes exist ONLY where exactness is mandated: a
+        `basic` for wording the requirements state word for word (consent text, legal
+        notice, a fixed welcome or hand-off sentence) and a `user_choice` (with `slot`)
+        for a compliance gate (consent yes/no — the flow may not continue without it)
+        or an identity check. NO separate data_request, read-back or result step
+        around a carrying journey — the tool refuses a data_request step that repeats
+        the journey's request. Hand-offs to another operation flow are `redirect` steps
+        after the journey with `redirect_flow_id` and a description of WHEN.
       scripted — the customer explicitly asked for a scenario-driven agent: every step
-        is a fixed node, one `user_choice` per value.
+        is a fixed node, one `user_choice` per value, `data_request` after the values.
+    Live (2026-09-21): the mixed shape — journey for some values, user_choice for the
+    rest, data_request and read-back nodes after — confirmed values the extractor had
+    invented and failed the request before the call; the carrying journey completed
+    a booking end to end.
 
     Args:
         flow_id: Letters only, 3-64 chars (e.g. 'ProcessReturn').
@@ -987,8 +1083,8 @@ def upsert_acxd_flow_plan(
         steps: [{"step":1,"description":"...","node_type":"user_input",
                  "determinism":"deterministic","determinism_rationale":"...",
                  "decision_category":"general|money|refund|...","data_request_id":"...",
-                 "slot":"orderNumber" (user_choice), "captures":["reason"] and
-                 "journey_tools":["knowledge_base"] (generative_journey),
+                 "slot":"orderNumber" (user_choice), "captures":["acType","quantity","phoneNumber"] and
+                 "journey_tools":["data_request","knowledge_base"] (generative_journey),
                  "template":"예약이 접수되었습니다. 예약번호는 {createReservation.reservationId:NLX.Variable}…"
                  (the sentence the customer approved for a result step or a journey's read-back)}]
         slots: [{"name":"orderId","type":"text","field_name":"order_id","sensitive":false,
@@ -1181,7 +1277,9 @@ def save_acxd_policies(guardrails: Union[list[dict], str] = None, kb_name: str =
     Args:
         guardrails: [{"name":"PII Filter","trigger":"input|output","policy":"...",
                       "detection_method":"regex|keyword|llmJudge|auto","action":"mask|modify|route|flag",
-                      "route_flow_id":"EscalationFlow","examples":[...]}]
+                      "route_flow_id":"EscalationFlow","examples":[...],
+                      "message":"<sentence to say verbatim when the rule fires — a mandated
+                      emergency notice; with action route it is written into every journey>"}]
         kb_name: Knowledge base name (articles come from the FAQ asset).
         kb_topics: FAQ topics the KB should cover.
     """

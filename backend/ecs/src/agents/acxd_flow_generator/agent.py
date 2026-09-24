@@ -26,6 +26,7 @@ from typing import Callable, Optional
 from strands import tool
 
 from tools.acxd_generation_context import get_acxd_spec
+from tools.acxd_flow_spec import handoff_notices_from_spec as _handoff_notices
 from tools.session_context import current_session_id
 from tools.acxd_flow_canonicalizer import canonicalize_flow
 from tools.validate_acxd_flow import GENERATIVE_NODE_TYPES, prune_to_schema
@@ -538,11 +539,6 @@ def _ascii_fallback_description(plan: dict, flow: dict) -> str:
     return label
 
 
-def _helper_flow_id_for(data_request_id: str) -> str:
-    """Helper-flow id a journey mcpFlow tool must point at for this data request."""
-    from tools.acxd_data_request_builder import helper_flow_id
-    return helper_flow_id(data_request_id)
-
 _FAILURE_EDGE = re.compile(r"not[_ ]?found|fail|miss|error|invalid|no[_ ]?match|false|absent|unknown|else|미조회|실패|없음|오류|불일치|見つか|失敗|不明", re.I)
 
 
@@ -777,12 +773,17 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
             logger.info("[ACXDFlowGen] repaired %s: filled empty %s.prompt from the plan",
                         flow.get("flowId"), cfg_key)
 
-    # LIVE-VERIFIED (2026-09-08) journey/tool repairs:
+    # LIVE-VERIFIED journey/tool repairs:
     #  - `intent_capture` is not a real node (palette has none, metadata is
     #    dropped, and a deployed flow using it failed on the first utterance).
-    #    Convert it to `user_input`, which the palette does have.
-    #  - a dataRequest tool sent only as `dataRequest.dataRequestId` comes back
-    #    as `dataRequest:{}` — the id must ALSO ride in `payload`.
+    #    Convert it to `user_input`, which the palette does have (2026-09-08).
+    #  - a `dataRequest` tool is kept as `{type, dataRequest: {dataRequestId,
+    #    payload}}`: stored as sent, built, and INVOKED by the journey at
+    #    runtime with model-composed arguments (2026-09-21, customer workspace —
+    #    the 2026-09-08 observation that the service drops the id no longer
+    #    holds; the helper-flow detour is gone).
+    #  - `mcpFlow` saves and builds but fails on invocation ("Unknown tool
+    #    type") — it becomes a `flow` tool.
     #  - only generative nodes may carry `modelType`.
     for node in nodes.values():
         if not isinstance(node, dict):
@@ -798,35 +799,25 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 if not isinstance(tool, dict):
                     continue
                 if tool.get("type") != "dataRequest":
-                    # mcpFlow saves and builds but fails on invocation.
                     if tool.get("type") == "mcpFlow" and tool.get("flowId"):
-                        # mcpFlow fails on invocation: "Unknown tool type".
                         tool = {"type": "flow", "flowId": tool["flowId"]}
                     rewritten.append(tool)
                     continue
                 dr = tool.get("dataRequest") if isinstance(tool.get("dataRequest"), dict) else {}
                 drid = (dr.get("dataRequestId")
                         or dr.get("action")
+                        or tool.get("dataRequestId")
                         or (tool.get("payload") or {}).get("dataRequestId"))
                 if not drid:
                     rewritten.append(tool)
                     continue
-                # A journey cannot call a data request directly.
-                #
-                # Verified by round-trip on a real workspace: the service DROPS
-                # `dataRequest.dataRequestId`. Smuggling the id through
-                # provider/action does make the FIELDS survive, but that shape
-                # is not what the runtime resolves as a callable tool — and the
-                # build succeeds either way, so a build is no evidence.
-                #
-                # The configuration that is actually deployed and passed a live
-                # multi-turn test (GAON Assistant, build c4d9eeaf, the only
-                # deployment on that app) binds each data request as an
-                # **mcpFlow** pointing at a helper flow that wraps it. mcpFlow
-                # is a first-class GenerativeJourneyToolType and keeps the agent
-                # in control so it can summarize the result.
-                rewritten.append({"type": "flow",
-                                  "flowId": _helper_flow_id_for(drid)})
+                payload = dr.get("payload") if isinstance(dr.get("payload"), dict) else {}
+                if not payload and isinstance(tool.get("payload"), dict):
+                    payload = {k: v for k, v in tool["payload"].items() if k != "dataRequestId"}
+                kept = {k: v for k, v in tool.items() if k in ("type", "interimMessages", "prompt")}
+                kept["type"] = "dataRequest"
+                kept["dataRequest"] = {"dataRequestId": str(drid), "payload": payload}
+                rewritten.append(kept)
             if rewritten:
                 journey["tools"] = rewritten
         gt = meta.get("generativeText")
@@ -1351,6 +1342,10 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
             s.get("template") for s in (plan.get("steps") or [])
             if isinstance(s, dict) and s.get("node_type") == "generative_text"
         ],
+        # Route guardrails carrying a mandated sentence (an emergency notice):
+        # J9 writes them into every journey so the sentence is said verbatim
+        # wherever the trigger words are heard, then the journey hands off.
+        "handoff_notices": _handoff_notices(spec),
     }
 
 

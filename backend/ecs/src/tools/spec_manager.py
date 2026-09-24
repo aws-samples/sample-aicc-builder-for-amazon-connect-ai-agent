@@ -1353,6 +1353,33 @@ def _exact_length_pattern(text: str, n: int) -> Optional[str]:
     return None
 
 
+# A literal prefix written next to the length phrase: 'AC-' + 8 digits,
+# `GC-`+8자리, "RT-" + 6자리, AC- 뒤 숫자 8자리, prefix "AC-". Letters/digits
+# ending in a separator (or 2–4 upper-case letters) — never a bare word.
+_LITERAL_PREFIX_RE = re.compile(
+    r"""(?:^|[\s(（:：,，])['"`“‘]?([A-Z][A-Z0-9]{0,4}[-_#/]|[A-Z]{2,4})['"`”’]?\s*(?:\+|＋|뒤|다음|に続|followed by|then|and then)""",
+    re.UNICODE)
+
+
+def _literal_prefix(text: str) -> Optional[str]:
+    """The fixed prefix an id carries before its N-character body, when the
+    description spells it out. e2e (2026-09-22, three of six runs): "'AC-' + 8
+    digits" / "GC-+8자리" derived `^\\d{8}$` and min/max 8, contradicting the
+    slot regex `^AC-\\d{8}$` and every real id — D9-4 blocking in each run."""
+    m = _LITERAL_PREFIX_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _exact_length_pattern_with_prefix(text: str, n: int) -> tuple[Optional[str], int]:
+    """(pattern, total_length) for an exact-length phrase, honouring a literal
+    prefix written next to it."""
+    body = _exact_length_pattern(text, n)
+    prefix = _literal_prefix(text)
+    if body is None or not prefix:
+        return body, n
+    return "^" + re.escape(prefix) + body[1:], n + len(prefix)
+
+
 def _enforce_exact_length_phrase(data: dict) -> dict:
     """The customer's words win over the model's numbers.
 
@@ -1383,15 +1410,22 @@ def _enforce_exact_length_phrase(data: dict) -> dict:
     if not ex or _LEN_RANGE_RE.search(text):
         return data
     n = int(ex.group(1))
+    derived, total = _exact_length_pattern_with_prefix(text, n)
+    existing = data.get("pattern") if isinstance(data.get("pattern"), str) else None
+    if existing and existing != derived and re.match(r"^\^[A-Za-z0-9\\\-_#/]+", existing) \
+            and not existing.startswith(("^\\d", "^[")):
+        # The interviewer already wrote a prefixed pattern (^AC-\d{8}$): the
+        # phrase's N counts the body only, so the lengths follow the pattern.
+        total = n + len(re.sub(r"\\(.)", r"\1", re.match(r"^\^([^\\\[(]+)", existing).group(1)))
     for key in ("min_length", "max_length"):
-        if data.get(key) is not None and data.get(key) != n:
-            data[key] = n
+        if data.get(key) is not None and data.get(key) != total:
+            data[key] = total
     if data.get("min_length") is None:
-        data["min_length"] = n
+        data["min_length"] = total
     if data.get("max_length") is None:
-        data["max_length"] = n
+        data["max_length"] = total
     if data.get("pattern") is None:
-        data["pattern"] = _exact_length_pattern(text, n)
+        data["pattern"] = derived
     return data
 
 
@@ -1820,6 +1854,43 @@ def get_all_operation_ids() -> dict:
     }
 
 
+KB_NATIVE_DB_TYPES = frozenset({"knowledge_base", "knowledgebase", "kb", "faq"})
+
+
+def is_kb_native_spec(spec) -> bool:
+    """True for an OperationSpec that is answered by the knowledge base, not by
+    a backend: its data source is the knowledge base, or every tool has both
+    generation flags off. Live (e2e 2026-09-22, two Korean runs): the interview
+    saved `answer_faq` / `department_faq` OperationSpecs although FAQ is a
+    native `knowledge_base` node; the Lambda-count gate then demanded a FAQ
+    Lambda, one run built a FAQ Data Request and Lambda, and no tool could
+    delete the spec. Such a spec is left in place but counts for nothing:
+    no tool id, no Data Request, no Lambda / OpenAPI expectation."""
+    if spec is None:
+        return False
+    source = getattr(spec, "data_source", None)
+    if source is None and isinstance(spec, dict):
+        source = spec.get("data_source")
+    db_type = getattr(source, "db_type", None) if source is not None and not isinstance(source, dict) \
+        else (source or {}).get("db_type") if isinstance(source, dict) else None
+    if str(db_type or "").strip().lower().replace("-", "_") in KB_NATIVE_DB_TYPES:
+        return True
+    tools = getattr(spec, "tools", None) if not isinstance(spec, dict) else spec.get("tools")
+    if tools:
+        def _flag(t, name):
+            return getattr(t, name, None) if not isinstance(t, dict) else t.get(name, True)
+        return all(_flag(t, "generate_lambda") is False and _flag(t, "generate_openapi") is False for t in tools)
+    return False
+
+
+def get_backend_specs() -> "dict[str, OperationSpec]":
+    """Operation specs that expect a backend (Lambda, OpenAPI path, Data
+    Request) — every spec except the knowledge-base-only ones. Gates that judge
+    the backend against the specs (count, parity, missing-asset) read this."""
+    return {op_id: spec for op_id, spec in (get_all_specs() or {}).items()
+            if not is_kb_native_spec(spec)}
+
+
 @tool
 def get_all_tool_ids() -> dict:
     """
@@ -1842,6 +1913,8 @@ def get_all_tool_ids() -> dict:
     by_operation = {}
 
     for op_id, spec in all_specs.items():
+        if is_kb_native_spec(spec):
+            continue
         op_tools = []
         if spec.tools:
             for t in spec.tools:
@@ -2224,6 +2297,8 @@ def get_all_tools() -> list[ToolSpec]:
     result: list[ToolSpec] = []
 
     for op_id, spec in all_specs.items():
+        if is_kb_native_spec(spec):
+            continue  # answered by the knowledge base: no tool, no Lambda, no path
         if spec.tools:
             result.extend(spec.tools)
         else:

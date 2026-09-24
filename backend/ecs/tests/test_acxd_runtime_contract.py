@@ -1836,7 +1836,7 @@ def test_j7_journey_prompt_carries_conversation_style_rules():
     out, notes = _apply_journey(_journey_flow())
     prompt = out["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
     assert prompt.startswith("고객의 반품 사유를 자연스럽게 확인합니다.")      # the generator's text is kept
-    assert "[conversation style]" in prompt and "되풀이하지" in prompt and "구체적인 날짜" in prompt
+    assert "[conversation style]" in prompt and "되풀이하지" in prompt and "몇 월 며칠" in prompt
     assert any("(J7)" in n for n in notes)
     again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
     assert again["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"].count("[conversation style]") == 1
@@ -1877,9 +1877,10 @@ def test_j4_agent_request_exit_condition_is_appended_and_routed():
     assert {"timeout", "failure"} <= statuses
 
 
-def test_j5_tools_kb_added_unsupported_dropped_bounds_and_model_defaulted():
-    flow = _journey_flow(journey_cfg={"tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}]})
-    out, notes = _apply_journey(flow)
+def test_j5_tools_kb_added_mcpflow_refused_bounds_and_model_defaulted():
+    """A collecting journey (no data request tool) keeps Haiku and 8 steps and
+    gets the knowledge base; mcpFlow is still refused (it fails on invocation)."""
+    out, notes = _apply_journey(_journey_flow())
     cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
     assert cfg["tools"] == [{"type": "knowledgeBase", "knowledgeBaseId": "{KB:greencart-faq-kb}", "scopeTags": []}]
     assert cfg["maxSteps"] == 8 and cfg["modelType"] == "anthropic.claude-haiku-4-5"
@@ -1888,6 +1889,107 @@ def test_j5_tools_kb_added_unsupported_dropped_bounds_and_model_defaulted():
                                              escalation_flow_id="Escalation", slot_type_ids={"yesNo", "reason"},
                                              slot_type_docs={"reason": _REASON_TYPE}, journey_steps=_JOURNEY_STEPS)
     assert any("mcpFlow" in v and "J5" in v for v in violations)
+
+
+def test_j8_journey_with_a_data_request_tool_carries_the_operation():
+    """Live (2026-09-21, customer workspace): a dataRequest tool on a journey is
+    stored, built and INVOKED — the model composed the arguments, the backend
+    answered and the journey announced the result. Such a journey ends through
+    exit conditions, its captures are optional, it gets no read-back, the
+    stronger model and more steps."""
+    flow = _journey_flow(journey_cfg={"tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}]})
+    out, notes = _apply_journey(flow)
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    tool = next(t for t in cfg["tools"] if t["type"] == "dataRequest")
+    assert tool["dataRequest"]["dataRequestId"] == "requestReturn"
+    assert tool["dataRequest"]["payload"] == {"orderNumber": "{orderNumber:NLX.Slot}", "contactPhone": "{contactPhone:NLX.Slot}"}
+    assert any(t["type"] == "knowledgeBase" for t in cfg["tools"])
+    assert cfg["dataCapture"]["exitEnabled"] is False
+    assert all(d["required"] is False for d in cfg["dataCapture"]["data"])
+    assert cfg["modelType"] == "anthropic.claude-sonnet-5" and cfg["maxSteps"] == 16
+    names = [c["name"] for c in cfg["exitConditions"]]
+    assert "done" in names and "agentRequested" in names and "anotherRequest" in names
+    edges = out["nodes"]["gj"]["childNodes"]
+    done = next(e for e in edges if e["name"] == "done")
+    assert done["nodeId"] == "askP"                                   # the model's continuation became the done exit
+    assert done["conditions"][0]["right"]["value"] == names.index("done")
+    assert not any(all(c["left"].get("type") == "slot" for c in (e.get("conditions") or [{}])) and e.get("conditions")
+                   for e in edges), "no captured-slots edge on a carrying journey"
+    assert not any("(J6)" in n for n in notes), "no deterministic read-back after a carrying journey"
+    prompt = cfg["prompt"]
+    assert "[tool use]" in prompt and "requestReturn" in prompt and "더 필요한 것이 있으신지" in prompt
+    again, notes_again = _apply_journey(out)
+    assert again == out and not any("(J8)" in n for n in notes_again)
+
+
+def test_j8_payload_gets_every_required_request_field_or_the_gap_is_reported():
+    """Live (Hanbit e2e, 2026-09-22): `cancelAppointment` required `action`,
+    `bookAppointment` required `patientName`; the journeys sent neither and only
+    a reviewer advisory noticed. A required field the flow has a slot for is
+    mapped into the payload; one it has no value for is a J8 violation."""
+    partial = {"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn",
+                                                       "payload": {"orderNumber": "{orderNumber:NLX.Slot}"}}}
+    out, notes = _apply_journey(_journey_flow(journey_cfg={"tools": [partial]}))
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    tool = next(t for t in cfg["tools"] if t["type"] == "dataRequest")
+    assert tool["dataRequest"]["payload"] == {"orderNumber": "{orderNumber:NLX.Slot}",
+                                              "contactPhone": "{contactPhone:NLX.Slot}"}
+    assert any("payload now carries required ['contactPhone']" in n for n in notes)
+    doc = dict(_INTAKE_DOC, requestSchema={"type": "object", "required": ["orderNumber", "action"],
+                                           "properties": {"orderNumber": {"type": "string"}, "action": {"type": "string"}}})
+    violations = runtime_contract_violations(
+        _journey_flow(journey_cfg={"tools": [partial]}), **_journey_kwargs(data_requests={"requestReturn": doc}))
+    assert any("J8" in v and "omits required request field(s) ['action']" in v for v in violations)
+
+
+def test_j8_a_carrying_journey_pinned_to_a_fast_model_is_moved_to_the_tool_model():
+    """e2e 2026-09-22: the generator pinned Haiku on 7 of 16 carrying journeys;
+    the probe had shown Haiku mis-computing weekdays and reading results as
+    colon lists. The pin is overridden, a talk-only journey keeps its model."""
+    tool = {"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}
+    out, notes = _apply_journey(_journey_flow(journey_cfg={"tools": [tool], "modelType": "anthropic.claude-haiku-4-5"}))
+    assert out["nodes"]["gj"]["metadata"]["generativeJourney"]["modelType"] == "anthropic.claude-sonnet-5"
+    assert any("anthropic.claude-haiku-4-5 → anthropic.claude-sonnet-5" in n for n in notes)
+    talk_only, _ = _apply_journey(_journey_flow(journey_cfg={"modelType": "anthropic.claude-haiku-4-5"}))
+    assert talk_only["nodes"]["gj"]["metadata"]["generativeJourney"]["modelType"] == "anthropic.claude-haiku-4-5"
+
+
+def test_j9_mandated_handoff_notice_is_written_into_every_journey_prompt():
+    """Live (Hanbit e2e, 2026-09-22): the document's emergency rule ("응급/피가/숨이"
+    → say the 119 sentence, hand off) reached no flow, guardrail or prompt. A
+    route guardrail plan with a message becomes a rule of every journey."""
+    from tools.acxd_flow_spec import handoff_notices_from_spec
+    spec = {"guardrails": [
+        {"name": "Emergency", "trigger": "input", "policy": "emergency → human", "detection_method": "keyword",
+         "action": "route", "route_flow_id": "Escalation", "examples": ["응급", "피가", "숨이"],
+         "message": "응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요."},
+        {"name": "PII", "trigger": "input", "policy": "mask phones", "action": "mask", "message": "ignored"},
+        {"name": "Abuse", "trigger": "input", "policy": "abuse → human", "action": "route", "examples": ["욕설"]}]}
+    notices = handoff_notices_from_spec(spec)
+    assert notices == [{"keywords": ["응급", "피가", "숨이"],
+                        "message": "응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요."}]
+    out, notes = _apply_journey(_journey_flow(), handoff_notices=notices)
+    prompt = out["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
+    assert "[hand-off notices]" in prompt
+    assert "'응급', '피가', '숨이' 같은 말을 하면" in prompt
+    assert "'응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요.'" in prompt and "agentRequested" in prompt
+    assert any("(J9)" in n for n in notes)
+    again, notes_again = _apply_journey(out, handoff_notices=notices)
+    assert again == out and not any("(J9)" in n for n in notes_again)
+    plain, plain_notes = _apply_journey(_journey_flow())
+    assert "[hand-off notices]" not in plain["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
+
+
+def test_j8_plan_journey_tools_add_the_data_request_and_a_missing_id_is_refused():
+    steps = [{"captures": ["reason"], "journey_tools": ["data_request", "knowledge_base"], "description": "접수"}]
+    out, notes = _apply_journey(_journey_flow(), journey_steps=steps, request_steps=["requestReturn"])
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    assert [t["dataRequest"]["dataRequestId"] for t in cfg["tools"] if t["type"] == "dataRequest"] == ["requestReturn"]
+    assert any("from the plan's journey_tools (J8)" in n for n in notes)
+    violations = runtime_contract_violations(
+        _journey_flow(journey_cfg={"tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "noSuchRequest"}}]}),
+        **_journey_kwargs())
+    assert any("names no bundled data request" in v for v in violations)
 
 
 def test_j2_j5_are_idempotent_and_a_journey_without_a_plan_step_is_left_to_the_model():
@@ -2190,3 +2292,19 @@ def test_d3p_resolves_the_plan_s_request_id_against_the_bundled_requests():
                                 **{"follow_up_flow_id": "FollowUpFlow", "escalation_flow_id": "EscalationFlow",
                                    **ctx, "request_steps": [snake, "no_such_request"]})
     assert contract.request_steps == [real]
+
+
+def test_j_system_operands_written_as_variable_are_retyped():
+    """e2e (2026-09-22): the generator wrote the journey's done exit as
+    `{"type": "variable", "name": "System.gjConditionIndex"}`; a System value is
+    matched only through the `system` operand (E2), so the exit never fired."""
+    edges = [{"nodeId": "askP", "name": "Done", "conditions": [{
+        "left": {"type": "variable", "name": "System.gjConditionIndex"},
+        "operator": "eq", "right": {"type": "constant", "value": 0}}]}]
+    flow = _journey_flow(journey_edges=edges,
+                         journey_cfg={"exitConditions": [{"name": "done", "prompt": "끝"}],
+                                      "tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}]})
+    out, notes = _apply_journey(flow)
+    done = next(e for e in out["nodes"]["gj"]["childNodes"] if e["name"] == "Done")
+    assert done["conditions"][0]["left"] == {"type": "system", "name": "System.gjConditionIndex"}
+    assert any("typed 'system'" in n for n in notes)

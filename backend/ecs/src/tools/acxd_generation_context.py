@@ -536,9 +536,15 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
 
     data_integrations: list[dict] = []
     request_ids: dict[str, str] = {}
+    kb_native_ids: set[str] = set()
+    from tools.spec_manager import is_kb_native_spec
     for operation_id, operation in operations.items():
         op = _model_dump(operation)
         raw_id = str(op.get("operation_id") or operation_id)
+        if is_kb_native_spec(operation):
+            # FAQ is a native knowledge_base node: no Data Request, no backend.
+            kb_native_ids.add(_normalise_data_request_id(raw_id))
+            continue
         data_request_id = _normalise_data_request_id(raw_id)
         request_ids[raw_id] = data_request_id
         # The Classic contract exposes an operation through its TOOLS: the Lambda

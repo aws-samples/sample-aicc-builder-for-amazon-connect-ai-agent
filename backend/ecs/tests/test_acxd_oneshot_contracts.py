@@ -407,3 +407,21 @@ def test_d9_4_accepts_self_validating_builtins_without_a_regex():
     mismatch = _d9_open_value_slot_issues(bundle, plan, {"name": "orderNo"}, "orderNo",
                                           "book_appointment", "^\\d{10}$", None, None)
     assert mismatch and "does not match" in mismatch[0]["message"]
+
+
+def test_exact_length_phrase_keeps_a_literal_prefix():
+    """e2e 2026-09-22 (AnyCompany, TableNow, GreenCart): "'AC-' + 8 digits" derived
+    `^\\d{8}$` and min/max 8, contradicting the slot regex `^AC-\\d{8}$` — a
+    D9-4 blocking finding in three of six runs."""
+    en = _enforce_exact_length_phrase({"name": "orderNumber", "field_type": "string",
+                                       "description": "Order number, format 'AC-' + 8 digits"})
+    assert en["pattern"] == r"^AC\-\d{8}$" and en["min_length"] == en["max_length"] == 11
+    ko = _enforce_exact_length_phrase({"name": "orderNumber", "field_type": "string",
+                                       "description": "고객이 제공한 주문번호(GC-+8자리 숫자)"})
+    assert ko["pattern"] == r"^GC\-\d{8}$" and ko["max_length"] == 11
+    # an interviewer-written prefixed pattern is kept and the lengths follow it
+    kept = _enforce_exact_length_phrase({"name": "returnId", "field_type": "string", "pattern": r"^RT-\d{6}$",
+                                         "description": "반품번호, 숫자 6자리", "max_length": 6})
+    assert kept["pattern"] == r"^RT-\d{6}$" and kept["min_length"] == kept["max_length"] == 9
+    plain = _enforce_exact_length_phrase({"name": "pin", "field_type": "string", "description": "숫자 4자리"})
+    assert plain["pattern"] == r"^\d{4}$" and plain["max_length"] == 4

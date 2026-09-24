@@ -720,6 +720,10 @@
             },
             "alwaysRetrigger": {
               "type": "boolean"
+            },
+            "payload": {
+              "type": "object",
+              "$comment": "Live (2026-09-21): a dataRequest tool is stored as sent and invoked by the journey; the runtime composes the call's arguments from the conversation against the request schema, so the payload only documents the slot mapping and may be {}."
             }
           }
         },

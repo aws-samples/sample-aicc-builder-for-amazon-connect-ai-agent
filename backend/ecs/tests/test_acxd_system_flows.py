@@ -164,20 +164,34 @@ def test_untrained_flags(role, untrained):
 def test_welcome_flow_shape():
     flow = build_welcome_flow(KO_SPEC)
     assert flow["flowId"] == "WelcomeFlow"
-    assert _walk(flow) == ["start", "basic", "user_input", "redirect", "redirect", "end"]
+    # start → greeted? (choice) → [already: listen | first visit: greeting] → listen → redirects
+    assert _walk(flow) == ["start", "choice", "user_input", "basic", "redirect", "redirect", "end"]
     assert "generative_journey" not in set(_types(flow).values())
+    # Live (voice, 2026-09-21): the greeting played five times in 23 s — a
+    # re-entry (structured request, an utterance routed back here) skips it.
+    guard = _node_of_type(flow, "choice")
+    assert guard["childNodes"][0]["conditions"] == [{
+        "left": {"type": "context", "name": "welcomeGreeted"}, "operator": "gte",
+        "right": {"type": "constant", "value": 1}}]
+    assert flow["nodes"][guard["childNodes"][0]["nodeId"]]["type"] == "user_input"
+    assert guard["childNodes"][1]["conditions"] == []
+    assert flow["aiDescription"] == "Internal system flow. Never select this flow for a customer utterance."
 
     greeting = _node_of_type(flow, "basic")
     # No approved greeting in the spec → company + the operations menu
     assert greeting["messages"][0]["body"] == (
         "안녕하세요, 가온물류입니다. 배송 조회, 에어컨 세척 가격 문의, 세척 예약 등을 "
         "도와드릴 수 있어요. 무엇을 도와드릴까요?")
-    # the counter is reset on entry, not in FallbackFlow
+    # the counter is reset on entry, not in FallbackFlow; the greeting marks itself spoken
     assert greeting["metadata"]["stateModifications"] == [{
         "type": "context", "name": "fallbackAttempts", "modification": "set",
         "value": {"type": "constant", "value": 0},
+    }, {
+        "type": "context", "name": "welcomeGreeted", "modification": "set",
+        "value": {"type": "constant", "value": 1},
     }]
-    assert flow["contextVariables"] == [{"name": "fallbackAttempts", "type": "number"}]
+    assert flow["contextVariables"] == [{"name": "fallbackAttempts", "type": "number"},
+                                        {"name": "welcomeGreeted", "type": "number"}]
 
     listen = _node_of_type(flow, "user_input")
     assert [c["conditions"] for c in listen["childNodes"]] == [
@@ -271,14 +285,33 @@ def test_operation_labels_never_cut_a_menu_out_of_purpose_sentences():
 def test_follow_up_flow_shape():
     flow = build_follow_up_flow(KO_SPEC)
     assert flow["flowId"] == "FollowUpFlow"
-    assert _walk(flow) == ["start", "basic", "user_choice", "choice", "basic", "basic",
-                           "user_input", "end", "redirect", "redirect"]
+    # Listen FIRST (live 2026-09-21: "음 바꿔도 되나요?" after a booking fell into the
+    # fallback because a yes/no capture cannot route): question → user_input →
+    # recognized redirect | choice on the "no" words → thanks | yes/no capture …
+    assert _walk(flow) == ["start", "basic", "basic", "user_input", "redirect", "choice",
+                           "end", "basic", "user_choice", "choice", "basic",
+                           "user_input", "redirect", "redirect"]
 
     # R6: the slot is cleared at the START of the flow, before it is asked again
     start = _node_of_type(flow, "start")
     clear = flow["nodes"][start["childNodes"][0]["nodeId"]]
     assert clear["metadata"]["stateModifications"] == [
-        {"type": "slot", "name": MORE_HELP_SLOT_NAME, "modification": "clear"}]
+        {"type": "slot", "name": MORE_HELP_SLOT_NAME, "modification": "clear"},
+        {"type": "context", "name": "fallbackAttempts", "modification": "set",
+         "value": {"type": "constant", "value": 0}}]
+    question = flow["nodes"][clear["childNodes"][0]["nodeId"]]
+    assert question["type"] == "basic" and question["messages"][0]["body"] == "더 도와드릴 일이 있을까요?"
+    listen_first = flow["nodes"][question["childNodes"][0]["nodeId"]]
+    assert listen_first["type"] == "user_input"
+    decide = flow["nodes"][next(c["nodeId"] for c in listen_first["childNodes"] if c["name"] == "noFlowRecognized")]
+    assert decide["type"] == "choice"
+    no_edges = [c for c in decide["childNodes"] if c["name"].startswith("no:")]
+    assert {c["conditions"][0]["right"]["value"] for c in no_edges} >= {"아니요", "없어요", "됐어요"}
+    assert all(c["conditions"][0]["left"] == {"type": "system", "name": "System.utterance"}
+               and c["conditions"][0]["operator"] == "contains" for c in no_edges)
+    assert flow["nodes"][no_edges[0]["nodeId"]]["type"] == "basic"          # thanks → end
+    assert decide["childNodes"][-1]["conditions"] == []                       # otherwise: the yes/no question
+    assert flow["nodes"][decide["childNodes"][-1]["nodeId"]]["type"] == "user_choice"
 
     # S4: yes/no needs a real slot type; S2: slotTypeId is the attached slot NAME
     assert flow["slotTypes"] == [{
@@ -303,8 +336,9 @@ def test_follow_up_flow_shape():
         "operator": "eq", "right": {"type": "constant", "value": "예"},
     }]
     assert no_branch["conditions"] == []
+    # two listens, two recognized redirects; one fallback redirect
     assert sorted(_redirect_targets(flow)) == sorted(
-        [CAPTURED_FLOW_PLACEHOLDER, "FallbackFlow"])
+        [CAPTURED_FLOW_PLACEHOLDER, CAPTURED_FLOW_PLACEHOLDER, "FallbackFlow"])
 
 
 def test_follow_up_yes_value_follows_the_language():
@@ -704,3 +738,46 @@ def test_application_attaches_the_faq_flow_with_the_knowledge_base():
     without = [f["flowId"] for f in build_application(KO_SPEC)["flows"]]
     assert "FaqFlow" in with_kb and "FaqFlow" not in without
     assert with_kb.index("FaqFlow") > with_kb.index("RequestAgentFlow")
+
+
+def test_a_route_guardrail_with_a_mandated_sentence_gets_its_own_handoff_flow():
+    """Live (Hanbit e2e, 2026-09-22): the document's emergency rule ("응급/피가/숨이"
+    → say the 119 sentence, hand off) reached no flow or guardrail. A route
+    guardrail carrying a message gets a deterministic flow that says the
+    sentence verbatim and escalates; the guardrail routes to it; the
+    application attaches it."""
+    from tools.acxd_resource_builders import build_application, build_guardrails
+    from tools.acxd_system_flows import (
+        build_system_flow, conditional_system_roles, handoff_notice_plans, is_system_flow_role,
+        resolve_system_flow_ids)
+
+    sentence = "응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요."
+    spec = {**KO_SPEC, "guardrails": [
+        {"name": "Emergency", "trigger": "input", "policy": "emergency → human", "detection_method": "keyword",
+         "action": "route", "route_flow_id": "EscalationFlow", "examples": ["응급", "피가", "숨이"],
+         "message": sentence},
+        {"name": "Abuse", "trigger": "input", "policy": "abuse → human", "detection_method": "keyword",
+         "action": "route", "examples": ["욕설"]}]}
+    notices = handoff_notice_plans(spec)
+    assert [n["flow_id"] for n in notices] == ["EmergencyHandoffFlow"]
+    role = notices[0]["role"]
+    assert is_system_flow_role(role) and role in conditional_system_roles(spec)
+    assert resolve_system_flow_ids(spec)[role] == "EmergencyHandoffFlow"
+    assert conditional_system_roles(KO_SPEC) == ()
+
+    flow = build_system_flow(role, spec)
+    assert flow["flowId"] == "EmergencyHandoffFlow" and flow["untrained"] is True
+    assert _walk(flow) == ["start", "basic", "escalate"]
+    assert _node_of_type(flow, "basic")["messages"][0]["body"] == sentence
+    assert validate_acxd_asset("flow", flow) == []
+
+    docs, problems = build_guardrails(spec)
+    assert problems == []
+    by_name = {d["name"]: d for d in docs}
+    emergency = next(d for n, d in by_name.items() if "emergency" in n.lower())
+    assert emergency["rules"][0]["enforcement"] == {"action": "route", "behavior": {"flowId": "EmergencyHandoffFlow"}}
+    abuse = next(d for n, d in by_name.items() if "abuse" in n.lower())
+    assert abuse["rules"][0]["enforcement"]["behavior"]["flowId"] == "EscalationFlow"  # no message: generic hand-off
+
+    attached = [f["flowId"] for f in build_application(spec)["flows"]]
+    assert "EmergencyHandoffFlow" in attached

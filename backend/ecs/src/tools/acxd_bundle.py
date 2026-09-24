@@ -360,6 +360,30 @@ def load_acxd_bundle(session_id: str) -> dict:
     from tools.acxd_data_request_builder import repair_data_request_contract
     bundle["data_requests"] = [repair_data_request_contract(d)
                                for d in bundle["data_requests"]]
+    # A Data Request left behind for an operation the knowledge base answers
+    # (e2e 2026-09-22: `answerFaq` / `departmentFaq` — the interview had saved
+    # an OperationSpec for FAQ, and nothing could delete the file) or a file
+    # emptied to `{}` by hand is not part of the application.
+    try:
+        from tools.spec_manager import is_kb_native_spec, operation_specs_bucket
+        from tools.acxd_generation_context import _normalise_data_request_id
+        kb_native = {_normalise_data_request_id(str(op_id)).lower()
+                     for op_id, spec in (operation_specs_bucket(session_id) or {}).items()
+                     if is_kb_native_spec(spec)}
+    except Exception:  # pragma: no cover - the bucket is optional here
+        kb_native = set()
+    kept_requests, dropped_requests = [], []
+    for doc in bundle["data_requests"]:
+        rid = str((doc or {}).get("dataRequestId") or "") if isinstance(doc, dict) else ""
+        if not rid or rid.lower() in kb_native:
+            dropped_requests.append(rid or "<no dataRequestId>")
+            continue
+        kept_requests.append(doc)
+    if dropped_requests:
+        bundle["dropped_data_requests"] = dropped_requests
+        logger.info("[ACXDBundle] %d data request(s) left out of the bundle (knowledge-base "
+                    "operation or empty document): %s", len(dropped_requests), dropped_requests)
+    bundle["data_requests"] = kept_requests
 
     apps = _read_json_docs(session_id, ACXD_APPLICATION_TYPE)
     bundle["application"] = apps[0] if apps else None

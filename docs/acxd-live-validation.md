@@ -274,8 +274,9 @@ the plan's `captures` become the node's `dataCapture` (schema from the slot type
 values or the field's regex, `exitEnabled: true`); the captured edge is the FIRST
 child edge and tests every captured slot with `exists`; an `agentRequested` exit
 condition is appended and routed to the agent-request flow; a `knowledgeBase` tool
-is attached when the plan asks for it; `dataRequest` / `mcpFlow` tools are refused
-(the service drops the first, the second fails on invocation); `maxSteps` and a
+is attached when the plan asks for it; `mcpFlow` tools are refused (they fail on
+invocation) — `dataRequest` tools were refused here too, until the 2026-09-21 probes
+showed them stored, built and invoked (rule J8); `maxSteps` and a
 node-level `modelType` are defaulted. A journey never captures a strict-format
 value — those stay `user_choice` with F1's format re-ask — and the interview drops
 such a slot from `captures` and says so.
@@ -285,6 +286,80 @@ never delivered (the confirmation "파손으로 접수하는 게 맞나요?" was
 value was captured on the same turn, so the plan puts a deterministic
 confirmation or the next question right after the journey), and a generative
 *result* sentence still depends on the workspace's default model (`generative_text`).
+
+## 2026-09-21 — a journey carries the operation (customer workspace, voice logs + test-panel probes)
+
+Two sources this time. First, the QueryLogs of three real **voice** calls a
+customer made against a bundle generated that afternoon (the mixed shape:
+journey for the described values, `user_choice` for the strict ones, then
+read-back, `data_request` and result nodes). Second, a probe application in
+the same workspace with hand-written flows, driven from the studio's test
+panel with the debug trace open.
+
+What the voice calls showed:
+
+| Finding | Fix |
+|---------|-----|
+| The greeting was spoken **five times in 23 seconds**: the voice channel re-entered `WelcomeFlow` with `structured` requests while the greeting played, and the router sent "안녕하세요" / "뭐 해줄 수 있어요?" back to it although the flow is `untrained` — its `aiDescription` said it "greets the customer" | `WelcomeFlow` greets once per session (a `welcomeGreeted` context variable skips the greeting on re-entry) and every untrained system flow carries a routing text that describes nothing a caller might say |
+| After "이번 주 금요일이에요" (a `user_choice` date capture) the flow entered the journey **on the same turn**; with no utterance of its own the journey's capture extractor returned `{"acType":"벽걸이형 실내기","address":"서울시 강남구 역삼로 100","customerName":"홍길동","quantity":"1"}` — none of it said by the caller (the name came from an earlier lookup result) — `exitEnabled` ended the node at once, the journey's own reply was dropped, and the read-back node confirmed the invented values aloud | a carrying journey (below) keeps `exitEnabled` off, marks captures optional, and reads back itself; the interview no longer plans deterministic captures in front of a journey |
+| The reservation `data_request` took its failure edge with **no HTTP call** (`DataRequestsRequested` never logged): the request schema's `phoneNumber.pattern` was the dashed display format while the runtime delivers the slot without separators (`quantity` was a string against `integer` as well); the caller was escalated | request schemas carry types and enums only (`fields_to_json_schema`); the format stays in the description |
+| `generative_text` result nodes failed with `IntegrationNotFound` on every call — the workspace has no default generative model; the templated fallback (M2) is what the caller heard | documented; a carrying journey announces the result itself with its node-level model |
+| "세척 예약도 해주실 수 있나요 근데 세척요금이 어떻게 돼요" at the follow-up yes/no prompt cost an incomprehension count and an extra turn; after a booking "음 바꿔도 되나요?" landed in the fallback | `FollowUpFlow` listens first (below) and a carrying journey keeps handling changes, cancellations and questions after the result |
+
+What the probes established (`ProbeJourneyTools`, `ProbeReservationJ`,
+`ProbeHalluc` on a separate application; every step read from the debug trace):
+
+| Probe | Result |
+|---|---|
+| CreateFlow → GetFlow with a journey carrying `{type: dataRequest, dataRequest: {dataRequestId, payload}}`, `flow` and `knowledgeBase` tools, `dataCapture` schemas with `pattern`/`enum`/`integer`, `exitEnabled: false`, `modelType: anthropic.claude-sonnet-5`, and a `generative_task` node | everything stored as sent; the build is `BUILT`; the deployment serves it. A `payload` of `{}` and no `payload` at all are stored too. The 2026-09-08 observation that the id is dropped no longer holds |
+| "벽걸이형 두 대예요. 얼마예요?" | `Tool invoked getCleaningPrice` with `toolInput {"acType": "벽걸이형 실내기", "quantity": 2}` — **composed by the model** (an integer, not the slot string), `DataRequestsRequested/Returned 200`, `Tool responded` with the backend body, then the journey spoke "벽걸이형 실내기 세척 가격은 1대당 100,000원이며, 2대 기준 총 200,000원입니다. 더 필요하신 사항이 있으신가요?" **while it still held the turn** |
+| Consent `basic` (verbatim) + `user_choice` yes/no → journey with `getCleaningPrice` and `createCleaningReservation` tools, five values in two utterances | the journey asked for what was missing, read everything back with the price ("이대로 접수할까요?"), called `createCleaningReservation` on "네 접수해 주세요" with `toolInput {"quantity": 2, "phoneNumber": "010-4114-9537", …}` — the phone in the request schema's dashed format — and announced "예약이 접수되었습니다. 예약번호는 CR-…, 방문예정일은 2026-09-25, 총 금액은 200,000원입니다. 변경사항이 있으시면 세척일 전에 미리 연락드립니다." |
+| Exit conditions | are **tools the model calls** (`Tool invoked toolName: done, toolType: exitCondition`) → `System.gjConditionIndex eq i`; "아 그냥 상담원이랑 이야기할게요" reached `RequestAgentFlow` → `EscalationFlow` in one turn |
+| `dataCapture` on the same turns | the extractor is a **separate model call**: it stored `phoneNumber: 01011148371` while the journey read back 010-4114-9537, returned `{}` on turns where three values were given, and with Sonnet 5 errored with "User messages cannot contain reasoning content" — a slot filled by a journey is not a value to build on |
+| `generative_task` (`agenticTask`, zero-turn) after the `done` exit | no message (`Error NoMessages` → fallback), like the zero-turn journey of 2026-09-17: the node after a journey must speak or redirect |
+| A wrong-shape phone ("010 4114 953") | the journey re-asked with the format ("010으로 시작하는 11자리 숫자로 다시 한번 말씀해 주세요") — format handling by prompt works |
+| Haiku vs Sonnet 5 on the same flow | Haiku: 1.4–3.3 s per turn, but "이번 주 금요일" became 2026-09-26 (a Saturday) and the result was read as "예약번호: … 방문일: … 총 금액: …"; Sonnet 5: 3.8–9.8 s per turn, the right date, sentences. Carrying journeys default to Sonnet 5; the prompt tells the model to confirm a relative date with the customer instead of computing weekdays |
+| `CreateApplicationDeployment` | `500 Failed to create deployment` **without** `languageCodes` and success **with** `["ko-KR"]` — the opposite of 2026-09-12; the runner's try-both stays |
+| Replicating the hallucination with the customer's configuration (Haiku, `required: true`, `exitEnabled: true`) on a short transcript | not reproduced — the extractor answered `{}`; the invented values needed the longer voice transcript (an earlier lookup result, a routing loop). The mitigation does not depend on reproducing it: nothing downstream reads the extractor's slots |
+
+Source: rule J8 in `tools/acxd_runtime_contract.py` (dataRequest tools kept and
+normalised, plan `journey_tools` `data_request[:id]` added as tools, captures
+optional with `exitEnabled: false`, `done` / `anotherRequest` exits, no J6
+read-back, Sonnet 5 and 16 steps, tool-use rules appended to the prompt),
+`journey_carries_request` in `tools/acxd_flow_spec.py` (plan validation: no
+`data_request` step that repeats the journey's request, no strict-format
+`user_choice` requirement, a journey decides a hand-off), the interview and
+generator prompts (mandated wording verbatim, no dropped fields, the carrying
+shape), `fields_to_json_schema` (no request-side pattern / length), and the
+system flows (`WelcomeFlow` guard and routing text, listen-first `FollowUpFlow`).
+
+## 2026-09-22 — six fresh interviews on the journey-carries-the-operation build
+
+Three Korean and three English requirement documents (a home-appliance
+cleaning service, an e-commerce returns desk, a hospital, an order-tracking
+shop, a restaurant reservation line, a clinic) were interviewed end to end on
+the dev builder, each to a downloaded bundle. Every operation came out as one
+7-node flow whose generative journey holds the `dataRequest` tools, exits
+through `done` / `agentRequested` / `anotherRequest`, keeps its captures
+optional and carries the `[tool use]` and `[conversation style]` rules; the
+mandated sentences (a consent text with its yes/no gate, a refund notice, a
+911 line) were verbatim; request schemas carried no `pattern`. What the runs
+caught, and where it went:
+
+| Finding | Where it showed | Source |
+|---|---|---|
+| The generator wrote journey `done` exits with `left.type: "variable"` for `System.gjConditionIndex`; such an edge never matches at runtime. | All six bundles before the fix. | Rule J retypes `System.*` operands to `system`. |
+| The interview saved an OperationSpec for FAQ (`answer_faq`, `department_faq`). The Lambda-count, parity and missing-asset gates then demanded a FAQ Lambda and path; one run built them, another was stuck for an hour because no tool deletes a spec. | Two Korean runs. | `is_kb_native_spec` / `get_backend_specs`: a spec answered by the knowledge base (`data_source.db_type: knowledge_base`, or every tool flagged `generate_lambda/openapi: false`) counts for nothing — no tool id, no Data Request, and a stale or empty request file is dropped by the bundle loader. |
+| A journey tool payload omitted a field the request marks `required` (`action`, `patientName`); every call would have been a `VALIDATION_ERROR`, and only a reviewer advisory noticed. | Hospital run, twice. | J8 fills a missing required field from a same-named capture or reports it; `JOURNEY_PAYLOAD_MISSING_REQUIRED` in the consistency check. |
+| The generator pinned Haiku on 7 of 16 carrying journeys — the model the probes showed mis-computing weekdays and reading results as colon lists. | Four bundles. | J8 overrides a fast model on a carrying journey (it composes the backend's arguments). |
+| "'AC-' + 8 digits" derived `pattern ^\d{8}$` and length 8 for an 11-character id, contradicting the slot regex — a D9-4 blocking finding. | Three runs. | `_enforce_exact_length_phrase` honours a literal prefix next to the length phrase and keeps a prefixed pattern the interviewer wrote. |
+| The hospital document's emergency rule (trigger words → "응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요" → hand-off) reached no flow, guardrail or prompt; it survived only inside a FAQ article. | Hospital run. | `ACXDGuardrailPlan.message`; the interview records safety hand-offs as keyword `route` guardrails with the sentence; rule J9 writes the sentence into every journey's rules (said verbatim, then `agentRequested`). The guardrail path itself still lands in the escalation flow's generic line — not yet verified live. |
+| `read_acxd_asset` / `patch_acxd_asset` returned `{status, content}`; strands takes such a dict as a preformed ToolResult, so the file text reached Bedrock as a bare block and the turn died (`content_type=<{> unsupported type`). | One run, mid-review. | Payload keyed `file_content`; the message sanitizers coerce stray string blocks. |
+| The Korean journey tool rules carried an example from one customer's domain into another project's prompts. | Hospital bundle. | Example removed. |
+
+Wall time per run, interview to download: 40–45 minutes when the review was
+clean on the first round; 99–166 minutes for the two runs that hit the FAQ-spec
+gates before the fix (including three backend rollovers).
 
 ## Service contract facts (not in the SDK types, learned from the API)
 
@@ -312,7 +387,11 @@ confirmation or the next question right after the journey), and a generative
 | Webhook reply | A Data Request succeeds only on HTTP 200 with a body that matches its `responseSchema`; a `201` from a create operation or `errorCode: null` where the schema says string takes the failure branch | the same wrapper returns 200 and coerces the envelope |
 | Output guardrails | A derived output rule (LLM judge, generalised literal) that rewrites messages fired on the greeting itself and on the bot's own format hint | derived output rules stay advisory (`flag`), and the rule's `description` says why — a reviewer read the flag as a defect once |
 | Journey data capture | `generativeJourney.dataCapture.data[{name, type: slot, required, schema}]` fills the flow's attached slot as the journey talks (a free description was classified onto the enum); when every required value is captured the node ends and evaluates its edges with **no** `System.gjConditionIndex` and **no** `node_status` set — a journey without a slot-test edge logs `Error NoMessages` and the caller lands in the fallback flow | J2/J3: dataCapture from the plan's `captures`, the captured edge (`slot <name> exists` per capture) first |
-| Journey exit conditions | `exitConditions[i]` fire as `System.gjConditionIndex eq i` (an LLM judgement per turn); "상담원이랑 이야기할게요" reached the queue in 1.2 s through an appended `agentRequested` condition; a KB tool call (`AgenticToolStart knowledgeBase`, `KbInvoked`) happens inside the turn | J4/J5: agent exit appended and routed, `knowledgeBase` tool attached, `dataRequest`/`mcpFlow` tools refused |
+| Journey exit conditions | `exitConditions[i]` fire as `System.gjConditionIndex eq i` (an LLM judgement per turn); "상담원이랑 이야기할게요" reached the queue in 1.2 s through an appended `agentRequested` condition; a KB tool call (`AgenticToolStart knowledgeBase`, `KbInvoked`) happens inside the turn | J4/J5: agent exit appended and routed, `knowledgeBase` tool attached, `mcpFlow` refused; a `dataRequest` tool is kept and invoked by the journey (J8, 2026-09-21) |
+| Journey `dataRequest` tools | `{type: dataRequest, dataRequest: {dataRequestId, payload}}` is stored as sent, builds, and the journey invokes it with arguments the model composes against the request schema (an integer quantity, a phone in the schema's dashed format); the backend's reply comes back as the tool result and the journey announces it while it holds the turn (2026-09-21) | J8: kept and normalised, plan `journey_tools` `data_request[:id]` added, `exitEnabled: false`, optional captures, `done` / `anotherRequest` exits, Sonnet 5 |
+| Journey capture extractor | A separate model call: it stored `01011148371` while the journey read back 010-4114-9537, returned `{}` on turns with three values, and errored with Sonnet 5 ("User messages cannot contain reasoning content"); with `required: true` on a long voice transcript it invented four values (2026-09-21) | nothing downstream depends on a carrying journey's captured slots; the request is a tool call |
+| Request schema validation | The request body is validated against `requestSchema` BEFORE the HTTP call: a dashed phone `pattern` against the separator-stripped slot value took the failure edge with no `DataRequestsRequested` event (voice, 2026-09-21) | request schemas carry types and enums only |
+| Welcome re-entry | The voice channel re-entered `WelcomeFlow` with `structured` requests while the greeting played, and the router sent greetings and "what can you do?" to the untrained welcome flow because its `aiDescription` described greeting (2026-09-21) | greet once per session (`welcomeGreeted`); untrained system flows carry a neutral routing text |
 | Journey replies on exit | The sentence a journey composes on the turn it exits is not delivered (a zero-turn announcement journey wrote the result and the caller heard only the next node) | the node after a journey speaks; result announcements are not journeys |
 | `generative_text` without a workspace model | `Error IntegrationNotFound`, `node_status` failure, silence — `generative_text` has no `modelType` of its own; a `failure` edge to a templated `basic` speaks | M2 keeps the confirmed node and adds the fallback edge instead of replacing it |
 | LLM-judged input `route` guardrail | A rule derived from the escalation policy ("refund/claim requests go to an agent", threshold 0.8) fired on a customer describing a cleaning order — "냄새가 나서 … 종합으로 세척받고 싶어요" — and `RequestOverridden actor: guardrail` sent the call to the escalation flow before the journey collected anything | an llmJudge input rule with `route`/`block` is kept as `flag`; keyword and regex rules keep their action; hand-off by topic belongs to the journey's exit conditions |

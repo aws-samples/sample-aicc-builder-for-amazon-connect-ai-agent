@@ -213,7 +213,9 @@ def _check_flow_graph(flow: dict, path: str, out: list) -> None:
 
 
 def _iter_flow_data_request_refs(flow: dict):
-    """Yield (path, dataRequestId) referenced by data_request nodes."""
+    """Yield (path, dataRequestId) referenced by data_request nodes and by the
+    `dataRequest` tools of generative journeys (a journey calls the request
+    itself — live 2026-09-21)."""
     for nid, node in (flow.get("nodes") or {}).items():
         if not isinstance(node, dict):
             continue
@@ -222,6 +224,48 @@ def _iter_flow_data_request_refs(flow: dict):
                 yield f"nodes[{nid!r}].dataRequests[{i}]", ref
             elif isinstance(ref, dict) and "dataRequestId" in ref:
                 yield f"nodes[{nid!r}].dataRequests[{i}]", ref["dataRequestId"]
+        journey = ((node.get("metadata") or {}).get("generativeJourney")
+                   if isinstance(node.get("metadata"), dict) else None)
+        for i, tool in enumerate((journey or {}).get("tools") or []):
+            if not isinstance(tool, dict) or tool.get("type") != "dataRequest":
+                continue
+            ref = tool.get("dataRequest") if isinstance(tool.get("dataRequest"), dict) else {}
+            if ref.get("dataRequestId"):
+                yield f"nodes[{nid!r}].metadata.generativeJourney.tools[{i}]", ref["dataRequestId"]
+
+
+def journey_payload_missing_required(tool: dict, document: dict) -> list[str]:
+    """Required request fields the journey tool's payload template does not
+    carry. Live (Hanbit e2e, 2026-09-22): `cancelAppointment` required `action`
+    and `bookAppointment` required `patientName`, both journeys sent neither,
+    and only the reviewer's advisory noticed — every real call would have
+    failed VALIDATION_ERROR at the backend."""
+    ref = tool.get("dataRequest") if isinstance(tool.get("dataRequest"), dict) else {}
+    payload = ref.get("payload") if isinstance(ref.get("payload"), dict) else {}
+    schema = document.get("requestSchema") if isinstance(document.get("requestSchema"), dict) else {}
+    required = [r for r in (schema.get("required") or []) if isinstance(r, str)]
+    return [r for r in required if r not in payload]
+
+
+def _iter_journey_payload_gaps(flow: dict, documents: dict):
+    """Yield (path, dataRequestId, missing_required) for every generative
+    journey dataRequest tool whose payload omits a required request field."""
+    for nid, node in (flow.get("nodes") or {}).items():
+        if not isinstance(node, dict):
+            continue
+        journey = ((node.get("metadata") or {}).get("generativeJourney")
+                   if isinstance(node.get("metadata"), dict) else None)
+        for i, tool in enumerate((journey or {}).get("tools") or []):
+            if not isinstance(tool, dict) or tool.get("type") != "dataRequest":
+                continue
+            ref = tool.get("dataRequest") if isinstance(tool.get("dataRequest"), dict) else {}
+            document = documents.get(ref.get("dataRequestId"))
+            if not isinstance(document, dict):
+                continue  # DATA_REQUEST_REF_UNDEFINED reports the unknown id
+            missing = journey_payload_missing_required(tool, document)
+            if missing:
+                yield (f"nodes[{nid!r}].metadata.generativeJourney.tools[{i}]",
+                       ref.get("dataRequestId"), missing)
 
 
 def _iter_flow_kb_refs(flow: dict):
@@ -350,6 +394,8 @@ def validate_acxd_consistency(
     slot_type_ids = _dups(slot_types, "slotTypeId", "DUP_SLOT_TYPE_ID", "slot_types")
     data_request_ids = _dups(data_requests, "dataRequestId",
                              "DUP_DATA_REQUEST_ID", "data_requests")
+    data_requests_by_id = {d.get("dataRequestId"): d for d in data_requests
+                           if isinstance(d, dict) and d.get("dataRequestId")}
     guardrail_names = _dups(guardrails, "name", "DUP_GUARDRAIL_NAME", "guardrails")
     kb_names = _dups(kbs, "name", "DUP_KB_NAME", "knowledge_bases")
 
@@ -380,6 +426,11 @@ def validate_acxd_consistency(
             if dr not in data_request_ids:
                 _v(out, "DATA_REQUEST_REF_UNDEFINED", f"flows[{i}].{p}",
                    f"references unknown data request {dr!r}")
+        for p, dr, missing in _iter_journey_payload_gaps(f, data_requests_by_id):
+            _v(out, "JOURNEY_PAYLOAD_MISSING_REQUIRED", f"flows[{i}].{p}",
+               f"payload for data request {dr!r} omits required field(s) {missing}: "
+               f"the backend rejects every call (VALIDATION_ERROR) — add the field to the "
+               f"journey's captures and to the tool payload")
         for p, kb_id in _iter_flow_kb_refs(f):
             _check_kb_ref(kb_id, f"flows[{i}].{p}")
 
@@ -590,13 +641,15 @@ def bundle_contract_kwargs(bundle: dict, spec: Optional[dict] = None) -> Optiona
         (fid for fid in sorted(known_targets) if fid.lower().startswith("followup")), "FollowUpFlow")
     escalation_flow_id = next(
         (fid for fid in sorted(known_targets) if fid.lower().startswith("escalation")), "EscalationFlow")
+    from tools.acxd_flow_spec import handoff_notices_from_spec
     return {
         "roles": roles,
         "kwargs": dict(
             slot_type_ids=set(slot_type_docs), slot_type_docs=slot_type_docs,
             data_requests=data_requests, flow_ids=known_targets,
             context_variables=context_variables, follow_up_flow_id=follow_up_flow_id,
-            escalation_flow_id=escalation_flow_id, field_enums=field_enums),
+            escalation_flow_id=escalation_flow_id, field_enums=field_enums,
+            handoff_notices=handoff_notices_from_spec(spec) if spec else None),
     }
 
 

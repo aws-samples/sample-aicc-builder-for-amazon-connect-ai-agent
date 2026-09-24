@@ -33,38 +33,61 @@ ASCII `aiDescription` ("Use this flow when the user…"); the system flows
 
 **The conversation is generative by default; the flow pins down what must be exact.**
 The interview asks once for the *conversation style* (`application.conversation_style`,
-default `generative`). Under it an operation flow is carried by ONE
-`generative_journey` node that collects the values a person explains in their own
-words (`metadata.generativeJourney.dataCapture.data[{name, type: slot, required,
-schema}]`, built from the plan's `captures` — a free description is classified onto
-the slot's enum) and answers side questions from the FAQ (a `knowledgeBase` tool).
-Fixed nodes remain for what must be exact: `basic` for mandated wording,
-`user_choice` for every strict-format value (regex, phone, identifier) and identity
-check — a journey never captures those — `data_request` for the backend call,
-`choice` for money/eligibility/compliance decisions, `escalate`/`redirect` for
-hand-off. When every required value is captured the journey ends and evaluates its
-edges; that exit sets neither `System.gjConditionIndex` nor `node_status`, so the
-FIRST child edge tests the captured slots with `exists` (without it: `Error
-NoMessages` and the fallback flow). `exitConditions[i]` map to
-`System.gjConditionIndex eq i`; the contract appends an `agentRequested` condition
-routed to the agent-request flow, one exit condition per topic-shaped hand-off the
-plan confirmed (a refund or claim request, a complaint — judged inside the journey,
-never as an LLM-judged input guardrail, which fired on ordinary requests),
-`timeout`/`failure` edges to the escalation, a node-level `modelType` and
-`maxSteps`. The sentence a journey composes on the turn it exits is not
-delivered, so the captured branch first passes a templated `basic` that reads the
-values back. `dataCapture.prompt` names the values to collect. The plan's
-`data_request` steps, in order, pin which request each `data_request` node calls
-(the generator once called the reservation endpoint for the price lookup), and the
-application's `frustration` default event points at the escalation flow. A `dataRequest` or `mcpFlow` tool on a
-journey is refused (the service drops the first, the second fails on invocation).
-`scripted` — one `user_choice` per value, no journey — is only the customer's
-explicit choice. Live record: probes 1–7 of 2026-09-17 in the validation log.
+default `generative`). Under it ONE `generative_journey` node **carries the
+operation**: its `tools` hold the operation's Data Request(s) as `dataRequest`
+tools (`{type: dataRequest, dataRequest: {dataRequestId, payload}}` — stored as
+sent, built, and invoked at runtime with arguments the model composes against the
+request schema; live 2026-09-21) and the FAQ as a `knowledgeBase` tool. The
+journey collects every value (strict-format ones included — it reads them back and
+re-asks on a wrong shape), calls a lookup as soon as its inputs are known, reads
+the details back before a create/change and calls it on the customer's yes,
+announces the result while it still holds the turn, keeps handling what the
+customer says next, and ends through its `exitConditions`: `done` (the customer
+says they need nothing else → the follow-up redirect), `agentRequested` (→ the
+agent-request flow), `anotherRequest` (a request it has no tool for → the
+follow-up flow, which listens and routes), one condition per topic-shaped hand-off
+the plan confirmed, plus `timeout`/`failure` edges to the escalation. Its
+`dataCapture` mirrors the captured values with `required: false` and
+`exitEnabled: false` — the capture extractor is a separate model call that stored a
+phone number different from the one the journey read back, so nothing downstream
+depends on it. It runs on `anthropic.claude-sonnet-5` with `maxSteps` 16 (Haiku
+computed a weekday wrong and read results as a list), and its prompt ends with the
+contract's conversation-style and tool-use rules (J7/J8). Fixed nodes remain only
+where exactness is mandated: `basic` for wording the requirements state verbatim
+(consent text, legal notice) and `user_choice` for a compliance gate (consent
+yes/no) or an identity check, both before the journey. No `data_request`,
+read-back or `generative_text` node follows a carrying journey; a `data_request`
+step that repeats the journey's request is refused at plan time.
+
+A journey WITHOUT a data request tool only collects: `dataCapture` is required and
+`exitEnabled: true`; when every required value is captured the journey ends and
+evaluates its edges — that exit sets neither `System.gjConditionIndex` nor
+`node_status`, so the FIRST child edge tests the captured slots with `exists`
+(without it: `Error NoMessages` and the fallback flow), the captured branch first
+passes a templated `basic` that reads the values back (the sentence a journey
+composes on the turn it exits is not delivered), strict-format values stay
+`user_choice` nodes, and the plan's `data_request` steps, in order, pin which
+request each `data_request` node calls. `exitConditions[i]` map to
+`System.gjConditionIndex eq i` in both shapes. An `mcpFlow` tool is refused (it
+fails on invocation with "Unknown tool type"). Request schemas carry types and
+enums only — no `pattern` or length: the runtime validates the request body
+BEFORE the HTTP call against separator-stripped slot values, and a dashed phone
+pattern sent a live booking straight to the failure branch. `scripted` — one
+`user_choice` per value, `data_request` after them, no journey — is only the
+customer's explicit choice. Live record: probes of 2026-09-17 and 2026-09-21 in
+the validation log.
 
 **Continuity is a flow, not a prompt.** An operation that succeeds redirects to
-`FollowUpFlow`, which asks "anything else?" as a `user_choice` over the `yesNo`
-slot type: yes → greeting + `user_input` → redirect to the recognised flow, no →
-thanks + `end`, no match → `FallbackFlow`. `FallbackFlow` increments a context
+`FollowUpFlow`, which asks "anything else?" as a message and then LISTENS with a
+`user_input` node: a request is routed at once; an answer that names no flow is
+tested for the language's "no" words (`System.utterance contains`) and ends the
+session with thanks; anything else is asked "anything else? yes/no" once (a
+`user_choice` over the `yesNo` slot type): yes → "how can I help?" + `user_input`
+→ redirect to the recognised flow, no → thanks + `end`, no match → `FallbackFlow`.
+`WelcomeFlow` greets once per session (a `welcomeGreeted` context variable skips
+the greeting on re-entry — the voice channel re-entered it with structured
+requests while the greeting played) and, like every untrained system flow, carries
+a routing text that describes nothing a caller might say. `FallbackFlow` increments a context
 variable and escalates on the third attempt.
 
 **A default-behaviour flow is not routable.** `EscalationFlow` cannot be reached

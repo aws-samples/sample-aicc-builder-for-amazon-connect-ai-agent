@@ -8,6 +8,60 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _coerce_content_block(block):
+    """Coerce one content block into a shape Bedrock accepts.
+
+    strands passes a tool's return value straight through as an
+    already-formed ToolResult when that dict carries BOTH ``status`` and
+    ``content`` (``strands/tools/decorator.py::_wrap_tool_result``), so a
+    tool returning ``{"status": "ok", "content": "<file text>"}`` puts a bare
+    STRING where the toolResult's content list belongs. strands then iterates
+    that string CHARACTER by character and raises
+    ``TypeError: content_type=<{> | unsupported type``, killing the event loop
+    mid-turn. Wrap anything that is not a dict in ``{"text": ...}``.
+    """
+    if not isinstance(block, dict):
+        return {"text": str(block)}
+
+    tool_result = block.get("toolResult")
+    if not isinstance(tool_result, dict):
+        return block
+
+    inner = tool_result.get("content")
+    if inner is None:
+        return block
+    coerced = [
+        item if isinstance(item, dict) else {"text": str(item)}
+        for item in (inner if isinstance(inner, list) else [inner])
+    ]
+    if coerced == inner:
+        return block
+    logger.warning("[SafeBedrockModel] Coerced malformed toolResult content into %d text block(s)", len(coerced))
+    return {**block, "toolResult": {**tool_result, "content": coerced}}
+
+
+def normalize_content_blocks(messages: list) -> list:
+    """Make every message's ``content`` a list of content-block dicts.
+
+    Runs before the pairing rules below, which all assume dict blocks.
+    """
+    normalized = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            logger.warning("[SafeBedrockModel] Dropping non-dict message")
+            continue
+        content = msg.get("content")
+        if content is None:
+            normalized.append(msg)
+            continue
+        blocks = [
+            _coerce_content_block(b)
+            for b in (content if isinstance(content, list) else [content])
+        ]
+        normalized.append(msg if blocks == content else {**msg, "content": blocks})
+    return normalized
+
+
 def fix_messages_for_bedrock(messages: list) -> list:
     """Ensure messages satisfy Bedrock ConverseStream constraints:
     1. First message must be role=user
@@ -22,7 +76,10 @@ def fix_messages_for_bedrock(messages: list) -> list:
     if not messages:
         return messages
 
-    # 0. Filter out system-role messages (Bedrock only accepts user/assistant)
+    # 0. Coerce malformed content blocks (a bare string where a content list
+    #    belongs), then filter out system-role messages (Bedrock only accepts
+    #    user/assistant)
+    messages = normalize_content_blocks(messages)
     fixed = [m for m in messages if m.get("role") in ("user", "assistant")]
 
     # 1. Drop leading non-user messages
