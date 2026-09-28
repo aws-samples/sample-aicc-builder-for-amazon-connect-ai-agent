@@ -817,7 +817,9 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 payload = dr.get("payload") if isinstance(dr.get("payload"), dict) else {}
                 if not payload and isinstance(tool.get("payload"), dict):
                     payload = {k: v for k, v in tool["payload"].items() if k != "dataRequestId"}
-                kept = {k: v for k, v in tool.items() if k in ("type", "interimMessages", "prompt")}
+                # No interimMessages: over a Connect chat the Agentic CX block ends a
+                # turn that sends one in its Error branch (live 2026-09-28).
+                kept = {k: v for k, v in tool.items() if k in ("type", "prompt")}
                 kept["type"] = "dataRequest"
                 kept["dataRequest"] = {"dataRequestId": str(drid), "payload": payload}
                 rewritten.append(kept)

@@ -47,9 +47,12 @@ The Classic and ACXD targets are unchanged.
   empty reply.
 - A journey whose prompt named the knowledge base by its `{KB:…}` placeholder failed on
   its first turn; the placeholder now stays in the tool definition.
+- Journey tools send no interim message ("one moment please"): over a chat contact the
+  Agentic CX block ended each tested turn whose tool sent one in its Error branch,
+  although the application had answered.
 - `WIRING-GUIDE.md` covers what the Agentic CX block needs: the contact language set
   before it, the alias ACXD lists as `Production`, the panel's Confirm button, and a
-  test chat after every redeploy.
+  test chat after every redeploy (the chat can keep reaching a replaced build).
 
 ## [3.0.0] - 2026-09-15
 

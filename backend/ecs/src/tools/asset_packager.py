@@ -818,14 +818,15 @@ def _generate_acxd_only_wiring_guide(bundle: dict) -> str:
         "- **Workspace model.** Knowledge-base answers and generative replies run on the default",
         "  generative model of the ACXD workspace. Set it before the first contact.",
         "- **After a redeploy.** When a redeploy has to replace the application deployment, its",
-        "  alias key changes and the block keeps serving the previous build. Re-select the",
-        "  application and alias in the block, click **Confirm** and publish, then check with a",
-        "  test chat that the new build answers: re-selecting the same `Production` entry has",
-        "  left the block on the previous deployment.",
-        "- **Chat response time.** Over a chat contact the block took its Error branch about five",
-        "  seconds into a turn whose journey called the backend (the application answered after",
-        "  eight). Test the turns that call your API through your own chat entry point before",
-        "  going live.",
+        "  alias key changes. Re-select the application and the alias in the block, click",
+        "  **Confirm** and publish. Then check with a test chat that the change answers: in a",
+        "  test workspace the chat was still answered by a replaced build 45 minutes and two",
+        "  replacements later, also after the block was saved with the current key, while the",
+        "  designer's test panel (which runs the current flows before any build) had the change.",
+        "- **Interim messages.** The journeys' tools send no interim message (\"one moment",
+        "  please\"): over a chat contact the block took its Error branch on each tested turn",
+        "  whose tool sent one, although the application answered. Keep it that way when you",
+        "  edit the journeys in the designer.",
     ]
     if context_names:
         lines += [

@@ -449,15 +449,31 @@ Studio test panel and through a Contact Flow with the Agentic CX block
 | Through Connect the FAQ answer never arrived (`KbResponded status: failure`); the knowledge base had been created as en-US because its document named no language. The test panel still answered | the knowledge base carries the application's languages, and packaging fills them into a KB asset generated earlier; after the redeploy the Connect chat said the parking answer and the follow-up question |
 | The deployed runtime judges a knowledge_base node as `match` / `no_match` / `failure` / `timeout`, and a `success` edge was taken on `no_match` with an empty answer | K1 adds a `no_match` edge to where `failure` goes; FaqFlow has it first |
 | A Contact Flow imported as JSON with the ids and the deployment key stayed silent (no conversation reached the application); picking workspace, application and alias in the block's dropdowns and clicking the panel's **Confirm** made it answer | WIRING-GUIDE: set the contact language, pick the three values, Confirm, publish; the alias is listed as `Production` even for the development environment |
+| Through Connect chat the identity turn (the booking journey calls `findPatient`) ended in the block's Error branch on both builds whose tool had `interimMessages`; the application had answered with the interim sentence and the result (after 8.2 s and 8.4 s). The same bundle with only the interim messages removed answered that turn three times, once after 8.9 s | J8 removes `interimMessages` from journey tools; the generator is told not to add them |
 
-Through Connect chat the greeting, a two-message turn, the FAQ answer, the
-follow-up question and the booking journey's first question all arrived, and
+Through Connect chat the greeting, a two-message basic node, the FAQ answer,
+the follow-up question and the booking journey's identity turn all arrived, and
 `{System.timezone:NLX.System}` printed `America/New_York` there too
-(`channelType=API`, `environment=development`). Still open, both on the
-service side: a journey turn that called the backend took 8.2 s and the block
-took its Error branch about 5 s in, before the application answered (twice);
-and after a redeploy replaced the deployment, re-selecting `Production` in the
-block twice left it on the previous build. Voice was not tested.
+(`channelType=API`, `environment=development`). The booking journey the
+builder now emits is identical to the one that answered there.
+
+After the fixes the dev builder re-packaged the session (no regeneration
+needed: the contract passes run at packaging) and the bundle was deployed. In
+the designer's test panel: "내일 오후 2시 정형외과" → 9월 29일(화) read back,
+identity, the summary read back, yes → booked; "이번 주 금요일" → 10월 2일(금);
+a booking looked up by number, read back and cancelled after a yes; the
+parking answer, then "네" → "무엇을 도와드릴까요?"; emergency words → the 119
+sentence and the hand-off; an agent request → the hand-off. One of two runs of
+the first booking ended in the hand-off instead: after `findPatient` answered,
+the model called an exit condition (`exit_condition_1`) and the runtime
+reported `AgentFailure` ("failed to generate a final answer"); the same input
+then completed.
+
+Still open, on the service side: after a deployment was replaced, the Connect
+chat kept being answered by the replaced build (build id in the conversation
+events) 45 minutes and two replacements later, also after the block was saved
+with the current deployment's key; the test panel runs the current flows.
+Voice was not tested.
 
 ## Service contract facts (not in the SDK types, learned from the API)
 
@@ -519,7 +535,7 @@ block twice left it on the previous build. Voice was not tested.
 | Knowledge base language | A knowledge base created without `mainLanguageCode` / `languageCodes` is stored as en-US; a ko-KR conversation's lookup then fails in the deployed runtime (`KbResponded status: failure`) although the Studio test panel answers (2026-09-28) | KB document carries the application's languages; packaging fills them |
 | Knowledge base outcome | The deployed runtime evaluates a knowledge_base node as `match` / `no_match` / `failure` / `timeout`; an edge on `success` is taken on `no_match` too, with an empty answer (2026-09-28) | K1 `no_match` edge |
 | Placeholders in text | `{KB:<name>}` resolves in `knowledgeBaseId` only; in a journey prompt it fails the journey (`Slot=KB is unresolved`, `AgentFailure`) (2026-09-28) | runtime contract K2 |
-| Agentic CX block | Values set by JSON import did not reach the application; the block's dropdowns plus the panel's **Confirm** did. The alias list shows the deployment as `Production` for the development environment. Over chat a turn taking 8.2 s ended in the block's Error branch about 5 s in (2026-09-28) | WIRING-GUIDE |
+| Agentic CX block | Values set by JSON import did not reach the application; the block's dropdowns plus the panel's **Confirm** did. The alias list shows the deployment as `Production` for the development environment. Over chat, a journey turn whose tool sent `interimMessages` ended in the block's Error branch; without them the same turn answered. After a replacement the chat kept reaching the replaced build (45 min, two replacements) (2026-09-28) | J8, WIRING-GUIDE |
 | Routing text | `description` / `aiDescription` are ASCII-only; non-ASCII is rejected on create | system flows and the generator write English routing text; the bundle loader strips non-ASCII |
 | Slot regex | The `regex` attached to a built-in slot is not enforced at capture: a value of the wrong shape is stored (an order number in the return-number slot) and reaches the Data Request. A `matches_regex` condition on the slot IS evaluated, against the delivered (separator-stripped) value | runtime contract F1: a `matches_regex` guard after every pattern-bearing capture, separators optional, letters either case; adapter reassigns a value that fits exactly one other field |
 | Associated slots | `choice.associatedSlotTypeIds` is accepted by the API and silently discarded (by slot name and by identifier); a capture node listens on one slot only | no second slot per node; E2 tests the utterance instead |

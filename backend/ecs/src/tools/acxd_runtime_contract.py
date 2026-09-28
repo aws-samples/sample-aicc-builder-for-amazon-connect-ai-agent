@@ -3979,6 +3979,15 @@ class _RuntimeContract:
             kept = []
             request_ids: list[str] = []
             for tool in tools:
+                if "interimMessages" in tool:
+                    # Live (2026-09-28, Connect chat through the Agentic CX block):
+                    # both builds whose journey tool sent an interim message ended the
+                    # tool turn in the block's Error branch although the application
+                    # answered; the same bundle without them answered (7-9 s turns).
+                    tool = {k: v for k, v in tool.items() if k != "interimMessages"}
+                    self.change(f"{label}: interimMessages removed from a {tool.get('type')!r} tool — "
+                                "over a Connect chat the Agentic CX block ends such a turn in its "
+                                "Error branch (J8)")
                 kind = tool.get("type")
                 if kind == "mcpFlow":
                     self.violation(
@@ -4001,8 +4010,8 @@ class _RuntimeContract:
                     payload = self._complete_payload(
                         rid, self._tool_payload(rid, dr.get("payload")), capture_names, label)
                     if dr.get("dataRequestId") != rid or dr.get("payload") != payload or set(tool) - {
-                            "type", "dataRequest", "interimMessages", "prompt"}:
-                        tool = {k: v for k, v in tool.items() if k in ("type", "interimMessages", "prompt")}
+                            "type", "dataRequest", "prompt"}:
+                        tool = {k: v for k, v in tool.items() if k in ("type", "prompt")}
                         tool["dataRequest"] = {"dataRequestId": rid, "payload": payload}
                         self.change(f"{label}: dataRequest tool {rid!r} normalised to "
                                     f"{{dataRequestId, payload}} (J8)")
