@@ -1440,11 +1440,14 @@ def save_acxd_policies(guardrails: Union[list[dict], str] = None, kb_name: str =
     Save guardrails and the knowledge-base shell (runtime target acxd only).
 
     Args:
-        guardrails: [{"name":"PII Filter","trigger":"input|output","policy":"...",
+        guardrails: [{"name":"Abuse words","trigger":"input|output","policy":"...",
                       "detection_method":"regex|keyword|llmJudge|auto","action":"mask|modify|route|flag",
                       "route_flow_id":"EscalationFlow","examples":[...],
                       "message":"<sentence to say verbatim when the rule fires — a mandated
                       emergency notice; with action route it is written into every journey>"}]
+                    A `mask` replaces the matched text before the flow reads it: never mask a
+                    value a flow collects (phone, birth date) — mark its FieldSpec is_pii instead;
+                    such a mask is kept as `flag`.
         kb_name: Knowledge base name (articles come from the FAQ asset).
         kb_topics: FAQ topics the KB should cover.
     """

@@ -3,6 +3,20 @@
 This file lists the user-visible changes of each AICC Builder release — what you can build,
 what the generated bundle does, and what now works without a hand edit.
 
+## [Unreleased]
+
+### Fixed
+
+- ACXD knowledge-base articles carry each FAQ document's whole answer. When an answer's
+  details sat under headings of their own, the article kept only its first sentence and
+  the assistant answered questions such as "반품 정책이 어떻게 되나요?" with nothing.
+  Packaging a session again restores the full answers; no regeneration is needed.
+- An ACXD guardrail no longer masks a value the conversation asks for. A mask replaces the
+  caller's words before the assistant reads them, so a birth-date or phone-number mask
+  made identity checks and bookings fail. Such a rule is kept as a flag (the value is
+  already marked sensitive on its slot), the interview no longer proposes masks the
+  requirements do not ask for, and packaging a session again applies the change.
+
 ## [3.1.0] - 2026-09-25
 
 ### Added

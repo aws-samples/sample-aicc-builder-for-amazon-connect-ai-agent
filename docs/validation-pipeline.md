@@ -203,7 +203,9 @@ against the JSON schema for the resource (`slot_type`, `data_request`, `guardrai
 `knowledge_base`, `kb_article`, `context_variable`, `application`) and apply their
 own repairs: ASCII-only metadata, project-scoped secret and guardrail names, a
 `route` guardrail with no target re-pointed to escalation, a PII mask moved to the
-input trigger, a Data Request whose response schema carries types only plus the
+input trigger, an input mask over a value the flows collect kept as `flag`, a
+knowledge-base article carrying its FAQ document's whole answer (headings inside the
+answer included), a Data Request whose response schema carries types only plus the
 `success` flag, both `production` and `development` webhook environments, the
 `{<slug>BackendApiKey:NLX.Secret}` header spelling. A system flow that fails its own
 gate is treated as a code defect and is not retried.

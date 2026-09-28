@@ -712,6 +712,67 @@ def normalize_bundle_languages(bundle: dict) -> list[str]:
     return notes
 
 
+def _article_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def normalize_bundle_knowledge_articles(bundle: dict, faq_articles: list[dict]) -> list[str]:
+    """Knowledge-base articles carry their FAQ document's whole answer, IN PLACE.
+
+    Live (5-use-case run, 2026-09-28): the FAQ parser ended each answer at the
+    first '## ' sub-heading the FAQ generator wrote inside it, so SELC and
+    GreenCart articles kept only a lead sentence and the knowledge base answered
+    FAQ questions with nothing. A KB asset rendered before the parser was fixed
+    still holds those bodies. A body that is a proper prefix of its own FAQ
+    document's answer (same question) was cut and gets the whole answer; any
+    other body is an edit and stays. ``faq_articles`` are the parsed FAQ
+    documents (``{"question", "answer"}``). Returns the notes."""
+    answers: dict[str, str] = {}
+    for article in faq_articles or []:
+        if isinstance(article, dict) and article.get("question") and article.get("answer"):
+            answers.setdefault(_article_text(article["question"]), str(article["answer"]).strip())
+    if not answers:
+        return []
+    notes: list[str] = []
+    for doc in bundle.get("knowledge_bases") or []:
+        if not isinstance(doc, dict):
+            continue
+        for article in doc.get("articles") or []:
+            if not isinstance(article, dict):
+                continue
+            question = article.get("question")
+            question = question.get("text") if isinstance(question, dict) else question
+            full = answers.get(_article_text(question))
+            responses = article.get("responses")
+            if not full or not isinstance(responses, list) or not responses:
+                continue
+            first = responses[0]
+            body = str((first or {}).get("body") or "").strip() if isinstance(first, dict) else ""
+            if not body or len(full) <= len(body) or not full.startswith(body):
+                continue
+            first["body"] = full
+            notes.append(f"knowledge base {doc.get('name')!r}: article {_article_text(question)[:40]!r} "
+                         f"restored to its FAQ answer ({len(body)} -> {len(full)} chars)")
+    return notes
+
+
+def normalize_bundle_guardrails(bundle: dict) -> list[str]:
+    """No input ``mask`` hides a value the bundle's flows collect, IN PLACE.
+
+    The generator applies the rule when it writes a guardrail; a guardrail
+    rendered before the rule existed, or patched afterwards, gets it here. The
+    flows' attached slots are what the conversation collects. Returns the notes."""
+    from tools.acxd_resource_builders import keep_collected_value_masks_advisory
+
+    slots = [slot for flow in bundle.get("flows") or [] if isinstance(flow, dict)
+             for slot in flow.get("slotTypes") or [] if isinstance(slot, dict) and slot.get("name")]
+    notes: list[str] = []
+    for doc in bundle.get("guardrails") or []:
+        if isinstance(doc, dict):
+            notes.extend(keep_collected_value_masks_advisory(doc, slots))
+    return notes
+
+
 def normalize_bundle_flows(bundle: dict, spec: Optional[dict] = None) -> list[str]:
     """Run the runtime contract over the bundle's operation flows IN PLACE, as a
     last deterministic pass before packaging.

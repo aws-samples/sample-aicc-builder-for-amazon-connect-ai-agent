@@ -787,11 +787,19 @@ design the ACXD flows before moving to the analysis document.
    Asia/Seoul / Asia/Tokyo, and whenever the document names another zone: the
    journeys count "today" and "tomorrow" in it, while the ACXD runtime's own clock
    runs on America/New_York. Do not ask again when the document states it.
-   Guardrail rules that hold on the live service: a PII `mask` runs on `input`
-   (what the customer says — that is where a phone number enters the
-   transcript); on `output` the same regex redacts the bot's own format hint
-   ("010-1234-5678 형식으로" → "[REDACTED] 형식으로"), so plan `output` masks only
-   when the bot's replies themselves must be masked. Hand-off BY TOPIC (refund,
+   Guardrail rules that hold on the live service: a `mask` rewrites the text
+   BEFORE the flow reads it, so an `input` mask hands the journey "[REDACTED]"
+   instead of the value. Live (2026-09-28): a birth-date mask (`\\d{8}`) made
+   identity verification ask for the birth date again and again, and a phone
+   mask ended a booking journey in AgentFailure. So NEVER plan a mask over a
+   value any flow collects (phone, birth date, order or policy number): mark
+   that field `is_pii` in its FieldSpec — it deploys as a `sensitive` slot —
+   and the builder keeps such a mask as `flag` anyway. Plan an input mask only
+   when the requirements ask to hide a value no flow asks for (a card number
+   volunteered in free talk); do not add a PII mask on your own. On `output`
+   the same regex redacts the bot's own format hint ("010-1234-5678 형식으로" →
+   "[REDACTED] 형식으로"), so plan `output` masks only when the bot's replies
+   themselves must be masked. Hand-off BY TOPIC (refund,
    claim, complaint) is not a guardrail: an LLM-judged input rule with `route`
    fired on a customer describing a cleaning order and took the call away — the
    builder keeps such rules advisory (`flag`). Put topic hand-offs in the

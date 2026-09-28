@@ -447,6 +447,18 @@ def _prepare_acxd_package(session_id: str, project_name: str) -> tuple[dict, dic
         from .validate_acxd_consistency import normalize_bundle_languages
         for note in normalize_bundle_languages(bundle):
             logger.info("[packager] %s", note)
+        if bundle.get("knowledge_bases"):
+            from .acxd_generation_context import _load_faq_articles
+            from .validate_acxd_consistency import normalize_bundle_knowledge_articles
+            faq_articles = _load_faq_articles(
+                session_id,
+                list_assets=lambda sid: list_session_assets(sid, s3_only=True),
+                get_asset=lambda key: get_asset_from_s3(key, s3_only=True))
+            for note in normalize_bundle_knowledge_articles(bundle, faq_articles):
+                logger.info("[packager] %s", note)
+        from .validate_acxd_consistency import normalize_bundle_guardrails
+        for note in normalize_bundle_guardrails(bundle):
+            logger.info("[packager] %s", note)
     except Exception as exc:  # pragma: no cover - never block packaging on the pass
         logger.warning("[packager] runtime contract pass skipped: %s", exc)
     manifest = build_manifest(bundle, project_name=project_name,

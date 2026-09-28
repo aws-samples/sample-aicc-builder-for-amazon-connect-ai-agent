@@ -493,6 +493,35 @@ the Error target. A booking made a few minutes earlier was not found by its
 number (the mock backend keeps bookings per Lambda instance); a seed booking
 was. Voice was not tested.
 
+## 2026-09-28 (evening) — five use cases on the merged build: FAQ answers and PII masks
+
+Five requirement documents (SELC, GreenCart, Daon telecom, Hanul insurance,
+TableNow in English) were built on the dev builder in ACXD-only mode,
+packaged, deployed as five new applications in the same sandbox workspace
+(data requests swapped to `inline-static` test replies, since the sandbox has
+no backend for them) and tested in the Studio test panel. Two builder defects
+explained three of the failed cases.
+
+| Finding | Fix |
+|---|---|
+| "반품 정책이 어떻게 되나요?" and "세척 서비스는 어떤 종류가 있나요?" got an answer with no content. The FAQ generator had written each answer's details under `## ` headings of its own ("## 반품 가능 기간", "## 배송비 부담 기준") inside the answer, and the ACXD parser ended the answer at the first of them: all 7 SELC and 9 GreenCart articles were the lead sentence alone (18-58 characters). Daon, Hanul and TableNow wrote bold labels and were whole | the answer runs to the FAQ template's own trailing sections (Related Information, Metadata); headings inside it become bold label lines; packaging restores an article body that is a proper prefix of its FAQ document's answer |
+| No document asked for masking, yet the interview planned input `mask` rules: Daon `\d{8}` for the birth date, SELC and Hanul `\d{3}-\d{4}-\d{4}` for the phone. The mask rewrites the caller's words before the flow reads them: "010-2222-3333, 19900512" reached the identity journey as "010-2222-3333, [REDACTED]" and it asked for the birth date again and again; SELC's journey ended in `AgentFailure` right after the masked phone number. `\d{8}` also matches a phone number said without dashes | an input mask over a value a flow collects is kept as `flag` with the reason in the rule's description (generation and packaging); the interview is told not to plan one and not to add PII masks on its own — the values are marked `sensitive` on their slots already |
+
+After the fix the dev builder re-packaged the four sessions without
+regeneration (flows byte-identical; only the knowledge base and the guardrail
+changed) and the bundles were redeployed over the same applications. In the
+test panel: SELC "에어컨 세척 서비스는 어떤 종류가 있나요?" listed the product
+types and 종합세척 / 기본세척; the cleaning booking with "010-1234-5678" read
+back every value and was booked (RSV-20261002-0001), the Debug trace showing
+`Guardrail rule triggered` with `behaviorType: flag` and `ruleOutput: null`;
+GreenCart's return policy answer carried 14 days, the 3,000원 return fee and
+the 300,000원 approval threshold, and the membership answer its benefits;
+Daon "010-2222-3333, 19900512" and "01022223333 … 19900512" were answered on
+the first turn; Hanul's claim with "010-9876-5432" was registered, and the
+emergency keywords still reached the hand-off. The shared system flows were
+put back to Hanbit's afterwards without a new build (its deployment and build
+unchanged).
+
 ## Service contract facts (not in the SDK types, learned from the API)
 
 | Area | Fact | Where it is enforced now |
@@ -528,6 +557,7 @@ was. Voice was not tested.
 | `generative_text` without a workspace model | `Error IntegrationNotFound`, `node_status` failure, silence — `generative_text` has no `modelType` of its own; a `failure` edge to a templated `basic` speaks | M2 keeps the confirmed node and adds the fallback edge instead of replacing it |
 | LLM-judged input `route` guardrail | A rule derived from the escalation policy ("refund/claim requests go to an agent", threshold 0.8) fired on a customer describing a cleaning order — "냄새가 나서 … 종합으로 세척받고 싶어요" — and `RequestOverridden actor: guardrail` sent the call to the escalation flow before the journey collected anything | an llmJudge input rule with `route`/`block` is kept as `flag`; keyword and regex rules keep their action; hand-off by topic belongs to the journey's exit conditions |
 | Output `mask` on a phone regex | Redacted the bot's own hint: "010-1234-5678 형식으로" → "[REDACTED] 형식으로" (second time, now with a regex written on purpose). The same regex as an **input** mask left the slot capture intact — "010-2345-6789" reached the phone slot and the reservation went through | a `mask` planned on `output` runs on `input` unless the plan sets `mask_bot_output` |
+| Input `mask` and a journey | The mask rewrites the caller's words before the flow reads them, so a generative journey receives "[REDACTED]" instead of the value (`TestGuardrail` names the result `processedInput`). A `flag` rule fires on the same words (`Guardrail rule triggered`, `behaviorType: flag`, `ruleOutput: null`) and leaves them as said (2026-09-28) | an input mask over a value the flows collect is kept as `flag` |
 | `NLX.PhoneNumber` value vs. a dashed regex | "010-2345-6789" was refused by the F1 format check against `^01[0-9]-[0-9]{3,4}-[0-9]{4}$` — the runtime delivered the value without dashes and the variable-width run kept the pattern from being loosened | `runtime_regex` makes every literal separator optional even when the shape is not fixed |
 | Empty context-variable wrapper | `{"contextVariables": []}` (a project with no variable) was packaged as a variable and the runner failed at step 5 with "key is required"; no gate had looked at it | the loader unwraps the wrapper, the D9 schema gate validates context variables, and the schema accepts the SDK's `string` type |
 | A generated journey, end to end | One free-text turn — "스탠드형 두 대 … 종합으로 … 김민수 … 다음 주 화요일 오전 … 테헤란로 123 …" — filled six captures (two of them enums) at once; the delivery flow's journey took name and address after a miss, the phone step stayed deterministic, A2 found the order, the reservation flow priced 2 × 150,000 and created RSV-…; both ended in FollowUp → end | the generated bundle of a real interview (2026-09-17) behaves as designed |
