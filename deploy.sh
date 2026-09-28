@@ -130,6 +130,7 @@ DEPLOY_INFRA=true
 DEPLOY_FRONTEND=true
 FORCE_BUILD=false
 SKIP_CHECKS=false
+CDK_DEPLOY_FAILED=false   # set when `cdk deploy` fails; turns the final banner red and exits 1
 STAGE="dev"
 ALLOW_VPC_PUBLIC_ACCESS=false
 
@@ -596,7 +597,14 @@ if [ "$DEPLOY_INFRA" = true ]; then
 
     echo "Deploying CDK stack..."
     if ! npx cdk deploy --all $CDK_CONTEXT_ARGS --require-approval never --outputs-file "$CDK_OUTPUTS_FILE"; then
+        # Keep going so the already-built image and frontend still ship against
+        # the previous (rolled-back) stack state, but remember the failure: the
+        # final banner must not read "Deployment Complete!" and the run must
+        # exit non-zero (a failed prod deploy on 2026-09-22 ended with a green
+        # banner because this flag did not exist).
+        CDK_DEPLOY_FAILED=true
         echo -e "${RED}CDK deploy failed. Check errors above.${NC}"
+        echo -e "${RED}Continuing with the remaining steps against the previous stack state; this run will exit non-zero.${NC}"
         if [ ! -f "$CDK_OUTPUTS_FILE" ]; then
             echo -e "${RED}No outputs file generated. Subsequent steps may fail.${NC}"
         fi
@@ -728,7 +736,12 @@ if [ "$DEPLOY_BACKEND" = true ]; then
         --output text 2>/dev/null | grep -v None || true)
     BACKEND_HASH="${BACKEND_SRC_HASH}-${ECS_APP_HASH}-${_CFG_POOL:-nopool}-${TASK_DEF_ARN:-notd}"
 
-    if check_hash_changed "ecs-backend-cfg${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"; then
+    # A failed CDK deploy rolls the service back to CloudFormation's own task
+    # definition revision, which carries none of the env vars patched below —
+    # and the hash above is unchanged by that rollback, so the patch was skipped
+    # and prod ran without USER_POOL_ID (2026-09-22). Always re-patch after a
+    # CDK failure.
+    if [ "$CDK_DEPLOY_FAILED" = true ] || check_hash_changed "ecs-backend-cfg${STAGE_SUFFIX}-${AWS_DEFAULT_REGION}-${ACCOUNT_ID}" "$BACKEND_HASH"; then
 
         # Patch ECS task definition with runtime env vars
         # (S3 Files volume is now managed entirely by CDK — see infrastructure/lib/ecs-stack.ts)
@@ -996,6 +1009,17 @@ fi
 # ========================================
 # Done!
 # ========================================
+if [ "${CDK_DEPLOY_FAILED:-false}" = true ]; then
+    echo -e "\n${RED}=========================================="
+    echo "  Deployment FINISHED WITH ERRORS"
+    echo "=========================================="
+    echo "  The CDK stack deploy FAILED and CloudFormation rolled it back."
+    echo "  Infrastructure changes did NOT land; the backend/frontend steps"
+    echo "  above ran against the previous stack state."
+    echo "  Fix the CloudFormation error, then rerun this script."
+    echo -e "==========================================${NC}"
+    exit 1
+fi
 echo -e "\n${GREEN}=========================================="
 echo "  Deployment Complete!"
 echo "==========================================${NC}"

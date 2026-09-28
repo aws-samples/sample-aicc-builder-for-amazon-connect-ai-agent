@@ -75,6 +75,22 @@ export interface EcsStackProps extends cdk.StackProps {
    * @default false
    */
   allowVpcPublicAccess?: boolean;
+
+  /**
+   * Create the Application Auto Scaling target and step-scaling policies for the
+   * service. Set false ONLY for a one-shot drift repair: Application Auto Scaling
+   * deregisters a service's scalable target (deleting its policies) when the ECS
+   * service is deleted, and if the service is re-created under the same name
+   * CloudFormation keeps its stale records — every later change to those
+   * resources then fails with NotFound ("No scalable target registered",
+   * "Scaling Policy ... does not exist"; hit on the Tokyo prod stack, 2026-09-22).
+   * Deploying once with this false makes CloudFormation drop the phantom
+   * records; deploying again with the default re-creates them cleanly.
+   * Driven by AICC_SKIP_AUTOSCALING=true in app.ts.
+   *
+   * @default true
+   */
+  enableAutoScaling?: boolean;
 }
 
 export class EcsStack extends cdk.Stack {
@@ -622,6 +638,7 @@ export class EcsStack extends cdk.Stack {
     // scale-out-only except for one explicit, slow scale-in step on the
     // connection metric, and running turns hold ECS task scale-in protection
     // (see backend/ecs/src/context/task_protection.py).
+    if (props?.enableAutoScaling !== false) {
     const scaling = service.autoScaleTaskCount({
       minCapacity: 1,
       maxCapacity: 10,
@@ -666,6 +683,7 @@ export class EcsStack extends cdk.Stack {
       cooldown: cdk.Duration.minutes(15),
       evaluationPeriods: 5,
     });
+    } // enableAutoScaling
 
     // Running agent turns protect their task from scale-in / rolling-deploy
     // termination through the ECS agent endpoint; that call needs this action.
