@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AICC Builder · validation gate map</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --paper: #ffffff; --ink: #232F3E; --muted: #545B64; --accent: #EC7211; --rule: #D5DBDB;
+            --sans: 'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif; --mono: 'Amazon Ember Mono', ui-monospace, monospace; }
+    body { font-family: var(--sans); background: var(--paper); color: var(--ink); padding: 2.5rem 2rem; display: flex; justify-content: center; }
+    .frame { max-width: 1440px; width: 100%; }
+    .eyebrow { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.5rem; }
+    h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.01em; line-height: 1.2; margin-bottom: 0.5rem; }
+    p.lede { font-size: 0.95rem; color: var(--muted); max-width: 78ch; margin-bottom: 1.5rem; }
+    svg { width: 100%; display: block; }
+    .cards { display: grid; grid-template-columns: 1fr 1.2fr 1.2fr; gap: 1rem; margin-top: 1.5rem; }
+    .card { border: 1px solid var(--rule); border-radius: 6px; padding: 0.9rem 1rem; }
+    .card h2 { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.4rem; }
+    .card p { font-size: 0.85rem; line-height: 1.45; }
+    .card em { color: var(--accent); font-style: normal; font-weight: 600; }
+    .card code { font-family: var(--mono); font-size: 0.8em; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">AICC Builder 3.0 · validation pipeline</p>
+    <h1>Where the deterministic gates sit, asset by asset</h1>
+    <p class="lede">An LLM writes each asset once; everything after that is code. Each row is one asset family, each column one stage: the interview completeness gate, generation, the save- and merge-time gates inside the generator, the cross-asset consistency gate, the reviewer whose blocking set is computed in code, and packaging. Details: <code>docs/validation-pipeline.md</code>.</p>
+<svg viewBox="0 0 1440 900" width="1440" height="900" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="d-title d-desc">
+<title id="d-title">AICC Builder validation gate map: the deterministic checks each asset passes, stage by stage</title>
+<desc id="d-desc">Rows are the six asset families; columns are the stages an asset passes through: the interview completeness gate, LLM generation, the deterministic save- and merge-time gates inside each generator, the cross-asset consistency gate, the reviewer with its code-computed blocking set, and packaging.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#545B64"/></marker><marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#EC7211"/></marker><marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0972D3"/></marker><marker id="arrow-red" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#D13212"/></marker></defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="231" y="22" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">Interview gate</text>
+<text x="231" y="35" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">complete_interview</text>
+<text x="371" y="22" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">Generate</text>
+<text x="371" y="35" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">LLM sub-agent</text>
+<text x="631" y="22" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">Save / merge-time gates</text>
+<text x="631" y="35" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">inside the generator, deterministic</text>
+<text x="916" y="22" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">Cross-asset gate</text>
+<text x="916" y="35" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">validate_parameter_consistency</text>
+<text x="1126" y="22" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">Reviewer</text>
+<text x="1126" y="35" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">LLM findings + code-computed blocking set</text>
+<text x="1328" y="22" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">Packaging</text>
+<text x="1328" y="35" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">download / bundle</text>
+<rect x="16" y="58" width="1408" height="112" fill="rgba(35,47,62,0.025)"/>
+<text x="24" y="78" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">Lambda</text>
+<text x="24" y="91" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="start">handlers</text>
+<rect x="16" y="170" width="1408" height="112" fill="#ffffff"/>
+<text x="24" y="190" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">OpenAPI</text>
+<text x="24" y="203" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="start">MCP tool spec</text>
+<rect x="16" y="282" width="1408" height="112" fill="rgba(35,47,62,0.025)"/>
+<text x="24" y="302" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">CloudFormation</text>
+<text x="24" y="315" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="start">backend stack</text>
+<rect x="16" y="394" width="1408" height="112" fill="#ffffff"/>
+<text x="24" y="414" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">Contact Flow</text>
+<text x="24" y="427" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="start">Amazon Connect</text>
+<rect x="16" y="506" width="1408" height="112" fill="rgba(35,47,62,0.025)"/>
+<text x="24" y="526" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">AI Prompt · ACXD app</text>
+<text x="24" y="539" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="start">Classic · ACXD</text>
+<rect x="16" y="618" width="1408" height="112" fill="#ffffff"/>
+<text x="24" y="638" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">FAQ · Knowledge base</text>
+<text x="24" y="651" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="start">documents</text>
+<line x1="448" y1="114.0" x2="454" y2="114.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="808" y1="114.0" x2="814" y2="114.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="448" y1="226.0" x2="454" y2="226.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="808" y1="226.0" x2="814" y2="226.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="448" y1="338.0" x2="454" y2="338.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="808" y1="338.0" x2="814" y2="338.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="448" y1="450.0" x2="454" y2="450.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="808" y1="450.0" x2="814" y2="450.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="448" y1="562.0" x2="454" y2="562.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="808" y1="562.0" x2="814" y2="562.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="448" y1="674.0" x2="454" y2="674.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<line x1="808" y1="674.0" x2="814" y2="674.0" stroke="#545B64" stroke-width="1.0" marker-end="url(#arrow)"/>
+<rect x="176" y="64" width="110" height="660" rx="6" fill="rgba(236,114,17,0.04)" stroke="#EC7211" stroke-width="0.9"/>
+<text x="184" y="77" fill="#EC7211" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">⛔ refuses the handoff</text>
+<text x="184" y="90" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">spec_completeness:</text>
+<text x="184" y="101.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">every operation has</text>
+<text x="184" y="112.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">output_fields; every</text>
+<text x="184" y="123.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">field has a known</text>
+<text x="184" y="134.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">field_type; enum</text>
+<text x="184" y="146" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">types carry</text>
+<text x="184" y="157.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">enum_values; array</text>
+<text x="184" y="168.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">has items, object has</text>
+<text x="184" y="179.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">properties</text>
+<text x="184" y="190.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start"></text>
+<text x="184" y="202" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">ACXD only: every</text>
+<text x="184" y="213.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">flow-plan step</text>
+<text x="184" y="224.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">user-confirmed</text>
+<text x="184" y="235.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">(acxd_flow_spec_ready);</text>
+<text x="184" y="246.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">each flow slot maps</text>
+<text x="184" y="258" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">to a real input</text>
+<text x="184" y="269.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">field; an escalate</text>
+<text x="184" y="280.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">step has</text>
+<text x="184" y="291.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">escalation_conditions;</text>
+<text x="184" y="302.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">context_variables</text>
+<text x="184" y="314" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">declared</text>
+<text x="184" y="325.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start"></text>
+<text x="184" y="336.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">Pass →</text>
+<text x="184" y="347.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">interview_complete.json,</text>
+<text x="184" y="358.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">one-time handoff,</text>
+<text x="184" y="370" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">generator tools</text>
+<text x="184" y="381.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">unlocked</text>
+<rect x="296" y="64" width="150" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="304" y="77" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">lambda_generator_agent</text>
+<text x="304" y="90" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">one handler per tool_id,</text>
+<text x="304" y="101.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">batches of 6</text>
+<text x="304" y="112.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">reads spec + infra schema</text>
+<rect x="296" y="176" width="150" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="304" y="189" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">openapi_generator_agent</text>
+<text x="304" y="202" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">≤6 ops: full mode</text>
+<text x="304" y="213.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">&gt;6 ops: base + chunks → merge</text>
+<rect x="296" y="288" width="150" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="304" y="301" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">infrastructure_generator_agent</text>
+<text x="304" y="314" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">base → one fragment per tool_id</text>
+<text x="304" y="325.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">→ merge</text>
+<text x="304" y="336.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">reads specs +</text>
+<text x="304" y="347.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">InfrastructureSpec</text>
+<rect x="296" y="400" width="150" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="304" y="413" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">contact_flow_generator_agent</text>
+<text x="304" y="426" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">ContactFlowSpec is the</text>
+<text x="304" y="437.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">behaviour contract</text>
+<text x="304" y="448.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">optional RAG (S3 Vectors KB)</text>
+<rect x="296" y="512" width="150" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="304" y="525" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">prompt_generator_agent</text>
+<text x="304" y="538" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">Classic: prompt alone in its</text>
+<text x="304" y="549.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">turn</text>
+<text x="304" y="560.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">ACXD: generate_acxd_application</text>
+<text x="304" y="571.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">→ acxd_flow_generator, one flow</text>
+<text x="304" y="582.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">per operation, ≤5</text>
+<text x="304" y="594" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">self-correction attempts</text>
+<rect x="296" y="624" width="150" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="304" y="637" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">faq_generator_agent</text>
+<text x="304" y="650" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">source: research → param →</text>
+<text x="304" y="661.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">context → uploads (else mock)</text>
+<text x="304" y="672.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">one doc per save_faq_document</text>
+<rect x="456" y="64" width="350" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="464" y="77" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">save-time (report; stored asset already written)</text>
+<text x="464" y="90" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ lint_lambda_status_codes: 4xx business outcomes → 200 (re-streamed)</text>
+<text x="464" y="101.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">! lint_python_source: compile check → syntax_ok</text>
+<text x="464" y="112.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">! lambda_field_gaps: spec inputs never read / outputs never written</text>
+<text x="464" y="123.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">(per-asset D1)</text>
+<text x="464" y="134.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">no re-check after patch_file</text>
+<rect x="456" y="176" width="350" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="464" y="189" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">full mode at save · chunk mode at merge_openapi_fragments</text>
+<text x="464" y="202" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ merge: re-indent, dedupe paths/schemas; ! chunks_without_schemas</text>
+<text x="464" y="213.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ response_contract.enforce_openapi_yaml: request = spec inputs, success =</text>
+<text x="464" y="224.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">envelope + outputs at success_status_code</text>
+<text x="464" y="235.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎! lint_and_autofix_openapi: null keys, missing responses, pattern↔length;</text>
+<text x="464" y="246.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">OAS 3.0 validation advisory</text>
+<rect x="456" y="288" width="350" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="464" y="301" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">merge_infrastructure_fragments (fragments are not linted)</text>
+<text x="464" y="314" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ 13 rewrites: property names, CORS headers, qconnect→wisdom, DB_* env</text>
+<text x="464" y="325.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">unification, Handler alias, UpdateQSession policy/env, resource dedupe,</text>
+<text x="464" y="336.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">DependsOn rebuild, /tools strip, ApiKeyRequired (ACXD)</text>
+<text x="464" y="347.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">! fragment completeness backstop · ✎! cfn-lint: !Sub fixes, E/W/I reported</text>
+<rect x="456" y="400" width="350" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="464" y="413" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">lint_contact_flow (blocking for import-safety) + ACXD binding</text>
+<text x="464" y="426" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ type allowlist + hallucinated-type mapping · per-block parameter</text>
+<text x="464" y="437.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">normalization · Trigger wrapper · Loop operands · Complete/Escalate canonical</text>
+<text x="464" y="448.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">· error branches</text>
+<text x="464" y="459.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">■ StartAction / dangling transitions · ! unreachable, no disconnect</text>
+<text x="464" y="470.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ ACXD: normalize_acxd_contact_flow (Agentic CX block, 4 branches,</text>
+<text x="464" y="482" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">$.AgenticCX rewrite)</text>
+<rect x="456" y="512" width="350" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="464" y="525" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">Classic: lint_ai_prompt · ACXD: per-flow save gate</text>
+<text x="464" y="538" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ unknown {{$.x}} → $.Custom.x, duplicate variables; ✎ RETRIEVE guide</text>
+<text x="464" y="549.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">ACXD: ✎ canonicalize_flow → ✎! runtime contract (rule families S · M · R · D</text>
+<text x="464" y="560.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">· P · F · E · J · A) → ■ JSON schema + strict node subset → ■ stub-bundle D9</text>
+<text x="464" y="571.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">→ retry</text>
+<text x="464" y="582.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">⛔ generation refused while any plan step is unconfirmed</text>
+<rect x="456" y="624" width="350" height="100" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="0.9"/>
+<text x="464" y="637" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">source + skeleton + ACXD KB</text>
+<text x="464" y="650" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">⛔ no FAQ source and no company context → refuse</text>
+<text x="464" y="661.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ fixed Markdown skeleton (question / answer headings are load-bearing for</text>
+<text x="464" y="672.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">the KB parser)</text>
+<text x="464" y="683.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎! ACXD: refresh_acxd_knowledge_base → knowledge_base.schema.json</text>
+<rect x="816" y="64" width="200" height="660" rx="6" fill="rgba(35,47,62,0.02)" stroke="#232F3E" stroke-width="0.9"/>
+<text x="824" y="77" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">■ every mismatch is blocking in the review</text>
+<text x="824" y="90" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">D1 spec ↔ Lambda ↔ OpenAPI fields, GSI</text>
+<text x="824" y="101.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">union, table env vars, data wrapper,</text>
+<text x="824" y="112.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">counts, tool fields</text>
+<text x="824" y="123.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">D2 IAM actions derived from SDK calls vs</text>
+<text x="824" y="134.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">CloudFormation roles</text>
+<text x="824" y="146" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">D3 RDS Data API contract · D4 SQL</text>
+<text x="824" y="157.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">identifiers, casts, NOT NULL, bind types</text>
+<text x="824" y="168.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">D5 Connect invoke permission (flow ↔ CFN)</text>
+<text x="824" y="179.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">· D6 session attributes (flow ↔ prompt),</text>
+<text x="824" y="190.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">prompt re-lint · D7 UpdateQSession env ·</text>
+<text x="824" y="202" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">D8 success status code · SAMPLE_DATA rows</text>
+<text x="824" y="213.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">in template</text>
+<text x="824" y="224.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">ACXD: D9-1 structure/uniqueness/runtime</text>
+<text x="824" y="235.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">contract · D9-2 determinism vs confirmed</text>
+<text x="824" y="246.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">plan · D9-3 Data Request ↔ OpenAPI · D9-4</text>
+<text x="824" y="258" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">slot constraints ↔ FieldSpec · D9-5 KB/FAQ</text>
+<text x="824" y="269.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">· D9-6 Contact Flow binding · D9-7</text>
+<text x="824" y="280.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">identity/ASCII · D9-8 backend auth (+</text>
+<text x="824" y="291.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">D2–D5 folded)</text>
+<text x="824" y="302.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">review_gates adds PARITY (spec ↔ OpenAPI</text>
+<text x="824" y="314" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">shapes), SPEC (orphan asset), MISSING</text>
+<text x="824" y="325.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">(spec without asset)</text>
+<text x="824" y="336.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">never writes; silently skips a check whose</text>
+<text x="824" y="347.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">input asset is absent</text>
+<rect x="1026" y="64" width="200" height="660" rx="6" fill="rgba(9,114,211,0.03)" stroke="#0972D3" stroke-width="0.9"/>
+<text x="1034" y="77" fill="#0972D3" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">reviewer_agent</text>
+<text x="1034" y="90" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">LLM review over the stored assets:</text>
+<text x="1034" y="101.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">completeness, OpenAPI, Lambda, field</text>
+<text x="1034" y="112.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">tracing, shape/enum fidelity, CFN, sample</text>
+<text x="1034" y="123.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">data, Contact Flow behaviour, native-tool</text>
+<text x="1034" y="134.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">misuse, lint cross-check, prompt; ACXD</text>
+<text x="1034" y="146" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">determinism, guardrails, KB, escalation,</text>
+<text x="1034" y="157.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">Data Request contract</text>
+<text x="1034" y="168.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">! ❌ / ⚠️ lines are advisory</text>
+<text x="1034" y="179.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">(advisory_critical, warnings)</text>
+<text x="1034" y="190.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">■ blocking set =</text>
+<text x="1034" y="202" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">collect_blocking_findings(): consistency +</text>
+<text x="1034" y="213.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">acxd-d9 + parity + spec gates, stable ids,</text>
+<text x="1034" y="224.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">first-wins dedupe; critical_issues = its</text>
+<text x="1034" y="235.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">count</text>
+<text x="1034" y="246.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">diff vs previous review → fixed / new /</text>
+<text x="1034" y="258" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">remaining (context/review_blocking.json)</text>
+<text x="1034" y="269.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">fix loop: report → user picks →</text>
+<text x="1034" y="280.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">deterministic repair first</text>
+<text x="1034" y="291.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">(enforce_openapi_contract_tool,</text>
+<text x="1034" y="302.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">rebuild_acxd_slot_types_tool,</text>
+<text x="1034" y="314" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">remove_duplicate_asset_copies_tool) →</text>
+<text x="1034" y="325.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">patch-only modification_request</text>
+<text x="1034" y="336.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">(modification_did_not_patch otherwise) →</text>
+<text x="1034" y="347.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">focused re-review</text>
+<rect x="1236" y="64" width="184" height="660" rx="6" fill="rgba(236,114,17,0.04)" stroke="#EC7211" stroke-width="0.9"/>
+<text x="1244" y="77" fill="#EC7211" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">package_assets_impl</text>
+<text x="1244" y="90" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">Classic: zip stored assets + README +</text>
+<text x="1244" y="101.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">deploy.sh; no content gate (review</text>
+<text x="1244" y="112.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">findings do not block the download)</text>
+<text x="1244" y="123.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start"></text>
+<text x="1244" y="134.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">ACXD: load_acxd_bundle ✎ canonicalize</text>
+<text x="1244" y="146" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">flows, rebind slot types, drop</text>
+<text x="1244" y="157.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">unattached / unreferenced, secret</text>
+<text x="1244" y="168.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">syntax, contact-flow re-lint + binding</text>
+<text x="1244" y="179.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">refresh</text>
+<text x="1244" y="190.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ packaging-time runtime-contract pass</text>
+<text x="1244" y="202" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">on operation flows</text>
+<text x="1244" y="213.2" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">⛔ D9-1…D9-8 + deploy-manifest</text>
+<text x="1244" y="224.4" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">schema/coverage + manifest→file</text>
+<text x="1244" y="235.6" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">existence → HTTP 409 with problems</text>
+<text x="1244" y="246.8" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎ Lambda ACXD adapter injected</text>
+<text x="1244" y="258" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">(separators, types, success flag)</text>
+<line x1="1018" y1="400.0" x2="1024" y2="400.0" stroke="#545B64" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="991" y="386.0" width="60" height="11" rx="2" fill="#ffffff"/>
+<text x="1021" y="394" fill="#545B64" font-size="7" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">review gates</text>
+<line x1="1228" y1="400.0" x2="1234" y2="400.0" stroke="#EC7211" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+<rect x="1210" y="386.0" width="43" height="11" rx="2" fill="#ffffff"/>
+<text x="1231" y="394" fill="#EC7211" font-size="7" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">download</text>
+<path d="M 1086,62 V 50 H 631.0 V 62" fill="none" stroke="#0972D3" stroke-width="1.0" stroke-dasharray="4,3" marker-end="url(#arrow-link)"/>
+<rect x="705" y="40" width="307" height="11" rx="2" fill="#ffffff"/>
+<text x="858.5" y="48" fill="#0972D3" font-size="7" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">patch-only fix → re-runs only what the patch path re-runs → re-review</text>
+<rect x="16" y="750" width="1408" height="140" rx="6" fill="rgba(35,47,62,0.02)" stroke="rgba(35,47,62,0.10)" stroke-width="0.8"/>
+<text x="28" y="766" fill="#232F3E" font-size="9" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start" font-weight="700">Legend</text>
+<text x="28" y="782" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">✎  rewrites the asset (normalization / auto-fix; reported unless noted)</text>
+<text x="588" y="782" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">!  reports only; the orchestrator or user decides</text>
+<text x="28" y="796" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">■  blocking finding at review, or a step the generator refuses to pass</text>
+<text x="588" y="796" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">⛔  hard refusal: handoff, generation, or download</text>
+<text x="1416" y="766" fill="#545B64" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="end" font-style="italic">LLM steps are the Generate column and the reviewer&#x27;s prose; every other box is code.</text>
+<text x="1416" y="782" fill="#545B64" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="end" font-style="italic">Classic and ACXD share every column; ACXD adds the application gates, D9 and the packaging refusal.</text>
+</svg>
+    <div class="cards">
+      <div class="card"><h2>Per asset</h2><p>Each generator runs its own deterministic gates right after the model answers: <em>lint + normalize</em> for the Classic assets, <em>canonicalize → runtime contract → schema → D9</em> in a retry loop for an ACXD flow. Most rewrite the asset in place and report what changed.</p></div>
+      <div class="card"><h2>Across assets</h2><p><code>validate_parameter_consistency</code> joins the stored assets against the OperationSpec (D1–D8, IAM, sample data) and, for ACXD, the application against OpenAPI, CloudFormation, the Contact Flow and the FAQ (D9). It never writes; it is read once by the review and, for ACXD, again by the packager.</p></div>
+      <div class="card"><h2>Reviewer</h2><p>The reviewer's ❌/⚠️ are advisory. The blocking set is <em>computed in code</em> from the deterministic gates with stable ids, so a fix loop has a fixed exit condition; fixes are patch-only and start with the deterministic repair tools. Only the ACXD download is refused on open findings.</p></div>
+    </div>
+  </div>
+</body>
+</html>
