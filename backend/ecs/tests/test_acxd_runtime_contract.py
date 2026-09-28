@@ -1836,7 +1836,10 @@ def test_j7_journey_prompt_carries_conversation_style_rules():
     out, notes = _apply_journey(_journey_flow())
     prompt = out["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
     assert prompt.startswith("고객의 반품 사유를 자연스럽게 확인합니다.")      # the generator's text is kept
-    assert "[conversation style]" in prompt and "되풀이하지" in prompt and "몇 월 며칠" in prompt
+    assert "[conversation style]" in prompt and "되풀이하지" in prompt
+    # a Korean application counts dates in Asia/Seoul (J11): the "ask for the
+    # month and day" line gives way to the [date basis] block
+    assert "[date basis]" in prompt and "Asia/Seoul" in prompt and "몇 월 며칠" not in prompt
     assert any("(J7)" in n for n in notes)
     again, notes_again = apply_runtime_contract(out, **_journey_kwargs())
     assert again["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"].count("[conversation style]") == 1
@@ -1940,6 +1943,45 @@ def test_j8_payload_gets_every_required_request_field_or_the_gap_is_reported():
     violations = runtime_contract_violations(
         _journey_flow(journey_cfg={"tools": [partial]}), **_journey_kwargs(data_requests={"requestReturn": doc}))
     assert any("J8" in v and "omits required request field(s) ['action']" in v for v in violations)
+
+
+def test_j8_payload_also_maps_optional_fields_the_journey_collects():
+    """Live (Hanbit e2e, 2026-09-27): cancelAppointment takes appointmentId OR
+    phoneNumber + birthDate; the journey captured all of them and the payload
+    carried only appointmentId and action, so a caller without the appointment
+    number could not be looked up. An optional request field with a slot of that
+    name is mapped like a required one (as D3 does for a fixed node); one with
+    no slot stays out."""
+    doc = dict(_INTAKE_DOC, requestSchema={"type": "object", "required": ["orderNumber"], "properties": {
+        "orderNumber": {"type": "string"}, "contactPhone": {"type": "string"}, "note": {"type": "string"}}})
+    partial = {"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn",
+                                                       "payload": {"orderNumber": "{orderNumber:NLX.Slot}"}}}
+    out, notes = _apply_journey(_journey_flow(journey_cfg={"tools": [partial]}),
+                                data_requests={"requestReturn": doc})
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    tool = next(t for t in cfg["tools"] if t["type"] == "dataRequest")
+    assert tool["dataRequest"]["payload"] == {"orderNumber": "{orderNumber:NLX.Slot}",
+                                              "contactPhone": "{contactPhone:NLX.Slot}"}
+    assert any("payload now carries optional ['contactPhone']" in n for n in notes)
+
+
+def test_j8_payload_drops_fields_the_request_schema_does_not_declare():
+    """Live (SELC, 2026-09-25 and 2026-09-26): the price lookup's payload also
+    sent the journey's `quantity` and `installLocationType`, which the request
+    schema does not declare; D9 passed the bundle and only a reviewer advisory
+    noticed. The customer's API follows BACKEND-CONTRACT.md (the request schema),
+    so the payload keeps only declared fields — on a rerun it is unchanged."""
+    extra = {"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn", "payload": {
+        "orderNumber": "{orderNumber:NLX.Slot}", "contactPhone": "{contactPhone:NLX.Slot}",
+        "quantity": "{quantity:NLX.Slot}"}}}
+    out, notes = _apply_journey(_journey_flow(journey_cfg={"tools": [extra]}))
+    cfg = out["nodes"]["gj"]["metadata"]["generativeJourney"]
+    tool = next(t for t in cfg["tools"] if t["type"] == "dataRequest")
+    assert tool["dataRequest"]["payload"] == {"orderNumber": "{orderNumber:NLX.Slot}",
+                                              "contactPhone": "{contactPhone:NLX.Slot}"}
+    assert any("payload no longer sends ['quantity']" in n for n in notes)
+    again, notes_again = _apply_journey(out)
+    assert again == out and not any("no longer sends" in n for n in notes_again)
 
 
 def test_j8_a_carrying_journey_pinned_to_a_fast_model_is_moved_to_the_tool_model():
@@ -2308,3 +2350,27 @@ def test_j_system_operands_written_as_variable_are_retyped():
     done = next(e for e in out["nodes"]["gj"]["childNodes"] if e["name"] == "Done")
     assert done["conditions"][0]["left"] == {"type": "system", "name": "System.gjConditionIndex"}
     assert any("typed 'system'" in n for n in notes)
+
+
+def test_j10_result_placeholders_of_the_journeys_own_request_become_plain_fields():
+    """e2e 2026-09-25 (SELC, ACXD only; the 09-22 Hanbit bundle too): the approved
+    result sentence reached the prompt as {<operation_id>.<field>:NLX.Variable} —
+    no variable carries an operation id, so it rendered empty. The sentence stays;
+    the journey fills [field] from its own tool result. An unknown head is reported."""
+    sentence = "반품이 접수되었습니다. 반품번호는 {request_return.returnId:NLX.Variable}입니다."
+    flow = _journey_flow(journey_cfg={
+        "prompt": f"반품을 접수합니다. 성공하면 다음 문구로 안내하세요: '{sentence}'",
+        "tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}]})
+    out, notes = _apply_journey(flow)
+    prompt = out["nodes"]["gj"]["metadata"]["generativeJourney"]["prompt"]
+    assert "반품번호는 [returnId]입니다." in prompt and ":NLX.Variable}" not in prompt
+    assert "[필드] 자리에는 도구 결과에서 같은 이름의 값" in prompt
+    assert any("(J10)" in n for n in notes)
+    again, notes_again = _apply_journey(out)
+    assert again == out and not any("(J10)" in n for n in notes_again)
+
+    stray = _journey_flow(journey_cfg={
+        "prompt": "상태는 {orderLookup.status:NLX.Variable}입니다.",
+        "tools": [{"type": "dataRequest", "dataRequest": {"dataRequestId": "requestReturn"}}]})
+    problems = runtime_contract_violations(stray, **_journey_kwargs())
+    assert any("J10" in p and "orderLookup.status" in p for p in problems)

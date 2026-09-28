@@ -25,9 +25,13 @@ logger = logging.getLogger(__name__)
 # rather than ``prompt``.
 CLASSIC_GENERATION_ASSETS = {"cdk", "lambda", "openapi", "prompt", "contact_flow"}
 ACXD_GENERATION_ASSETS = {"cdk", "lambda", "openapi", "acxd_application", "contact_flow"}
+#: ACXD only (v3.1): the application is the one generated core asset; the FAQ
+#: (knowledge_base) runs before it and feeds its knowledge base.
+ACXD_ONLY_GENERATION_ASSETS = {"acxd_application"}
 GENERATION_ASSETS = CLASSIC_GENERATION_ASSETS | ACXD_GENERATION_ASSETS
 FULL_ASSET_SET = CLASSIC_GENERATION_ASSETS | {"knowledge_base"}
 ACXD_FULL_ASSET_SET = ACXD_GENERATION_ASSETS | {"knowledge_base"}
+ACXD_ONLY_FULL_ASSET_SET = ACXD_ONLY_GENERATION_ASSETS | {"knowledge_base"}
 
 # Scoped (single-segment) generation ids the frontend may request.
 VALID_SCOPE_IDS = {"contact_flow", "prompt", "acxd_application", "faq"}
@@ -76,12 +80,24 @@ def _is_acxd_target(session_id: Optional[str]) -> bool:
         return False
 
 
+def _is_acxd_only_target(session_id: Optional[str]) -> bool:
+    try:
+        from tools.acxd_flow_spec import is_acxd_only_target
+        return is_acxd_only_target(session_id)
+    except Exception:
+        return False
+
+
 def _generation_assets_for_session(session_id: Optional[str]) -> set[str]:
+    if _is_acxd_only_target(session_id):
+        return ACXD_ONLY_GENERATION_ASSETS
     return ACXD_GENERATION_ASSETS if _is_acxd_target(session_id) else CLASSIC_GENERATION_ASSETS
 
 
 def get_full_asset_set(session_id: Optional[str] = None) -> set[str]:
     """Return the full produced-asset set for a session's fixed runtime target."""
+    if _is_acxd_only_target(session_id):
+        return set(ACXD_ONLY_FULL_ASSET_SET)
     return set(ACXD_FULL_ASSET_SET if _is_acxd_target(session_id) else FULL_ASSET_SET)
 
 

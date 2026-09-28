@@ -16,6 +16,22 @@ An ACXD archive contains `deploy-manifest.json`, `runner.js`, `package.json`, `l
 
 The packager runs D9 before archive creation. Any D9 error, manifest-schema failure, coverage gap, or missing manifest-referenced backend file rejects packaging. Secret values are never written to the archive; secret declarations name an environment variable that the runner reads at deploy time.
 
+## ACXD only (v3.1)
+
+The third runtime target on the start screen, `acxd_only`, builds the ACXD application alone. The interview, the flow design and every ACXD generator and D9 check are the same as for `acxd`; what is left out is the Classic backend (CloudFormation, Lambda, OpenAPI), the AI Prompt and the Contact Flow, with their generators, gates and bundle files.
+
+The archive holds `assets/acxd/**`, `deploy-manifest.json`, `runner.js`, `package.json`, `lib/*.js` and:
+
+- `deploy.sh` — a short wrapper (`templates/deploy_acxd_only.sh`) that checks Node.js, prompts for `ACXD_WORKSPACE_ID`, `ACXD_API_KEY`, `WEBHOOK_URL` and any secret value it is missing, and runs the runner. `--dry-run`, `status` and `cleanup` work as in the full target.
+- `BACKEND-CONTRACT.md` — every call the customer's API must answer, rendered from the Data Requests: method and path under `{WEBHOOK_URL}`, request and reply fields, the auth header, and the delivery facts the Classic Lambda adapter otherwise hides (journey tool calls send schema-formatted values with separators, fixed capture steps send slot values without them, yes/no as words, dates as calendar dates in the business's time zone, a 200-only reply validated against the response schema, business outcomes in the envelope).
+- `WIRING-GUIDE.md` — adding the Agentic CX block to the customer's own Contact Flow.
+
+The Data Requests call `{WEBHOOK_URL}<path>`, where `<path>` is the operation's own endpoint from the OperationSpec (not coerced to `/tools/<operation>`). The interview records the API's base URL (`application.backend_base_url`, optional) and the name of its credential header (`application.backend_auth_header`, or `none`); `complete_interview` refuses until the header is decided. With a header, every request sends it from one project-scoped secret, `<project>BackendApiKey`, filled at deploy time from `ACXD_SECRET_<NAME>` or `ACXD_SECRET_BACKENDAPIKEY`. Without one, no header is sent.
+
+The manifest has no `deploy-cfn-backend` and no `import-contact-flows` step. `wire-webhook-urls` carries `params.source: "env"` (plus `defaultUrl` when the interview recorded a base URL): the runner takes `WEBHOOK_URL` from the environment, falls back to `defaultUrl`, and refuses a missing or non-https URL.
+
+Gates: D1–D8 (Lambda, OpenAPI, CloudFormation, prompt and Contact Flow parity), D9-6 (Contact Flow binding) and D9-8 (generated backend and its API key) do not run. D9-3 checks instead that every external Data Request URL starts with `{WEBHOOK_URL}` and has a fixed path: the runtime posts the fields as the JSON body and never fills `/orders/{orderId}` or a query string. The missing-asset gate asks each operation for its Data Request only.
+
 ## Runtime contract the generators target
 
 Every item below was verified over live Connect chat in a Connect Customer

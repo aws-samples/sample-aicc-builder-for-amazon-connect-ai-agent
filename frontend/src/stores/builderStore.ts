@@ -665,7 +665,19 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       // IMPORTANT: Prioritize incomplete preview (currently streaming) over completed ones
       // This prevents creating multiple previews during regeneration streaming
       const incompleteKey = matchingKeys.find(k => !state.assetPreviews[k].isComplete);
-      const completeKey = matchingKeys.find(k => state.assetPreviews[k].isComplete);
+      // Compare with the NEWEST completed version, not the first one found. With
+      // two versions on screen (v1 card, v2 "재생성됨" card), every re-delivery of
+      // v2 — the S3 lazy-load after each WebSocket reconnect — differed from v1
+      // and became yet another copy. Live (Hanbit, 2026-09-26): one spec reached
+      // 298 copies in a 20-minute interview while a background tab reconnected
+      // about once a minute, and autosave stored every copy.
+      const completeKey = matchingKeys
+        .filter(k => state.assetPreviews[k].isComplete)
+        .reduce<string | undefined>((newest, k) => (
+          newest === undefined
+          || (state.assetPreviews[k].createdAt || 0) >= (state.assetPreviews[newest].createdAt || 0)
+            ? k : newest
+        ), undefined);
 
       // REGENERATION DETECTION: Only trigger when:
       // 1. There's NO incomplete preview (we're not already streaming)
@@ -681,10 +693,20 @@ export const useBuilderStore = create<BuilderState>((set) => ({
       //    files changing — to the user nothing was "streaming". The age guard
       //    keeps the contact-flow lint re-stream (seconds after the original,
       //    same document repaired) an in-place update.
+      //
+      // A completed preview with NO content is a session-restore placeholder
+      // (the REST copy holds only the s3Key; the text is lazy-loaded from S3
+      // afterwards). Filling it is an in-place update, never a regeneration:
+      // there is no earlier version to compare with. Treating it as one
+      // (live, 2026-09-26) re-inserted every restored asset as a "재생성됨"
+      // card at the bottom of the chat on each page load, showed the KB zip's
+      // bytes as text, and autosave stored each copy — one session reached the
+      // 300-asset cap with 30 distinct files (one spec ×70).
       const REGENERATION_MIN_AGE_MS = 30_000;
       const arrivesWholeAndChanged = !!(
         completeKey && preview.isComplete && !preview.isDelta && preview.content
         && !preview.rehydrated
+        && !!state.assetPreviews[completeKey].content
         && preview.content !== state.assetPreviews[completeKey].content
         && Date.now() - (state.assetPreviews[completeKey].createdAt || 0) > REGENERATION_MIN_AGE_MS
       );
@@ -730,6 +752,13 @@ export const useBuilderStore = create<BuilderState>((set) => ({
         const completePreview = state.assetPreviews[completeKey];
         newPreview.createdAt = completePreview.createdAt || Date.now();
         newPreview.messageIndex = completePreview.messageIndex ?? state.messages.length;
+        // Same version, so a "재생성됨" card stays one (with its compare view)
+        // when a reconnect re-delivers it.
+        if (completePreview.isRegeneration && newPreview.isRegeneration === undefined) {
+          newPreview.isRegeneration = true;
+          newPreview.previousContent = completePreview.previousContent;
+          newPreview.previousCreatedAt = completePreview.previousCreatedAt;
+        }
         // Preserve existing content when incoming is a delta or empty — prevents
         // late-delivered delta events (race in backend pending_ws_events flush)
         // from clobbering the fully accumulated content. Observed on

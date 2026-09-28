@@ -129,6 +129,12 @@ The rule is embedded in:
 
 ## 4. Deterministic validation runs between LLM phases
 
+> The complete map of every deterministic gate — per-asset lint and
+> normalization, the D1–D8 / PARITY / D9 cross-asset checks and how the
+> reviewer's blocking set is computed — is in
+> [docs/validation-pipeline.md](./validation-pipeline.md). This section
+> keeps the short version.
+
 After each generation phase, the Orchestrator invokes
 `validate_parameter_consistency(session_id)`. This is **not** an LLM
 call — it is a pure Python function that parses each asset and compares

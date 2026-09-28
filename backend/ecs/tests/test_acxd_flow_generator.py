@@ -104,6 +104,13 @@ def test_valid_flow_passes_full_validation():
     assert validate_generated_flow(REFUND_FLOW, PLAN, SPEC) == []
 
 
+def test_a_sibling_flows_defect_does_not_fail_this_flows_attempt():
+    """Live (Hanbit, 2026-09-27): a digit in a deterministic sibling's flow id
+    (``Notice1HandoffFlow``) failed all five attempts of every operation flow."""
+    spec = {**SPEC, "flows": [PLAN, {"flow_id": "Broken2Flow", "role": "operation", "purpose": "x"}]}
+    assert validate_generated_flow(REFUND_FLOW, PLAN, spec) == []
+
+
 def test_flow_id_must_match_plan():
     flow = copy.deepcopy(REFUND_FLOW)
     flow["flowId"] = "WrongFlow"

@@ -299,6 +299,9 @@ def _check_backend_for_live_data_requests(
         (d.get("data_request_id"), d.get("mode"))
         for d in spec.get("data_integrations") or []
         if isinstance(d, dict) and d.get("mode") in ("sample", "external")
+        # ACXD only (v3.1): the customer's own API answers at {WEBHOOK_URL};
+        # the bundle is not supposed to carry a backend for it.
+        and not d.get("external_backend")
     ]
     if not needing:
         return
@@ -642,6 +645,9 @@ def bundle_contract_kwargs(bundle: dict, spec: Optional[dict] = None) -> Optiona
     escalation_flow_id = next(
         (fid for fid in sorted(known_targets) if fid.lower().startswith("escalation")), "EscalationFlow")
     from tools.acxd_flow_spec import handoff_notices_from_spec
+    from tools.acxd_timezone import application_timezone
+    kb_name = next((str(doc["name"]) for doc in (bundle.get("knowledge_bases") or [])
+                    if isinstance(doc, dict) and doc.get("name")), None)
     return {
         "roles": roles,
         "kwargs": dict(
@@ -649,8 +655,35 @@ def bundle_contract_kwargs(bundle: dict, spec: Optional[dict] = None) -> Optiona
             data_requests=data_requests, flow_ids=known_targets,
             context_variables=context_variables, follow_up_flow_id=follow_up_flow_id,
             escalation_flow_id=escalation_flow_id, field_enums=field_enums,
-            handoff_notices=handoff_notices_from_spec(spec) if spec else None),
+            handoff_notices=handoff_notices_from_spec(spec) if spec else None,
+            kb_name=kb_name, sibling_flows=_sibling_operation_flows(flows, spec),
+            timezone=application_timezone(spec)),
     }
+
+
+def _sibling_operation_flows(flows: list, spec: Optional[dict]) -> dict[str, str]:
+    """flowId -> task name for every flow that calls the backend (an operation),
+    named by the interview's display name when the spec has it, else by the
+    first sentence of the flow's routing description."""
+    names = {str(p.get("flow_id")): str(p.get("display_name") or p.get("purpose") or "").strip()
+             for p in ((spec or {}).get("flows") or []) if isinstance(p, dict) and p.get("flow_id")}
+    out: dict[str, str] = {}
+    for flow in flows:
+        flow_id = str(flow.get("flowId") or "")
+        nodes = flow.get("nodes") if isinstance(flow.get("nodes"), dict) else {}
+        calls_backend = any(
+            isinstance(n, dict) and (
+                n.get("type") == "data_request"
+                or (n.get("type") == "generative_journey" and any(
+                    isinstance(t, dict) and t.get("type") == "dataRequest"
+                    for t in ((((n.get("metadata") or {}).get("generativeJourney") or {}).get("tools")) or []))))
+            for n in nodes.values())
+        if not flow_id or not calls_backend:
+            continue
+        name = names.get(flow_id) or re.split(r"(?<=[.!?])\s", str(flow.get("aiDescription") or "").strip())[0]
+        if name:
+            out[flow_id] = name[:300]
+    return out
 
 
 def normalize_bundle_flows(bundle: dict, spec: Optional[dict] = None) -> list[str]:
@@ -674,7 +707,10 @@ def normalize_bundle_flows(bundle: dict, spec: Optional[dict] = None) -> list[st
             continue
         flow_id = str(flow.get("flowId") or "")
         role = context["roles"].get(flow_id, "operation")
-        if role != "operation":
+        # `help` is an application event, but its flow is model-written like an
+        # operation (Hanbit's DepartmentInfo); the generator ran the contract on
+        # it with that role, so the packaging pass does too.
+        if role not in ("operation", "help"):
             continue
         try:
             normalized, flow_notes = apply_runtime_contract(flow, role=role, **context["kwargs"])

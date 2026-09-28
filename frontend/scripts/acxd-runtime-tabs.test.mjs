@@ -31,11 +31,34 @@ type LucideIcon = unknown;`,
 
 test('runtime target selector supports radiogroup keyboard navigation', () => {
   assert.equal(runtimeTarget.runtimeTargetForKey('classic', 'ArrowRight'), 'acxd');
-  assert.equal(runtimeTarget.runtimeTargetForKey('acxd', 'ArrowRight'), 'classic');
-  assert.equal(runtimeTarget.runtimeTargetForKey('classic', 'ArrowLeft'), 'acxd');
+  assert.equal(runtimeTarget.runtimeTargetForKey('acxd', 'ArrowRight'), 'acxd_only');
+  assert.equal(runtimeTarget.runtimeTargetForKey('acxd_only', 'ArrowRight'), 'classic');
+  assert.equal(runtimeTarget.runtimeTargetForKey('classic', 'ArrowLeft'), 'acxd_only');
   assert.equal(runtimeTarget.runtimeTargetForKey('acxd', 'Home'), 'classic');
-  assert.equal(runtimeTarget.runtimeTargetForKey('classic', 'End'), 'acxd');
+  assert.equal(runtimeTarget.runtimeTargetForKey('classic', 'End'), 'acxd_only');
   assert.equal(runtimeTarget.runtimeTargetForKey('classic', 'Enter'), null);
+});
+
+test('only the three runtime targets are accepted from backend echoes', () => {
+  for (const value of ['classic', 'acxd', 'acxd_only']) {
+    assert.equal(runtimeTarget.isRuntimeTarget(value), true, value);
+  }
+  for (const value of ['ACXD', 'acxd-only', '', null, undefined, 3]) {
+    assert.equal(runtimeTarget.isRuntimeTarget(value), false, String(value));
+  }
+  assert.equal(runtimeTarget.isAcxdRuntime('acxd_only'), true);
+  assert.equal(runtimeTarget.isAcxdRuntime('classic'), false);
+});
+
+test('ACXD only hides every backend, Contact Flow and prompt progress step', () => {
+  const visible = (target, ids) => ids.filter((id) => runtimeTarget.isProgressStepForTarget(id, target));
+  const steps = ['database', 'operations', 'requirements', 'research', 'lambda', 'prompt',
+    'acxd_application', 'openapi', 'contact_flow', 'cdk', 'knowledge_base', 'review', 'ready'];
+  assert.deepEqual(visible('acxd_only', steps),
+    ['operations', 'requirements', 'research', 'acxd_application', 'knowledge_base', 'review', 'ready']);
+  assert.equal(visible('acxd', steps).includes('prompt'), false);
+  assert.equal(visible('acxd', steps).includes('lambda'), true);
+  assert.equal(visible('classic', steps).includes('acxd_application'), false);
 });
 
 test('tabIdFor maps ACXD asset types to the intended grouped tabs', () => {

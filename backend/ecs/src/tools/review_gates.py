@@ -198,10 +198,11 @@ def _missing_asset_findings(session_id: str) -> list[dict]:
     if not specs:
         return []
     try:
-        from tools.acxd_flow_spec import is_acxd_target
+        from tools.acxd_flow_spec import is_acxd_only_target, is_acxd_target
         acxd = bool(is_acxd_target(session_id))
+        acxd_only = bool(is_acxd_only_target(session_id))
     except Exception:
-        acxd = False
+        acxd = acxd_only = False
 
     lambda_folders: set[str] = set()
     data_requests: set[str] = set()
@@ -237,9 +238,11 @@ def _missing_asset_findings(session_id: str) -> list[dict]:
     findings: list[dict] = []
     for op_id in specs:
         names = _spellings(op_id)
-        checks = [("lambda", not (names & lambda_folders), "Lambda handler",
-                   "run lambda_generator_agent for this operation")]
-        if openapi_seen:
+        # ACXD only (v3.1) generates no Lambda and no OpenAPI: the operation's
+        # Data Request calling the customer's API is its one asset.
+        checks = [] if acxd_only else [("lambda", not (names & lambda_folders), "Lambda handler",
+                                        "run lambda_generator_agent for this operation")]
+        if openapi_seen and not acxd_only:
             checks.append(("openapi", not (names & openapi_ops), "OpenAPI path",
                            "run openapi_generator_agent / merge_openapi_fragments"))
         if acxd:

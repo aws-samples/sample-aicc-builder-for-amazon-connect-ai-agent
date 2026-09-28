@@ -29,7 +29,38 @@ https://github.com/user-attachments/assets/64b4cd24-4653-4fed-86f9-4cd62866e1e2
 
 ---
 
-## What's New in v3.0 — Amazon Connect Agentic CX Designer (ACXD) is now supported
+## What's New in v3.1 — ACXD only: just the Agentic CX Designer application
+
+Already running your own backend API and Contact Flow? Pick **ACXD only** on the
+start screen and AICC Builder builds the Agentic CX Designer application alone:
+no CloudFormation, Lambda, OpenAPI spec, AI Prompt or Contact Flow.
+
+- **The same conversation design.** Generative journeys, the wording your
+  requirements mandate, consent and identity gates, guardrails and the FAQ
+  knowledge base are designed exactly as for the ACXD target.
+- **A shorter interview.** No database, infrastructure or Contact Flow
+  questions. Instead the interview records each operation's endpoint on your
+  API, the API's base URL and the header it reads its credential from.
+- **Data requests that call your API.** Each one calls `WEBHOOK_URL` plus the
+  operation's own path. The credential is an ACXD secret you enter when you
+  deploy; it never enters the bundle.
+- **A contract for your backend.** `BACKEND-CONTRACT.md` lists every call your
+  API must answer: method and path, request and reply fields, and the formats
+  the runtime actually delivers (values with or without separators, yes/no as
+  words, dates in the business's time zone, a 200 reply checked against the
+  response schema).
+- **One command to deploy.** `./deploy.sh` asks for the workspace, API key, base
+  URL and secret values it is missing and deploys the application;
+  `WIRING-GUIDE.md` shows how to add the Agentic CX block to your Contact Flow.
+
+The Classic and ACXD targets are unchanged.
+
+> 📖 Bundle contents and deploy: [docs/acxd-packaging.md](./docs/acxd-packaging.md#acxd-only-v31)
+
+---
+
+<details>
+<summary><strong>What's New in v3.0</strong> — Amazon Connect Agentic CX Designer (ACXD) is now supported (click to expand)</summary>
 
 AICC Builder can now build your PoC for **Agentic CX Designer** as well as for
 the Classic stack. On the start screen, choose where your agent will run:
@@ -100,6 +131,8 @@ With the ACXD target you get:
 
 > 📖 Bundle contents and deploy phases: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
 > what we validated in a real Connect Customer account: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
+
+</details>
 
 ---
 
@@ -639,6 +672,7 @@ letter, and a number (no symbol required).
 | Doc | Description |
 |---|---|
 | [docs/agentic-ai.md](./docs/agentic-ai.md) | **How the multi-agent system keeps customer requirements intact end-to-end** — OperationSpec contract, deterministic validation, patch-only modification |
+| [docs/validation-pipeline.md](./docs/validation-pipeline.md) | **The deterministic gates behind every asset** — per-asset lint and normalization, the cross-asset checks (D1–D8, PARITY, D9) and how the reviewer's blocking set is computed |
 | [docs/existing-database.md](./docs/existing-database.md) | **Building on a database you already have** — live scan vs schema-as-document, schema fidelity, and the deterministic SQL gates |
 | [docs/acxd-packaging.md](./docs/acxd-packaging.md) | **ACXD runtime target** — bundle contract, deploy phases, the Agentic CX block |
 | [docs/acxd-live-validation.md](./docs/acxd-live-validation.md) | What a real Connect Customer deployment taught us — service-contract facts the SDK types do not show, and the fixes |
@@ -722,7 +756,35 @@ Contact Flow, CDK 인프라, FAQ)을 자동 생성합니다. 단일 오케스트
 
 ---
 
-## v3.0의 새 기능 — Amazon Connect Agentic CX Designer(ACXD)를 지원합니다
+## v3.1의 새 기능: ACXD 전용, Agentic CX Designer 애플리케이션만 생성
+
+백엔드 API와 Contact Flow를 이미 운영하고 있다면 시작 화면에서 **ACXD 전용**을
+고르세요. AICC Builder가 Agentic CX Designer 애플리케이션만 만듭니다.
+CloudFormation, Lambda, OpenAPI 스펙, AI 프롬프트, Contact Flow는 만들지 않습니다.
+
+- **같은 대화 설계.** 생성형 여정, 요구사항이 정한 문구, 동의·본인 확인 게이트,
+  가드레일, FAQ 지식 베이스를 ACXD 타깃과 똑같이 설계합니다.
+- **짧아진 인터뷰.** 데이터베이스, 인프라, Contact Flow는 묻지 않습니다. 대신 업무별
+  API 엔드포인트, API 기본 URL, 인증 값을 읽는 헤더 이름을 기록합니다.
+- **기존 API를 호출하는 데이터 요청.** 각 요청은 `WEBHOOK_URL`에 업무별 경로를 붙여
+  호출합니다. 인증 값은 배포할 때 입력하는 ACXD 시크릿이며 번들에는 들어가지
+  않습니다.
+- **백엔드 계약서.** `BACKEND-CONTRACT.md`에 API가 응답해야 할 호출이 모두
+  정리됩니다. 메서드와 경로, 요청·응답 필드, 런타임이 실제로 보내는 값의 형식(구분자가
+  있는 값과 없는 값, 예/아니오 단어, 업무 시간대 기준 날짜, 응답 스키마로 검사하는 200
+  응답)을 담습니다.
+- **명령 하나로 배포.** `./deploy.sh`가 워크스페이스, API 키, 기본 URL, 시크릿 값 중
+  빠진 것을 묻고 애플리케이션을 배포합니다. 기존 Contact Flow에 Agentic CX 블록을
+  붙이는 방법은 `WIRING-GUIDE.md`에 있습니다.
+
+Classic과 ACXD 타깃은 그대로입니다.
+
+> 📖 번들 구성과 배포: [docs/acxd-packaging.md](./docs/acxd-packaging.md#acxd-only-v31)
+
+---
+
+<details>
+<summary><strong>v3.0의 새 기능</strong> — Amazon Connect Agentic CX Designer(ACXD)를 지원합니다 (펼쳐 보기)</summary>
 
 이제 AICC Builder로 Classic 스택뿐 아니라 **Agentic CX Designer**용 PoC도 만들 수
 있습니다. 시작 화면에서 에이전트가 실행될 곳을 고르세요.
@@ -780,6 +842,8 @@ ACXD를 선택하면 다음을 받습니다.
 
 > 📖 번들 구성과 배포 단계: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
 > 실제 Connect Customer 계정 검증 기록: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
+
+</details>
 
 ---
 
@@ -1020,7 +1084,36 @@ AICC Builder は、約 1 時間の対話で、Amazon Connect 用のカスタム�
 
 ---
 
-## v3.0 の新機能 — Amazon Connect Agentic CX Designer（ACXD）に対応しました
+## v3.1 の新機能 — ACXD のみ：Agentic CX Designer アプリケーションだけを生成
+
+バックエンド API と Contact Flow をすでに運用しているなら、開始画面で **ACXD のみ**
+を選んでください。AICC Builder は Agentic CX Designer アプリケーションだけを作ります。
+CloudFormation、Lambda、OpenAPI スペック、AI プロンプト、Contact Flow は作りません。
+
+- **同じ会話設計。** 生成型ジャーニー、要件が定める文言、同意・本人確認のゲート、
+  ガードレール、FAQ ナレッジベースを ACXD ターゲットと同じように設計します。
+- **短くなったインタビュー。** データベース、インフラ、Contact Flow は質問しません。
+  代わりに業務ごとの API エンドポイント、API のベース URL、認証値を読むヘッダー名を
+  記録します。
+- **既存 API を呼び出すデータリクエスト。** 各リクエストは `WEBHOOK_URL` に業務ごとの
+  パスを付けて呼び出します。認証値はデプロイ時に入力する ACXD シークレットで、
+  バンドルには含まれません。
+- **バックエンドの契約書。** `BACKEND-CONTRACT.md` に API が応答すべき呼び出しを
+  すべてまとめます。メソッドとパス、リクエスト・応答フィールド、ランタイムが実際に
+  送る値の形式（区切り文字のある値とない値、はい/いいえの単語、業務のタイムゾーンでの日付、
+  応答スキーマで検査される 200 応答）を記載します。
+- **コマンド 1 つでデプロイ。** `./deploy.sh` がワークスペース、API キー、ベース URL、
+  シークレット値のうち足りないものを尋ねてアプリケーションをデプロイします。既存の
+  Contact Flow に Agentic CX ブロックを追加する方法は `WIRING-GUIDE.md` にあります。
+
+Classic と ACXD ターゲットは変わりません。
+
+> 📖 バンドルの内容とデプロイ: [docs/acxd-packaging.md](./docs/acxd-packaging.md#acxd-only-v31)
+
+---
+
+<details>
+<summary><strong>v3.0 の新機能</strong> — Amazon Connect Agentic CX Designer（ACXD）に対応しました（クリックで展開）</summary>
 
 AICC Builder で、Classic スタックに加えて **Agentic CX Designer** 向けの PoC も
 作れるようになりました。開始画面でエージェントを動かす場所を選びます。
@@ -1084,6 +1177,8 @@ ACXD を選ぶと次が得られます。
 
 > 📖 バンドルの内容とデプロイフェーズ: [docs/acxd-packaging.md](./docs/acxd-packaging.md) ·
 > 実際の Connect Customer アカウントでの検証記録: [docs/acxd-live-validation.md](./docs/acxd-live-validation.md)
+
+</details>
 
 ---
 
@@ -1450,6 +1545,7 @@ aws cognito-idp admin-create-user \
 | ドキュメント | 内容 |
 |---|---|
 | [docs/agentic-ai.md](./docs/agentic-ai.md) | **マルチエージェントがお客様の要件を最後まで保ち続ける仕組み** — OperationSpec を契約と見立てる方式、決定論的なバリデーション、パッチモードでの修正 |
+| [docs/validation-pipeline.md](./docs/validation-pipeline.md) | **すべてのアセットを支える決定論的ゲート** — アセットごとの lint と正規化、アセット間チェック（D1–D8、PARITY、D9）、レビュアーのブロッキングセットの算出方法 |
 | [docs/acxd-packaging.md](./docs/acxd-packaging.md) | **ACXD ランタイムターゲット** — バンドル契約、デプロイフェーズ、Agentic CX ブロック |
 | [docs/acxd-live-validation.md](./docs/acxd-live-validation.md) | 実際の Connect Customer アカウントへのデプロイで分かったこと — SDK の型からは見えないサービス契約と修正 |
 | [docs/architecture.md](./docs/architecture.md) | ランタイムのアーキテクチャ、WebSocket プロトコル、データフロー |

@@ -210,6 +210,43 @@ test('a REPLACED deployment records aliasRotated with the old and new ids, and s
   assert.match(text, /type=deployments/);   // where the key can be read
 });
 
+test('the update is tried once with the language codes; the refusal is logged and the deployment replaced', async () => {
+  // Live (2026-09-27): the retry without languageCodes could only answer "A deployment
+  // requires at least one language code", which hid the real refusal in the log.
+  const dir = tmpBundle({});
+  const ctx = deployCtx(dir, { updateFails: true });
+  ctx.state.applicationId = 'app-1';
+  ctx.state.buildId = 'b-1';
+  ctx.state.applicationLanguageCodes = ['ko-KR'];
+
+  await STEPS['deploy-application'].run(ctx, { environment: 'development' });
+
+  const updates = ctx.client.calls('UpdateApplicationDeploymentCommand');
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0].input.languageCodes, ['ko-KR']);
+  assert.match(ctx.lines.join('\n'), /refused to update the 'development' deployment in place \(InternalServerException/);
+  assert.equal(ctx.state.deploymentId, 'new-dep');
+});
+
+test('an ACXD-only bundle (no Contact Flow import) is not told to run a --rebind-alias it does not have', async () => {
+  const dir = tmpBundle({});
+  const ctx = deployCtx(dir, { updateFails: true });
+  ctx.managesContactFlow = false;
+  ctx.state.applicationId = 'app-1';
+  ctx.state.buildId = 'b-1';
+  ctx.state.applicationLanguageCodes = ['ko-KR'];
+
+  await STEPS['deploy-application'].run(ctx, { environment: 'development' });
+
+  assert.equal(ctx.state.aliasRotated, true);
+  assert.equal(ctx.state.aliasRotation.managesContactFlow, false);
+  const text = ctx.lines.join('\n');
+  assert.match(text, /ALIAS ROTATED/);
+  assert.match(text, /Alias dropdown/);
+  assert.match(text, /does not manage that contact flow/);
+  assert.doesNotMatch(text, /--rebind-alias/);
+});
+
 test('an in-place promotion keeps the key and clears a flag left by an earlier run', async () => {
   const dir = tmpBundle({});
   const ctx = deployCtx(dir, { updateFails: false });

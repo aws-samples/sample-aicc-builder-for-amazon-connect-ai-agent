@@ -118,6 +118,16 @@ def _business_profile(infrastructure: dict) -> dict:
                 profile["greeting"] = greeting
         except Exception as exc:  # pragma: no cover - spec store outage is non-fatal
             logger.debug("[ACXDContext] approved greeting lookup skipped: %s", exc)
+    # The closing the customer approved — FollowUpFlow's goodbye says it.
+    if not profile.get("closing"):
+        try:
+            from tools.spec_manager import get_session_flow_config
+            flow_config = get_session_flow_config()
+            closing = str(getattr(flow_config, "common_closing", "") or "").strip() if flow_config else ""
+            if closing:
+                profile["closing"] = closing
+        except Exception as exc:  # pragma: no cover - spec store outage is non-fatal
+            logger.debug("[ACXDContext] approved closing lookup skipped: %s", exc)
     return profile
 
 
@@ -523,6 +533,35 @@ class ACXDGenerationContext:
         return copy.deepcopy(self.payload)
 
 
+def _project_slug_for_acxd_only(infrastructure: dict, application: dict, profile: dict) -> str:
+    """An ASCII project name when no InfrastructureSpec exists (ACXD only).
+
+    Workspace-level ACXD resources are named per project (the backend-key secret,
+    guardrails); without a slug every ACXD-only project in one workspace would
+    share ``BackendApiKey`` and overwrite each other's credential.
+    """
+    if application.get("project_name"):
+        return str(application["project_name"])
+    for candidate in (infrastructure.get("project_name"), application.get("name"),
+                      profile.get("company_name"), profile.get("project_name")):
+        words = re.findall(r"[A-Za-z0-9]+", str(candidate or ""))
+        words = [w for w in words if w.lower() != "assistant"] or words
+        if words and re.search(r"[A-Za-z]{3}", "".join(words)):
+            return "-".join(w.lower() for w in words)[:48].strip("-")
+    return "aicc-acxd"
+
+
+def _acxd_only_path(op: dict, primary_tool: dict, tool_id: str) -> str:
+    """The customer's OWN endpoint path for an operation (ACXD only).
+
+    Classic pins every path to ``/tools/<tool_id>`` because it generates that API
+    itself; with the customer's API the path is whatever the interview recorded.
+    """
+    raw = str(primary_tool.get("path") or op.get("path") or f"/tools/{tool_id}").strip()
+    raw = raw.split("?", 1)[0].strip() or f"/tools/{tool_id}"
+    return raw if raw.startswith("/") else "/" + raw
+
+
 def build_generation_context(session_id: Optional[str] = None) -> ACXDGenerationContext:
     """Build the former ACXDSpec-shaped dict from the new source-of-truth specs."""
     sid = _session_id(session_id)
@@ -531,8 +570,25 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
     flow_spec = get_acxd_flow_spec(session_id)
     flow_data = _model_dump(flow_spec)
     plans = copy.deepcopy(flow_data.get("flows") or [])
-    openapi = _load_openapi_document(sid)
-    contracts = _operation_contracts(openapi)
+    from tools.acxd_flow_spec import is_acxd_only_target
+    acxd_only = bool(is_acxd_only_target(sid))
+    app_plan = flow_data.get("application") or {}
+    if acxd_only:
+        # No generated backend: the customer's API is the contract, and the
+        # OperationSpec is its only description in this bundle.
+        infrastructure = dict(infrastructure)
+        if not infrastructure.get("project_name"):
+            infrastructure["project_name"] = _project_slug_for_acxd_only(
+                infrastructure, app_plan, _business_profile(infrastructure))
+        contracts: dict[str, dict] = {}
+    else:
+        openapi = _load_openapi_document(sid)
+        contracts = _operation_contracts(openapi)
+    backend_auth_header = str(app_plan.get("backend_auth_header") or "").strip() if acxd_only else ""
+    backend_secret = None
+    if acxd_only and backend_auth_header:
+        from tools.acxd_data_request_builder import backend_api_key_secret_name
+        backend_secret = backend_api_key_secret_name(infrastructure.get("project_name"))
 
     data_integrations: list[dict] = []
     request_ids: dict[str, str] = {}
@@ -561,9 +617,11 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
                 break
             contract = contracts.get(key) or {}
         path = primary_tool.get("path") or contract.get("path") or f"/tools/{tool_id}"
-        if not str(path).startswith("/tools/"):
+        if acxd_only:
+            path = _acxd_only_path(op, primary_tool, tool_id)
+        elif not str(path).startswith("/tools/"):
             path = f"/tools/{str(path).strip('/').split('/')[-1]}"
-        data_integrations.append({
+        integration = {
             "data_request_id": data_request_id,
             "operation_ref": tool_id,
             "operation_id": raw_id,
@@ -588,7 +646,60 @@ def build_generation_context(session_id: Optional[str] = None) -> ACXDGeneration
             "purpose": op.get("summary") or op.get("description") or raw_id,
             # Secrets are workspace-level: the backend key secret is named per project.
             "project_slug": infrastructure.get("project_name"),
-        })
+        }
+        if acxd_only:
+            # The customer's own API: no generated backend behind {WEBHOOK_URL},
+            # so no implicit x-api-key — only the header the interview recorded,
+            # its value held in one project-scoped Secret for every request.
+            integration["external_backend"] = True
+            if backend_secret:
+                integration["auth_header"] = backend_auth_header
+                integration["auth_secret_name"] = backend_secret
+        data_integrations.append(integration)
+
+        # A HELPER tool of the operation is its own endpoint (1 tool = 1 Lambda +
+        # 1 API path in the other targets), so it gets its own Data Request —
+        # otherwise a journey's `data_request:<helper>` tool names a request the
+        # bundle does not have. Live (SELC e2e, 2026-09-22): the booking journey
+        # needed the `get_cleaning_price` quote first and the orchestrator had to
+        # add that request by hand during review.
+        for helper in tools[1:]:
+            helper_id = str(helper.get("tool_id"))
+            helper_request_id = _normalise_data_request_id(helper_id)
+            if str(helper.get("role") or "helper").lower() == "session":
+                continue          # session tools live in the flow config, not here
+            if helper.get("generate_lambda") is False and helper.get("generate_openapi") is False:
+                continue          # excluded from the PoC by the customer
+            if any(i["data_request_id"] == helper_request_id for i in data_integrations):
+                continue
+            request_ids[helper_id] = helper_request_id
+            helper_contract = contracts.get(helper_id) or contracts.get(helper_request_id) or {}
+            if acxd_only:
+                helper_path = _acxd_only_path({}, helper, helper_id)
+            else:
+                helper_path = helper.get("path") or helper_contract.get("path") or f"/tools/{helper_id}"
+                if not str(helper_path).startswith("/tools/"):
+                    helper_path = f"/tools/{str(helper_path).strip('/').split('/')[-1]}"
+            helper_integration = {
+                "data_request_id": helper_request_id,
+                "operation_ref": helper_id,
+                "operation_id": raw_id,
+                "path": helper_path,
+                "mode": "external",
+                "http_method": helper_contract.get("http_method") or helper.get("http_method") or "POST",
+                "request_fields": _merge_fields(
+                    helper_contract.get("request_fields"),
+                    [_field_dict(field) for field in (helper.get("input_fields") or [])]),
+                "response_fields": _with_envelope(_merge_fields(
+                    helper_contract.get("response_fields"),
+                    [_field_dict(field) for field in (helper.get("output_fields") or [])])),
+                "purpose": helper.get("summary") or helper.get("trigger_context") or helper_id,
+                "project_slug": infrastructure.get("project_name"),
+            }
+            for key in ("external_backend", "auth_header", "auth_secret_name"):
+                if key in integration:
+                    helper_integration[key] = integration[key]
+            data_integrations.append(helper_integration)
 
     # Live (AnyClinic, 2026-09-20): a plan step named its request by the
     # OPERATION id (`reschedule_appointment`) while the bundled request is

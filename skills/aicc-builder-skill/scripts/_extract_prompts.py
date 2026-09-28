@@ -121,6 +121,11 @@ def extract_prompts(repo_root: Path, skill_root: Path) -> int:
         # Appended last for an ACXD-target session in the webapp
         # (get_phase_system_prompt); the skill applies it when the user picked ACXD.
         "ACXD_RUNTIME_TARGET_PROMPT",
+        # ACXD only (v3.1): replaces GENERATION_PROMPT and the reference sections
+        # for an `acxd_only` session; the skill applies them when the user picked
+        # ACXD only.
+        "ACXD_ONLY_GENERATION_PROMPT",
+        "ACXD_ONLY_RUNTIME_TARGET_PROMPT",
     ]
     parts = []
     for p in phases:
@@ -357,6 +362,12 @@ def _extract_acxd(src: Path, skill_root: Path) -> None:
     if deploy_src.is_file():
         shutil.copyfile(deploy_src, out_templates / "deploy_workshop.sh")
         print(f"[ok] templates/deploy_workshop.sh ({deploy_src.stat().st_size} bytes)")
+
+    # the ACXD-only bundle's deploy.sh (v3.1): the runner and nothing else
+    acxd_only_src = src / "templates/deploy_acxd_only.sh"
+    if acxd_only_src.is_file():
+        shutil.copyfile(acxd_only_src, out_templates / "deploy_acxd_only.sh")
+        print(f"[ok] templates/deploy_acxd_only.sh ({acxd_only_src.stat().st_size} bytes)")
 
 _LINT_HEADER = '''#!/usr/bin/env python3
 # AUTO-GENERATED — DO NOT EDIT.

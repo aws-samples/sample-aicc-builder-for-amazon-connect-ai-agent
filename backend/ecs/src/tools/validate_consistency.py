@@ -19,7 +19,7 @@ from strands import tool
 from .spec_manager import get_all_specs, get_all_tools
 from .s3_asset_storage import list_session_assets, get_asset_from_s3
 from .acxd_bundle import load_acxd_bundle
-from .acxd_flow_spec import get_acxd_flow_spec, is_acxd_target
+from .acxd_flow_spec import get_acxd_flow_spec, is_acxd_only_target, is_acxd_target
 
 logger = logging.getLogger(__name__)
 
@@ -2639,7 +2639,7 @@ def _dedupe_d9_issues(issues: list[dict]) -> list[dict]:
 
 
 def run_d9_checks(session_id: str, *, classic_mismatches: Optional[list[dict]] = None) -> list[dict]:
-    """Run D9-1…D9-8 for an ACXD runtime target.
+    """Run D9-1…D9-9 for an ACXD runtime target.
 
     Returns only stable machine-readable findings:
     ``[{"id": "D9-1", "severity": "error", "message": "...", ...}]``.
@@ -2670,15 +2670,130 @@ def run_d9_checks(session_id: str, *, classic_mismatches: Optional[list[dict]] =
             classic_mismatches = []
 
     issues: list[dict] = []
+    acxd_only = is_acxd_only_target(session_id)
     issues.extend(_d9_structural_checks(bundle, flow_spec))       # D9-1 / D9-2 + retained cross-refs
-    issues.extend(_d9_data_request_checks(bundle, session_id))    # D9-3
+    if acxd_only:
+        # No OpenAPI or Lambda to compare with: the Data Requests ARE the
+        # contract of the customer's API (BACKEND-CONTRACT.md renders them).
+        issues.extend(_d9_external_api_checks(bundle))            # D9-3 (ACXD only)
+    else:
+        issues.extend(_d9_data_request_checks(bundle, session_id))    # D9-3
     issues.extend(_d9_slot_type_checks(bundle, flow_spec))        # D9-4
     issues.extend(_d9_knowledge_base_checks(bundle, flow_spec, session_id))  # D9-5
-    issues.extend(_d9_contact_flow_checks(bundle, flow_spec))     # D9-6
+    if not acxd_only:
+        # ACXD only ships no Contact Flow and no backend: the customer wires the
+        # Agentic CX block and owns the API, so D9-6 and D9-8 have no subject.
+        issues.extend(_d9_contact_flow_checks(bundle, flow_spec))     # D9-6
     issues.extend(_d9_identity_metadata_checks(bundle, flow_spec))  # D9-7
-    issues.extend(_d9_external_backend_checks(bundle, classic_mismatches))  # D9-8
-    issues.extend(_d9_backend_auth_checks(bundle, session_id))    # D9-8 (auth)
+    if not acxd_only:
+        issues.extend(_d9_external_backend_checks(bundle, classic_mismatches))  # D9-8
+        issues.extend(_d9_backend_auth_checks(bundle, session_id))    # D9-8 (auth)
+    issues.extend(_d9_mandated_wording_checks(                    # D9-9
+        bundle, session_id, include_contact_flows=not acxd_only))
     return _dedupe_d9_issues(issues)
+
+
+#: A path segment the runtime would send verbatim (`/orders/{orderId}`).
+_D9_PATH_TEMPLATE = re.compile(r"\{(?!WEBHOOK_URL\})[^}]*\}")
+
+
+def _d9_spoken_haystack(documents: list) -> str:
+    """Every string of the given assets, plus each flow's messages joined in node
+    order — a line the builder splits over two nodes is one sentence to the caller."""
+    from tools.requirement_items import _quote_key
+
+    chunks: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            chunks.append(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    for document in documents:
+        walk(document)
+        nodes = document.get("nodes") if isinstance(document, dict) else None
+        if isinstance(nodes, dict):
+            chunks.append(" ".join(
+                str(message.get("body") or "")
+                for node in nodes.values() if isinstance(node, dict)
+                for message in node.get("messages") or [] if isinstance(message, dict)))
+    return _quote_key("\n".join(chunks))
+
+
+def _d9_mandated_wording_checks(bundle: dict, session_id: str, *, include_contact_flows: bool) -> list[dict]:
+    """D9-9: each sentence the requirements quote for the assistant to say — and
+    the interview kept — is in the generated flows word for word.
+
+    Live (SELC e2e, 2026-09-26): the escalation plan carried the document's
+    "…이전 전달주신 정보는 …" verbatim, the interview gate passed, and the
+    bundle's EscalationFlow said the builder's own "…이전에 전달해 주신 정보는 …";
+    nothing after the interview compared the two."""
+    try:
+        from tools.requirement_items import _quote_key, kept_quotes, load_ledger
+        quotes = kept_quotes(load_ledger(session_id))
+    except Exception as exc:
+        logger.debug("[D9] mandated wording check skipped: %s", exc)
+        return []
+    if not quotes:
+        return []
+    documents = [f for f in bundle.get("flows") or [] if isinstance(f, dict)]
+    if include_contact_flows:
+        documents += [c for c in bundle.get("contact_flows") or [] if isinstance(c, dict)]
+    haystack = _d9_spoken_haystack(documents)
+    issues: list[dict] = []
+    for quote in quotes:
+        if _quote_key(quote["text"]) in haystack:
+            continue
+        issues.append(_d9_issue(
+            "D9-9",
+            f"the requirements quote {quote.get('id')} ({quote.get('item_id')}) \"{str(quote['text'])[:120]}\" "
+            "for the assistant to say, and no generated flow says it word for word — put that exact sentence "
+            "(do not rephrase it) in the message of the step that says it (patch_acxd_asset), or regenerate "
+            "that flow; dropping it is the customer's decision, recorded in the interview",
+            asset_type="flow", field="messages", quote_id=quote.get("id"),
+        ))
+    return issues
+
+
+def _d9_external_api_checks(bundle: dict) -> list[dict]:
+    """D9-3 for ACXD only: each external Data Request must be callable as written.
+
+    The URL is ``{WEBHOOK_URL}`` + the operation's own path. A path template such
+    as ``/orders/{orderId}`` is not filled from the request — the runtime posts the
+    fields as the JSON body — so the customer's API would receive the braces
+    literally. The same holds for a query string, and a URL that is not the
+    placeholder (a literal host) bypasses the deploy-time base URL.
+    """
+    issues: list[dict] = []
+    for data_request in bundle.get("data_requests") or []:
+        if not isinstance(data_request, dict):
+            continue
+        webhook = data_request.get("webhook") or {}
+        if webhook.get("implementation") != "external":
+            continue
+        request_id = data_request.get("dataRequestId") or "<unknown>"
+        url = str(webhook.get("url") or "")
+        if not url.startswith("{WEBHOOK_URL}"):
+            issues.append(_d9_issue(
+                "D9-3", f"Data Request {request_id!r} URL {url!r} must start with {{WEBHOOK_URL}} — the "
+                "base URL of the customer's API is supplied at deploy time",
+                asset_type="data_request", field="webhook.url", operation_id=request_id,
+            ))
+            continue
+        path = url[len("{WEBHOOK_URL}"):]
+        if _D9_PATH_TEMPLATE.search(path) or "?" in path:
+            issues.append(_d9_issue(
+                "D9-3", f"Data Request {request_id!r} path {path!r} carries a path parameter or query "
+                "string; the runtime sends the fields as the JSON body and never fills them in — give "
+                "the operation a fixed path (update_operation_spec path=...) that reads the body",
+                asset_type="data_request", field="webhook.url", operation_id=request_id,
+            ))
+    return issues
 
 
 def _d9_backend_auth_checks(bundle: dict, session_id: str) -> list[dict]:
@@ -2775,12 +2890,23 @@ def _d9_api_methods(template: str) -> list[tuple[str, str, str]]:
 
 
 def _validate_parameter_consistency_impl(session_id: str) -> dict:
-    """Preserve D1–D8 behavior and append D9 only for ACXD sessions."""
-    result = _D1_D8_IMPLEMENTATION(session_id)
+    """Preserve D1–D8 behavior and append D9 only for ACXD sessions.
+
+    ACXD only (v3.1) generates no Lambda, OpenAPI, CloudFormation, prompt or
+    Contact Flow, so the Classic cross-asset checks have nothing to compare and
+    only D9 runs."""
     try:
         acxd_target = is_acxd_target(session_id)
+        acxd_only = is_acxd_only_target(session_id)
     except Exception:
-        acxd_target = False
+        acxd_target = acxd_only = False
+    if acxd_only:
+        from tools.spec_manager import get_backend_specs
+        result = {"success": True, "mismatches": [],
+                  "summary": "ACXD only: Classic backend checks (D1-D8) do not apply",
+                  "operations_checked": len(get_backend_specs() or {})}
+    else:
+        result = _D1_D8_IMPLEMENTATION(session_id)
     mismatches = list(result.get("mismatches") or [])
     if acxd_target:
         mismatches.extend(_d9_as_mismatch(issue) for issue in run_d9_checks(

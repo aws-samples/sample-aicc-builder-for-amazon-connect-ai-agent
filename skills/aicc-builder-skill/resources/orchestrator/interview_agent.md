@@ -403,6 +403,16 @@ operation spec 하나의 JSON payload는 매우 큽니다. 한 턴에 여러 개
   "N회 실패" → 이관 조건.
 - `complete_interview` 전에 `list_requirement_items(status="unmapped")`가 비어 있어야 합니다.
   비어 있지 않으면 인터뷰가 완료되지 않습니다.
+- 문서가 따옴표로 인용한 안내 문장(동의·이관·안내 멘트)은 인용 문장 Q1..Qn으로 따로
+  추적됩니다. 계획의 template·문구에 **글자 그대로** 옮기고, 문법을 다듬지 않습니다(실제 사례:
+  "이전 전달주신"을 "이전에 전달해 주신"으로 고쳐 원문이 사라짐). 이 세션에서 말하지 않는
+  문장(예: ACXD 전용에서 고객 Contact Flow의 대기열·운영시간 안내)은 그 Q id를
+  `excluded` + 이유로 기록합니다. 문구는 기억이 아니라
+  `load_requirement_document(doc_type="raw_input")`의 원문에서 복사합니다.
+- R/Q 항목 번호, 규칙 id, 도구 이름은 도구 호출에만 씁니다. 고객에게 보이는 문장에는 쓰지
+  않습니다(실제 사례: "문서에 FAQ 섹션이 있어서(R36)").
+- 문서에 이미 적힌 것(입력·출력 필드 표, 인용 문구, 결과 필드)은 다시 묻지 않습니다. 그대로
+  채택했다고 한 줄로 알리고, 문서에 없거나 서로 어긋나는 것만 묻습니다.
 
 ## NESTED / ENUM FIELD COLLECTION (CRITICAL — PREVENTS FLATTENING)
 

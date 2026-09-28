@@ -151,6 +151,17 @@
                   "outputKey": {
                     "type": "string",
                     "default": "ApiEndpoint"
+                  },
+                  "source": {
+                    "type": "string",
+                    "enum": ["cfn", "env"],
+                    "default": "cfn",
+                    "description": "cfn: read the CloudFormation output of the bundled backend. env: ACXD-only bundle, WEBHOOK_URL comes from the environment (the customer's own API)."
+                  },
+                  "defaultUrl": {
+                    "type": "string",
+                    "pattern": "^https://[^\\s{}]+$",
+                    "description": "source=env only: the base URL used when WEBHOOK_URL is not exported."
                   }
                 }
               }

@@ -249,7 +249,8 @@ def record_modification_outcome(
 ) -> None:
     """Attach an outcome to the most recent request entry.
 
-    outcome values: "claimed_success", "escalated_spec_level", "disambiguation_asked",
+    outcome values: "claimed_success", "no_tool_call" (the reply claimed results in
+                    a turn that ran no tool), "escalated_spec_level", "disambiguation_asked",
                     "error", "skipped".
     """
     state = _read_state(session_id)

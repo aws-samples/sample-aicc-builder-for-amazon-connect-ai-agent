@@ -33,6 +33,7 @@ import { sendRuntimeTarget } from '../hooks/useWebSocket';
 import { ModelSelector } from './ModelSelector';
 import { validateFile, MAX_FILES } from './ChatAttachmentButton';
 import { AttachmentPreview } from './AttachmentPreview';
+import { BrandLogo } from './BrandLogo';
 
 interface ChatEmptyStateProps {
   language: Language;
@@ -59,6 +60,9 @@ const STRINGS: Record<Language, Record<string, string>> = {
     classicRuntimeDesc: 'Lex + AI agent + AgentCore Gateway',
     acxdRuntime: 'ACXD',
     acxdRuntimeDesc: 'Agentic CX Designer app behind the Agentic CX block',
+    acxdOnlyRuntime: 'ACXD only',
+    acxdOnlyRuntimeDesc: 'Only the Agentic CX Designer app; calls your existing API. No Lambda, OpenAPI, CloudFormation or Contact Flow',
+    fullDescAcxdOnly: 'Run the full interview and generate the Agentic CX Designer application with its deploy kit.',
     segment: 'Single Segment',
     segmentDesc: 'Generate just one Connect asset: Contact Flow, AI Prompt, or FAQ.',
     improve: 'Improve Existing',
@@ -83,6 +87,9 @@ const STRINGS: Record<Language, Record<string, string>> = {
     classicRuntimeDesc: 'Lex + AI 에이전트 + AgentCore Gateway',
     acxdRuntime: 'ACXD',
     acxdRuntimeDesc: 'Agentic CX 블록 뒤의 Agentic CX Designer 앱',
+    acxdOnlyRuntime: 'ACXD 전용',
+    acxdOnlyRuntimeDesc: 'Agentic CX Designer 앱만 생성하고 기존 API를 호출합니다. Lambda·OpenAPI·CloudFormation·Contact Flow 없음',
+    fullDescAcxdOnly: '전체 인터뷰를 진행하고 Agentic CX Designer 애플리케이션과 배포 키트를 생성합니다.',
     segment: '단일 세그먼트',
     segmentDesc: 'Connect 에셋 하나만 생성: Contact Flow, AI 프롬프트, FAQ.',
     improve: '기존 에셋 개선',
@@ -107,6 +114,9 @@ const STRINGS: Record<Language, Record<string, string>> = {
     classicRuntimeDesc: 'Lex + AI エージェント + AgentCore Gateway',
     acxdRuntime: 'ACXD',
     acxdRuntimeDesc: 'Agentic CX ブロックの背後にある Agentic CX Designer アプリ',
+    acxdOnlyRuntime: 'ACXD のみ',
+    acxdOnlyRuntimeDesc: 'Agentic CX Designer アプリだけを生成し、既存の API を呼び出します。Lambda・OpenAPI・CloudFormation・Contact Flow なし',
+    fullDescAcxdOnly: 'フルインタビューを実施し、Agentic CX Designer アプリケーションとデプロイキットを生成します。',
     segment: '単一セグメント',
     segmentDesc: 'Connectアセットを1つだけ生成: Contact Flow、AIプロンプト、FAQ。',
     improve: '既存を改善',
@@ -139,6 +149,7 @@ const MODE_CARDS: { id: StartMode; icon: typeof LayoutGrid; titleKey: string; de
 const RUNTIME_TARGET_OPTIONS: Array<{ id: RuntimeTarget; titleKey: string; descKey: string }> = [
   { id: 'classic', titleKey: 'classicRuntime', descKey: 'classicRuntimeDesc' },
   { id: 'acxd', titleKey: 'acxdRuntime', descKey: 'acxdRuntimeDesc' },
+  { id: 'acxd_only', titleKey: 'acxdOnlyRuntime', descKey: 'acxdOnlyRuntimeDesc' },
 ];
 
 // Text-asset extensions the start screen accepts in addition to images/docs.
@@ -283,9 +294,10 @@ export function ChatEmptyState({ language, onStart }: ChatEmptyStateProps) {
   return (
     <div className="flex flex-col items-center justify-center min-h-full px-4 py-8">
       {/* Logo */}
-      <div className="w-16 h-16 mb-5 rounded-2xl bg-gradient-to-br from-primary-500 to-primary-600 flex items-center justify-center shadow-lg dark:shadow-glow">
-        <span className="text-3xl">🤖</span>
-      </div>
+      <BrandLogo
+        variant="symbol"
+        className="w-36 h-20 mb-5"
+      />
 
       <h2 className="text-xl lg:text-2xl font-semibold text-surface-900 dark:text-surface-100 mb-8 text-center">
         {t.heading}
@@ -321,7 +333,7 @@ export function ChatEmptyState({ language, onStart }: ChatEmptyStateProps) {
                 {t[card.titleKey]}
               </h3>
               <p className="text-xs text-surface-500 dark:text-surface-400 leading-relaxed">
-                {t[card.descKey]}
+                {t[card.id === 'full' && runtimeTarget === 'acxd_only' ? 'fullDescAcxdOnly' : card.descKey]}
               </p>
             </>
           );

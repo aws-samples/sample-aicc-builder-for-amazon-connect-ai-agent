@@ -61,6 +61,14 @@ current_message_index: contextvars.ContextVar[int] = contextvars.ContextVar(
     "current_message_index", default=0
 )
 
+# The customer's message for this WS iteration, exactly as typed. A requirement
+# document is stored from it (and from the session's text uploads) rather than
+# from the model's re-typed copy — e2e 2026-09-25: a 13.9 KB document became a
+# 7.6 KB raw_input and a quoted hand-off sentence lost its wording.
+current_user_message_text: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_user_message_text", default=None
+)
+
 # Consolidated callback handler — the same instance is shared across all
 # sub-agents in one request (see app.py: set_research_callback, set_faq_callback,
 # ... all receive the same ``callback_handler``). Nine module-level globals
