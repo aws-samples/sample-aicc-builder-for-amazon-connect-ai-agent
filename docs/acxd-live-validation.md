@@ -448,8 +448,8 @@ Studio test panel and through a Contact Flow with the Agentic CX block
 | The regenerated booking journey listed its knowledge tool as "- {KB:FAQ}: …" in its prompt; every booking ended at once in the agent hand-off (`Slot=KB is unresolved`, `AgentFailure`) | K2: `{KB:<name>}` outside `knowledgeBaseId` becomes plain words; other `{name:Namespace}` tokens outside `NLX.*` are reported; the generator is told to keep the placeholder in `knowledgeBaseId` |
 | Through Connect the FAQ answer never arrived (`KbResponded status: failure`); the knowledge base had been created as en-US because its document named no language. The test panel still answered | the knowledge base carries the application's languages, and packaging fills them into a KB asset generated earlier; after the redeploy the Connect chat said the parking answer and the follow-up question |
 | The deployed runtime judges a knowledge_base node as `match` / `no_match` / `failure` / `timeout`, and a `success` edge was taken on `no_match` with an empty answer | K1 adds a `no_match` edge to where `failure` goes; FaqFlow has it first |
-| A Contact Flow imported as JSON with the ids and the deployment key stayed silent (no conversation reached the application); picking workspace, application and alias in the block's dropdowns and clicking the panel's **Confirm** made it answer | WIRING-GUIDE: set the contact language, pick the three values, Confirm, publish; the alias is listed as `Production` even for the development environment |
-| Through Connect chat the identity turn (the booking journey calls `findPatient`) ended in the block's Error branch on both builds whose tool had `interimMessages`; the application had answered with the interim sentence and the result (after 8.2 s and 8.4 s). The same bundle with only the interim messages removed answered that turn three times, once after 8.9 s | J8 removes `interimMessages` from journey tools; the generator is told not to add them |
+| A Contact Flow imported as JSON with the ids and a deployment key stayed silent (no conversation reached the application); picking workspace, application and alias in the block's dropdowns and clicking the panel's **Confirm** made it answer. Later the same day the flow imported as JSON with the current key answered without the block being opened, so the silent import had another cause (not isolated) | WIRING-GUIDE: set the contact language, pick the three values, Confirm, publish; the alias is listed as `Production` even for the development environment |
+| Through Connect chat the identity turn (the booking journey calls `findPatient`) left the block on both builds whose tool had `interimMessages`: the contact ended about 5 s into the turn, before the application's answer (8.2 s and 8.4 s). The test flow sent Default and Error to the same prompt then, so which of the two is not known. The same bundle with only the interim messages removed answered such turns (6 to 9 s) | J8 removes `interimMessages` from journey tools; the generator is told not to add them |
 
 Through Connect chat the greeting, a two-message basic node, the FAQ answer,
 the follow-up question and the booking journey's identity turn all arrived, and
@@ -469,11 +469,29 @@ the model called an exit condition (`exit_condition_1`) and the runtime
 reported `AgentFailure` ("failed to generate a final answer"); the same input
 then completed.
 
-Still open, on the service side: after a deployment was replaced, the Connect
-chat kept being answered by the replaced build (build id in the conversation
-events) 45 minutes and two replacements later, also after the block was saved
-with the current deployment's key; the test panel runs the current flows.
-Voice was not tested.
+What looked like Connect keeping a replaced build was one open contact. From
+02:49 to 04:05 UTC every "new" test chat went into the same contact, still in
+progress hours later: one ACXD conversation id (the conversation id is the
+Connect contact id), one greeting, and the deployment key and build of 02:49,
+when the flow still held the key of the deployment replaced a minute earlier.
+Connect's test chat window reopens a chat that has not ended, and a contact
+stays on the key its Agentic CX block started with, so re-pointing and
+publishing the flow could not reach it. Started as a new contact, the chat was
+answered by the current deployment key and build (both are in every
+conversation event).
+
+With the flow's branches then wired to separate prompts, the final bundle
+answered over Connect chat, each run a new contact on the current build: "내일
+오후 2시에 정형외과" → 9월 29일(화) read back, identity (the `findPatient` turn),
+the summary read back, yes → booked, "아니요 없어요" → the closing sentence and
+the block's **Default** branch; the parking answer, the follow-up question and
+the closing → Default; a booking found by phone number and birth date, read
+back, cancelled after a yes → Default; an agent request → **Escalation**;
+emergency words → the 119 sentence, then Escalation. The designer stores
+Default as the block's `NoMatchingCondition` error and writes `NextAction` as
+the Error target. A booking made a few minutes earlier was not found by its
+number (the mock backend keeps bookings per Lambda instance); a seed booking
+was. Voice was not tested.
 
 ## Service contract facts (not in the SDK types, learned from the API)
 
@@ -535,7 +553,7 @@ Voice was not tested.
 | Knowledge base language | A knowledge base created without `mainLanguageCode` / `languageCodes` is stored as en-US; a ko-KR conversation's lookup then fails in the deployed runtime (`KbResponded status: failure`) although the Studio test panel answers (2026-09-28) | KB document carries the application's languages; packaging fills them |
 | Knowledge base outcome | The deployed runtime evaluates a knowledge_base node as `match` / `no_match` / `failure` / `timeout`; an edge on `success` is taken on `no_match` too, with an empty answer (2026-09-28) | K1 `no_match` edge |
 | Placeholders in text | `{KB:<name>}` resolves in `knowledgeBaseId` only; in a journey prompt it fails the journey (`Slot=KB is unresolved`, `AgentFailure`) (2026-09-28) | runtime contract K2 |
-| Agentic CX block | Values set by JSON import did not reach the application; the block's dropdowns plus the panel's **Confirm** did. The alias list shows the deployment as `Production` for the development environment. Over chat, a journey turn whose tool sent `interimMessages` ended in the block's Error branch; without them the same turn answered. After a replacement the chat kept reaching the replaced build (45 min, two replacements) (2026-09-28) | J8, WIRING-GUIDE |
+| Agentic CX block | The alias list shows the deployment as `Production` for the development environment; the dropdowns plus the panel's **Confirm** store the current deployment key (a JSON import with the current key answered too). The ACXD conversation id is the Connect contact id, and a contact stays on the deployment key its block started with; Connect's test chat window reopens a chat that has not ended. A finished conversation leaves through Default (`NoMatchingCondition`), a hand-off through the `Escalation` condition. Over chat, a journey turn whose tool sent `interimMessages` left the block before the answer; without them the same turn answered (2026-09-28) | J8, WIRING-GUIDE, the runner's alias warning |
 | Routing text | `description` / `aiDescription` are ASCII-only; non-ASCII is rejected on create | system flows and the generator write English routing text; the bundle loader strips non-ASCII |
 | Slot regex | The `regex` attached to a built-in slot is not enforced at capture: a value of the wrong shape is stored (an order number in the return-number slot) and reaches the Data Request. A `matches_regex` condition on the slot IS evaluated, against the delivered (separator-stripped) value | runtime contract F1: a `matches_regex` guard after every pattern-bearing capture, separators optional, letters either case; adapter reassigns a value that fits exactly one other field |
 | Associated slots | `choice.associatedSlotTypeIds` is accepted by the API and silently discarded (by slot name and by identifier); a capture node listens on one slot only | no second slot per node; E2 tests the utterance instead |

@@ -213,11 +213,14 @@ Fixing it is one of:
 ./deploy.sh --rebind-alias <deploymentKey>   # patches the published flow in place
 ```
 
-or, in the console: open the contact flow → click the Agentic CX block → Alias
-dropdown → re-select the environment alias → Save → Publish. Re-running the whole
-deploy with `ACXD_ALIAS_ID=<new deploymentKey>` works too. Reading the key
-requires the console-internal endpoint (a console session plus its `cxn` bearer
-token — no CLI or SDK equivalent):
+or, in the console: open the contact flow → click the Agentic CX block →
+re-select the application, then the alias (ACXD lists it as `Production`, also
+for the development environment) → **Confirm** → Save → Publish. A chat or call
+that is already in the block stays on the build it started with, so test with a
+new contact; Connect's test chat window reopens a chat that has not ended.
+Re-running the whole deploy with `ACXD_ALIAS_ID=<new deploymentKey>` works too.
+Reading the key requires the console-internal endpoint (a console session plus
+its `cxn` bearer token — no CLI or SDK equivalent):
 
 ```
 GET /acxd/api/cxn/flowResources?workspaceId=<ws>&applicationId=<app>&type=deployments

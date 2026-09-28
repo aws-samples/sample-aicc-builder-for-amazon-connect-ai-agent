@@ -32,6 +32,20 @@ def test_the_language_is_set_before_the_block_and_the_alias_is_named_as_acxd_sho
     assert "`patientName`" in guide
 
 
+def test_the_branches_and_a_redeploy_test_are_described_as_seen_live():
+    # Live (2026-09-28, separate prompts per branch): a goodbye left through Default,
+    # stored as NoMatchingCondition; an agent request or emergency through Escalation.
+    # A chat that had not ended stayed on the build it started with, so the guide
+    # sends the reader to a new contact instead of blaming the service.
+    guide = _generate_acxd_only_wiring_guide({
+        "application": {"name": "hanbit-booking", "settings": {"languageCode": "ko-KR"}},
+        "context_variables": []})
+    assert "`NoMatchingCondition`" in guide and "`NoMatchingError`" in guide
+    assert "Testing a change" in guide and "greets you again" in guide
+    assert "replaced build 45 minutes" not in guide
+    assert "Error branch" not in guide
+
+
 def test_an_application_without_a_language_gets_a_visible_placeholder():
     guide = _generate_acxd_only_wiring_guide({"application": {"name": "x"}, "context_variables": []})
     assert "<the application's language code>" in guide

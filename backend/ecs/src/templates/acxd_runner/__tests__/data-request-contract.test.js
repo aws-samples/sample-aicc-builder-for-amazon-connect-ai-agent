@@ -245,6 +245,9 @@ test('an ACXD-only bundle (no Contact Flow import) is not told to run a --rebind
   assert.match(text, /Alias dropdown/);
   assert.match(text, /does not manage that contact flow/);
   assert.doesNotMatch(text, /--rebind-alias/);
+  // The dropdown lists the deployment as 'Production'; an open chat keeps its build.
+  assert.match(text, /'Production'/);
+  assert.match(text, /stays on the previous build: test with a new one/);
 });
 
 test('an in-place promotion keeps the key and clears a flag left by an earlier run', async () => {

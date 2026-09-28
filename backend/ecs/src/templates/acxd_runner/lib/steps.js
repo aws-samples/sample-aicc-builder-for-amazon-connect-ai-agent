@@ -879,9 +879,13 @@ function recordAliasRotation(ctx, rotation) {
   ctx.log('  !! the previous one — which still resolves, to the previous build.');
   ctx.log('  !! Fix it in the Connect flow designer, exactly:');
   ctx.log('  !!   1. Open the contact flow that carries the Agentic CX block');
-  ctx.log('  !!   2. Click the block -> Alias dropdown');
-  ctx.log(`  !!   3. Re-select the environment alias (the '${rotation.environment}' entry)`);
+  ctx.log('  !!   2. Click the block -> re-select the application, then open the Alias dropdown');
+  ctx.log(`  !!   3. Pick the alias (ACXD lists it as 'Production', also for the '${rotation.environment}'`);
+  ctx.log('  !!      environment) -> Confirm');
   ctx.log('  !!   4. Save -> Publish');
+  // Live (2026-09-28): a contact keeps the key its block started with, and Connect's
+  // test chat reopens a chat that has not ended, so a re-pointed flow can look stale.
+  ctx.log('  !! A chat or call already in the block stays on the previous build: test with a new one.');
   if (rotation.managesContactFlow === false) {
     // This bundle imports no Contact Flow, so deploy.sh cannot re-point one.
     ctx.log('  !! This bundle does not manage that contact flow; nothing to do if none uses it yet.');

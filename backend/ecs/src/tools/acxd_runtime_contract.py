@@ -3981,13 +3981,14 @@ class _RuntimeContract:
             for tool in tools:
                 if "interimMessages" in tool:
                     # Live (2026-09-28, Connect chat through the Agentic CX block):
-                    # both builds whose journey tool sent an interim message ended the
-                    # tool turn in the block's Error branch although the application
-                    # answered; the same bundle without them answered (7-9 s turns).
+                    # on both builds whose journey tool sent an interim message the
+                    # block left the conversation about 5 s into the tool turn,
+                    # before the application's answer (8.2 s and 8.4 s); the same
+                    # bundle without them answered such turns (6-9 s).
                     tool = {k: v for k, v in tool.items() if k != "interimMessages"}
                     self.change(f"{label}: interimMessages removed from a {tool.get('type')!r} tool — "
-                                "over a Connect chat the Agentic CX block ends such a turn in its "
-                                "Error branch (J8)")
+                                "over a Connect chat the Agentic CX block leaves the conversation "
+                                "on such a turn (J8)")
                 kind = tool.get("type")
                 if kind == "mcpFlow":
                     self.violation(

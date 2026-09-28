@@ -1,10 +1,10 @@
 """J8: journey tools carry no interim messages.
 
 Live (2026-09-28, Connect chat through the Agentic CX block, same Hanbit bundle):
-the identity turn calls `findPatient`. Both builds whose tool sent an interim
-message ("환자 정보를 확인하고 있어요…") ended that turn in the block's Error branch
-although the application answered in about 8 s; the bundle with only the
-interim messages removed answered the same turn twice (7 s and 9 s).
+the identity turn calls `findPatient`. On both builds whose tool sent an interim
+message ("환자 정보를 확인하고 있어요…") the block left the conversation about
+5 s into that turn, before the application's answer (8.2 s and 8.4 s); the
+bundle with only the interim messages removed answered such turns (6-9 s).
 """
 
 from __future__ import annotations

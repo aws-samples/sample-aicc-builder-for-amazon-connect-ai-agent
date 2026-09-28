@@ -101,7 +101,7 @@ These node types always have the following edges, whether or not you write them.
 - `prompt` (required): the agent's instructions for this stretch of the conversation. Write it in the project's language.
 - `modelType`: one of `amazon-nova-2-lite`, `anthropic.claude-haiku-4-5`, `anthropic.claude-sonnet-5`.
 - `tools`: use ONLY these shapes.
-  * `{"type": "dataRequest", "dataRequest": {"dataRequestId": "<id>", "payload": {"<field>": "{<slot>:NLX.Slot}", ...}}}` for a Data Request the journey calls itself (live 2026-09-21: stored as sent, built, and invoked at runtime — the runtime composes the call's arguments from the conversation against the request schema, so the payload only documents the slot mapping and may be `{}`). Do NOT add `interimMessages`: over a Connect chat the Agentic CX block ends a turn that sends one in its Error branch (live 2026-09-28).
+  * `{"type": "dataRequest", "dataRequest": {"dataRequestId": "<id>", "payload": {"<field>": "{<slot>:NLX.Slot}", ...}}}` for a Data Request the journey calls itself (live 2026-09-21: stored as sent, built, and invoked at runtime — the runtime composes the call's arguments from the conversation against the request schema, so the payload only documents the slot mapping and may be `{}`). Do NOT add `interimMessages`: over a Connect chat the Agentic CX block leaves the conversation on a turn that sends one (live 2026-09-28).
   * `{"type": "knowledgeBase", "knowledgeBaseId": "{KB:<name>}", "scopeTags": []}` for knowledge lookups.
   * `{"type": "flow", "flowId": "<flow>"}` only when the plan says so.
   NEVER emit an `mcpFlow` tool (runtime: "Unknown tool type"). Every id MUST be one this bundle actually creates.
