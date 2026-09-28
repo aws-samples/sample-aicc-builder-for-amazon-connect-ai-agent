@@ -42,7 +42,15 @@ def test_boolean_inputs_become_spoken_yes_no_enums(bound):
     spec = sm._specs_bucket()["create_cleaning_reservation"]
     consent = next(f for f in spec.input_fields if f.name == "privacyConsent")
     assert consent.field_type == "string" and consent.enum_values == ["예", "아니오"]
-    assert "예 = true" in consent.description and consent.description.startswith("개인정보 동의")
+    assert "first value = true" in consent.description and "(예 / 아니오)" in consent.description
+    assert consent.description.startswith("개인정보 동의")
+    # The ACXD metadata pass keeps only ASCII; the note must still make sense.
+    # Before (SELC bundle, 2026-09-26): "( ) (spoken yes/no: = true, = false)".
+    from tools.acxd_bundle import enforce_ascii_metadata
+    cleaned = enforce_ascii_metadata({"description": consent.description})["description"]
+    assert cleaned == "(spoken yes/no: first value = true, second value = false)"
+    # no readable ASCII word survives → the optional field is dropped, not mangled
+    assert enforce_ascii_metadata({"description": "개인정보 수집·이용 동의 (Y/N)"}) == {}
     # other inputs and OUTPUT booleans are untouched (the API returns real booleans)
     assert next(f for f in spec.input_fields if f.name == "quantity").field_type == "integer"
     assert next(f for f in spec.output_fields if f.name == "confirmed").field_type == "boolean"

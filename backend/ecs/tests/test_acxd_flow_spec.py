@@ -281,6 +281,18 @@ def test_every_operation_needs_a_flow_plan():
     assert any("operation 'track_order' has no ACXD flow plan" in p for p in problems)
 
 
+def test_an_operation_a_journey_calls_as_a_helper_tool_needs_no_flow_of_its_own():
+    """SELC e2e (2026-09-25): demanding a flow per OperationSpec split the
+    delivery conversation in two and the search flow never looked up the delivery."""
+    spec = _full_spec()
+    flow = next(f for f in spec.flows if f.flow_id == "ProcessReturn")
+    step = flow.steps[0]
+    step.node_type = "generative_journey"
+    step.journey_tools = ["data_request", "data_request:trackOrder"]
+    problems = afs.validate_acxd_flow_spec(spec, {"process_return", "track_order"})
+    assert not any("has no ACXD flow plan" in p for p in problems), problems
+
+
 # --- one flow per system role (live: WelcomeFlow + Welcome shipped 9 flows) ---
 
 def test_second_flow_for_a_system_role_is_refused_and_remove_frees_it():
@@ -479,6 +491,19 @@ def test_conversation_style_defaults_to_generative_and_accepts_aliases():
     assert res["application"]["conversation_style"] == "generative"
     bad = afs.save_acxd_application_settings(conversation_style="whatever")
     assert not bad["success"] and "conversation_style" in bad["error"]
+
+
+def test_application_settings_record_an_iana_time_zone():
+    """Live (sandbox 2026-09-28): the runtime's clock is America/New_York, so the
+    journeys need the business's own zone; a name the tz database does not know
+    is refused rather than stored."""
+    res = afs.save_acxd_application_settings(timezone="america/chicago")
+    assert res["success"] and res["application"]["timezone"] == "America/Chicago"
+    bad = afs.save_acxd_application_settings(timezone="Korea Standard Time")
+    assert not bad["success"] and "IANA" in bad["error"]
+    assert afs.get_acxd_flow_spec().application.timezone == "America/Chicago"
+    cleared = afs.save_acxd_application_settings(timezone="")
+    assert cleared["success"] and cleared["application"]["timezone"] is None
 
 
 def test_generative_style_notes_send_a_scripted_plan_back_to_the_interviewer():

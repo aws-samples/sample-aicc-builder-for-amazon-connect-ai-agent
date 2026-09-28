@@ -40,6 +40,7 @@ import {
 import { useBuilderStore, SCOPE_TO_PROGRESS_ID } from '../stores/builderStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { cn } from '../lib/utils';
+import { isProgressStepForTarget } from '../lib/runtimeTarget';
 import type { ProgressItem, ProgressSubStep, BuilderPhase } from '../types';
 import { PHASE_LABELS, PHASE_ORDER } from '../types';
 
@@ -206,9 +207,7 @@ export function ProgressSidebar() {
   //   run) don't execute. So we keep the interview + review + packaging steps
   //   visible and trim only the generation lanes that won't run. A flow-only run
   //   therefore shows ~7 honest steps, not a misleading 1–2.
-  const targetProgress = progress.filter((item) =>
-    runtimeTarget === 'acxd' ? item.id !== 'prompt' : item.id !== 'acxd_application'
-  );
+  const targetProgress = progress.filter((item) => isProgressStepForTarget(item.id, runtimeTarget));
   const inScopeProgressIds = scope
     ? new Set([...scope.map((s) => SCOPE_TO_PROGRESS_ID[s] || s)])
     : null;

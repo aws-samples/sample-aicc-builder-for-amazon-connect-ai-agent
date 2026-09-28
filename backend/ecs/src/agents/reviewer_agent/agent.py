@@ -601,16 +601,25 @@ async def reviewer_agent(
     # both authoritative artifacts so the reviewer can compare the interview
     # decisions with the generated nodes rather than infer intent from prose.
     try:
-        from tools.acxd_flow_spec import get_acxd_flow_spec, is_acxd_target
+        from tools.acxd_flow_spec import get_acxd_flow_spec, get_runtime_target, is_acxd_target
         if is_acxd_target(session_id):
             from tools.acxd_bundle import load_acxd_bundle
             import json as _json
             flow_spec = get_acxd_flow_spec(session_id)
+            runtime_target = get_runtime_target(session_id)
             acxd_context = {
-                "runtime_target": "acxd",
+                "runtime_target": runtime_target,
                 "flow_spec": flow_spec.model_dump() if flow_spec else None,
                 "bundle": load_acxd_bundle(session_id),
             }
+            if runtime_target == "acxd_only":
+                acxd_context["scope"] = (
+                    "ACXD only: the bundle is the ACXD application alone. There is no Lambda, "
+                    "OpenAPI, CloudFormation, AI Prompt or Contact Flow BY DESIGN — do not report "
+                    "them missing. The Data Requests call the customer's existing API at "
+                    "{WEBHOOK_URL}<path> (base URL supplied at deploy time), and the customer adds "
+                    "the Agentic CX block to their own Contact Flow. Skip the Classic checklist and "
+                    "the Contact Flow / OpenAPI parity dimensions.")
             infra_spec_section += (
                 "\n## ACXD Runtime Review Context (authoritative)\n"
                 + _json.dumps(acxd_context, ensure_ascii=False, indent=2)

@@ -11,6 +11,7 @@ import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { cn, formatDate } from '../lib/utils';
+import { stripInternalRequirementIds } from '../lib/displayText';
 import type { Message, BuilderPhase } from '../types';
 import { PHASE_LABELS, PHASE_ICONS } from '../types';
 import { Copy, Check, Wrench, Loader2, CheckCircle2, XCircle, Brain, ChevronDown, ChevronRight, FileCode, FileText, Workflow, Server, BookOpen, Package, PanelRight } from 'lucide-react';
@@ -350,7 +351,7 @@ export const MessageBubble = memo(function MessageBubble({ message }: MessageBub
             components={isUser ? userMarkdownComponents : assistantMarkdownComponents}
             remarkPlugins={[remarkGfm]}
           >
-            {message.content}
+            {isUser || isSystem ? message.content : stripInternalRequirementIds(message.content)}
           </ReactMarkdown>
         </div>
 

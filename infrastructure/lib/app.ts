@@ -36,6 +36,12 @@ const contactFlowKbIdSsmParamName = `/aicc-builder${suffix}/contact-flow-kb-id`;
 const allowVpcPublicAccess =
   app.node.tryGetContext("allowVpcPublicAccess") === "true";
 
+// One-shot drift repair (see EcsStackProps.enableAutoScaling): deploy once with
+// AICC_SKIP_AUTOSCALING=true to drop Application Auto Scaling records that
+// CloudFormation still holds for a re-created ECS service, then deploy again
+// without it. Never leave it set.
+const enableAutoScaling = process.env.AICC_SKIP_AUTOSCALING !== "true";
+
 // Main AICC Builder Stack first — owns AssetsBucket, Cognito, CloudFront, Lambda API.
 // CloudFront reads ALB DNS via SSM dynamic reference (no CFN cross-stack edge).
 const mainStack = new AiccBuilderStack(app, mainStackId, {
@@ -55,6 +61,7 @@ new EcsStack(app, ecsStackId, {
   albDnsSsmParamName,
   contactFlowKbIdSsmParamName,
   allowVpcPublicAccess,
+  enableAutoScaling,
 });
 
 // Knowledge Base Stack for Contact Flow Generator RAG

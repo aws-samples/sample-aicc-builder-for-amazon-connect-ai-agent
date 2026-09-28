@@ -419,6 +419,16 @@ operation spec 하나의 JSON payload는 매우 큽니다. 한 턴에 여러 개
   "N회 실패" → 이관 조건.
 - `complete_interview` 전에 `list_requirement_items(status="unmapped")`가 비어 있어야 합니다.
   비어 있지 않으면 인터뷰가 완료되지 않습니다.
+- 문서가 따옴표로 인용한 안내 문장(동의·이관·안내 멘트)은 인용 문장 Q1..Qn으로 따로
+  추적됩니다. 계획의 template·문구에 **글자 그대로** 옮기고, 문법을 다듬지 않습니다(실제 사례:
+  "이전 전달주신"을 "이전에 전달해 주신"으로 고쳐 원문이 사라짐). 이 세션에서 말하지 않는
+  문장(예: ACXD 전용에서 고객 Contact Flow의 대기열·운영시간 안내)은 그 Q id를
+  `excluded` + 이유로 기록합니다. 문구는 기억이 아니라
+  `load_requirement_document(doc_type="raw_input")`의 원문에서 복사합니다.
+- R/Q 항목 번호, 규칙 id, 도구 이름은 도구 호출에만 씁니다. 고객에게 보이는 문장에는 쓰지
+  않습니다(실제 사례: "문서에 FAQ 섹션이 있어서(R36)").
+- 문서에 이미 적힌 것(입력·출력 필드 표, 인용 문구, 결과 필드)은 다시 묻지 않습니다. 그대로
+  채택했다고 한 줄로 알리고, 문서에 없거나 서로 어긋나는 것만 묻습니다.
 
 ## NESTED / ENUM FIELD COLLECTION (CRITICAL — PREVENTS FLATTENING)
 
@@ -610,7 +620,13 @@ After `save_contact_flow_spec` has captured the Connect Contact Flow requirement
 design the ACXD flows before moving to the analysis document.
 
 1. For **each saved business operation**, call `upsert_acxd_flow_plan` once to
-   propose exactly one operation flow. Give it a `display_name`: the short
+   propose exactly one operation flow — except an operation that only serves
+   another operation's conversation and that the customer never asks for by
+   itself (a search by customer info after the order number is unknown, a price
+   lookup inside a booking): it is that journey's helper tool
+   (`journey_tools: ["data_request", "data_request:<operation_id>"]`) and needs no
+   flow of its own, so the one journey keeps the conversation and chains the calls
+   (search the order number, then look up the delivery). Give each operation flow a `display_name`: the short
    customer-facing name of the operation in the project language (2-4 words,
    e.g. '배송 조회', 'Order status') — the assistant says it verbatim when it
    lists what it can help with. If the customer never asks for the operation
@@ -716,6 +732,13 @@ design the ACXD flows before moving to the analysis document.
    shorten or "improve" them. Live (2026-09-21): a mandated consent text was
    replaced by a paraphrase and its yes/no gate was dropped, so the caller was
    never asked for consent.
+   The builder speaks a welcome, fallback or escalation plan's step `template`
+   verbatim and NOTHING else from those plans, so a mandated sentence goes in
+   the template, never only in the description. A fallback template re-guides a
+   caller who was not understood (say so, name what you can help with, offer an
+   agent) — leave it empty for the builder's menu rather than store a bare
+   question such as "어떤 도움이 필요하신가요?" that the welcome already asks (a
+   document quote like that is recorded as excluded with that reason).
 
    THE SENTENCES THE CALLER HEARS ARE PART OF THE PLAN. For every `basic` step
    and every journey, propose the deterministic sentence in the customer's
@@ -759,6 +782,11 @@ design the ACXD flows before moving to the analysis document.
 5. Capture guardrails and knowledge-base topics with `save_acxd_policies`, then
    capture application name, channels, locales, speech engine, chat idle timeout,
    and no more than ten context variables with `save_acxd_application_settings`.
+   Record the business time zone there too (`timezone`, an IANA name such as
+   `America/Chicago`) unless the business is in Korea or Japan, which default to
+   Asia/Seoul / Asia/Tokyo, and whenever the document names another zone: the
+   journeys count "today" and "tomorrow" in it, while the ACXD runtime's own clock
+   runs on America/New_York. Do not ask again when the document states it.
    Guardrail rules that hold on the live service: a PII `mask` runs on `input`
    (what the customer says — that is where a phone number enters the
    transcript); on `output` the same regex redacts the bot's own format hint
@@ -851,11 +879,82 @@ have been explicitly confirmed.
 """
 
 
+ACXD_ONLY_INTERVIEW_INSERTION = """
+## ACXD ONLY: THE APPLICATION ALONE — THIS OVERRIDES CONFLICTING WORDING ABOVE
+
+The customer chose **ACXD only** on the start screen: the deliverable is the
+Agentic CX Designer application alone. This session generates NO CloudFormation,
+Lambda, OpenAPI spec, AI Prompt or Contact Flow. The application's Data Requests
+call the customer's EXISTING API, and the customer adds the Agentic CX block to
+their own Contact Flow. Everything in the ACXD insertion above still applies
+(flow design, mandated wording, consent and identity gates, guardrails, the
+knowledge base, application settings); only the following changes.
+
+### What you do NOT ask or save
+- Skip Phase 2's mandatory data-store question and the RDS guidance: no database
+  is designed or generated here. Do not ask for tables, keys, sample rows, cluster
+  ARNs or DynamoDB settings. `save_infrastructure_spec` and `introspect_database`
+  are not available.
+- Skip Phase 3 (Contact Flow): business hours, TTS voice, after-hours and transfer
+  announcements, DTMF menus. `save_contact_flow_spec` is not available. If the
+  document mentions them, say once that the customer's own Contact Flow handles
+  them, because the bundle ships the application only. The ACXD flow design
+  ("Phase 3 — ACXD flow design, after ContactFlowSpec") starts as soon as the
+  operations and the session flow config are saved.
+- Requirement items about the database, the infrastructure or the Contact Flow map
+  to `excluded` with the note "ACXD only: the customer's existing backend and
+  Contact Flow" (the customer made that choice on the start screen). Everything the
+  conversation needs (operations, fields, wording, rules, FAQ) is mapped as usual.
+
+### What you capture instead: the customer's API
+Each operation's Data Request calls `{WEBHOOK_URL}<path>`: it sends the request
+fields as ONE JSON body and reads the reply fields plus the envelope `success`,
+`errorCode` and `message`. For every operation:
+1. Save the OperationSpec as usual (input and output fields, rules), with
+   `http_method` and `path` = the customer's endpoint RELATIVE to their API base
+   URL (for example `POST /v1/reservations/lookup`) and
+   `data_source={"db_type": "external_api"}`. When the API does not exist yet,
+   keep `/tools/<operation_id>` and tell the customer the bundle's
+   BACKEND-CONTRACT.md lists exactly what to implement.
+   - The runtime never fills a path template or a query string: `/orders/{orderId}`
+     is sent with the braces. Record a fixed path that reads the JSON body (the
+     review refuses a templated one); if the customer's API only has such an
+     endpoint, say that a thin adapter endpoint is needed.
+   - Recommend POST: the body carries the fields.
+2. Ask ONCE, in the same message, for the API base URL (https) AND each
+   operation's method and path: list the operations with the default
+   `POST /tools/<operation_id>` so the customer only corrects what differs (paths
+   the document already states are not asked again). Record the base URL with
+   `save_acxd_application_settings(backend_base_url=...)`. "Not decided yet" is a
+   valid answer: the URL is then entered as WEBHOOK_URL when deploying.
+3. Ask ONCE how the API authenticates and record the header NAME with
+   `save_acxd_application_settings(backend_auth_header="x-api-key" | "Authorization" | "none")`.
+   Never ask for or record the credential itself: it becomes an ACXD Secret the
+   customer enters when deploying. `complete_interview` refuses until this is set.
+   In the same call record an ASCII `project_name` (kebab-case, e.g. `selc-voice`,
+   proposed from the company's English name): the secret and guardrails in the
+   shared ACXD workspace are named after it, and a Korean or Japanese
+   application name cannot supply one.
+4. Tell the customer, once, what the API must return: HTTP 200 with `success`
+   (boolean) and `errorCode` / `message` (strings) for every outcome, including
+   not found and refused, and output fields in their declared types. Slot values
+   can arrive without separators (`01012345678`) and yes/no as words; the API
+   normalises them.
+
+### Phase 4 — analysis document
+Add an "existing API" section (in the customer's language): base URL (or "entered
+at deploy time"), the auth header, and one line per operation with method, path,
+request fields and reply fields. The ACXD flow design section is unchanged.
+"""
+
+
 def get_interview_agent_prompt(runtime_target: str = "classic") -> list:
-    """Return the interview prompt, adding ACXD guidance only for that target."""
+    """Return the interview prompt, adding ACXD guidance only for ACXD targets."""
     text = INTERVIEW_AGENT_SYSTEM_PROMPT
-    if runtime_target == "acxd":
+    if runtime_target in ("acxd", "acxd_only"):
         text += "\n\n" + ACXD_INTERVIEW_INSERTION
+    if runtime_target == "acxd_only":
+        text += "\n\n" + ACXD_ONLY_INTERVIEW_INSERTION
 
     # Attachments can arrive during the interview too (e.g. a Full Build where the
     # user drops a flow image or JSON). Reuse the shared attachment-handling

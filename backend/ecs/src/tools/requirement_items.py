@@ -19,9 +19,10 @@ Storage: `requirement_items.json` in the session workspace (NFS + S3), next to
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Union
 
 from strands import tool
 
@@ -146,12 +147,235 @@ def requirement_signals(items: Iterable[dict]) -> dict:
         signals["faq"] = {"item_ids": faq_items}
     if identity_items:
         signals["identity_verification"] = {"item_ids": identity_items}
+    quotes = quoted_sentences(items)
+    if quotes:
+        # Each quote gets its own id: one table item can hold a Contact Flow
+        # announcement (excluded in ACXD only) next to the hand-off line the
+        # plan must say, so exclusion has to be per sentence.
+        for number, quote in enumerate(quotes, 1):
+            quote["id"] = f"Q{number}"
+        signals["quotes"] = quotes
     return signals
 
 
-# ── storage ──────────────────────────────────────────────────────────────────
-def _workspace():
+#: A quoted sentence a caller hears: "…" / “…” / 「…」 that ends like speech.
+_QUOTED = re.compile(r"[\"“]([^\"“”]{10,500})[\"”]|「([^」]{6,500})」")
+_SPEECH_END = re.compile(r"(?:[.?!。？！]|다|요|까|죠|니다|세요)$")
+#: Words next to a quote that say the SYSTEM speaks it ("… 안내 후", "환영 메시지:").
+_SPEECH_CUE = re.compile(r"안내|멘트|문구|메시지|말씀|고지|인사|환영|제안|announce|message|say|tell|notice|"
+                         r"prompt|greet|repl|respond|案内|メッセージ|読み上げ", re.I)
+#: Sections whose quotes are the CUSTOMER's test utterances, not system speech.
+_EXAMPLE_SECTION = re.compile(r"기대\s*대화|예시\s*(발화|대화)|테스트|expected|sample\s+(dialog|conversation)|"
+                              r"test\s+(case|dialog|conversation)|想定会話|テスト", re.I)
+
+
+def quoted_sentences(items: Iterable[dict]) -> list[dict]:
+    """Sentences the document puts in quotes for the system to SAY (a consent
+    notice, a hand-off line): the customer expects them word for word. A quoted
+    label or value ("기존 ERP", "벽걸이 실내기 대당 10만원") does not end like
+    speech, and a caller's example utterance ("진료 예약하고 싶어요" in the
+    expected-dialogue section) has no speech cue beside it; both are left out."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        if _EXAMPLE_SECTION.search(str(item.get("section") or "")):
+            continue
+        text = str(item.get("text") or "")
+        for m in _QUOTED.finditer(text):
+            sentence = " ".join((m.group(1) or m.group(2) or "").split())
+            if not sentence or sentence in seen or not re.search(r"[A-Za-z\uac00-\ud7a3\u3040-\u30ff\u4e00-\u9fff]", sentence):
+                continue
+            if not _SPEECH_END.search(sentence.rstrip(" )")):
+                continue
+            if not _SPEECH_CUE.search(text[max(0, m.start() - 30):m.start()] + text[m.end():m.end() + 15]):
+                continue
+            seen.add(sentence)
+            out.append({"text": sentence, "item_id": item.get("id")})
+    return out
+
+
+def _quote_key(text: str) -> str:
+    return " ".join(str(text).replace("‘", "'").replace("’", "'").split())
+
+
+def _is_excluded(mappings: dict, item_ids: Iterable[Any]) -> bool:
+    return all(str((mappings.get(i) or {}).get("target", "")).startswith("excluded") for i in item_ids)
+
+
+def kept_quotes(ledger: Optional[dict]) -> list[dict]:
+    """The document's quoted sentences that must be said word for word: every
+    tracked quote whose Q id and requirement item were not excluded."""
+    if not ledger:
+        return []
+    mappings = ledger.get("mappings") or {}
+    return [q for q in (ledger.get("signals") or {}).get("quotes") or []
+            if isinstance(q, dict) and q.get("text")
+            and not _is_excluded(mappings, [q.get("item_id")])
+            and not _is_excluded(mappings, [q.get("id")])]
+
+
+def _plan_texts(flow_spec: Any, *, include_contact_flow: bool = True) -> str:
+    """Every place the ACXD builder takes a spoken sentence from — where a
+    mandated sentence must appear to be spoken:
+
+    * an operation plan, whole (its steps and rules feed the flow generator);
+    * a SYSTEM plan's step ``template`` only — the deterministic builder speaks
+      the approved template and nothing else, so a sentence left in the step's
+      description was never said (SELC e2e, 2026-09-26);
+    * a guardrail's ``message`` (its HandoffFlow and every journey say it);
+    * the session greeting and closing;
+    * the Contact Flow spec, when the builder generates a Contact Flow.
+    """
+    chunks: list[str] = []
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, str):
+            chunks.append(obj)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                walk(v)
+
+    def dump(obj: Any) -> Any:
+        return obj.model_dump() if hasattr(obj, "model_dump") else obj
+
     try:
+        from tools.acxd_system_flows import is_system_flow_role
+    except Exception:  # pragma: no cover - module optional in isolated tests
+        def is_system_flow_role(role):  # type: ignore[misc]
+            return False
+    data = dump(flow_spec) or {}
+    if not isinstance(data, dict):
+        data = {}
+    for plan in data.get("flows") or []:
+        plan = dump(plan)
+        if not isinstance(plan, dict):
+            continue
+        if is_system_flow_role(plan.get("role")):
+            for step in plan.get("steps") or []:
+                step = dump(step)
+                if isinstance(step, dict) and step.get("template"):
+                    chunks.append(str(step["template"]))
+        else:
+            walk(plan)
+    for guard in data.get("guardrails") or []:
+        guard = dump(guard)
+        if isinstance(guard, dict) and guard.get("message"):
+            chunks.append(str(guard["message"]))
+    try:
+        from tools.spec_manager import get_contact_flow_spec, get_session_flow_config
+        config = get_session_flow_config()
+        for key in ("common_greeting", "common_closing"):
+            value = getattr(config, key, None) if config is not None else None
+            if isinstance(value, str):
+                chunks.append(value)
+        if include_contact_flow:
+            spec = get_contact_flow_spec()
+            if spec is not None:
+                walk(dump(spec))
+    except Exception:
+        pass
+    return _quote_key("\n".join(chunks))
+
+
+# ── enum values the interview re-typed ───────────────────────────────────────
+#: A document token: a run of letters or digits (Hangul, kana, CJK, Latin).
+_DOC_TOKEN = re.compile(r"[0-9A-Za-z_\uac00-\ud7a3\u3040-\u30ff\u4e00-\u9fff]+")
+
+
+def _spec_enums(spec: Any):
+    """(field name, enum values) for every field a spec declares, however nested."""
+    stack = [spec.model_dump() if hasattr(spec, "model_dump") else spec]
+    while stack:
+        obj = stack.pop()
+        if isinstance(obj, dict):
+            values = obj.get("enum_values")
+            if isinstance(values, list) and values:
+                yield str(obj.get("name") or ""), values
+            stack.extend(v for v in obj.values() if isinstance(v, (dict, list)))
+        elif isinstance(obj, list):
+            stack.extend(v for v in obj if isinstance(v, (dict, list)))
+
+
+def enum_near_misses(document: str, specs: Any) -> list[dict]:
+    """Enum values a spec carries that the customer's document never writes but
+    writes ALMOST: '종합세추' where the document says '종합세척' (e2e 2026-09-26),
+    '뱅걸이실내기' for '벽걸이실내기' (2026-09-25). The interview re-types enum
+    values when it saves a spec, and a value one syllable off reaches the
+    customer's API as is. Only same-length substitutions count (a retyping slip,
+    not a variant such as '가정' / '가정용'); a value with no such neighbour in the
+    document (one the customer added in conversation), a value shorter than four
+    characters and one that differs from its neighbour only in digits pass."""
+    text = str(document or "")
+    if not text.strip():
+        return []
+    squeezed = re.sub(r"\s+", "", text)
+    tokens = {t for t in _DOC_TOKEN.findall(text) if len(t) >= 4}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for op_id, spec in (specs or {}).items():
+        for field, values in _spec_enums(spec):
+            for value in values:
+                v = str(value).strip()
+                if len(v) < 4 or v in text or re.sub(r"\s+", "", v) in squeezed:
+                    continue
+                limit = 1 if len(v) <= 6 else 2
+                best: Optional[tuple] = None
+                for t in tokens:
+                    if len(t) != len(v):
+                        continue
+                    diff = [(a, b) for a, b in zip(v, t) if a != b]
+                    if not diff or len(diff) > limit or all(a.isdigit() and b.isdigit() for a, b in diff):
+                        continue
+                    if best is None or (len(diff), t) < best:
+                        best = (len(diff), t)
+                eid = f"E:{op_id}.{field}={v}"
+                if best and eid not in seen:
+                    seen.add(eid)
+                    out.append({"id": eid, "operation": op_id, "field": field, "value": v, "document": best[1]})
+    return out
+
+
+def _ledger_document(ledger: dict) -> str:
+    return "\n".join(str(i.get("text") or "") for i in ledger.get("items") or [])
+
+
+def input_enum_conflicts(specs: Any) -> list[dict]:
+    """Input fields that share a name across operations but not their enum values.
+
+    Live (SELC, 2026-09-26): the interview corrected '종합세추' → '종합세척' in
+    `create_cleaning_reservation.serviceType` only; `get_cleaning_price.serviceType`
+    kept the typo, the price lookup's data request carried it, and D9 passed the
+    bundle. One value the caller says fills both calls, so the sets must match —
+    unless the customer really runs two vocabularies, which is excluded by the
+    returned `X:<field>` id."""
+    by_field: dict[str, dict[str, tuple]] = {}
+    for op_id, spec in (specs or {}).items():
+        fields = getattr(spec, "input_fields", None)
+        if fields is None and isinstance(spec, dict):
+            fields = spec.get("input_fields")
+        for f in fields or []:
+            name = getattr(f, "name", None) if not isinstance(f, dict) else f.get("name")
+            values = getattr(f, "enum_values", None) if not isinstance(f, dict) else f.get("enum_values")
+            if not name or not values:
+                continue
+            by_field.setdefault(str(name), {})[str(op_id)] = tuple(str(v).strip() for v in values)
+    out: list[dict] = []
+    for name, per_op in sorted(by_field.items()):
+        if len(per_op) > 1 and len({frozenset(v) for v in per_op.values()}) > 1:
+            out.append({"id": f"X:{name}", "field": name, "variants": {op: list(v) for op, v in per_op.items()}})
+    return out
+
+
+# ── storage ──────────────────────────────────────────────────────────────────
+def _workspace(session_id: Optional[str] = None):
+    try:
+        if session_id:
+            # D9 runs for a named session, not only the one bound to this turn.
+            from tools.project_workspace import ProjectWorkspace, get_workspace_for
+            return get_workspace_for(session_id) or ProjectWorkspace(session_id)
         from tools.project_workspace import ensure_workspace
         return ensure_workspace()
     except Exception as exc:  # pragma: no cover
@@ -159,8 +383,8 @@ def _workspace():
         return None
 
 
-def load_ledger() -> Optional[dict]:
-    ws = _workspace()
+def load_ledger(session_id: Optional[str] = None) -> Optional[dict]:
+    ws = _workspace(session_id) if session_id else _workspace()
     if ws is None:
         return None
     try:
@@ -276,6 +500,14 @@ def _acxd_context(session_id: Optional[str]) -> tuple[bool, Any]:
     return False, None
 
 
+def _is_acxd_only(session_id: Optional[str]) -> bool:
+    try:
+        from tools.acxd_flow_spec import is_acxd_only_target
+        return bool(session_id) and is_acxd_only_target(session_id)
+    except Exception:
+        return False
+
+
 def requirement_coverage_problems(session_id: Optional[str] = None) -> list[str]:
     """What the document says that no spec expresses. Empty when there is no
     document or everything is accounted for."""
@@ -301,7 +533,11 @@ def requirement_coverage_problems(session_id: Optional[str] = None) -> list[str]
         return all(str((mappings.get(i) or {}).get("target", "")).startswith("excluded") for i in item_ids)
 
     lookup = signals.get("phone_lookup")
-    if lookup and not excluded([lookup.get("item_id")]):
+    # ACXD only has no Contact Flow spec and withholds save_contact_flow_spec, so
+    # this check could only be cleared by excluding the item (live on dev,
+    # 2026-09-25: one refused complete_interview round). The item is still
+    # mapped like every other one by the unmapped check above.
+    if lookup and not excluded([lookup.get("item_id")]) and not _is_acxd_only(session_id):
         try:
             from tools.spec_manager import get_contact_flow_spec
             cf = get_contact_flow_spec()
@@ -337,6 +573,58 @@ def requirement_coverage_problems(session_id: Optional[str] = None) -> list[str]
                 "step describes verifying the caller — plan the verification steps (user_choice for the value the "
                 "customer proves, data_request to check it, choice → escalate after the allowed misses), or record "
                 "the items as excluded with the customer's reason")
+    # Quoted sentences are said word for word (e2e 2026-09-25: the document's
+    # "이전 전달주신 정보는 …" hand-off line reached the plan as "이전에 전달해 주신
+    # 정보는 …" while the interview reported it verbatim). Plans only: a
+    # sentence in an operation's business rules is not yet said by any step.
+    quotes = signals.get("quotes") or []
+    if quotes and is_acxd and flow_spec is not None:
+        # ACXD only ships no Contact Flow: nothing there is ever said.
+        haystack = _plan_texts(flow_spec, include_contact_flow=not _is_acxd_only(session_id))
+        missing = [q for q in kept_quotes(ledger) if _quote_key(q["text"]) not in haystack]
+        if missing:
+            shown = "; ".join(f"{q.get('id')} ({q.get('item_id')}) \"{q['text'][:80]}\"" for q in missing[:6])
+            more = f" (+{len(missing) - 6} more)" if len(missing) > 6 else ""
+            problems.append(
+                f"the document quotes {len(missing)} sentence(s) that no plan step says verbatim: {shown}{more} — "
+                "copy each, character for character, into the template or wording of the step that says it (do "
+                "not polish the grammar; in a welcome, fallback or escalation plan only the step's `template` is "
+                "spoken), or record that quote (its Q id) as excluded with the reason (e.g. said by the customer's "
+                "own Contact Flow)")
+    # Enum values reach the customer's API exactly as saved, and the interview
+    # re-types them from the document (see enum_near_misses).
+    try:
+        from tools.spec_manager import get_all_specs
+        typos = [e for e in enum_near_misses(_ledger_document(ledger), get_all_specs())
+                 if not excluded([e["id"]])]
+    except Exception as exc:
+        logger.debug("[requirement_items] enum check skipped: %s", exc)
+        typos = []
+    if typos:
+        shown = "; ".join(f"{e['operation']}.{e['field']} '{e['value']}' (the document writes '{e['document']}')"
+                          for e in typos[:6])
+        problems.append(
+            f"{len(typos)} enum value(s) differ from the document by a character or two: {shown} — re-save the "
+            "operation spec with the document's spelling, or, only when the customer asked for that exact value, "
+            "record its id (" + ", ".join(e["id"] for e in typos[:3]) + ") as excluded with the customer's reason")
+    # One spoken value fills every call that shares the field, and ACXD keeps ONE
+    # slot type per name for the whole application (see input_enum_conflicts).
+    # Classic operations each own their Lambda and OpenAPI, so a per-operation
+    # vocabulary is legitimate there.
+    try:
+        from tools.spec_manager import get_all_specs
+        conflicts = ([c for c in input_enum_conflicts(get_all_specs()) if not excluded([c["id"]])]
+                     if is_acxd else [])
+    except Exception as exc:
+        logger.debug("[requirement_items] enum conflict check skipped: %s", exc)
+        conflicts = []
+    if conflicts:
+        shown = "; ".join(
+            f"{c['field']}: " + ", ".join(f"{op} {v}" for op, v in c["variants"].items()) for c in conflicts[:4])
+        problems.append(
+            f"{len(conflicts)} input field(s) carry different enum values in different operations: {shown} — "
+            "save the same values in every operation that takes the field, or, only when the customer really uses "
+            "two vocabularies, record " + ", ".join(c["id"] for c in conflicts[:3]) + " as excluded with the reason")
     return problems
 
 
@@ -368,7 +656,7 @@ def list_requirement_items(status: str = "unmapped") -> dict:
 
 
 @tool
-def map_requirement_items(mappings: list[dict]) -> dict:
+def map_requirement_items(mappings: Union[list[dict], str]) -> dict:
     """
     Record what each requirement item became — the spec that expresses it — or
     that the customer excluded it.
@@ -383,10 +671,30 @@ def map_requirement_items(mappings: list[dict]) -> dict:
     Returns:
         The updated coverage summary; unknown item ids and malformed targets are reported and skipped.
     """
+    # The model sometimes sends the list JSON-encoded as one string; live (Hanbit,
+    # 2026-09-26) that failed validation, showed the raw escaped JSON in the chat
+    # and cost a retry. Accept it rather than bounce it.
+    if isinstance(mappings, str):
+        try:
+            mappings = json.loads(mappings)
+        except ValueError:
+            return {"success": False,
+                    "error": "mappings must be a list of {item_id, target, note} objects"}
+    if isinstance(mappings, dict):
+        mappings = [mappings]
+    if not isinstance(mappings, list):
+        return {"success": False, "error": "mappings must be a list of {item_id, target, note} objects"}
     ledger = load_ledger()
     if not ledger:
         return {"success": False, "error": "No requirements document has been saved in this session."}
     known_ids = {i["id"] for i in ledger.get("items") or []}
+    known_ids |= {str(q.get("id")) for q in ((ledger.get("signals") or {}).get("quotes") or []) if q.get("id")}
+    try:  # an enum value the customer really asked for is excluded by its E: id
+        from tools.spec_manager import get_all_specs
+        known_ids |= {e["id"] for e in enum_near_misses(_ledger_document(ledger), get_all_specs())}
+        known_ids |= {c["id"] for c in input_enum_conflicts(get_all_specs())}
+    except Exception as exc:
+        logger.debug("[requirement_items] enum ids unavailable: %s", exc)
     stored = dict(ledger.get("mappings") or {})
     rejected: list[str] = []
     try:

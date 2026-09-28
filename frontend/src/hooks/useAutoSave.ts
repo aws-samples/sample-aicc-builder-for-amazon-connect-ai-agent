@@ -75,8 +75,13 @@ export function useAutoSave() {
   }, [currentSessionId]);
 
   const saveHistoryToDynamoDB = useCallback(async () => {
-    const { messages } = useBuilderStore.getState();
+    const { messages, isLoadingSession } = useBuilderStore.getState();
     if (!currentSessionId || messages.length === 0) return;
+    // While a session is being restored the in-memory list is not the
+    // conversation yet (replayed asset cards, a reconnect notice). Saving it
+    // then (live, 2026-09-26: "Saving history: 1 messages" 17 s before the
+    // restore landed) hands the server a partial window to merge.
+    if (isLoadingSession) return;
 
     const persistableMessages = messages.filter(isPersistableMessage);
     if (persistableMessages.length === 0) return;

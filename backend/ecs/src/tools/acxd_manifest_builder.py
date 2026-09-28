@@ -123,6 +123,25 @@ def _needs_webhook_backend(bundle: dict) -> bool:
     return "{WEBHOOK_URL}" in json.dumps(bundle.get("data_requests") or [])
 
 
+def acxd_only_backend(session_id: str) -> tuple[bool, str | None]:
+    """(external_backend, backend_base_url) for a session.
+
+    True for the ACXD-only target (v3.1): the Data Requests call the customer's
+    own API, so the manifest carries no CloudFormation step and ``{WEBHOOK_URL}``
+    comes from the environment — or the base URL the interview recorded.
+    """
+    try:
+        from tools.acxd_flow_spec import get_acxd_flow_spec, is_acxd_only_target
+        if not is_acxd_only_target(session_id):
+            return False, None
+        spec = get_acxd_flow_spec(session_id)
+        url = getattr(getattr(spec, "application", None), "backend_base_url", None) if spec else None
+        return True, (str(url).rstrip("/") or None) if url else None
+    except Exception as exc:  # pragma: no cover - never guess ACXD only on an outage
+        logger.debug("[ACXDManifest] ACXD-only lookup skipped: %s", exc)
+        return False, None
+
+
 def _needs_secrets(bundle: dict) -> bool:
     # Two spellings: the live contract `{Name:NLX.Secret}` (D1) and the legacy
     # `{{secrets.Name}}` an older session may still carry.
@@ -140,12 +159,19 @@ def build_manifest(
     cfn_template_path: str = "cloudformation/infrastructure.yaml",
     lambda_dirs: list[str] | None = None,
     build_version: str = "1.0",
+    external_backend: bool = False,
+    backend_base_url: str | None = None,
 ) -> dict:
     """Build a schema-ready manifest from one ``load_acxd_bundle`` result.
 
     Dependency order is fixed: backend/webhook, secrets, slot types, context
     variables, data requests, knowledge bases, guardrails, flows, application
     compose/build/deploy, then the Connect contact-flow import.
+
+    ``external_backend`` (ACXD only, v3.1): the Data Requests call the
+    customer's own API, so there is no CloudFormation step; ``wire-webhook-urls``
+    takes ``{WEBHOOK_URL}`` from the environment, falling back to
+    ``backend_base_url`` when the interview recorded one.
     """
     if len(str(build_version)) > MAX_BUILD_VERSION_LENGTH:
         raise ValueError(
@@ -158,7 +184,16 @@ def build_manifest(
     backend_lambda_dirs = (lambda_dirs if lambda_dirs is not None
                            else _derive_lambda_dirs(bundle))
 
-    if _needs_webhook_backend(bundle):
+    if _needs_webhook_backend(bundle) and external_backend:
+        wire_params: dict[str, Any] = {"source": "env"}
+        if backend_base_url:
+            wire_params["defaultUrl"] = str(backend_base_url).rstrip("/")
+        steps.append({
+            "type": "wire-webhook-urls",
+            "description": "Point the Data Requests at your backend API (WEBHOOK_URL)",
+            "params": wire_params,
+        })
+    elif _needs_webhook_backend(bundle):
         params: dict[str, Any] = {
             "templatePath": cfn_template_path,
             "stackName": f"{project}-stack",
@@ -242,8 +277,13 @@ def build_deploy_manifest(
     )
 
 
-def check_manifest_coverage(manifest: dict, bundle: dict) -> list[str]:
-    """Return missing-asset coverage and dependency-order problems."""
+def check_manifest_coverage(manifest: dict, bundle: dict, *, external_backend: bool = False) -> list[str]:
+    """Return missing-asset coverage and dependency-order problems.
+
+    ``external_backend`` (ACXD only): ``{WEBHOOK_URL}`` names the customer's own
+    API, so only ``wire-webhook-urls`` is required — and a CloudFormation or
+    Contact Flow step is a defect, because the bundle carries neither.
+    """
     problems: list[str] = []
     step_types = [step.get("type") for step in manifest.get("steps") or []]
 
@@ -270,7 +310,16 @@ def check_manifest_coverage(manifest: dict, bundle: dict) -> list[str]:
     elif bundle.get("flows"):
         problems.append("bundle has flows but no ACXD application asset")
 
-    if _needs_webhook_backend(bundle):
+    if external_backend:
+        if _needs_webhook_backend(bundle) and "wire-webhook-urls" not in step_types:
+            problems.append(
+                "data requests use {WEBHOOK_URL} but the manifest has no 'wire-webhook-urls' step")
+        for step_type in ("deploy-cfn-backend", "import-contact-flows"):
+            if step_type in step_types:
+                problems.append(
+                    f"an ACXD-only manifest must not carry '{step_type}' (the bundle has no "
+                    "generated backend or Contact Flow)")
+    elif _needs_webhook_backend(bundle):
         for step_type in ("deploy-cfn-backend", "wire-webhook-urls"):
             if step_type not in step_types:
                 problems.append(
@@ -303,8 +352,11 @@ def generate_acxd_deploy_manifest(
 
     session_id = current_session_id.get() or "default"
     bundle = load_acxd_bundle(session_id)
-    manifest = build_manifest(bundle, project_name=project_name, environment=environment)
-    problems = validate_deploy_manifest(manifest) + check_manifest_coverage(manifest, bundle)
+    external_backend, base_url = acxd_only_backend(session_id)
+    manifest = build_manifest(bundle, project_name=project_name, environment=environment,
+                              external_backend=external_backend, backend_base_url=base_url)
+    problems = validate_deploy_manifest(manifest) + check_manifest_coverage(
+        manifest, bundle, external_backend=external_backend)
     if problems:
         return {"status": "error", "problems": problems}
 

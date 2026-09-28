@@ -1031,7 +1031,14 @@ def _format_spec_as_markdown(op_id: str, spec: OperationSpec) -> str:
         db_type = (getattr(ds, "db_type", None) or "").lower()
         table = getattr(ds, "table_name", None) or "?"
         lines += ["", "### Data Source"]
-        if db_type.startswith("rds"):
+        if db_type == "external_api":
+            # ACXD only: the customer's own backend answers the Data Request,
+            # so there is no table to show (was rendered as "Table: ? (PK: ?)").
+            lines.append(
+                f"- Existing API: `{spec.http_method or 'POST'} {spec.path or '?'}` "
+                "(called as `{WEBHOOK_URL}` + path)"
+            )
+        elif db_type.startswith("rds"):
             engine = "PostgreSQL" if "postgres" in db_type else (
                 "MySQL" if "mysql" in db_type else "RDS")
             pk = getattr(ds, "partition_key", None)
@@ -2481,7 +2488,12 @@ def normalize_boolean_inputs_for_acxd(language: str = "ko") -> list[str]:
                 continue
             f.field_type = "string"
             f.enum_values = list(values)
-            note = f"spoken yes/no: {values[0]} = true, {values[1]} = false"
+            # Worded so the ASCII-only metadata pass (acxd_bundle.enforce_ascii_metadata)
+            # keeps its meaning: the locale words sit in a trailing group that is
+            # dropped whole, not inside "X = true" where stripping them left
+            # "( ) (spoken yes/no: = true, = false)" (SELC bundle, 2026-09-26).
+            note = (f"spoken yes/no: first value = true, second value = false "
+                    f"({values[0]} / {values[1]})")
             f.description = f"{f.description} ({note})" if getattr(f, "description", None) else note
             changed.append(f"{op_id}.{f.name}")
             touched = True

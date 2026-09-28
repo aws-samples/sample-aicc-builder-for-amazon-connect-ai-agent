@@ -3,6 +3,58 @@
 This file lists the user-visible changes of each AICC Builder release — what you can build,
 what the generated bundle does, and what now works without a hand edit.
 
+## [3.1.0] - 2026-09-25
+
+### Added
+
+**ACXD only: the Agentic CX Designer application on its own**
+
+- A third runtime target on the start screen, **ACXD only**, builds just the Agentic CX
+  Designer application for a customer who already has a backend API and a Contact Flow.
+  The bundle carries no CloudFormation, Lambda, OpenAPI spec, AI Prompt or Contact Flow.
+- The interview designs the same conversation as the ACXD target (generative journeys,
+  mandated wording, consent and identity gates, guardrails, the FAQ knowledge base) and
+  skips the database, infrastructure and Contact Flow questions. Instead it records each
+  operation's endpoint on your API, the API's base URL and the name of the header it reads
+  its credential from.
+- Data requests call your API at `WEBHOOK_URL` plus each operation's own path. The
+  credential is an ACXD secret you enter when deploying; it is never stored in the bundle.
+- The download contains `assets/acxd/`, the deploy manifest and runner, a short
+  `deploy.sh` that asks for the workspace, API key, base URL and secret values it is
+  missing, `BACKEND-CONTRACT.md` listing every call your API must answer (fields, reply
+  envelope, value formats as the runtime delivers them) and `WIRING-GUIDE.md` for adding
+  the Agentic CX block to your own Contact Flow.
+- Review gates follow the target: the backend and Contact Flow parity checks do not
+  apply, and a data request path with a template such as `/orders/{orderId}` or a query
+  string is reported before download, because the runtime sends the fields as the JSON
+  body.
+
+The Classic and ACXD targets are unchanged.
+
+### Fixed
+
+- ACXD and ACXD-only journeys count "today" and "tomorrow" in the business's own time
+  zone. The Agentic CX runtime gives every conversation the New York clock, so before
+  13:00 in Seoul a caller's "내일" used to become the wrong day. Korean and Japanese
+  applications use Asia/Seoul and Asia/Tokyo; for any other business the interview
+  records the zone, and `BACKEND-CONTRACT.md` names it.
+- A date the caller gives in words ("this Friday") is read back with its weekday and
+  confirmed before it is used, and a booking, change or cancellation waits for the
+  caller's yes to the read-back even when they asked for it outright.
+- FAQ answers reach callers behind a Contact Flow: the knowledge base is created in the
+  application's language (it defaulted to English and the deployed application found no
+  answer), and a question the FAQ does not cover takes the no-answer path instead of an
+  empty reply.
+- A journey whose prompt named the knowledge base by its `{KB:…}` placeholder failed on
+  its first turn; the placeholder now stays in the tool definition.
+- Journey tools send no interim message ("one moment please"): over a chat contact the
+  Agentic CX block left the conversation on each tested turn whose tool sent one, before
+  the application's answer arrived.
+- `WIRING-GUIDE.md` covers what the Agentic CX block needs: the contact language set
+  before it, the alias ACXD lists as `Production`, the panel's Confirm button, the branch
+  a finished conversation takes (Default), and testing a redeploy with a new chat (a chat
+  that has not ended stays on the build it started with).
+
 ## [3.0.0] - 2026-09-15
 
 ### Added

@@ -13,6 +13,7 @@ import type { Language } from '../types';
 import { LANGUAGES } from '../types';
 import { cn } from '../lib/utils';
 import { ModelSelector } from './ModelSelector';
+import { BrandLogo } from './BrandLogo';
 
 export function Header() {
   const navigate = useNavigate();
@@ -62,9 +63,7 @@ export function Header() {
           {/* Logo and Title */}
           <div className="flex items-center gap-3 lg:gap-4">
             <div className="flex items-center gap-2">
-              <div className="w-9 h-9 lg:w-10 lg:h-10 rounded-lg bg-gradient-to-br from-primary-500 to-primary-600 flex items-center justify-center shadow-glow">
-                <span className="text-lg lg:text-xl">🏗️</span>
-              </div>
+              <BrandLogo className="w-9 h-9 lg:w-10 lg:h-10" />
               <div>
                 <h1 className="text-base lg:text-lg font-semibold bg-gradient-to-r from-white to-surface-300 bg-clip-text text-transparent">
                   AICC Builder

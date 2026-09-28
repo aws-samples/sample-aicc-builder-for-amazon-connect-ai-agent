@@ -11,6 +11,7 @@ import { useAuthStore } from "../stores/authStore";
 import { useSessionStore } from "../stores/sessionStore";
 import type { WebSocketMessage, SubagentActivity, SubagentToolCall, AttachedFile, MessageAttachment, AttachmentData, AssetPreview, BuilderPhase, RuntimeTarget } from "../types";
 import { PHASE_LABELS } from "../types";
+import { isRuntimeTarget } from "../lib/runtimeTarget";
 import { getSessionHistory, getSessionAssets, getSessionData, getMessageLog, type MessageLogEntry, generatePresignedUrl, generateUploadPresignedUrl, uploadFileToS3, fetchAssetContent, type ConversationMessage } from "../services/sessions";
 import { fetchNfsDiagnostics } from "../services/workspaceApi";
 
@@ -74,6 +75,30 @@ function disarmSessionReadyWatchdog() {
     clearTimeout(globalSessionReadyWatchdog);
     globalSessionReadyWatchdog = null;
   }
+}
+
+/**
+ * The stored asset list can hold the same file many times: every regeneration
+ * card was saved as its own entry, all pointing at the one S3 object (live,
+ * 2026-09-26: 300 entries for 30 distinct files; 298 copies of one spec). Each
+ * copy became another card and another S3 fetch on every page load and every
+ * reconnect. Keep one entry per object, the newest (where the current content
+ * was produced). Mutates the array in place.
+ */
+function collapseStoredAssets<T extends { assetType: string; fileName?: string; operationId?: string; s3Key?: string; createdAt?: number }>(
+  assets: T[],
+  where: string,
+): void {
+  const newest = new Map<string, T>();
+  for (const asset of assets) {
+    const id = asset.s3Key || `${asset.assetType}::${asset.operationId || ''}::${asset.fileName || ''}`;
+    const seen = newest.get(id);
+    if (!seen || (asset.createdAt || 0) >= (seen.createdAt || 0)) newest.set(id, asset);
+  }
+  if (newest.size === assets.length) return;
+  console.log(`[useWebSocket] Collapsed ${assets.length} stored assets to ${newest.size} distinct objects (${where})`);
+  const keep = new Set(newest.values());
+  assets.splice(0, assets.length, ...assets.filter((a) => keep.has(a)));
 }
 
 // Session ID storage key prefix for localStorage
@@ -235,7 +260,7 @@ function restoreRuntimeTarget(
   options: { answersPending?: boolean; resend?: boolean } = {},
 ): void {
   const target = message.runtime_target ?? message.runtimeTarget;
-  if (target !== 'classic' && target !== 'acxd') return;
+  if (!isRuntimeTarget(target)) return;
   const store = useBuilderStore.getState();
   store.setRuntimeTarget(target);
   const pending = store.pendingRuntimeTarget;
@@ -1112,6 +1137,16 @@ export function useWebSocket() {
           }
           break;
 
+        case "no_tool_notice":
+          // The backend saw a work-phase reply claim fixes/checks in a turn that
+          // ran no tool (context/turn_honesty.py). Show it as its own card after
+          // the reply so the user can tell narration from work.
+          flushBeforeInsert();
+          if (data.content) {
+            addMessage({ role: "system", content: `⚠️ ${data.content}` });
+          }
+          break;
+
         case "max_tokens_truncated":
           // The turn was cut off at the model's output-token cap (app.py's
           // MaxTokensReachedException handler). Any tool calls in that turn did
@@ -1174,7 +1209,7 @@ export function useWebSocket() {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const session = data.session as any;
             const runtimeTarget = session.runtime_target ?? session.runtimeTarget;
-            if (runtimeTarget === 'classic' || runtimeTarget === 'acxd') {
+            if (isRuntimeTarget(runtimeTarget)) {
               useBuilderStore.getState().setRuntimeTarget(runtimeTarget);
             }
             updateSession({
@@ -2190,6 +2225,7 @@ export function useWebSocket() {
         // Also reload assets from S3 in case they were generated while disconnected
         try {
           const assets = await getSessionAssets(sessionId);
+          if (assets && assets.length > 1) collapseStoredAssets(assets, "reconnect");
           if (assets && assets.length > 0) {
             console.log("[useWebSocket] Reloading", assets.length, "assets after reconnect");
             // Step 1: Restore asset previews with metadata (content may be empty for S3-backed assets)
@@ -3100,6 +3136,9 @@ export function useWebSocket() {
           // This ensures assets appear in their original positions in the conversation flow
           const { updateAssetPreview } = useBuilderStore.getState();
 
+          // One entry per stored object (see collapseStoredAssets).
+          if (assets && assets.length > 1) collapseStoredAssets(assets, "load");
+
           // First, add all assets to the asset preview store (for right panel display)
           // Assets with s3Key but no content will show as placeholders until S3 lazy-load completes
           if (assets && assets.length > 0) {
@@ -3119,33 +3158,41 @@ export function useWebSocket() {
               });
             }
 
-            // Lazy-load content from S3 for assets that have s3Key but empty content
+            // Lazy-load content from S3 for assets that have s3Key but empty
+            // content — in the BACKGROUND. Awaiting it held the conversation
+            // back: live (2026-09-26) 278 sequential fetches kept the chat at
+            // asset cards only for 33 s, the 15 s watchdog opened the input in
+            // the meantime, and a message sent then vanished from the chat when
+            // the late restore replaced the list.
             const assetsNeedingContent = assets.filter(a => a.s3Key && !a.content);
             if (assetsNeedingContent.length > 0) {
               console.log("[useWebSocket] Lazy-loading content from S3 for", assetsNeedingContent.length, "assets");
-              const BATCH_SIZE = 6;
-              for (let i = 0; i < assetsNeedingContent.length; i += BATCH_SIZE) {
-                const batch = assetsNeedingContent.slice(i, i + BATCH_SIZE);
-                await Promise.all(batch.map(async (asset) => {
-                  const content = await fetchAssetContent(newSessionId, asset.s3Key!);
-                  if (content) {
-                    updateAssetPreview({
-                      assetType: asset.assetType as AssetPreview['assetType'],
-                      operationId: asset.operationId,
-                      fileName: asset.fileName,
-                      content,
-                      isComplete: asset.isComplete,
-                      language: asset.language,
-                      createdAt: asset.createdAt,
-                      s3Key: asset.s3Key,
-                      messageIndex: asset.messageIndex,
-                    });
-                  } else {
-                    console.warn("[useWebSocket] Failed to load content from S3 for:", asset.assetType, asset.fileName);
-                  }
-                }));
-              }
-              console.log("[useWebSocket] S3 lazy-load complete");
+              void (async () => {
+                const BATCH_SIZE = 6;
+                for (let i = 0; i < assetsNeedingContent.length; i += BATCH_SIZE) {
+                  if (useSessionStore.getState().currentSessionId !== newSessionId) return;
+                  const batch = assetsNeedingContent.slice(i, i + BATCH_SIZE);
+                  await Promise.all(batch.map(async (asset) => {
+                    const content = await fetchAssetContent(newSessionId, asset.s3Key!);
+                    if (content) {
+                      updateAssetPreview({
+                        assetType: asset.assetType as AssetPreview['assetType'],
+                        operationId: asset.operationId,
+                        fileName: asset.fileName,
+                        content,
+                        isComplete: asset.isComplete,
+                        language: asset.language,
+                        createdAt: asset.createdAt,
+                        s3Key: asset.s3Key,
+                        messageIndex: asset.messageIndex,
+                      });
+                    } else {
+                      console.warn("[useWebSocket] Failed to load content from S3 for:", asset.assetType, asset.fileName);
+                    }
+                  }));
+                }
+                console.log("[useWebSocket] S3 lazy-load complete");
+              })();
             }
           }
 

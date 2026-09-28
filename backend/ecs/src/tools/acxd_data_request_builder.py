@@ -241,13 +241,18 @@ def build_data_request(plan: dict) -> dict:
         raise ValueError(f"unknown data integration mode {mode!r} "
                          f"(expected mock/external/mcp)")
 
+    purpose = " ".join(str(plan.get("purpose") or "").split())
+    if not purpose.isascii():
+        # ASCII-only metadata: a Korean purpose would be cut to a fragment
+        # ("( API)", Hanbit 2026-09-27). Say what the request is instead.
+        purpose = f"Calls the {dr_id} operation of the backend API."
     doc = {
         "dataRequestId": dr_id,
         "type": "object",
         "webhook": webhook,
         "responseSchema": response_json_schema(response_fields),
         "sensitive": bool(plan.get("sensitive")),
-        "description": (plan.get("purpose") or "")[:200],
+        "description": purpose[:200],
     }
     if request_fields:
         doc["requestSchema"] = fields_to_json_schema(request_fields)
@@ -488,7 +493,13 @@ def webhook_environments(url: str, headers: Optional[list] = None) -> dict:
 
 def _calls_generated_backend(plan: dict) -> bool:
     """True when the integration targets the backend this bundle deploys
-    (the {WEBHOOK_URL} placeholder) rather than a customer-supplied URL."""
+    (the {WEBHOOK_URL} placeholder) rather than a customer-supplied URL.
+
+    ACXD only (v3.1) marks its integrations ``external_backend``: the URL still
+    reads ``{WEBHOOK_URL}<path>``, but what answers there is the customer's own
+    API, so it gets no implicit ``x-api-key`` from a stack that does not exist."""
+    if plan.get("external_backend"):
+        return False
     if str(plan.get("mode") or "external").lower() not in ("external", "sample"):
         return False
     url = str(plan.get("url") or plan.get("webhook_url") or "")
@@ -554,6 +565,20 @@ def build_secret_assets(spec: dict) -> list:
         if not secret or secret in seen:
             continue
         seen.add(secret)
+        if plan.get("external_backend"):
+            # ACXD only: the customer's own API. One Secret per project holds the
+            # header value; the runner also accepts it as ACXD_SECRET_BACKENDAPIKEY.
+            env_name = "ACXD_SECRET_" + re.sub(r"[^A-Za-z0-9]", "", secret).upper()
+            header = str(plan.get("auth_header") or "the credential header").strip()
+            out.append({
+                "name": secret,
+                "description": (
+                    f"Value of the {header} header your backend API expects. Set at deploy "
+                    f"time from env {env_name} (or ACXD_SECRET_BACKENDAPIKEY); never stored "
+                    "in the bundle."),
+                "valueEnv": env_name,
+            })
+            continue
         if secret.endswith(BACKEND_API_KEY_SECRET):
             env_name = "ACXD_SECRET_" + re.sub(r"[^A-Za-z0-9]", "", secret).upper()
             out.append({

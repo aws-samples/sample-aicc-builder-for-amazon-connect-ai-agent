@@ -343,6 +343,37 @@ def _is_acxd_target(session_id: str) -> bool:
         return False
 
 
+def _is_acxd_only_target(session_id: str) -> bool:
+    """ACXD only (v3.1): the bundle is the ACXD application and its deploy kit."""
+    try:
+        from .acxd_flow_spec import is_acxd_only_target
+        return bool(is_acxd_only_target(session_id))
+    except Exception as exc:
+        logger.debug("[packager] ACXD-only target lookup unavailable: %s", exc)
+        return False
+
+
+def _acxd_only_backend_settings(session_id: str) -> dict:
+    """{base_url, auth_header, timezone} the interview recorded for the customer's API."""
+    try:
+        from .acxd_flow_spec import get_acxd_flow_spec
+        app = getattr(get_acxd_flow_spec(session_id), "application", None)
+    except Exception:  # pragma: no cover - the spec store is optional here
+        app = None
+    try:
+        from .acxd_timezone import business_timezone
+        locales = list(getattr(app, "locales", None) or [])
+        zone = business_timezone(getattr(app, "timezone", None),
+                                 getattr(app, "primary_locale", None) or (locales[0] if locales else None))
+    except Exception:  # pragma: no cover - documentation only
+        zone = None
+    return {
+        "base_url": (getattr(app, "backend_base_url", None) or "").rstrip("/") or None,
+        "auth_header": (getattr(app, "backend_auth_header", None) or "").strip() or None,
+        "timezone": zone,
+    }
+
+
 def _load_acxd_bundle(session_id: str) -> dict:
     from .acxd_bundle import load_acxd_bundle
     return load_acxd_bundle(session_id)
@@ -386,12 +417,18 @@ def _run_d9_checks(session_id: str, bundle: dict) -> list[str]:
 
 def _prepare_acxd_package(session_id: str, project_name: str) -> tuple[dict, dict, list[str]]:
     from .acxd_manifest_builder import (
+        acxd_only_backend,
         build_manifest,
         check_manifest_coverage,
         validate_deploy_manifest,
     )
 
     bundle = _load_acxd_bundle(session_id)
+    external_backend, backend_base_url = acxd_only_backend(session_id)
+    if external_backend:
+        # ACXD only: the customer wires the Agentic CX block into their own
+        # Contact Flow; a stray Contact Flow asset is not part of this bundle.
+        bundle["contact_flows"] = []
     # Last deterministic pass: a flow patched after generation (review-round
     # fix, modification request) gets the same runtime contract the generator
     # applies at write time — then D9 judges the result.
@@ -407,12 +444,17 @@ def _prepare_acxd_package(session_id: str, project_name: str) -> tuple[dict, dic
         notes = normalize_bundle_flows(bundle, spec)
         if notes:
             logger.info("[packager] runtime contract pass at packaging: %d change(s)", len(notes))
+        from .validate_acxd_consistency import normalize_bundle_languages
+        for note in normalize_bundle_languages(bundle):
+            logger.info("[packager] %s", note)
     except Exception as exc:  # pragma: no cover - never block packaging on the pass
         logger.warning("[packager] runtime contract pass skipped: %s", exc)
-    manifest = build_manifest(bundle, project_name=project_name)
+    manifest = build_manifest(bundle, project_name=project_name,
+                              external_backend=external_backend,
+                              backend_base_url=backend_base_url)
     problems = [f"D9: {item}" for item in _run_d9_checks(session_id, bundle)]
     problems.extend(validate_deploy_manifest(manifest))
-    problems.extend(check_manifest_coverage(manifest, bundle))
+    problems.extend(check_manifest_coverage(manifest, bundle, external_backend=external_backend))
     return bundle, manifest, problems
 
 
@@ -442,16 +484,20 @@ def build_acxd_zip_entries(
     manifest: dict,
     spec: Optional[dict] = None,
     extra_files: Optional[dict] = None,
+    *,
+    external_backend: bool = False,
 ) -> list[tuple[str, bytes, bool]]:
     """Return ACXD-only archive entries after manifest/coverage validation.
 
     ``spec`` and ``extra_files`` are accepted for compatibility with the
     retired standalone packager. D9 is session-aware and now runs from the
-    unified packager before this helper is called.
+    unified packager before this helper is called. ``external_backend`` marks
+    an ACXD-only (v3.1) manifest, whose coverage rules differ.
     """
     from .acxd_manifest_builder import check_manifest_coverage, validate_deploy_manifest
 
-    problems = validate_deploy_manifest(manifest) + check_manifest_coverage(manifest, bundle)
+    problems = validate_deploy_manifest(manifest) + check_manifest_coverage(
+        manifest, bundle, external_backend=external_backend)
     if problems:
         _refuse("ACXD manifest is invalid:\n  - " + "\n  - ".join(problems))
 
@@ -588,7 +634,8 @@ def _generate_wiring_guide(bundle: dict) -> str:
         "  deployment (the service refuses to update a deployment in place), the alias",
         "  key changes and the published flow keeps serving the previous build. The",
         "  script prints the new key; run `./deploy.sh --rebind-alias <key>` or pick",
-        "  the alias again in the block and publish.",
+        "  the alias again in the block and publish. A contact that is already in the",
+        "  block stays on the build it started with, so test with a new chat or call.",
         "",
     ]
     for contact_flow in bundle.get("contact_flows") or []:
@@ -603,6 +650,269 @@ def _generate_wiring_guide(bundle: dict) -> str:
     return "\n".join(lines)
 
 
+#: Deploy script shipped with an ACXD-only bundle (v3.1) — the runner, nothing else.
+ACXD_ONLY_DEPLOY_TEMPLATE = "deploy_acxd_only.sh"
+
+
+def _schema_rows(schema: Any) -> list[tuple[str, str, bool, str]]:
+    """(name, type, required, description) for each top-level property."""
+    if not isinstance(schema, dict):
+        return []
+    required = set(schema.get("required") or [])
+    rows = []
+    for name, prop in (schema.get("properties") or {}).items():
+        prop = prop if isinstance(prop, dict) else {}
+        kind = str(prop.get("type") or "string")
+        if kind == "array" and isinstance(prop.get("items"), dict):
+            kind = f"array of {prop['items'].get('type') or 'object'}"
+        notes = str(prop.get("description") or "")
+        if prop.get("enum"):
+            values = ", ".join(str(v) for v in prop["enum"])
+            notes = f"{notes}; one of: {values}" if notes else f"one of: {values}"
+        rows.append((str(name), kind, name in required, notes.replace("|", "/")))
+    return rows
+
+
+def _external_data_requests(bundle: dict) -> list[dict]:
+    return [doc for doc in bundle.get("data_requests") or []
+            if isinstance(doc, dict)
+            and ((doc.get("webhook") or {}).get("implementation") == "external")]
+
+
+def _generate_backend_contract(bundle: dict, backend: dict) -> str:
+    """BACKEND-CONTRACT.md: what the customer's API must answer (ACXD only).
+
+    Rendered from the Data Requests themselves — the one contract the runtime
+    enforces — plus the delivery facts the Classic path's Lambda adapter hides
+    (separators stripped from slot values, words for yes/no, a 200-only reply
+    validated against the response schema). It is documentation, not an
+    OpenAPI document: nothing imports it.
+    """
+    requests = _external_data_requests(bundle)
+    secrets = [s for s in bundle.get("secrets") or [] if isinstance(s, dict) and s.get("name")]
+    header = backend.get("auth_header")
+    lines = [
+        "# Backend API contract",
+        "",
+        "The application's data requests call **your** API directly. This file lists",
+        "every call: the path under the base URL, the JSON body the runtime sends and",
+        "the JSON reply it validates. It is generated from `assets/acxd/data-requests/`",
+        "— change the data requests (re-run the builder), not this file.",
+        "",
+        "## Base URL and authentication",
+        "",
+        "- **Base URL**: `WEBHOOK_URL`, set when you run `./deploy.sh`"
+        + (f" (default recorded in the interview: `{backend['base_url']}`)." if backend.get("base_url") else "."),
+    ]
+    if header and secrets:
+        secret = secrets[0]
+        lines.append(
+            f"- **Authentication**: every request carries the header `{header}`; its value is the "
+            f"ACXD secret `{secret['name']}`, created at deploy time from "
+            f"`{secret.get('valueEnv') or 'ACXD_SECRET_BACKENDAPIKEY'}` (or `ACXD_SECRET_BACKENDAPIKEY`). "
+            "The value is never written into the bundle.")
+    else:
+        lines.append("- **Authentication**: none. The data requests send no credential header; "
+                     "restrict the API another way (network, allow-list) before real use.")
+    lines += [
+        "",
+        "## What every endpoint must do",
+        "",
+        "1. **Read the fields from the JSON body.** The runtime posts the request fields as one",
+        "   JSON object. It may add conversation-context keys; ignore keys you do not use.",
+        "2. **Accept both forms of a value.** A generative journey's tool call sends values in",
+        "   their schema format, with separators (`010-1111-2222`, `2026-09-16`, `10:00`), while",
+        "   a fixed capture step sends a built-in slot value without them (`01011112222`,",
+        "   `20260916`, `1000`). A yes/no field arrives as the word in the application's language",
+        "   (`예` / `아니요`, `yes` / `no`). Normalise (strip the separators) before you validate.",
+        "3. **Always answer HTTP 200 with a JSON body.** A 201/204, or a body that does not match",
+        "   the response schema below, sends the conversation down the failure path. The reply",
+        "   carries the envelope `success` (boolean, required), `errorCode` and `message`",
+        "   (strings, never `null`) plus the fields listed. Numbers must be JSON numbers, not",
+        "   strings.",
+        "4. **Report business outcomes in the envelope, not the status code.** Not found,",
+        "   refused or invalid input is `200` with `success: false`, an `errorCode` and a",
+        "   `message`, so the assistant can tell the caller what happened.",
+    ]
+    zone = backend.get("timezone")
+    if zone:
+        lines += [
+            f"5. **Dates are calendar dates in `{zone}`.** The assistant turns \"today\" and",
+            f"   \"tomorrow\" into dates in `{zone}` (the ACXD runtime's own clock runs on",
+            "   America/New_York) and sends them as `YYYY-MM-DD`. Check date rules (same-day,",
+            "   booking window, cut-off times) against your own calendar in the same zone.",
+        ]
+    lines += [
+        "",
+    ]
+    if not requests:
+        lines += ["This bundle has no external data requests.", ""]
+    for doc in requests:
+        webhook = doc.get("webhook") or {}
+        url = str(webhook.get("url") or "")
+        path = url.replace("{WEBHOOK_URL}", "") or "/"
+        method = str(webhook.get("method") or "POST").upper()
+        lines += [f"## `{doc.get('dataRequestId')}`", ""]
+        if doc.get("description"):
+            lines += [str(doc["description"]), ""]
+        lines += [f"`{method} {{WEBHOOK_URL}}{path}`", ""]
+        request_rows = _schema_rows(doc.get("requestSchema"))
+        lines += ["Request body:", ""]
+        if request_rows:
+            lines += ["| Field | Type | Required | Notes |", "|---|---|---|---|"]
+            lines += [f"| `{n}` | {t} | {'yes' if r else 'no'} | {d} |" for n, t, r, d in request_rows]
+        else:
+            lines.append("(no fields)")
+        response_rows = _schema_rows(doc.get("responseSchema"))
+        lines += ["", "Reply body (HTTP 200):", ""]
+        if response_rows:
+            lines += ["| Field | Type | Required | Notes |", "|---|---|---|---|"]
+            lines += [f"| `{n}` | {t} | {'yes' if r else 'no'} | {d} |" for n, t, r, d in response_rows]
+        else:
+            lines.append("(envelope only)")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _generate_acxd_only_wiring_guide(bundle: dict) -> str:
+    """WIRING-GUIDE.md for an ACXD-only bundle: the customer owns the Contact Flow."""
+    application = bundle.get("application") or {}
+    name = application.get("name", "the ACXD application")
+    context_names = [str(v.get("name") or v.get("key") or "") for v in bundle.get("context_variables") or []
+                     if isinstance(v, dict)]
+    context_names = [n for n in context_names if n]
+    settings = application.get("settings") if isinstance(application.get("settings"), dict) else {}
+    codes = settings.get("languageCodes") or application.get("languageCodes") or []
+    locale = str(settings.get("languageCode") or application.get("mainLanguageCode")
+                 or (codes[0] if codes else "") or "").strip() or "<the application's language code>"
+    lines = [
+        "# Connecting the application to Amazon Connect",
+        "",
+        "This bundle ships no Contact Flow. After `./deploy.sh` has deployed the application,",
+        "add the Agentic CX block to the flow that should reach it:",
+        "",
+        "1. In your **Connect Customer** instance open the contact flow (inbound voice or chat).",
+        f"2. Before the block, set the contact's language to `{locale}`: a **Set contact attributes**",
+        "   block that sets the contact's language (in the flow JSON an `UpdateContactData` action",
+        f"   with `LanguageCode: {locale}`). Without it every contact fails with \"NLX Chat Streaming",
+        "   Failed\" although the application and its build are fine.",
+        "3. Add the **Agentic CX** block where the caller should meet the assistant.",
+        f"4. In the block pick the ACXD workspace, the application **{name}** and its alias. The",
+        "   alias list shows the deployment `deploy.sh` created under the name ACXD gives it",
+        "   (`Production`, even for a deployment to the development environment). Click",
+        "   **Confirm** at the bottom of the block panel; without it the block keeps its old values.",
+        "5. Wire the block's branches:",
+        "   - **Default**: the conversation finished (the assistant said goodbye), usually a",
+        "     disconnect.",
+        "   - **Escalation**: the assistant handed off to a human; route to your queue transfer",
+        "     (hours check, set queue, transfer).",
+        "   - **Error**: the application could not run; play a short apology and transfer or",
+        "     disconnect.",
+        "   - **Idle chat timeout** (chat): disconnect.",
+        "",
+        "   In the flow JSON, Default is the block's `NoMatchingCondition` error, Escalation the",
+        "   condition `Equals Escalation`, Error `NoMatchingError` and the idle timeout",
+        "   `InputTimeLimitExceeded`.",
+        "6. Publish the flow and attach it to a phone number or chat widget.",
+        "",
+        "## Things the application relies on",
+        "",
+        "- **The application speaks.** It greets, collects, answers and says goodbye. Keep the",
+        "  Contact Flow silent before the block, except a recording or legal notice you must play,",
+        "  or the caller hears two greetings.",
+        "- **Workspace model.** Knowledge-base answers and generative replies run on the default",
+        "  generative model of the ACXD workspace. Set it before the first contact.",
+        "- **After a redeploy.** When a redeploy has to replace the application deployment",
+        "  (`deploy.sh` says so), its alias key changes. The block keeps the old key, which still",
+        "  answers with the previous build, so re-select the application and the alias in the",
+        "  block, click **Confirm** and publish.",
+        "- **Testing a change.** A contact stays on the build its Agentic CX block started with,",
+        "  so test with a new chat or call. Connect's test chat window reopens a chat that has",
+        "  not ended: finish or end it first, then check that the new chat greets you again.",
+        "- **Interim messages.** The journeys' tools send no interim message (\"one moment",
+        "  please\"): over a chat contact the block left the conversation on each tested turn",
+        "  whose tool sent one, before the application's answer arrived. Keep it that way when",
+        "  you edit the journeys in the designer.",
+    ]
+    if context_names:
+        lines += [
+            "",
+            "## Context variables",
+            "",
+            "After the block, later actions can read `$.AgenticCX.ContextVariables.<name>`:",
+            "",
+        ] + [f"- `{n}`" for n in context_names]
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _generate_acxd_only_readme(project_name: str, bundle: dict, manifest: dict, backend: dict) -> str:
+    """README.md for an ACXD-only bundle (v3.1)."""
+    from .acxd_bundle import bundle_summary
+
+    counts = bundle_summary(bundle)
+    application = bundle.get("application") or {}
+    has_backend = bool(_external_data_requests(bundle))
+    lines = [
+        f"# {project_name}",
+        "",
+        "**Agentic CX Designer application (ACXD only)**",
+        "",
+        f"Generated by AICC Builder on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.",
+        "",
+        "This bundle holds only what Agentic CX Designer deploys. There is no CloudFormation,",
+        "Lambda, OpenAPI or Contact Flow: the data requests call your existing API, and you add",
+        "the Agentic CX block to your own Contact Flow.",
+        "",
+        "## Contents",
+        "",
+        f"- `assets/acxd/application.json`: the application **{application.get('name', '')}**",
+        f"- `assets/acxd/flows/`: {counts.get('flows', 0)} conversation flow(s)",
+        f"- `assets/acxd/data-requests/`: {counts.get('data_requests', 0)} data request(s)",
+        f"- `assets/acxd/slot-types/`: {counts.get('slot_types', 0)} slot type(s)",
+        f"- `assets/acxd/guardrails/`: {counts.get('guardrails', 0)} guardrail(s)",
+        f"- `assets/acxd/knowledge-bases/`: {counts.get('knowledge_bases', 0)} knowledge base(s) with their articles",
+        f"- `assets/acxd/secrets/`: {counts.get('secrets', 0)} secret declaration(s) (names only, never values)",
+        "- `assets/acxd/context-variables.json`",
+        f"- `deploy-manifest.json`: {len(manifest.get('steps') or [])} deploy step(s) run by `runner.js`",
+        "- `deploy.sh`, `runner.js`, `lib/`, `package.json`: the deploy kit",
+    ]
+    if has_backend:
+        lines.append("- `BACKEND-CONTRACT.md`: the calls your API must answer")
+    lines += [
+        "- `WIRING-GUIDE.md`: adding the Agentic CX block to your Contact Flow",
+        "",
+        "## Deploy",
+        "",
+        "Requirements: Node.js 20+, a Connect Customer instance with an Agentic CX designer",
+        "workspace, and a programmatic API key (Admin Hub > Users > API access).",
+        "",
+        "```bash",
+        "./deploy.sh --dry-run     # the plan, nothing changes",
+        "export ACXD_WORKSPACE_ID=<workspace id> ACXD_API_KEY=<acxd_live_...>",
+    ]
+    if has_backend:
+        default = backend.get("base_url") or "https://api.example.com"
+        lines.append(f"export WEBHOOK_URL={default}   # base URL of your backend API")
+        if backend.get("auth_header"):
+            lines.append("export ACXD_SECRET_BACKENDAPIKEY=<value of the "
+                         f"{backend['auth_header']} header>")
+    lines += [
+        "./deploy.sh               # prompts for anything not exported",
+        "./deploy.sh status",
+        "./deploy.sh cleanup",
+        "```",
+        "",
+        "The deploy is idempotent: re-running updates the same resources. The API key and",
+        "secret values are read from the environment and never written into the bundle or",
+        "its state files.",
+        "",
+        "Next: `WIRING-GUIDE.md`.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 @tool
 def package_and_upload_assets(
     session_id: str,
@@ -611,6 +921,23 @@ def package_and_upload_assets(
 ) -> dict:
     """Strands tool wrapper — see package_assets_impl for implementation."""
     return package_assets_impl(session_id, project_name, include_readme, asset_type_filter=None)
+
+
+def _session_project_name(session_id: str) -> Optional[str]:
+    """The ASCII project name an ACXD-only session recorded, or None.
+
+    The download endpoint calls the packager without one, so every bundle was
+    named 'aicc-poc' (live, SELC ACXD only, 2026-09-26: folder, README title and
+    manifest said aicc-poc while the application was selc-voice, and two
+    downloads unpacked into the same folder)."""
+    try:
+        from tools.acxd_flow_spec import derived_project_name, get_acxd_flow_spec
+        spec = get_acxd_flow_spec(session_id)
+        app = getattr(spec, "application", None) if spec is not None else None
+        return derived_project_name(app) if app is not None else None
+    except Exception as e:  # pragma: no cover - best effort, never blocks a download
+        logger.debug(f"[packager] ACXD project name unavailable for {session_id}: {e}")
+        return None
 
 
 def package_assets_impl(
@@ -650,6 +977,12 @@ def package_assets_impl(
     if not bucket_name:
         # Try alternate environment variable
         bucket_name = os.environ.get("ASSETS_BUCKET")
+
+    if (not project_name or project_name == "aicc-poc") and _is_acxd_only_target(session_id):
+        # ACXD only has no CloudFormation stack whose name follows the project,
+        # so the bundle can carry the application's own project name. The other
+        # targets keep their default: the runner names '<project>-stack' after it.
+        project_name = _session_project_name(session_id) or "aicc-poc"
 
     if not bucket_name:
         return {
@@ -724,6 +1057,11 @@ def package_assets_impl(
                     "session_id": session_id,
                 }
             acxd_plan = (acxd_bundle, acxd_manifest)
+        # ACXD only (v3.1): the archive is the ACXD application and its deploy
+        # kit. Nothing Classic is generated, and a stray asset (an FAQ source
+        # file, an import) must not make the bundle look like a Classic one.
+        acxd_only = bool(acxd_plan) and _is_acxd_only_target(session_id)
+        backend_settings = _acxd_only_backend_settings(session_id) if acxd_only else {}
 
         # Create in-memory ZIP file
         zip_buffer = io.BytesIO()
@@ -738,7 +1076,7 @@ def package_assets_impl(
             # second copy is the same file and is skipped — only a DIFFERENT
             # document at the same path makes the bundle ambiguous.
             zip_digests: dict[str, str] = {}
-            for s3_key, asset_info in parsed_assets.items():
+            for s3_key, asset_info in ({} if acxd_only else parsed_assets).items():
                 asset_type = asset_info["asset_type"]
                 operation_id = asset_info.get("operation_id")
                 file_name = asset_info["file_name"]
@@ -814,7 +1152,7 @@ def package_assets_impl(
             if acxd_plan:
                 acxd_bundle, acxd_manifest = acxd_plan
                 for relative_path, payload, executable in build_acxd_zip_entries(
-                        project_name, acxd_bundle, acxd_manifest):
+                        project_name, acxd_bundle, acxd_manifest, external_backend=acxd_only):
                     zip_path = f"{project_name}/{relative_path}"
                     if zip_path in zip_paths:
                         _refuse(
@@ -837,27 +1175,35 @@ def package_assets_impl(
 
             # Add README with deployment instructions
             if include_readme and file_list:
-                readme_content = _generate_readme(
-                    project_name=project_name,
-                    assets_found=assets_found
-                )
-                if acxd_plan:
-                    readme_content += "\n\n" + _generate_acxd_readme_section() + "\n"
+                if acxd_only:
+                    readme_content = _generate_acxd_only_readme(
+                        project_name, acxd_plan[0], acxd_plan[1], backend_settings)
+                else:
+                    readme_content = _generate_readme(
+                        project_name=project_name,
+                        assets_found=assets_found
+                    )
+                    if acxd_plan:
+                        readme_content += "\n\n" + _generate_acxd_readme_section() + "\n"
                 readme_path = f"{project_name}/README.md"
                 zf.writestr(readme_path, readme_content)
                 zip_paths.add(readme_path)
                 file_list.append(readme_path)
 
-            # Add deploy.sh for CloudShell one-click deployment (from template)
+            # Add deploy.sh for CloudShell one-click deployment (from template).
+            # ACXD only ships its own short script: the runner and nothing else.
             if file_list:
                 template_path = os.path.join(
-                    os.path.dirname(__file__), "..", "templates", "deploy_workshop.sh"
+                    os.path.dirname(__file__), "..", "templates",
+                    ACXD_ONLY_DEPLOY_TEMPLATE if acxd_only else "deploy_workshop.sh",
                 )
                 if os.path.exists(template_path):
                     with open(template_path, "r") as f:
                         deploy_script = f.read()
                 else:
                     deploy_script = None
+                if acxd_only and not deploy_script:
+                    _refuse("the ACXD-only deploy script template is missing from this build")
                 if deploy_script:
                     deploy_path = f"{project_name}/deploy.sh"
                     zf.writestr(deploy_path, deploy_script,
@@ -870,9 +1216,15 @@ def package_assets_impl(
 
             if acxd_plan:
                 wiring_path = f"{project_name}/WIRING-GUIDE.md"
-                zf.writestr(wiring_path, _generate_wiring_guide(acxd_plan[0]))
+                zf.writestr(wiring_path, _generate_acxd_only_wiring_guide(acxd_plan[0]) if acxd_only
+                            else _generate_wiring_guide(acxd_plan[0]))
                 zip_paths.add(wiring_path)
                 file_list.append(wiring_path)
+            if acxd_only and _external_data_requests(acxd_plan[0]):
+                contract_path = f"{project_name}/BACKEND-CONTRACT.md"
+                zf.writestr(contract_path, _generate_backend_contract(acxd_plan[0], backend_settings))
+                zip_paths.add(contract_path)
+                file_list.append(contract_path)
 
         # Check if we actually packaged anything
         if not file_list:
@@ -940,7 +1292,7 @@ def package_assets_impl(
             "total_size_mb": round(total_size / (1024 * 1024), 2),
             "s3_key": s3_key,
             "assets_found": assets_found,
-            "runtime_target": "acxd" if acxd_plan else "classic",
+            "runtime_target": "acxd_only" if acxd_only else ("acxd" if acxd_plan else "classic"),
             "message": f"Assets packaged successfully! {len(file_list)} files, {round(total_size / 1024, 1)} KB"
         }
 

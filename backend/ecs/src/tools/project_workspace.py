@@ -446,6 +446,49 @@ class ProjectWorkspace:
 # @tool wrappers — callable by orchestrator / sub-agents
 # ---------------------------------------------------------------------------
 
+#: Text attachments whose bytes ARE the customer's document.
+_TEXT_UPLOAD_SUFFIXES = (".md", ".markdown", ".txt", ".csv")
+
+
+def _customer_document_text(session_id: Optional[str]) -> str:
+    """The requirement document in the customer's own bytes: this message when
+    it is document-sized, plus every text attachment of the session. Empty when
+    neither exists (a short answer, a PDF-only upload) — the model's text is
+    then all there is."""
+    parts: list[str] = []
+    try:
+        from tools.session_context import current_user_message_text
+        message = (current_user_message_text.get() or "").strip()
+        if len(message) >= 500:
+            parts.append(message)
+    except Exception:
+        pass
+    if session_id:
+        try:
+            from tools.workspace_file_tools import _resolve_safe_path
+            uploads = _resolve_safe_path(session_id, "uploads")
+            if uploads.is_dir():
+                for path in sorted(uploads.iterdir()):
+                    if path.is_file() and path.suffix.lower() in _TEXT_UPLOAD_SUFFIXES:
+                        text = path.read_text(encoding="utf-8", errors="replace").strip()
+                        if len(text) >= 200 and text not in parts:
+                            parts.append(text)
+        except Exception as e:
+            logger.debug(f"[Workspace] uploads not readable for {session_id}: {e}")
+    return "\n\n".join(parts)
+
+
+def _verbatim_raw_input(content: str, session_id: Optional[str]) -> tuple[str, str]:
+    """(text to store, source). The customer's bytes win over the model's
+    re-typed copy unless the model's is clearly larger (it merged several
+    messages): e2e 2026-09-25, a 13.9 KB upload was stored as a 7.6 KB summary
+    and a quoted hand-off sentence was reworded on the way to the plan."""
+    customer = _customer_document_text(session_id)
+    if customer and len(content or "") <= int(len(customer) * 1.25):
+        return customer, "customer_text"
+    return content, "model_text"
+
+
 @tool
 def save_requirement_document(
     doc_type: str,
@@ -472,6 +515,10 @@ def save_requirement_document(
     ws = ensure_workspace()
     if not ws:
         return {"success": False, "error": "Workspace not initialised (no session)"}
+    model_chars = len(content or "")
+    source = "model_text"
+    if doc_type == "raw_input":
+        content, source = _verbatim_raw_input(content, current_session_id.get())
     ok = ws.save_requirement(doc_type, content, operation_id)
     if not ok:
         return {
@@ -503,6 +550,13 @@ def save_requirement_document(
         "char_count": len(content),
         "message": f"Saved {doc_type} document ({len(content)} chars) to S3 workspace.",
     }
+    if doc_type == "raw_input" and source == "customer_text":
+        result["stored_from"] = source
+        result["model_char_count"] = model_chars
+        result["message"] += (
+            " Stored from the customer's own message and text attachments, verbatim "
+            f"(your copy had {model_chars} chars): quote wording and field tables from "
+            "load_requirement_document(doc_type='raw_input'), not from memory.")
     if doc_type == "raw_input":
         # The document is kept item by item from here on: every item must be
         # mapped to a spec (or excluded with the customer) before the interview

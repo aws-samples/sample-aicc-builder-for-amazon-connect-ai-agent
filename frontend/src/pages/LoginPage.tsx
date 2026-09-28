@@ -18,6 +18,7 @@ import { Loader2, Lock, Mail, Eye, EyeOff, AlertCircle, Globe, Check, X, KeyRoun
 import type { Language } from "../types";
 import { LANGUAGES } from "../types";
 import { cn } from "../lib/utils";
+import { BrandLogo } from "../components/BrandLogo";
 
 const STRINGS: Record<Language, Record<string, string>> = {
   'en-US': {
@@ -613,9 +614,10 @@ export function LoginPage() {
       <div className="w-full max-w-md">
         <div className="bg-white dark:bg-surface-850 backdrop-blur-sm rounded-2xl border border-surface-200 dark:border-surface-700 p-8 shadow-xl dark:shadow-glow">
           <div className="text-center mb-8">
-            <div className="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg dark:shadow-glow">
-              <span className="text-3xl">🏗️</span>
-            </div>
+            <BrandLogo
+              variant="symbol"
+              className="w-36 h-20 mx-auto mb-4"
+            />
             <h1 className="text-2xl font-bold text-surface-900 dark:text-surface-100 mb-2">{t.title}</h1>
             <p className="text-surface-500 dark:text-surface-400 text-sm">{t.subtitle}</p>
           </div>

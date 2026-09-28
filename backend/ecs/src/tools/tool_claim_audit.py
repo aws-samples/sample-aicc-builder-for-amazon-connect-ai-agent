@@ -144,6 +144,50 @@ def unbacked_tool_claims(text: str, tools_called: Iterable[str]) -> list[str]:
     return sorted(name for name in _claimed_tools(text) if name not in called)
 
 
+# A kind of work reported with a tool-shaped result while no tool of that kind
+# ran in the turn. Live (dev, 2026-09-28, ACXD only): asked to regenerate and
+# review, the orchestrator wrote "먼저 재생성을 실행합니다. 재생성 성공 (status:
+# success, problems: [], flows=9). 이어서 검토를 실행합니다." and then called only
+# reviewer_agent: no generation tool ran and the assets were a day old. Neither
+# check above fired, because the text named no tool and the turn did call one.
+_FAMILIES = (
+    ("regeneration", re.compile(r"(?:재생성|다시\s*생성|regenerat\w*|re-?generat\w*|再生成)", re.I),
+     ("generate_",),
+     re.compile(r"\bstatus\s*[:：]\s*(?:success|ok)\b|\bflows?\s*[:：=]\s*\d+|"
+                r"\bproblems?\s*[:：=]\s*(?:\d+|\[\s*\])|플로우\s*\d+\s*개", re.I)),
+    ("packaging", re.compile(r"(?:재?패키징|packag(?:ed|ing)\b|パッケージ化?)", re.I),
+     ("package_",),
+     re.compile(r"\.zip\b|다운로드\s*(?:링크|준비|가능)|download (?:link|is ready|ready)|"
+                r"\bfiles?\s*[:：=]\s*\d+|\bstatus\s*[:：]\s*(?:success|ok)\b", re.I)),
+)
+_FAMILY_WINDOW = 80
+
+_FAMILY_LABELS = {
+    "ko": {"regeneration": ("재생성", "생성 도구(generate_acxd_application 등)"),
+           "packaging": ("패키징", "패키징 도구(package_and_upload_assets)")},
+    "en": {"regeneration": ("a regeneration", "a generation tool (generate_acxd_application, …)"),
+           "packaging": ("packaging", "the packaging tool (package_and_upload_assets)")},
+}
+
+
+def unbacked_family_claims(text: str, tools_called: Iterable[str]) -> list[str]:
+    """Kinds of work ('regeneration', 'packaging') the text reports with a
+    tool-shaped result although no tool of that kind was called this turn."""
+    called = [str(t) for t in tools_called if t]
+    found: list[str] = []
+    for family, word, prefixes, result_shape in _FAMILIES:
+        if any(name.startswith(prefix) for name in called for prefix in prefixes):
+            continue
+        for match in word.finditer(text or ""):
+            line_end = text.find("\n", match.end())
+            stop = min(len(text) if line_end == -1 else line_end, match.end() + _FAMILY_WINDOW)
+            result = result_shape.search(text, match.end(), stop)
+            if result and not _PLAN_MARKERS.search(text[match.start():result.start()]):
+                found.append(family)
+                break
+    return found
+
+
 def unbacked_execution_claim(text: str, tools_called: Iterable[str]) -> bool:
     """True when the turn called NO tool yet the text asserts something was executed
     — by a verb, by presenting "the tool's return value", or by listing two or more
@@ -159,9 +203,22 @@ def unbacked_execution_claim(text: str, tools_called: Iterable[str]) -> bool:
 def audit_notice(text: str, tools_called: Iterable[str], language: str = "ko") -> str | None:
     """A user-facing notice for unbacked claims, or None when the turn is clean."""
     missing = unbacked_tool_claims(text, tools_called)
+    korean = str(language or "ko").lower().startswith("ko")
     if not missing:
+        families = unbacked_family_claims(text, tools_called)
+        if families:
+            labels = _FAMILY_LABELS["ko" if korean else "en"]
+            if korean:
+                work = "·".join(labels[f][0] for f in families)
+                tools = ", ".join(labels[f][1] for f in families)
+                return (f"\n\n⚠️ 검증 안내: 이 턴에 {work} 결과가 적혀 있지만 서버 기록에는 {tools} 호출이 없습니다. "
+                        "위 결과는 실제 실행 결과가 아니니, 해당 도구를 다시 실행해 확인해 주세요.")
+            work = " and ".join(labels[f][0] for f in families)
+            tools = ", ".join(labels[f][1] for f in families)
+            return (f"\n\n⚠️ Verification notice: this turn reports the result of {work}, but the server "
+                    f"recorded no call to {tools}. Treat that output as unverified and re-run the tool.")
         if unbacked_execution_claim(text, tools_called):
-            if str(language or "ko").lower().startswith("ko"):
+            if korean:
                 return ("\n\n⚠️ 검증 안내: 이 턴은 도구를 실행했다고 말하지만 서버 기록에는 어떤 도구 호출도 없습니다. "
                         "위 결과는 실제 실행 결과가 아닐 수 있으니, 해당 도구를 다시 실행해 확인해 주세요.")
             return ("\n\n⚠️ Verification notice: this turn says something was executed, but the server "

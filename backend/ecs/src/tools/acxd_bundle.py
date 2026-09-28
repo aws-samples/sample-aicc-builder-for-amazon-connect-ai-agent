@@ -70,10 +70,23 @@ def enforce_ascii_metadata(doc: Any) -> Any:
         if key in ASCII_ONLY_METADATA_FIELDS and isinstance(val, str):
             cleaned = re.sub(r"\s+", " ", re.sub(r"[^\x20-\x7E]", " ", val)).strip()
             if cleaned and re.search(r"[A-Za-z]{3}", cleaned):
-                cleaned = re.sub(r"\s+([,.:;!?])", r"\1", cleaned)
+                # a bracket whose words were all non-ASCII leaves "( )" / "( / )"
+                previous = None
+                while previous != cleaned:
+                    previous = cleaned
+                    cleaned = re.sub(r"[(\[]\s*[^\w()\[\]]*\s*[)\]]", "", cleaned)
+                cleaned = re.sub(r"\s+([,.:;!?)\]])", r"\1", cleaned)
                 cleaned = re.sub(r"[\"']\s+[\"']", " ", cleaned)
                 cleaned = re.sub(r"^[\s.,:;!?\"'-]+", "", cleaned)
                 cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+                # What is left of a mostly Korean/Japanese sentence is a fragment
+                # (Hanbit, 2026-09-27: "진료 예약 접수 (병원 기존 API)" → "( API)",
+                # the application's description → "AI (ACXD, API)"). Keep it only
+                # when real words survived: two or more, one of them not an acronym.
+                words = re.findall(r"[A-Za-z]{3,}", cleaned)
+                if re.search(r"[^\x00-\x7F]", val) and (
+                        len(words) < 2 or not any(re.search(r"[a-z]", w) for w in words)):
+                    cleaned = ""
                 if cleaned:
                     out[key] = cleaned
             continue
@@ -408,6 +421,17 @@ def load_acxd_bundle(session_id: str) -> dict:
     bundle["context_variables"] = cvs
 
     bundle["contact_flows"] = _dedupe_contact_flows(_read_json_docs(session_id, CLASSIC_CONTACT_FLOW_TYPE))
+    try:
+        from tools.acxd_flow_spec import is_acxd_only_target
+        acxd_only = bool(is_acxd_only_target(session_id))
+    except Exception:  # pragma: no cover - the target store is optional here
+        acxd_only = False
+    if acxd_only and bundle["contact_flows"]:
+        # ACXD only (v3.1): the customer adds the Agentic CX block to their own
+        # Contact Flow; an imported or leftover flow is not part of the bundle.
+        logger.info("[ACXDBundle] ACXD only: %d Contact Flow asset(s) left out of the bundle",
+                    len(bundle["contact_flows"]))
+        bundle["contact_flows"] = []
     # The Contact Flow was generated once; the binding contract (language block
     # before the Agentic CX block, chat analytics the API rejects, branch
     # targets) has grown since. Re-apply the linter and the binding on load so a

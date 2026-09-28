@@ -139,6 +139,58 @@
       "default": "development",
       "title": "Environment",
       "type": "string"
+    },
+    "timezone": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "IANA time zone the business runs on ('Asia/Seoul', 'America/Chicago'). Journeys count 'today' and 'tomorrow' in it \u2014 the ACXD runtime's own clock runs on America/New_York. Empty: derived from the primary locale (ko \u2192 Asia/Seoul, ja \u2192 Asia/Tokyo); any other language needs it recorded.",
+      "title": "Timezone"
+    },
+    "project_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "ACXD only: ASCII kebab-case project name ('selc-voice'). Workspace-level resources (the backend-key secret, guardrails) are named after it, the way InfrastructureSpec.project_name names them in the other targets.",
+      "title": "Project Name"
+    },
+    "backend_base_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "ACXD only: https base URL of the customer's existing API. The Data Requests call {WEBHOOK_URL}<operation path>; this is the default for WEBHOOK_URL at deploy time. Empty = supplied when deploying.",
+      "title": "Backend Base Url"
+    },
+    "backend_auth_header": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "ACXD only: the header the customer's API reads its credential from ('x-api-key', 'Authorization', \u2026). The value is an ACXD Secret set at deploy time, never stored. '' = the API takes no credential header; None = not decided yet.",
+      "title": "Backend Auth Header"
     }
   },
   "title": "ACXDApplicationPlan",

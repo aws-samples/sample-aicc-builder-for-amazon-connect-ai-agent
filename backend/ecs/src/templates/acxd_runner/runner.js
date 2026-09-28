@@ -68,6 +68,9 @@ function makeCtx(manifest, bundleDir, { client, sdk, acxdRegion } = {}) {
     client,
     sdk,
     state: loadState(bundleDir),
+    // An ACXD-only bundle imports no Contact Flow (the customer wires their own),
+    // so alias hints must not point at ./deploy.sh --rebind-alias.
+    managesContactFlow: manifest.steps.some((step) => step.type === 'import-contact-flows'),
     exec: (cmd, cmdArgs) => execFileSync(cmd, cmdArgs, { encoding: 'utf-8' }),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     env: process.env,
@@ -78,9 +81,10 @@ async function cmdDeploy(args, bundleDir) {
   const manifest = loadManifest(path.join(bundleDir, args.manifest));
   const project = process.env.PROJECT_NAME || manifest.project;
   log(`AICC Builder ACXD deploy — project '${project}', ${manifest.steps.length} step(s)`);
+  const hasCfnStep = manifest.steps.some((step) => step.type === 'deploy-cfn-backend');
   if (project !== manifest.project) {
     log(`  (PROJECT_NAME=${project} overrides the manifest's '${manifest.project}')`);
-  } else if (!process.env.PROJECT_NAME && !process.env.AICC_STACK_NAME) {
+  } else if (hasCfnStep && !process.env.PROJECT_NAME && !process.env.AICC_STACK_NAME) {
     // deploy.sh always exports these; a bare runner invocation does not, and
     // then it deploys its own '<manifest project>-stack'.
     log(`  Runner-only deploy: CloudFormation stack '${manifest.project}-stack'. To share ` +
@@ -128,12 +132,22 @@ async function cmdDeploy(args, bundleDir) {
   }
   if (ctx.state.aliasRotated) {
     log('   ⚠️  The deployment was REPLACED, so its deployment key (the Agentic CX block\'s');
-    log('      Alias) changed. Re-select the alias in the block and publish, or run');
-    log('      ./deploy.sh --rebind-alias <deploymentKey> — until then Connect serves the');
-    log('      previous build. See WIRING-GUIDE.md.');
+    if (ctx.managesContactFlow) {
+      log('      Alias) changed. Re-select the alias in the block and publish, or run');
+      log('      ./deploy.sh --rebind-alias <deploymentKey> — until then Connect serves the');
+      log('      previous build. See WIRING-GUIDE.md.');
+    } else {
+      log('      Alias) changed. A contact flow that already uses this application keeps');
+      log('      serving the previous build until you re-select the alias in its Agentic CX');
+      log('      block and publish. See WIRING-GUIDE.md.');
+    }
     return 0;
   }
   log('   Next: wire the Agentic CX block in your Connect contact flow (see WIRING-GUIDE.md).');
+  if (!manifest.steps.some((step) => step.type === 'import-contact-flows')) {
+    log('   This bundle ships no Contact Flow: add the Agentic CX block to your own flow and');
+    log('   pick this application and its alias in the block.');
+  }
   return 0;
 }
 
@@ -157,8 +171,13 @@ function cmdStatus(bundleDir) {
         `'${r.environment || 'development'}' deployment ` +
         `(${r.previousDeploymentId || '?'} -> ${r.deploymentId || state.deploymentId})`);
     log('      The Agentic CX block still holds the previous deployment key, so Connect');
-    log('      serves the PREVIOUS build. Re-select the alias in the block and publish, or');
-    log('      run ./deploy.sh --rebind-alias <deploymentKey>.');
+    if (r.managesContactFlow === false) {
+      log('      serves the PREVIOUS build. Re-select the alias in your contact flow\'s block');
+      log('      and publish.');
+    } else {
+      log('      serves the PREVIOUS build. Re-select the alias in the block and publish, or');
+      log('      run ./deploy.sh --rebind-alias <deploymentKey>.');
+    }
   }
   return 0;
 }

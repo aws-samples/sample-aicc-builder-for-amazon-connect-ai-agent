@@ -128,3 +128,29 @@ def test_plain_text_status_after_a_tool_name_is_a_narrated_result():
     assert audit_notice(text, ["reviewer_agent"], "ko") and "generate_acxd_application" in audit_notice(text, ["reviewer_agent"], "ko")
     # the same words after a real call are fine
     assert unbacked_tool_claims(text, ["generate_acxd_application", "reviewer_agent"]) == []
+
+
+def test_a_regeneration_result_while_only_the_reviewer_ran_is_reported():
+    """Live (dev, 2026-09-28): no generation tool ran, the assets were a day old,
+    and the turn called reviewer_agent — so neither the named-tool check nor the
+    zero-tool check fired."""
+    from tools.tool_claim_audit import unbacked_family_claims
+    text = ("빌더 업데이트 반영을 위해 재생성한 뒤 검토까지 실제로 실행하겠습니다.\n\n"
+            "먼저 재생성을 실행합니다.재생성 성공 (status: success, problems: [], flows=9). 이어서 검토를 실행합니다.")
+    assert unbacked_family_claims(text, ["reviewer_agent"]) == ["regeneration"]
+    notice = audit_notice(text, ["reviewer_agent"]) or ""
+    assert "재생성" in notice and "generate_acxd_application" in notice
+    # the same sentence after a real generation call is quiet
+    assert audit_notice(text, ["generate_acxd_application", "reviewer_agent"]) is None
+    # an announcement without a result is a plan, not a claim
+    assert unbacked_family_claims("재생성을 실행하겠습니다. 결과가 나오면 알려드리겠습니다.", []) == []
+
+
+def test_a_packaging_result_without_the_packaging_tool_is_reported():
+    from tools.tool_claim_audit import unbacked_family_claims
+    text = "Packaging finished — download is ready: hanbit-booking.zip (files: 32)."
+    assert unbacked_family_claims(text, ["reviewer_agent"]) == ["packaging"]
+    assert "package_and_upload_assets" in (audit_notice(text, ["reviewer_agent"], language="en") or "")
+    assert unbacked_family_claims(text, ["package_and_upload_assets"]) == []
+    # a review that merely says the bundle is ready for packaging claims no package
+    assert unbacked_family_claims("Ready for packaging: blocking 0, advisory 2.", ["reviewer_agent"]) == []

@@ -16,7 +16,9 @@ import { AssetPreviewBubble } from './AssetPreviewBubble';
 import { ChatAttachmentButton, validateFile } from './ChatAttachmentButton';
 import { AttachmentPreview } from './AttachmentPreview';
 import { ChatEmptyState } from './ChatEmptyState';
+import { BrandLogo } from './BrandLogo';
 import { cn } from '../lib/utils';
+import { isProgressStepForTarget } from '../lib/runtimeTarget';
 import type { AttachedFile, MessageAttachment } from '../types';
 import { VirtualizedItem } from './VirtualizedItem';
 
@@ -73,9 +75,7 @@ export function ChatWindow() {
 
   // E1: Mobile progress bar state
   const activeProgress = useMemo(() => {
-    const visibleProgress = progress.filter((item) =>
-      runtimeTarget === 'acxd' ? item.id !== 'prompt' : item.id !== 'acxd_application'
-    );
+    const visibleProgress = progress.filter((item) => isProgressStepForTarget(item.id, runtimeTarget));
     const inProgress = visibleProgress.filter(p => p.status === 'in_progress');
     const completed = visibleProgress.filter(p => p.status === 'completed');
     const total = visibleProgress.length;
@@ -501,9 +501,7 @@ export function ChatWindow() {
     <div className="flex flex-col h-full bg-white dark:bg-surface-850 rounded-xl shadow-sm dark:shadow-none border border-surface-200 dark:border-surface-700 overflow-hidden transition-colors">
       {/* Chat Header */}
       <div className="flex items-center gap-3 px-4 lg:px-6 py-3 lg:py-4 border-b border-surface-200 dark:border-surface-700 bg-surface-50/50 dark:bg-surface-900/50 flex-shrink-0">
-        <div className="w-9 h-9 lg:w-10 lg:h-10 rounded-full bg-gradient-to-br from-primary-500 to-primary-600 flex items-center justify-center shadow-sm dark:shadow-glow">
-          <span className="text-white font-semibold text-base lg:text-lg">🤖</span>
-        </div>
+        <BrandLogo className="w-9 h-9 lg:w-10 lg:h-10" />
         <div className="flex-1 min-w-0">
           <h2 className="font-semibold text-surface-900 dark:text-surface-100 text-sm lg:text-base">AICC Builder Agent</h2>
           <p className="text-xs lg:text-sm text-surface-500 dark:text-surface-400">

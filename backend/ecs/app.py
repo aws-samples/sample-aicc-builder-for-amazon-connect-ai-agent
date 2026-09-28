@@ -176,6 +176,13 @@ from tools.session_context import current_selected_effort as _current_selected_e
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("aicc-ecs")
+# The dashboard's WebSocket URL carries the Cognito JWT (?token=…) and uvicorn
+# logs every connection with the full path: redact it before any handler runs.
+try:
+    from tools.log_redaction import install_query_token_redaction
+    install_query_token_redaction()
+except Exception as _redact_err:  # pragma: no cover
+    logger.warning(f"query-token log redaction not installed: {_redact_err}")
 
 # ========================================
 # Configuration
@@ -285,6 +292,35 @@ GENERATION_TOOLS = [
     research_agent,
 ]
 
+# ACXD only (v3.1): the bundle is the ACXD application alone. Everything that
+# designs, generates, lints or imports a Classic backend, AI Prompt or Contact
+# Flow is withheld in every phase, so the model cannot drift into building one.
+ACXD_ONLY_EXCLUDED_TOOLS = [
+    introspect_database,
+    save_contact_flow_spec,
+    get_contact_flow_spec_tool,
+    save_infrastructure_spec,
+    get_infrastructure_spec_tool,
+    stream_fallback_asset,
+    merge_infrastructure_fragments,
+    merge_openapi_fragments,
+    lint_cloudformation,
+    lint_openapi,
+    lint_lambda,
+    lint_contact_flow_asset,
+    import_uploaded_asset_tool,
+    draft_flow_from_image_tool,
+    lambda_generator_agent,
+    openapi_generator_agent,
+    prompt_generator_agent,
+    contact_flow_generator_agent,
+    infrastructure_generator_agent,
+]
+
+
+def _without_acxd_only_excluded(tools: list) -> list:
+    return [tool for tool in tools if not any(tool is excluded for excluded in ACXD_ONLY_EXCLUDED_TOOLS)]
+
 
 # Generator sub-agent tool → the progress asset id it produces. Used to trim
 # out-of-scope generators for single-segment runs.
@@ -305,6 +341,8 @@ def _normalize_runtime_target(value: Any) -> str:
 
 def _full_asset_set_for_runtime(runtime_target: str) -> set[str]:
     """Keep tool trimming aligned with the target-specific progress asset id."""
+    if runtime_target == "acxd_only":
+        return {"acxd_application", "knowledge_base"}
     if runtime_target == "acxd":
         return (set(_FULL_ASSET_SET) - {"prompt"}) | {"acxd_application"}
     return set(_FULL_ASSET_SET)
@@ -329,9 +367,10 @@ def _load_acxd_kb_refresh_tool():
         return None
 
 
-def _load_deterministic_repairs(is_acxd: bool) -> list:
+def _load_deterministic_repairs(is_acxd: bool, acxd_only: bool = False) -> list:
     """Deterministic repairs for review findings (no LLM patching): OpenAPI
-    re-projection for both targets, slot type rebuild for ACXD."""
+    re-projection for both targets, slot type rebuild for ACXD. ACXD only has no
+    OpenAPI to re-project (and must not grow one)."""
     tools_out: list = []
     try:
         from tools.deterministic_repairs import (
@@ -339,7 +378,8 @@ def _load_deterministic_repairs(is_acxd: bool) -> list:
             rebuild_acxd_slot_types_tool,
             remove_duplicate_asset_copies_tool,
         )
-        tools_out.append(enforce_openapi_contract_tool)
+        if not acxd_only:
+            tools_out.append(enforce_openapi_contract_tool)
         if is_acxd:
             tools_out.append(rebuild_acxd_slot_types_tool)
             tools_out.append(remove_duplicate_asset_copies_tool)
@@ -369,10 +409,16 @@ def get_tools_for_phase(
     interview with ACXD flow-design tools. In generation it replaces the Classic
     prompt generator with Task B's ACXD application generator and exposes only the
     patch-only ACXD asset editor for modifications.
+
+    ACXD only (v3.1) keeps the same ACXD tools and withholds every Classic
+    backend / Contact Flow / AI Prompt tool (``ACXD_ONLY_EXCLUDED_TOOLS``).
     """
     runtime_target = _normalize_runtime_target(runtime_target)
-    is_acxd = runtime_target == "acxd"
+    acxd_only = runtime_target == "acxd_only"
+    is_acxd = runtime_target in ("acxd", "acxd_only")
     if phase == "interview":
+        if acxd_only:
+            return _without_acxd_only_excluded(INTERVIEW_TOOLS) + ACXD_INTERVIEW_TOOLS
         return INTERVIEW_TOOLS + ACXD_INTERVIEW_TOOLS if is_acxd else INTERVIEW_TOOLS
 
     scope_set = set(scope) if scope else set()
@@ -383,11 +429,14 @@ def get_tools_for_phase(
     is_full_build = not scope_set or scope_set >= full_asset_set
 
     # The Classic prompt generator is deliberately absent for ACXD. All other
-    # Classic generators continue to produce the backend and Contact Flow assets.
+    # Classic generators continue to produce the backend and Contact Flow assets
+    # — except for ACXD only, which builds none of them.
     generation_tools = [
         tool for tool in GENERATION_TOOLS
         if not (is_acxd and tool is prompt_generator_agent)
     ]
+    if acxd_only:
+        generation_tools = _without_acxd_only_excluded(generation_tools)
 
     if not is_full_build:
         generation_tools = [
@@ -396,7 +445,7 @@ def get_tools_for_phase(
                 or _GENERATOR_TOOL_TO_ASSET[tool] in scope_set)
         ]
 
-    generation_tools = generation_tools + _load_deterministic_repairs(is_acxd)
+    generation_tools = generation_tools + _load_deterministic_repairs(is_acxd, acxd_only)
     # The gates validate assets AGAINST the OperationSpec (D1–D8, parity, D9-4),
     # so a wrong FieldSpec (live: a mangled regex) can only be corrected at the
     # source — editing the asset to match a wrong spec is exactly what the gates
@@ -1428,10 +1477,20 @@ def _read_interview_state(session_id: str) -> Optional[str]:
 
     # Session-level artifacts → state/*.json
     state_dir = (base / "state") if base is not None else None
+    try:
+        acxd_only_session = get_runtime_target_if_set(session_id) == "acxd_only"
+    except Exception:
+        acxd_only_session = False
     for filename, label in (
         ("infrastructure_spec.json", "Infrastructure spec"),
         ("flow_config.json", "Session flow config"),
     ):
+        if acxd_only_session and filename == "infrastructure_spec.json":
+            # ACXD only: the customer's existing API is the backend, so there is
+            # no infrastructure spec to save — a ⏳ line would invite one.
+            lines.append("➖ Infrastructure spec: not used (ACXD only; the Data Requests call the "
+                         "customer's existing API)")
+            continue
         try:
             exists = state_dir is not None and (state_dir / filename).is_file()
         except Exception:
@@ -2134,6 +2193,12 @@ async def _rehydrate_assets_for_display(websocket: WebSocket, session_id: str) -
             if not content:
                 continue
             ext = os.path.splitext(file_name)[1].lower()
+            # A package or image is bytes, not a preview: replaying the KB zip
+            # rendered "PK\u0003\u0004…" in the chat as a "regenerated" card
+            # (dev, 2026-09-25). Its live card already carried the summary.
+            if ext in (".zip", ".gz", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".docx", ".xlsx") or (
+                    isinstance(content, str) and ("\x00" in content[:4096] or content.startswith("PK\x03\x04"))):
+                continue
             language = _REHYDRATE_EXT_TO_LANG.get(ext, "text")
             # File mtime (NFS) / LastModified (S3) in epoch ms — lets the
             # frontend place the replayed preview at its true chronological
@@ -2252,6 +2317,18 @@ async def websocket_handler(
                 _current_sid.set(_eff_sid)
             except Exception as _bind_err:
                 logger.warning(f"[WS] session_id bind failed: {_bind_err}")
+
+            # Bind the customer's own words for this message before any handler
+            # decorates them (attachment markers): save_requirement_document
+            # stores the requirement document from them, not from the model's
+            # re-typed copy (e2e 2026-09-25: 13.9 KB document → 7.6 KB raw_input).
+            try:
+                from tools.session_context import current_user_message_text as _cur_msg
+                if action in ("sendMessage", "sendMessageWithAttachments", "sendMessageWithS3Attachments"):
+                    _raw_msg = data.get("message")
+                    _cur_msg.set(_raw_msg if isinstance(_raw_msg, str) else None)
+            except Exception as _msg_err:
+                logger.debug(f"[WS] user message bind skipped: {_msg_err}")
 
             # Bind the selected Bedrock model for this WS iteration so the
             # create_task() context snapshot for background agent runs (and every
@@ -2675,9 +2752,28 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
     except Exception as scope_err:
         logger.warning(f"[generation_scope] inject failed (non-critical): {scope_err}")
 
+    # The previous turn reported results it never produced (no tool ran, or not
+    # the tool the result belongs to; see the claim audit and
+    # context.turn_honesty below). Live (Hanbit, 2026-09-27): asked to
+    # regenerate, the orchestrator answered "✅ ACXD 애플리케이션 생성 완료! …
+    # 플로우 7개" in ten seconds with no tool call; live (2026-09-28) it wrote
+    # "재생성 성공 (status: success, … flows=9)" and ran only the reviewer. The
+    # chat already shows a notice; this makes the NEXT turn require the real
+    # invocation instead of accepting the narration a second time.
+    last_turn_audit_block = ""
+    if session.pop("_unbacked_claim", False):
+        last_turn_audit_block = (
+            "\n<last_turn_audit>\n"
+            "Your previous reply reported results (a generation, a fix, a check or a package) that "
+            "no tool in that turn produced, so they did not happen. Now call the tool the user's "
+            "request needs and report only what its result says. If the previous reply merely "
+            "summarized work that an earlier turn had finished, say so plainly instead of repeating it.\n"
+            "</last_turn_audit>\n\n"
+        )
+
     combined_state = (
         f"{interview_state_block}{generation_state_block}"
-        f"{modification_state_block}{generation_scope_block}"
+        f"{modification_state_block}{generation_scope_block}{last_turn_audit_block}"
     )
 
     if content_blocks:
@@ -2899,11 +2995,13 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             # (live: "reviewer_agent returned blocking: []" with no reviewer call
             # in the turn). Only the runtime knows which tools ran; tell the user
             # where the claim was made.
+            claim_audit_fired = False
             try:
                 from tools.tool_claim_audit import audit_notice
                 _notice = audit_notice(full_response, tool_names_map.values(),
                                        language=str(session.get("language") or "ko"))
                 if _notice:
+                    claim_audit_fired = True
                     logger.warning(f"[ClaimAudit] {session_id}: unbacked tool claims — {_notice.strip()[:200]}")
                     full_response += _notice
                     await safe_send_or_log({"type": "stream", "content": _notice})
@@ -2946,6 +3044,29 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             except Exception as prog_err:
                 logger.warning(f"[generation_progress] update failed (non-critical): {prog_err}")
 
+            # Honesty backstop: a work-phase reply that claims fixes or checks
+            # in a turn that ran no tool gets a plain notice in the chat.
+            unbacked_claim = False
+            try:
+                from context.turn_honesty import unbacked_claim_notice
+                _notice = unbacked_claim_notice(
+                    new_messages, phase=_detect_phase(effective_session_id), language=ui_language,
+                    # tool_names_map keeps every tool the stream started;
+                    # tool_invocations_started is emptied as results arrive.
+                    tools_started=len(tool_names_map))
+                if _notice:
+                    unbacked_claim = True
+                    logger.warning(
+                        f"[honesty] {session_id}: the reply claims results but the turn ran no tool")
+                    # One warning per turn: the claim audit above already
+                    # appended its own when the reply named a tool.
+                    if not claim_audit_fired:
+                        await safe_send_or_log({"type": "no_tool_notice", "content": _notice})
+                if unbacked_claim or claim_audit_fired:
+                    session["_unbacked_claim"] = True
+            except Exception as hon_err:
+                logger.warning(f"[honesty] check failed (non-critical): {hon_err}")
+
             session["conversation_history"].extend(new_messages)
             session["conversation_history"] = _prune_conversation_history(
                 session["conversation_history"], max_messages=MAX_HISTORY_MESSAGES
@@ -2958,7 +3079,8 @@ async def handle_send_message_ws(websocket: WebSocket, session_id: str, message:
             # claimed success → ask, don't re-patch" rule could never fire.
             if modification_request_recorded:
                 try:
-                    record_modification_outcome(effective_session_id, "claimed_success")
+                    record_modification_outcome(
+                        effective_session_id, "no_tool_call" if unbacked_claim else "claimed_success")
                 except Exception:
                     pass  # non-critical
 
@@ -3449,7 +3571,23 @@ async def handle_inject_history_ws(websocket: WebSocket, session_id: str, data: 
             # else: skip malformed
 
         existing_len = len(session.get("conversation_history", []))
-        if len(injected_strands) >= existing_len:
+        # A turn still running for this session owns its conversation: the
+        # agent appends to it as it goes. Live (2026-09-26): a restore delayed
+        # 33 s by asset lazy-loading sent injectHistory 18 s into a turn and the
+        # history under the running agent was replaced with the browser's copy.
+        _turn_running = False
+        try:
+            async with _background_tasks_lock:
+                _bg = _background_tasks.get(session_id)
+                _turn_running = bool(_bg and not _bg["task"].done())
+        except Exception:
+            _turn_running = False
+        if _turn_running:
+            logger.info(
+                f"[injectHistory] Kept live history for {session_id}: a turn is running "
+                f"(live={existing_len}, injected={len(injected_strands)})"
+            )
+        elif len(injected_strands) >= existing_len:
             # DynamoDB version is same size or larger — use it
             session["conversation_history"] = _validate_tool_pairs(injected_strands)
             logger.info(
@@ -3463,8 +3601,10 @@ async def handle_inject_history_ws(websocket: WebSocket, session_id: str, data: 
             )
 
         # Persist merged history to NFS so it survives future reconnects
+        # (a running turn saves its own history when it ends)
         try:
-            _context_store.save_conversation_history(session_id, session["conversation_history"])
+            if not _turn_running:
+                _context_store.save_conversation_history(session_id, session["conversation_history"])
         except Exception as e:
             logger.warning(f"[injectHistory] NFS save failed for {session_id}: {e}")
 
@@ -3482,6 +3622,10 @@ async def handle_inject_history_ws(websocket: WebSocket, session_id: str, data: 
         "type": "history_injected",
         "sessionId": session_id,
         "originalSessionId": original_session_id,
+        # the frontend reads these; without them every restore logged
+        # "History injection failed: undefined" although it had succeeded
+        "success": True,
+        "injectedCount": len(history),
         "messageCount": len(session.get("conversation_history", [])),
         "hasWorkspace": bool(workspace_summary),
         "phase": _detect_phase(_hi_sid),
@@ -3495,7 +3639,7 @@ async def handle_create_new_session_ws(websocket: WebSocket, session_id: str, da
 
     Accepts an optional ``scope`` (subset of {contact_flow, prompt, faq} for a
     partial run), ``model`` (one of the allowlisted Bedrock ids), and
-    ``runtime_target`` (``classic`` or ``acxd``) chosen on the start screen. They
+    ``runtime_target`` (``classic``, ``acxd`` or ``acxd_only``) chosen on the start screen. They
     are persisted to NFS so detect_phase / the phase prompt / every BedrockModel
     construction reason about the right values from turn one.
 

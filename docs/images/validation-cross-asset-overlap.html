@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AICC Builder · cross-asset validation overlap</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --paper: #ffffff; --ink: #232F3E; --muted: #545B64; --accent: #EC7211; --rule: #D5DBDB;
+            --sans: 'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif; --mono: 'Amazon Ember Mono', ui-monospace, monospace; }
+    body { font-family: var(--sans); background: var(--paper); color: var(--ink); padding: 2.5rem 2rem; display: flex; justify-content: center; }
+    .frame { max-width: 1440px; width: 100%; }
+    .eyebrow { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.5rem; }
+    h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.01em; line-height: 1.2; margin-bottom: 0.5rem; }
+    p.lede { font-size: 0.95rem; color: var(--muted); max-width: 78ch; margin-bottom: 1.5rem; }
+    svg { width: 100%; display: block; }
+    .cards { display: grid; grid-template-columns: 1.3fr 1.3fr 1fr; gap: 1rem; margin-top: 1.5rem; }
+    .card { border: 1px solid var(--rule); border-radius: 6px; padding: 0.9rem 1rem; }
+    .card h2 { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.4rem; }
+    .card p { font-size: 0.85rem; line-height: 1.45; }
+    .card em { color: var(--accent); font-style: normal; font-weight: 600; }
+    .card code { font-family: var(--mono); font-size: 0.8em; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">AICC Builder 3.0 · validation pipeline</p>
+    <h1>Which checks join which assets</h1>
+    <p class="lede">Every edge is a deterministic check that reads both endpoints. Grey edges are the Classic checks in <code>validate_parameter_consistency</code> and <code>review_gates</code>; orange edges are the ACXD D9 checks; the response-contract projection is the one gate that rewrites an asset (OpenAPI) from the spec.</p>
+<svg viewBox="0 0 1440 780" width="1440" height="780" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="d-title d-desc">
+<title id="d-title">AICC Builder cross-asset validation: which deterministic checks join which assets</title>
+<desc id="d-desc">Nodes are the OperationSpec and the generated assets. Each edge carries the ids of the checks that read both endpoints: Classic checks in grey (D1–D8, PARITY, SAMPLE_DATA), ACXD checks in orange (D9-x). The pencil marks the one gate that rewrites an asset.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#545B64"/></marker><marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#EC7211"/></marker><marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0972D3"/></marker><marker id="arrow-red" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#D13212"/></marker></defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<path d="M 658,91 L 312,243" fill="none" stroke="#545B64" stroke-width="1.2"/>
+<rect x="373" y="167.0" width="155" height="12.2" rx="2" fill="#ffffff"/>
+<text x="450.3" y="176.2" fill="#545B64" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D1 · D1-5 · lambda_field_gaps</text>
+<path d="M 784,91 L 1146,243" fill="none" stroke="#545B64" stroke-width="1.2"/>
+<rect x="901" y="167.0" width="201" height="12.2" rx="2" fill="#ffffff"/>
+<text x="1001.2" y="176.2" fill="#545B64" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">PARITY · D1 · D8 · response_contract ✎</text>
+<path d="M 350,243 Q 720,150 1105,243" fill="none" stroke="#545B64" stroke-width="1.2"/>
+<rect x="477" y="194.8" width="166" height="12.2" rx="2" fill="#ffffff"/>
+<text x="560" y="204" fill="#545B64" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D1-3 data wrapper · D1-4 counts</text>
+<path d="M 250,297 L 250,453" fill="none" stroke="#545B64" stroke-width="1.2"/>
+<rect x="167" y="368.8" width="166" height="12.2" rx="2" fill="#ffffff"/>
+<text x="250" y="378" fill="#545B64" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D1-1 · D1-2 · D2 · D3 · D4 · D7</text>
+<path d="M 595,480 L 350,480" fill="none" stroke="#545B64" stroke-width="1.2"/>
+<rect x="418" y="464.8" width="110" height="12.2" rx="2" fill="#ffffff"/>
+<text x="472.5" y="474" fill="#545B64" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D5 invoke permission</text>
+<path d="M 786,507 L 1144,653" fill="none" stroke="#545B64" stroke-width="1.2"/>
+<rect x="940" y="564.8" width="49" height="12.2" rx="2" fill="#ffffff"/>
+<text x="965" y="574" fill="#545B64" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D6 · D6b</text>
+<path d="M 595,64 Q -20,160 160,453" fill="none" stroke="#545B64" stroke-width="1.2"/>
+<rect x="142" y="180.8" width="115" height="12.2" rx="2" fill="#ffffff"/>
+<text x="200" y="190" fill="#545B64" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D1 keys · SAMPLE_DATA</text>
+<path d="M 720,243 L 720,91" fill="none" stroke="#EC7211" stroke-width="1.2"/>
+<rect x="688" y="160.8" width="64" height="12.2" rx="2" fill="#ffffff"/>
+<text x="720" y="170" fill="#EC7211" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D9-2 · D9-4</text>
+<path d="M 845,270 L 1105,270" fill="none" stroke="#EC7211" stroke-width="1.2"/>
+<rect x="961" y="254.8" width="28" height="12.2" rx="2" fill="#ffffff"/>
+<text x="975" y="264" fill="#EC7211" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D9-3</text>
+<path d="M 660,297 L 310,453" fill="none" stroke="#EC7211" stroke-width="1.2"/>
+<rect x="428" y="359.8" width="115" height="12.2" rx="2" fill="#ffffff"/>
+<text x="485" y="369" fill="#EC7211" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D9-8 (+ D2–D5 folded)</text>
+<path d="M 720,297 L 720,453" fill="none" stroke="#EC7211" stroke-width="1.2"/>
+<rect x="706" y="368.8" width="28" height="12.2" rx="2" fill="#ffffff"/>
+<text x="720" y="378" fill="#EC7211" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D9-6</text>
+<path d="M 783,297 L 1147,453" fill="none" stroke="#EC7211" stroke-width="1.2"/>
+<rect x="951" y="359.8" width="28" height="12.2" rx="2" fill="#ffffff"/>
+<text x="965" y="369" fill="#EC7211" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">D9-5</text>
+<path d="M 595,270 L 350,270" fill="none" stroke="#EC7211" stroke-width="1.2" stroke-dasharray="4,3"/>
+<rect x="412" y="254.8" width="120" height="12.2" rx="2" fill="#ffffff"/>
+<text x="472.5" y="264" fill="#EC7211" font-size="8.2" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">adapter at packaging ✎</text>
+<rect x="595.0" y="37.0" width="250" height="54" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="1.1"/>
+<text x="720" y="60" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">OperationSpec · ToolSpec</text>
+<text x="720" y="76" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">interview contract: fields, formats, enums, success code</text>
+<rect x="150.0" y="243.0" width="200" height="54" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="1.1"/>
+<text x="250" y="266" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">Lambda handlers</text>
+<text x="250" y="282" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">index.py per tool</text>
+<rect x="1105.0" y="243.0" width="210" height="54" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="1.1"/>
+<text x="1210" y="266" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">OpenAPI spec</text>
+<text x="1210" y="282" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">MCP gateway contract</text>
+<rect x="150.0" y="453.0" width="200" height="54" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="1.1"/>
+<text x="250" y="476" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">CloudFormation</text>
+<text x="250" y="492" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">backend stack</text>
+<rect x="595.0" y="453.0" width="250" height="54" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="1.1"/>
+<text x="720" y="476" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">Contact Flow</text>
+<text x="720" y="492" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">Amazon Connect flow JSON</text>
+<rect x="1105.0" y="653.0" width="210" height="54" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="1.1"/>
+<text x="1210" y="676" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">AI Prompt</text>
+<text x="1210" y="692" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">Classic target only</text>
+<rect x="1105.0" y="453.0" width="210" height="54" rx="6" fill="#ffffff" stroke="#232F3E" stroke-width="1.1"/>
+<text x="1210" y="476" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">FAQ · knowledge base</text>
+<text x="1210" y="492" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">Markdown docs → KB articles</text>
+<rect x="595.0" y="243.0" width="250" height="54" rx="6" fill="rgba(236,114,17,0.05)" stroke="#EC7211" stroke-width="1.1"/>
+<text x="720" y="266" fill="#232F3E" font-size="11" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="middle" font-weight="700">ACXD application</text>
+<text x="720" y="282" fill="#545B64" font-size="8" font-family="'Amazon Ember Mono', ui-monospace, monospace" text-anchor="middle">flows · slot types · data requests · KB · context vars</text>
+<rect x="24" y="734" width="1392" height="36" rx="6" fill="rgba(35,47,62,0.02)" stroke="rgba(35,47,62,0.10)" stroke-width="0.8"/>
+<line x1="40" y1="752" x2="70" y2="752" stroke="#545B64" stroke-width="1.2"/>
+<text x="78" y="755" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">Classic checks (D1–D8, PARITY, SAMPLE_DATA) — validate_parameter_consistency + review_gates, read at review</text>
+<line x1="700" y1="752" x2="730" y2="752" stroke="#EC7211" stroke-width="1.2"/>
+<text x="738" y="755" fill="#232F3E" font-size="8.6" font-family="'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" text-anchor="start">ACXD checks (D9-1…D9-8) — read at review and again at packaging, where an open finding refuses the download</text>
+</svg>
+    <div class="cards">
+      <div class="card"><h2>Classic ids</h2><p><code>D1</code> spec ↔ Lambda ↔ OpenAPI field names, primary keys, GSI union (D1-1), table env vars (D1-2), <code>data</code> wrapper (D1-3), asset counts (D1-4), tool fields (D1-5) · <code>D2</code> IAM actions derived from SDK calls vs the CloudFormation roles · <code>D3</code> RDS Data API contract · <code>D4</code> SQL identifiers, casts, NOT NULL columns, bind types vs the scanned schema · <code>D5</code> Connect invoke permission for every Lambda the flow calls · <code>D6</code> flow session attributes named in the prompt, <code>D6b</code> prompt variable re-lint · <code>D7</code> UpdateQSession env · <code>D8</code> success status code · <code>SAMPLE_DATA</code> customer rows present in the template · <code>PARITY</code> spec ↔ OpenAPI shapes and enums.</p></div>
+      <div class="card"><h2>ACXD ids</h2><p><code>D9-2</code> flow determinism vs the confirmed plan · <code>D9-4</code> slot enum/regex/length vs the FieldSpec · <code>D9-3</code> Data Request path <code>/tools/&lt;op&gt;</code> and request/response field sets vs OpenAPI · <code>D9-8</code> <code>ApiKeyRequired</code> on every method and an <code>x-api-key</code> Secret header (folds D2–D5 as blocking) · <code>D9-6</code> Agentic CX block, <code>acxdBinding</code>, four branches, context variables, no pre-block <code>$.AgenticCX</code> read · <code>D9-5</code> planned knowledge base → articles with a question and an answer · <code>D9-1</code>/<code>D9-7</code> (not drawn) structure, uniqueness, runtime contract, identity and ASCII metadata inside the application itself.</p></div>
+      <div class="card"><h2>Spec is the hub</h2><p>The OperationSpec is read by every Classic check and by D9-2/D9-4, so a wrong FieldSpec surfaces as findings on several assets at once: fix the spec, then regenerate, rather than patching each asset. Lambda ↔ CloudFormation is the widest seam (six check families) and runs only when the merged template is found. <em>Two gates write:</em> the response-contract projection re-derives the OpenAPI schemas from the spec, and the Lambda adapter is injected into the handlers at ACXD packaging.</p></div>
+    </div>
+  </div>
+</body>
+</html>

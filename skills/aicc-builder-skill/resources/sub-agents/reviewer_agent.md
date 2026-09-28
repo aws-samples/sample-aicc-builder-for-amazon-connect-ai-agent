@@ -510,16 +510,25 @@ In addition to the Classic checklist, assess these ACXD dimensions:
    application's `conversation_style` first: with `generative` (the default)
    each operation flow is EXPECTED to carry one `generative_journey` — an
    operation flow made only of `user_choice`/`basic` nodes is the finding, not
-   the journey. For every journey check that `metadata.generativeJourney.
-   dataCapture.data` names exactly the plan's `captures` (type `slot`,
-   `required`, a schema), that the FIRST child edge tests those slots with
-   `exists` (the journey ends when they are captured and no other condition is
-   set — without that edge the caller lands in the fallback flow), that an
-   `agentRequested` exit condition routes to the agent-request flow, and that
-   no strict-format value (regex / phone / identifier) is captured by the
-   journey instead of a `user_choice`. Do not ask for a `dataRequest` or
-   `mcpFlow` tool on a journey (the service drops the first and fails the
-   second); the flow's `data_request` node makes the call.
+   the journey. Two journey shapes are correct, and the tools decide which:
+   a journey that CARRIES the operation (a `dataRequest` tool — it collects,
+   calls the backend and announces the result itself; live-verified
+   2026-09-21) ends through its exit conditions: `done` at index 0 →
+   the follow-up redirect, `agentRequested` → the agent-request flow,
+   `anotherRequest`, and `node_status` timeout/failure → escalation; its
+   captures are `required: false` with `exitEnabled: false`, and it has NO
+   captured-slots edge — do not ask for one. A journey WITHOUT a data request
+   only collects: its `dataCapture.data` names the plan's `captures`, and the
+   FIRST child edge tests those slots with `exists` (without it the caller
+   lands in the fallback flow), and a strict-format value (regex, phone,
+   identifier) is a `user_choice` beside it, not one of its captures. For both, check the tool payloads against the
+   request schemas (every required field present, nothing undeclared).
+   A time slot attached as `NLX.AlphaNumeric` with regex `^[0-9]{3,4}$` for
+   an HH:MM field is the live-verified capture shape (typed "10:00" reaches
+   the slot as "1000"; `NLX.Time` shifts it into a timezone instant) — not a
+   mismatch with the FieldSpec. In ACXD only there is no adapter, and
+   `BACKEND-CONTRACT.md` tells the customer's API that such values arrive
+   without separators.
 2. **Guardrail coverage** — each stated safety, privacy, policy, refusal, and
    escalation requirement must have a generated guardrail whose trigger,
    detection method, and action cover that policy. Do not claim coverage merely
@@ -540,9 +549,14 @@ In addition to the Classic checklist, assess these ACXD dimensions:
 4. **Escalation wiring** — every planned escalation path must lead to the
    Contact Flow Agentic CX `Escalation` branch, whose target resolves to a real
    action Identifier. Check Default, Error, and IdleChatTimeout branches too.
+   ACXD only ships no Contact Flow (the customer wires the block, per
+   `WIRING-GUIDE.md`): check instead that every escalation path reaches the
+   escalation flow's terminal `escalate` node.
 5. **Data-request contract** — external Data Request `/tools/<operation>`
    URLs, request fields, and response fields must exactly match the generated
-   OpenAPI path and schemas.
+   OpenAPI path and schemas. In ACXD only there is no OpenAPI: the URL is
+   `{WEBHOOK_URL}` + the path the customer's API declared, with no path
+   template or query string (D9-3 checks it).
 6. **ACXD metadata constraints** — non-ASCII `description` or `aiDescription`,
    non-letter flow IDs, non-UUID node IDs, and bare/unsupported locale codes
    are real API deployment failures, not style suggestions.

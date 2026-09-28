@@ -55,7 +55,25 @@ logger = logging.getLogger(__name__)
 
 RUNTIME_TARGET_CLASSIC = "classic"
 RUNTIME_TARGET_ACXD = "acxd"
-RUNTIME_TARGETS = (RUNTIME_TARGET_CLASSIC, RUNTIME_TARGET_ACXD)
+#: v3.1 — the ACXD application ALONE. Every ACXD code path (flow design, the
+#: application generator, D9, the runner) applies unchanged; what is left out
+#: is the Classic backend (CloudFormation, Lambda, OpenAPI), the Contact Flow and
+#: the AI Prompt, together with their gates and bundle files. The Data Requests
+#: call the customer's own API at ``{WEBHOOK_URL}``, supplied at deploy time.
+RUNTIME_TARGET_ACXD_ONLY = "acxd_only"
+RUNTIME_TARGETS = (RUNTIME_TARGET_CLASSIC, RUNTIME_TARGET_ACXD, RUNTIME_TARGET_ACXD_ONLY)
+#: Targets whose conversation is an ACXD application (both carry the flow spec).
+ACXD_RUNTIME_TARGETS = frozenset({RUNTIME_TARGET_ACXD, RUNTIME_TARGET_ACXD_ONLY})
+
+
+def is_acxd_runtime(target: Optional[str]) -> bool:
+    """True for a target string whose conversation is an ACXD application."""
+    return target in ACXD_RUNTIME_TARGETS
+
+
+def is_acxd_only_runtime(target: Optional[str]) -> bool:
+    """True for the ACXD-only target (no generated backend, no Contact Flow)."""
+    return target == RUNTIME_TARGET_ACXD_ONLY
 
 _RUNTIME_TARGET_FILE = "runtime_target.json"
 _SPEC_FILE = "acxd_flow_spec.json"
@@ -281,7 +299,7 @@ def _infra_runtime_target(sid: str) -> Optional[str]:
 
 
 def get_runtime_target(session_id: Optional[str] = None) -> str:
-    """Return ``classic`` or ``acxd`` for the session.
+    """Return ``classic``, ``acxd`` or ``acxd_only`` for the session.
 
     Precedence: saved ``InfrastructureSpec.runtime_target`` → in-memory
     seed → NFS seed → S3 workspace seed → ``classic`` (v2 sessions
@@ -347,7 +365,18 @@ def clear_runtime_target(session_id: Optional[str]) -> None:
 
 
 def is_acxd_target(session_id: Optional[str] = None) -> bool:
-    return get_runtime_target(session_id) == RUNTIME_TARGET_ACXD
+    """True for BOTH ACXD targets (``acxd`` and ``acxd_only``).
+
+    Every caller asks "is the conversation an ACXD application?" — flow design,
+    the application generator, D9, the bundle loader. Only the backend and
+    Contact Flow decisions differ, and those ask :func:`is_acxd_only_target`.
+    """
+    return is_acxd_runtime(get_runtime_target(session_id))
+
+
+def is_acxd_only_target(session_id: Optional[str] = None) -> bool:
+    """True when the session builds the ACXD application alone (v3.1)."""
+    return is_acxd_only_runtime(get_runtime_target(session_id))
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +556,29 @@ class ACXDApplicationPlan(_Model):
     context_variables: List[ACXDContextVariable] = Field(default_factory=list)
     default_flows: dict = Field(default_factory=dict, description="role → flow_id; derived from system flows when empty")
     environment: str = "development"
+    timezone: Optional[str] = Field(
+        default=None,
+        description="IANA time zone the business runs on ('Asia/Seoul', 'America/Chicago'). Journeys "
+                    "count 'today' and 'tomorrow' in it — the ACXD runtime's own clock runs on "
+                    "America/New_York. Empty: derived from the primary locale (ko → Asia/Seoul, "
+                    "ja → Asia/Tokyo); any other language needs it recorded.")
+    # ACXD only (v3.1): the Data Requests call the customer's EXISTING API.
+    project_name: Optional[str] = Field(
+        default=None,
+        description="ACXD only: ASCII kebab-case project name ('selc-voice'). Workspace-level "
+                    "resources (the backend-key secret, guardrails) are named after it, the way "
+                    "InfrastructureSpec.project_name names them in the other targets.")
+    backend_base_url: Optional[str] = Field(
+        default=None,
+        description="ACXD only: https base URL of the customer's existing API. The Data Requests "
+                    "call {WEBHOOK_URL}<operation path>; this is the default for WEBHOOK_URL at "
+                    "deploy time. Empty = supplied when deploying.")
+    backend_auth_header: Optional[str] = Field(
+        default=None,
+        description="ACXD only: the header the customer's API reads its credential from "
+                    "('x-api-key', 'Authorization', …). The value is an ACXD Secret set at "
+                    "deploy time, never stored. '' = the API takes no credential header; "
+                    "None = not decided yet.")
 
 
 class ACXDFlowSpec(_Model):
@@ -925,8 +977,26 @@ def validate_acxd_flow_spec(spec: ACXDFlowSpec, known_operation_ids: Optional[se
                             f"keep one (remove_acxd_flow_plan) — duplicates ship as extra flows")
     if known_operation_ids is not None:
         covered = {f.operation_id for f in spec.operation_flows()}
+        # An operation another journey calls as a helper tool ('data_request:<id>',
+        # the shape journey_tools recommends for "a search by customer info after
+        # a miss") is realised by that journey. Demanding a flow of its own split
+        # one conversation in two and lost the chaining rule (SELC e2e,
+        # 2026-09-25: the search flow announced the order number and ended, never
+        # looking up the delivery the document says it must).
+        loose_ops = {re.sub(r"[^a-z0-9]", "", op.lower()): op for op in known_operation_ids}
+        for f in spec.operation_flows():
+            for s in f.steps:
+                if s.node_type != "generative_journey":
+                    continue
+                for tool in s.journey_tools or []:
+                    raw = str(tool)
+                    if raw.startswith("data_request:"):
+                        op = loose_ops.get(re.sub(r"[^a-z0-9]", "", raw.split(":", 1)[1].lower()))
+                        if op:
+                            covered.add(op)
         for op in sorted(known_operation_ids - covered):
-            problems.append(f"operation '{op}' has no ACXD flow plan (one operation flow per OperationSpec)")
+            problems.append(f"operation '{op}' has no ACXD flow plan — give it an operation flow, or make it "
+                            f"a helper tool ('data_request:{op}') of the journey whose conversation it serves")
     for g in spec.guardrails:
         if g.action == "route" and (not g.route_flow_id or g.route_flow_id not in seen):
             problems.append(f"guardrail '{g.name}': route action needs an existing route_flow_id")
@@ -958,7 +1028,102 @@ def acxd_flow_spec_ready() -> tuple[bool, List[str]]:
     except Exception:  # pragma: no cover
         pass
     problems = validate_acxd_flow_spec(spec, known)
+    if is_acxd_only_target():
+        problems.extend(acxd_only_backend_problems(spec))
     return not problems, problems
+
+
+#: Values the interviewer uses for "the API takes no credential header".
+_NO_AUTH_HEADER_WORDS = frozenset({
+    "", "none", "no", "null", "nil", "없음", "없어요", "없다", "なし", "no auth", "no-auth",
+})
+_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{0,63}$")
+_BASE_URL_RE = re.compile(r"^https://[^\s{}<>\"']+$")
+
+
+def normalize_backend_auth_header(value: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """(header, error). ``''`` means "the API takes no credential header"."""
+    if value is None:
+        return None, None
+    text = str(value).strip()
+    if text.lower() in _NO_AUTH_HEADER_WORDS:
+        return "", None
+    text = text.split(":", 1)[0].strip()          # 'Authorization: Bearer …' → the NAME only
+    if not _HEADER_NAME_RE.match(text):
+        return None, (f"backend_auth_header must be an HTTP header NAME such as 'x-api-key' or "
+                      f"'Authorization' (got {value!r}); the value is a Secret set at deploy time")
+    return text, None
+
+
+def normalize_backend_base_url(value: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """(url, error). An empty value clears it (the URL is then supplied at deploy time)."""
+    if value is None:
+        return None, None
+    text = str(value).strip().rstrip("/")
+    if not text or text.lower() in _NO_AUTH_HEADER_WORDS:
+        return "", None
+    if not _BASE_URL_RE.match(text):
+        return None, (f"backend_base_url must be an https:// URL without spaces or placeholders "
+                      f"(got {value!r}); leave it empty to supply WEBHOOK_URL at deploy time")
+    return text, None
+
+
+_PROJECT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,46}[a-z0-9]$")
+
+
+def normalize_project_name(value: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """(kebab-case name, error) for an ASCII project name."""
+    if value is None:
+        return None, None
+    text = re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-")
+    if not _PROJECT_NAME_RE.match(text) or not re.search(r"[a-z]{3}", text):
+        return None, (f"project_name must be an ASCII name of 3-48 letters, digits or hyphens with at "
+                      f"least three letters, e.g. 'selc-voice' (got {value!r})")
+    return text, None
+
+
+def derived_project_name(app: object) -> Optional[str]:
+    """The ASCII project name an ACXD-only application is named after, or None.
+
+    The recorded ``project_name`` wins; otherwise the ASCII words of the
+    application name are used when they carry a real word ('Order Assistant' →
+    'order'). A Korean or Japanese name has none, and the interview must record one.
+    """
+    recorded = getattr(app, "project_name", None)
+    if recorded:
+        return recorded
+    words = [w for w in re.findall(r"[A-Za-z0-9]+", str(getattr(app, "name", None) or ""))
+             if w.lower() != "assistant"]
+    slug = "-".join(w.lower() for w in words)[:48].strip("-")
+    name, _error = normalize_project_name(slug) if slug else (None, None)
+    return name
+
+
+def acxd_only_backend_problems(spec: Optional["ACXDFlowSpec"]) -> List[str]:
+    """What the ACXD-only target needs decided about the customer's own API.
+
+    The generated bundle carries no backend, so the one fact the interview must
+    settle is how the Data Requests authenticate: a header name (the value is a
+    Secret set at deploy time) or explicitly none. The base URL may stay empty —
+    it is supplied as WEBHOOK_URL when deploying. Workspace-level resources need
+    an ASCII project name, which the other targets take from the
+    InfrastructureSpec this target does not have.
+    """
+    app = getattr(spec, "application", None)
+    if app is None:
+        return []
+    problems: List[str] = []
+    if getattr(app, "backend_auth_header", None) is None:
+        problems.append(
+            "application: ACXD only — ask whether the customer's API needs a credential "
+            "header and record it with save_acxd_application_settings(backend_auth_header="
+            "'x-api-key' | 'Authorization' | 'none'); the value itself is set at deploy time")
+    if not derived_project_name(app):
+        problems.append(
+            "application: ACXD only — record an ASCII project name with "
+            "save_acxd_application_settings(project_name='<company>-<service>', e.g. 'selc-voice'); "
+            "the secret and guardrails in the shared ACXD workspace are named after it")
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -1311,9 +1476,13 @@ def save_acxd_application_settings(
     context_variables: Union[list[dict], str] = None,
     environment: str = None,
     conversation_style: str = None,
+    backend_base_url: str = None,
+    backend_auth_header: str = None,
+    project_name: str = None,
+    timezone: str = None,
 ) -> dict:
     """
-    Save ACXD application settings (runtime target acxd only).
+    Save ACXD application settings (runtime targets acxd and acxd_only).
 
     Args:
         channels: subset of ['voice','chat'].
@@ -1328,11 +1497,51 @@ def save_acxd_application_settings(
             'scripted' (the customer explicitly wants a scenario-driven agent: every
             step a fixed node). Ask the customer once, early; keep 'generative' unless
             they clearly say otherwise.
+        backend_base_url: ACXD only — https base URL of the customer's EXISTING API
+            (e.g. 'https://api.example.com/v1'). The Data Requests call
+            {WEBHOOK_URL}<operation path>; this becomes the WEBHOOK_URL default at
+            deploy time. Leave empty when the customer will supply it when deploying.
+        backend_auth_header: ACXD only — the header NAME the customer's API reads
+            its credential from ('x-api-key', 'Authorization'), or 'none'. Never
+            the credential itself: the value is an ACXD Secret set at deploy time.
+        project_name: ACXD only — ASCII kebab-case project name ('selc-voice');
+            the secret and guardrails in the shared workspace are named after it.
+        timezone: IANA time zone the business runs on ('America/Chicago'). The
+            journeys count 'today' and 'tomorrow' in it (the ACXD runtime's own
+            clock runs on America/New_York). Korean and Japanese applications
+            default to Asia/Seoul / Asia/Tokyo; record it for any other business,
+            or when the document names a different zone. '' clears it.
     """
     with _spec_lock(_current_session_id()):
         try:
             spec = _load_or_new()
             app = spec.application
+            if timezone is not None:
+                if str(timezone).strip():
+                    from tools.acxd_timezone import canonical_timezone
+                    zone = canonical_timezone(timezone)
+                    if not zone:
+                        return {"success": False,
+                                "error": f"timezone {timezone!r} is not an IANA time zone name — use "
+                                         f"one like 'Asia/Seoul', 'America/Chicago' or 'Europe/London'"}
+                    app.timezone = zone
+                else:
+                    app.timezone = None
+            if project_name is not None:
+                name, error = normalize_project_name(project_name)
+                if error:
+                    return {"success": False, "error": error}
+                app.project_name = name
+            if backend_base_url is not None:
+                url, error = normalize_backend_base_url(backend_base_url)
+                if error:
+                    return {"success": False, "error": error}
+                app.backend_base_url = url or None
+            if backend_auth_header is not None:
+                header, error = normalize_backend_auth_header(backend_auth_header)
+                if error:
+                    return {"success": False, "error": error}
+                app.backend_auth_header = header
             if name is not None:
                 app.name = name
             if description is not None:

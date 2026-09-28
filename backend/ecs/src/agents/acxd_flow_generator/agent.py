@@ -140,7 +140,10 @@ def _build_initial_prompt(plan: dict, spec: dict) -> str:
         f"## When this flow's work SUCCEEDS, redirect to {system_ids['followup']!r} "
         f"— NOT `end`, which exits the application and ends the conversation. "
         f"When it cannot continue, redirect to {system_ids['escalation']!r}.",
-        f"## Knowledge base placeholder — copy VERBATIM: {{KB:{kb_name}}}"
+        f"## Knowledge base placeholder — copy VERBATIM into knowledgeBaseId fields ONLY: "
+        f"{{KB:{kb_name}}}. In prompt and message text call it the knowledgeBase tool in plain "
+        f"words: the runtime reads any {{…}} in text as a variable, and a journey whose prompt "
+        f"names the tool as the placeholder fails on its first turn (UnresolvedSlot)."
         if kb_name_raw else
         "## No knowledge base in this project — do NOT emit knowledge_base nodes",
         "",
@@ -814,7 +817,9 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
                 payload = dr.get("payload") if isinstance(dr.get("payload"), dict) else {}
                 if not payload and isinstance(tool.get("payload"), dict):
                     payload = {k: v for k, v in tool["payload"].items() if k != "dataRequestId"}
-                kept = {k: v for k, v in tool.items() if k in ("type", "interimMessages", "prompt")}
+                # No interimMessages: over a Connect chat the Agentic CX block leaves
+                # the conversation on a turn that sends one (live 2026-09-28).
+                kept = {k: v for k, v in tool.items() if k in ("type", "prompt")}
                 kept["type"] = "dataRequest"
                 kept["dataRequest"] = {"dataRequestId": str(drid), "payload": payload}
                 rewritten.append(kept)
@@ -1227,6 +1232,25 @@ def repair_generated_flow(flow: dict, plan: dict, spec: dict) -> dict:
     return flow
 
 
+def _shipped_kb_name(spec: dict) -> Optional[str]:
+    """The name the bundle's knowledge base is deployed under (the resource
+    builder sanitises it), so a journey's `{KB:<name>}` tool resolves."""
+    try:
+        from tools.acxd_system_flows import knowledge_base_name
+        return knowledge_base_name(spec)
+    except Exception:  # pragma: no cover - never block generation on this
+        return (spec.get("knowledge_base") or {}).get("name")
+
+
+def _business_timezone(spec: dict) -> Optional[str]:
+    """The zone the business runs on (recorded, else implied by the language)."""
+    try:
+        from tools.acxd_timezone import application_timezone
+        return application_timezone(spec)
+    except Exception:  # pragma: no cover - never block generation on this
+        return None
+
+
 def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
     """Keyword arguments for ``apply_runtime_contract``.
 
@@ -1325,7 +1349,19 @@ def _runtime_contract_arguments(plan: dict, spec: dict) -> dict:
             for s in (plan.get("steps") or [])
             if isinstance(s, dict) and s.get("node_type") == "generative_journey"
         ],
-        "kb_name": (spec.get("knowledge_base") or {}).get("name"),
+        "kb_name": _shipped_kb_name(spec),
+        # The zone the business runs on: J11 has every journey count "today" in
+        # it — the runtime's own clock is America/New_York (live sandbox 2026-09-28).
+        "timezone": _business_timezone(spec),
+        # The application's other operations: a carrying journey hands a request
+        # for one of them straight to its flow (J8, live sandbox 2026-09-27).
+        "sibling_flows": {
+            str(p["flow_id"]): str(p.get("display_name") or p.get("purpose") or "")
+            for p in (spec.get("flows") or [])
+            if isinstance(p, dict) and p.get("role") == "operation" and p.get("flow_id")
+            and p.get("flow_id") != plan.get("flow_id")
+            and str(p.get("display_name") or p.get("purpose") or "").strip()
+        },
         # The plan's data_request steps, in order: D3p pins the n-th data_request
         # node along the flow to the n-th confirmed request (live: the generator
         # called the reservation endpoint for the price lookup).
@@ -1386,7 +1422,18 @@ def validate_generated_flow(flow: dict, plan: dict, spec: dict) -> list[str]:
         )
     bundle = stub_bundle_for_validation(spec, flow)
     spec_view = {"flows": [plan]}
-    problems += [str(v) for v in validate_acxd_consistency(bundle, spec=spec_view)]
+    # The flow under test is flows[0]; flows[1:] are sibling stubs. A finding on
+    # a sibling is not this flow's to fix — live (Hanbit, 2026-09-27) a digit in a
+    # system flow id failed all five attempts of every operation flow, because
+    # the model was told to fix a flow it was not writing. Log it instead.
+    own, siblings = [], []
+    for violation in validate_acxd_consistency(bundle, spec=spec_view):
+        match = re.match(r"flows\[(\d+)\]", str(getattr(violation, "path", "")))
+        (siblings if match and int(match.group(1)) > 0 else own).append(violation)
+    if siblings:
+        logger.warning("[ACXDFlowGen] %s: %d finding(s) on sibling flows ignored for this attempt: %s",
+                       plan.get("flow_id"), len(siblings), "; ".join(str(v) for v in siblings[:3]))
+    problems += [str(v) for v in own]
     return problems
 
 

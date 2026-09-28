@@ -361,6 +361,138 @@ Wall time per run, interview to download: 40–45 minutes when the review was
 clean on the first round; 99–166 minutes for the two runs that hit the FAQ-spec
 gates before the fix (including three backend rollovers).
 
+## 2026-09-27 — an ACXD-only bundle deployed and tested live (Workshop Studio sandbox)
+
+The Hanbit hospital bundle from the v3.1 "ACXD only" mode (dev session
+016f7a7e) was deployed with its own `deploy.sh` to a fresh workspace (new
+Connect instance, ACXD workspace and API key created for the run) against a
+mock backend implementing its `BACKEND-CONTRACT.md` (a Lambda function URL
+that checks `x-api-key`). All 11 steps succeeded. Tested in the ACXD Studio
+test panel (chat), not over voice or a Contact Flow.
+
+| Path | Result |
+|---|---|
+| Greeting | said once, verbatim |
+| Booking | `findPatient` identified the caller; "내일" became the right date (2026-09-28, a Monday); read-back, `bookAppointment` 200, the mandated arrival notice |
+| Lookup / cancel | `A20260916` looked up and cancelled ("취소되었습니다") |
+| Emergency words ("지금 피가 많이 나요") | the 119 sentence verbatim, then the escalation line once, exit via Escalation |
+| "상담원 연결해 주세요" | `RequestAgentFlow` → `EscalationFlow`, one line, exit via Escalation |
+
+What the run caught, and where it went:
+
+| Finding | Fix |
+|---|---|
+| A `knowledge_base` node retrieved the answer (trace: `Knowledge base responded`, confidence 95, `Generative response` with the text) and the caller heard **only the follow-up question**. The node speaks nothing itself: `metadata.knowledgeBase.name` is its OUTPUT VARIABLE and the answer is `{<name>.answer:NLX.Local}` in a later message. Probed by UpdateFlow: `{FAQ.answer:NLX.Local}` and `{faqAnswer.answer:NLX.Local}` (after renaming the output) render the answer; `{FAQ:NLX.Variable}`, `{FAQ.<field>:NLX.Variable}` and `{FAQ.response:NLX.Local}` render empty; `{FAQ:NLX.Local}` fails the turn (`InternalServerError`, JSON parse) | runtime contract K1: a basic node saying `{<name>.answer:NLX.Local}` on the success path unless a message already references it; a reference under another namespace is rewritten; a name that is not an identifier becomes `faqAnswer`. `build_faq_flow` writes the same shape. Re-tested live: the answer is spoken, then the follow-up question |
+| After "아니요 없어요" to the journey's own "더 필요한 것이 있으신가요?", the `done` exit reached `FollowUpFlow`, which asked "더 도와드릴 일이 있을까요?" again | J8: the `done` hand-off to the follow-up flow sets the context variable `journeyDone = 1` (on a redirect of its own when `anotherRequest` shares the node); `FollowUpFlow` checks it first, resets it and says the approved closing. Re-tested live: "네 확인했어요. 더 필요한 건 없어요" → "이용해 주셔서 감사합니다. 건강하세요." |
+| Journey tool calls sent values in the schema format (`010-1111-2222`, `1988-03-15`, `10:00`); `BACKEND-CONTRACT.md` said values arrive without separators | the contract tells the API to accept both forms |
+| At `FollowUpFlow`'s listen, a plain "아니요 없어요" (after an FAQ answer) took the `captured_flow exists` edge and was redirected to `FallbackFlow` ("죄송합니다, 잘 이해하지 못했습니다…"), so the "no" words branch never ran. Probed with a debug line: `{System.capturedFlow:NLX.System}` was `FallbackFlow` — an utterance that matches no flow still CAPTURES the application's `unknown` default | `FollowUpFlow`'s listen tests `captured_flow eq <unknown default flow id>` first (live-verified) and treats it as "no flow"; a bare "yes" is recognised by `matches_regex` on `System.utterance` (live-verified) and gets "무엇을 도와드릴까요?". The next request is heard by the welcome flow's re-entry listen, because a second User input in the same flow on the same turn was evaluated against the same "네" and re-guided at once. The Korean "no" list had also lost "아뇨"/"아니" (a locale compared as a language root). Re-tested live: "아니요 없어요" → the approved closing; "네" → "무엇을 도와드릴까요?" → "예약 취소하고 싶어요" → the lookup journey |
+| Inside the lookup journey, "그리고 주차는 어떻게 하나요?" (answered by the FAQ) got "주차 안내는 제가 도와드릴 수 있는 업무가 아닙니다 … 연결해드릴까요?": the journey had no knowledge tool, and its rule "변경·취소·추가 질문 … 이 대화에서 계속 처리: 도구가 없으면 … 상담원 연결을 제안" won over the `anotherRequest` exit | J5/J8: every carrying operation journey gets the knowledge base as a `knowledgeBase` tool (named as deployed, so `{KB:…}` resolves); the [tool use] lines are scoped (this task here, general questions through the knowledge base, other tasks to an exit, never "offer an agent" for them) and a block packaged earlier is rewritten in place. Re-tested live: the trace shows `Tool invoked` → `Knowledge base invoked/responded` inside the journey; the parking answer, then "더 필요하신 사항이 있으신가요?", then "아니요 없어요" → the approved closing |
+| Found while re-testing: inside the lookup journey, "새로 진료 예약도 하고 싶어요" took `anotherRequest` and `FollowUpFlow` asked "더 도와드릴 일이 있을까요?" — the request was lost. The turn's `Flow capture state` stays on the journey's flow (the NLU does not classify a journey's turn), and a User input with an unconditional edge reached afterwards captured nothing | J8: one exit per other operation of the application (`switchTo<FlowId>`, prompt naming the task by its interview display name), redirecting to that flow; the journey it enters starts its task at once. Re-tested live: "새로 진료 예약도 하고 싶어요" → "네, 새로운 진료 예약 도와드리겠습니다. 먼저 본인 확인을 위해 전화번호와 생년월일을 알려주시겠어요?" → `findPatient` → booking |
+| A redeploy could not update the `development` deployment in place (`UpdateApplicationDeployment` refused `languageCodes`, then "requires at least one language code"), so the runner replaced it and printed the alias-rotation warning | Probed again with five request shapes (codes only; + environment; + description; + empty analyticsTags/contextVariables; the stored record echoed back): every one answered `InternalServerException: Failed to update deployment.` — a service defect, replacement stays the working path. The runner now tries once with the codes and logs the service's own refusal; an ACXD-only bundle (no Contact Flow import) is told to re-select the alias in the customer's own flow instead of a `--rebind-alias` it does not ship |
+
+Also observed: the runtime adds an `nlx_context` key to every request body;
+QueryLogs returned no events for test-panel conversations, so the debug trace
+is the evidence source for this run.
+
+After the three fixes the bundle was re-packaged with the builder's current
+code and redeployed; greeting, FAQ + "no", FAQ + "yes", lookup + FAQ question,
+lookup → new booking, booking (A22195983, the arrival notice, the closing),
+cancellation of that booking, the emergency words and "상담원 연결해 주세요" all
+behaved as above. Still open that day: between 00:00 and 09:00 KST the journey
+resolved "내일" one day early (2026-09-28 at 00:1x KST) and the backend refused it
+as a same-day booking. It was not UTC: the runtime dates by America/New_York, so
+the window was 00:00–13:00 KST (2026-09-28 below); the read-back and the
+backend's refusal kept it safe.
+
+## 2026-09-28 — journeys count dates in the business's time zone (same sandbox)
+
+A debug message and a probe journey on the Hanbit application showed where the
+wrong "tomorrow" came from:
+
+| Probe | Result |
+|---|---|
+| A basic node printing `{System.currentTimestamp:NLX.System}`, `{System.currentTimestampTz:NLX.System}` and `{System.timezone:NLX.System}` (names from the console's placeholder list) | `1790555152826` (UTC epoch ms), `1790540752000` (the New York wall clock as epoch ms, 4 h behind) and `America/New_York`, with the browser on Asia/Seoul; the test panel's request carries no zone |
+| A journey asked to repeat the clock it was given, at 09:28 Monday in Seoul | "Now it is Sunday, 2026-09-27 8:28 PM (America/New_York)" |
+| Application settings (Languages, Access, Organization, Advanced), workspace settings, Admin hub, the test panel's settings, the SDK (`ApplicationSettings`, `UpdateWorkspaceRequest`, `GenerativeJourneyConfig`) | no time-zone field anywhere |
+| The same journey told "the business runs on Asia/Seoul (UTC+9); convert the system clock first" | "오늘 2026-09-28 (월요일), Asia/Seoul"; "내일 오전 10시 내과" read back as 9월 29일(화) and booked on 2026-09-29 |
+| The same prompt on Haiku 4.5 | today right, but "이번 주 금요일" became 10월 3일, a Saturday (Sonnet 5: 10월 2일) |
+| Without the old "ask for the month and day" line | Sonnet booked "이번 주 금요일 오후 2시에 피부과로 예약해 주세요" at once, with no read-back: the [tool use] line listed `bookAppointment` under "a lookup is called as soon as its values are known" |
+
+| Fix | Where |
+|---|---|
+| J11: every journey carries a `[date basis]` block (the business's zone; convert the system clock first; relative dates counted from that today and read back with the weekday before a tool uses them; the zone not mentioned unless asked). It replaces the J7/J8 "do not compute weekdays, ask for the month and day" lines; a block naming another zone is replaced; a journey that captures an `NLX.Date` on a fast model moves to Sonnet 5 | runtime contract (generator and packaging pass) |
+| The zone: `ACXDApplicationPlan.timezone` (IANA, checked against the tz database), recorded with `save_acxd_application_settings(timezone=…)`; empty means Asia/Seoul for ko and Asia/Tokyo for ja; with no zone known nothing changes | `acxd_timezone.py`, flow spec, interview prompt |
+| J8: the first [tool use] line names the tools without calling them lookups and asks for a yes to the read-back before a call that creates, changes or cancels, even after "예약해 주세요"; a line packaged earlier is rewritten | runtime contract |
+| `BACKEND-CONTRACT.md` says the dates are calendar dates in that zone | packager |
+
+Re-tested live at 09:57–10:06 Seoul time, while New York was still on Sunday:
+"내일 오전 10시 30분 내과" → "내일은 9월 29일(화요일)이 맞으실까요?" → yes →
+A57138271 on 2026-09-29; "이번 주 금요일 오후 2시 30분 피부과" → "10월 2일이 맞으실까요?"
+→ yes → booked, then cancelled after "…취소하시는 것이 맞을까요?"; "오늘 오후 3시" →
+"9월 28일(월요일)" → yes → the backend's same-day refusal and an offer of 9월
+29일(화요일); "모레 오전 11시 정형외과" → "9월 30일(수요일)" → yes → A57560784.
+Greeting, FAQ + "no", the emergency words and "상담원 연결해 주세요" behaved as
+before. Not tested: voice and a Contact Flow (whether the Agentic CX block passes
+a zone is unknown; the `[date basis]` rules hold whatever zone the runtime reports).
+
+### Later the same day: the dev pipeline and a Connect chat
+
+The Hanbit session was regenerated on the dev builder with this code and
+packaged there; the bundle deployed to the sandbox and was driven through the
+Studio test panel and through a Contact Flow with the Agentic CX block
+(Connect's own test chat).
+
+| Finding | Fix |
+|---|---|
+| The dev orchestrator answered "재생성 성공 (status: success, problems: [], flows=9)" and then called only `reviewer_agent`; the assets were a day old. Neither claim check fired: no tool was named and the turn did call a tool | the claim audit reports a regeneration or packaging result when no tool of that kind ran, and the next turn is told to make the real call |
+| The regenerated booking journey listed its knowledge tool as "- {KB:FAQ}: …" in its prompt; every booking ended at once in the agent hand-off (`Slot=KB is unresolved`, `AgentFailure`) | K2: `{KB:<name>}` outside `knowledgeBaseId` becomes plain words; other `{name:Namespace}` tokens outside `NLX.*` are reported; the generator is told to keep the placeholder in `knowledgeBaseId` |
+| Through Connect the FAQ answer never arrived (`KbResponded status: failure`); the knowledge base had been created as en-US because its document named no language. The test panel still answered | the knowledge base carries the application's languages, and packaging fills them into a KB asset generated earlier; after the redeploy the Connect chat said the parking answer and the follow-up question |
+| The deployed runtime judges a knowledge_base node as `match` / `no_match` / `failure` / `timeout`, and a `success` edge was taken on `no_match` with an empty answer | K1 adds a `no_match` edge to where `failure` goes; FaqFlow has it first |
+| A Contact Flow imported as JSON with the ids and a deployment key stayed silent (no conversation reached the application); picking workspace, application and alias in the block's dropdowns and clicking the panel's **Confirm** made it answer. Later the same day the flow imported as JSON with the current key answered without the block being opened, so the silent import had another cause (not isolated) | WIRING-GUIDE: set the contact language, pick the three values, Confirm, publish; the alias is listed as `Production` even for the development environment |
+| Through Connect chat the identity turn (the booking journey calls `findPatient`) left the block on both builds whose tool had `interimMessages`: the contact ended about 5 s into the turn, before the application's answer (8.2 s and 8.4 s). The test flow sent Default and Error to the same prompt then, so which of the two is not known. The same bundle with only the interim messages removed answered such turns (6 to 9 s) | J8 removes `interimMessages` from journey tools; the generator is told not to add them |
+
+Through Connect chat the greeting, a two-message basic node, the FAQ answer,
+the follow-up question and the booking journey's identity turn all arrived, and
+`{System.timezone:NLX.System}` printed `America/New_York` there too
+(`channelType=API`, `environment=development`). The booking journey the
+builder now emits is identical to the one that answered there.
+
+After the fixes the dev builder re-packaged the session (no regeneration
+needed: the contract passes run at packaging) and the bundle was deployed. In
+the designer's test panel: "내일 오후 2시 정형외과" → 9월 29일(화) read back,
+identity, the summary read back, yes → booked; "이번 주 금요일" → 10월 2일(금);
+a booking looked up by number, read back and cancelled after a yes; the
+parking answer, then "네" → "무엇을 도와드릴까요?"; emergency words → the 119
+sentence and the hand-off; an agent request → the hand-off. One of two runs of
+the first booking ended in the hand-off instead: after `findPatient` answered,
+the model called an exit condition (`exit_condition_1`) and the runtime
+reported `AgentFailure` ("failed to generate a final answer"); the same input
+then completed.
+
+What looked like Connect keeping a replaced build was one open contact. From
+02:49 to 04:05 UTC every "new" test chat went into the same contact, still in
+progress hours later: one ACXD conversation id (the conversation id is the
+Connect contact id), one greeting, and the deployment key and build of 02:49,
+when the flow still held the key of the deployment replaced a minute earlier.
+Connect's test chat window reopens a chat that has not ended, and a contact
+stays on the key its Agentic CX block started with, so re-pointing and
+publishing the flow could not reach it. Started as a new contact, the chat was
+answered by the current deployment key and build (both are in every
+conversation event).
+
+With the flow's branches then wired to separate prompts, the final bundle
+answered over Connect chat, each run a new contact on the current build: "내일
+오후 2시에 정형외과" → 9월 29일(화) read back, identity (the `findPatient` turn),
+the summary read back, yes → booked, "아니요 없어요" → the closing sentence and
+the block's **Default** branch; the parking answer, the follow-up question and
+the closing → Default; a booking found by phone number and birth date, read
+back, cancelled after a yes → Default; an agent request → **Escalation**;
+emergency words → the 119 sentence, then Escalation. The designer stores
+Default as the block's `NoMatchingCondition` error and writes `NextAction` as
+the Error target. A booking made a few minutes earlier was not found by its
+number (the mock backend keeps bookings per Lambda instance); a seed booking
+was. Voice was not tested.
+
 ## Service contract facts (not in the SDK types, learned from the API)
 
 | Area | Fact | Where it is enforced now |
@@ -405,11 +537,23 @@ gates before the fix (including three backend rollovers).
 | `modify` guardrails | `CreateGuardrail` rejects a `modify` rule that has no `behavior.message` or `behavior.prompt` (one of the two, per the SDK) — with `ValidationException: rules[0].enforcement.action is not a supported value`, which names neither the guardrail nor the real cause. Live (2026-09-16): a hand-edited action passed packaging and the deploy died at the third guardrail, after two were created | the guardrail schema requires exactly one of `message`/`prompt` for `modify` (so patching and packaging refuse it), and the runner pre-flights every guardrail file before creating any and names the guardrail in the error |
 | Contact language | The Agentic CX block fails every contact with "NLX Chat Streaming Failed" unless the contact's language has been set (an `UpdateContactData` block with `LanguageCode` matching one of the application's languages) before the block | the Contact Flow binding inserts the block when the flow has none |
 | Workspace-level names | Secrets, guardrails and slot types are keyed by name across the whole workspace: two projects using `BackendApiKey` overwrote each other's API key on every deploy | the backend key secret and guardrails are named per project |
-| Built-in date / time slots | `NLX.Date` → ISO date; `NLX.Time` → a timezone-shifted UTC instant, unusable as a wall-clock time | S9 uses `NLX.Date`; time stays `NLX.AlphaNumeric` `^[0-9]{3,4}$`, restored to `HH:MM` by the adapter |
+| Built-in date / time slots | `NLX.Date` → ISO date; `NLX.Time` → a timezone-shifted UTC instant (shifted from America/New_York, the runtime's zone), unusable as a wall-clock time | S9 uses `NLX.Date`; time stays `NLX.AlphaNumeric` `^[0-9]{3,4}$`, restored to `HH:MM` by the adapter |
+| Runtime clock | Every conversation runs on `America/New_York`: `{System.timezone:NLX.System}`, and the clock a generative journey is given ("Now it is Sunday, 2026-09-27 8:28 PM (America/New_York)"). `System.currentTimestamp` is UTC epoch ms, `System.currentTimestampTz` the wall clock in that zone as epoch ms. No application, workspace, test-panel or SDK setting names a zone (2026-09-28) | J11: each journey is told the business's zone and converts the clock itself |
 | Payload placeholders | A `{slot:…}` placeholder for a slot not filled on the reaching path fails the Data Request **before the HTTP call** | runtime contract P1 (per-path payloads, node cloned per incoming edge) |
 | Reply validation | The reply must satisfy the full `responseSchema` including `enum` / `pattern`; a valid "not found" answer can fail it | reply schemas carry types only; result-branch enums come from the OperationSpec into D5 |
 | `captured_flow` | Populated by `user_input` only, never by a `user_choice` over the flow-choice slot | FollowUp flow re-listens through `user_input` |
+| Unknown utterance at a listen | Captures the application's `unknown` default flow: `System.capturedFlow` = its flow id (`FallbackFlow`), so `captured_flow exists` is true; `captured_flow eq "<flow id>"` matches it (2026-09-27) | FollowUpFlow tests the unknown default before `exists` |
+| Two listens on one turn | A second `user_input` reached in the same flow on the same turn is evaluated against the same utterance instead of waiting (clearing `System.capturedFlow` does not change that); a `user_input` in a flow entered by redirect waits (2026-09-27) | FollowUpFlow hands the next request to the welcome flow's listen |
+| A journey's turn | The turn's `Flow capture state` stays on the journey's flow: the NLU does not classify a journey's utterance, and a `user_input` reached after the journey exits captures nothing from it (2026-09-27) | one exit per other operation (J8) |
+| Utterance regex | `{"left": {"type": "system", "name": "System.utterance"}, "operator": "matches_regex", …}` matches (2026-09-27) | FollowUpFlow's bare "yes" |
+| Journey `knowledgeBase` tool | `{type: knowledgeBase, knowledgeBaseId, scopeTags: []}` builds; the journey calls it inside the turn (`Tool invoked` → `Knowledge base invoked` → `Knowledge base responded`) and answers from it (2026-09-27) | J5 attaches it to every carrying operation journey |
+| Deployment update | `UpdateApplicationDeployment` answered `InternalServerException: Failed to update deployment.` for five request shapes (2026-09-27; also 2026-09-10) | runner replaces the deployment and says so once |
 | Generative / KB nodes | Need a generative model configured on the workspace; without one the node is silent although the deployment and knowledge base succeed | documented prerequisite (`WIRING-GUIDE.md`) |
+| Knowledge base answer | A `knowledge_base` node says nothing: its answer lands in the output variable named by `metadata.knowledgeBase.name` and is spoken only where a message references `{<name>.answer:NLX.Local}`. `NLX.Variable` references render empty; `{<name>:NLX.Local}` fails the turn | runtime contract K1 (2026-09-27) |
+| Knowledge base language | A knowledge base created without `mainLanguageCode` / `languageCodes` is stored as en-US; a ko-KR conversation's lookup then fails in the deployed runtime (`KbResponded status: failure`) although the Studio test panel answers (2026-09-28) | KB document carries the application's languages; packaging fills them |
+| Knowledge base outcome | The deployed runtime evaluates a knowledge_base node as `match` / `no_match` / `failure` / `timeout`; an edge on `success` is taken on `no_match` too, with an empty answer (2026-09-28) | K1 `no_match` edge |
+| Placeholders in text | `{KB:<name>}` resolves in `knowledgeBaseId` only; in a journey prompt it fails the journey (`Slot=KB is unresolved`, `AgentFailure`) (2026-09-28) | runtime contract K2 |
+| Agentic CX block | The alias list shows the deployment as `Production` for the development environment; the dropdowns plus the panel's **Confirm** store the current deployment key (a JSON import with the current key answered too). The ACXD conversation id is the Connect contact id, and a contact stays on the deployment key its block started with; Connect's test chat window reopens a chat that has not ended. A finished conversation leaves through Default (`NoMatchingCondition`), a hand-off through the `Escalation` condition. Over chat, a journey turn whose tool sent `interimMessages` left the block before the answer; without them the same turn answered (2026-09-28) | J8, WIRING-GUIDE, the runner's alias warning |
 | Routing text | `description` / `aiDescription` are ASCII-only; non-ASCII is rejected on create | system flows and the generator write English routing text; the bundle loader strips non-ASCII |
 | Slot regex | The `regex` attached to a built-in slot is not enforced at capture: a value of the wrong shape is stored (an order number in the return-number slot) and reaches the Data Request. A `matches_regex` condition on the slot IS evaluated, against the delivered (separator-stripped) value | runtime contract F1: a `matches_regex` guard after every pattern-bearing capture, separators optional, letters either case; adapter reassigns a value that fits exactly one other field |
 | Associated slots | `choice.associatedSlotTypeIds` is accepted by the API and silently discarded (by slot name and by identifier); a capture node listens on one slot only | no second slot per node; E2 tests the utterance instead |

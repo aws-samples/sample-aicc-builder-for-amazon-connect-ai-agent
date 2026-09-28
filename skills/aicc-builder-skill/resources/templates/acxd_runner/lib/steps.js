@@ -167,12 +167,36 @@ const deployCfnBackend = {
 
 const wireWebhookUrls = {
   plan(ctx, params) {
+    if (params && params.source === 'env') {
+      const fallback = params.defaultUrl ? ` (default ${params.defaultUrl})` : '';
+      return [`use WEBHOOK_URL from the environment as {WEBHOOK_URL} — your backend API${fallback}`];
+    }
     const key = (params && params.outputKey) || 'ApiEndpoint';
     return [`read CFN output '${key}' and record it as {WEBHOOK_URL}`];
   },
   async run(ctx, params) {
     const key = (params && params.outputKey) || 'ApiEndpoint';
     const supplied = ctx.env && ctx.env.WEBHOOK_URL;
+    // ACXD-only bundles (source: env) have no CloudFormation stack: the Data
+    // Requests call the customer's own API, whose base URL arrives as
+    // WEBHOOK_URL or, failing that, the default the interview recorded.
+    if (params && params.source === 'env') {
+      const url = supplied || params.defaultUrl;
+      if (!url) {
+        throw new Error(
+          'WEBHOOK_URL is not set: export the base URL of the backend API the data ' +
+          'requests call (e.g. WEBHOOK_URL=https://api.example.com/v1)');
+      }
+      if (!/^https:\/\//.test(url)) {
+        throw new Error(`WEBHOOK_URL must be an https:// URL (got '${url}')`);
+      }
+      ctx.state.webhookUrl = url.replace(/\/$/, '');
+      ctx.log(`  = webhook base URL: ${ctx.state.webhookUrl} (${supplied ? 'WEBHOOK_URL' : 'manifest default'})`);
+      if (ctx.env && ctx.env.ACXD_SECRET_BACKENDAPIKEY) {
+        ctx.backendApiKey = ctx.env.ACXD_SECRET_BACKENDAPIKEY;
+      }
+      return;
+    }
     if (supplied) {
       ctx.state.webhookUrl = supplied.replace(/\/$/, '');
       ctx.log(`  = webhook base URL: ${ctx.state.webhookUrl} (WEBHOOK_URL)`);
@@ -748,18 +772,27 @@ const deployApplication = {
     let deploymentId;
     let aliasRotation = null;
     if (current) {
+      // One attempt, with the language codes: without them the service can only
+      // answer "A deployment requires at least one language code". Live
+      // (2026-09-10, and again 2026-09-27 with five request shapes: codes only,
+      // + environment, + description, + empty analyticsTags/contextVariables,
+      // the stored record echoed back) every UpdateApplicationDeployment answered
+      // InternalServerException "Failed to update deployment." — the replacement
+      // below is the path that works.
       try {
-        await withLangFallback('UpdateApplicationDeploymentCommand', {
+        await send(ctx, 'UpdateApplicationDeploymentCommand', {
           applicationIdentifier: appId,
           deploymentIdentifier: current.deploymentId,
           buildIdentifier: buildId,
           environment,
           description: 'AICC Builder deploy',
+          ...langs,
         });
         deploymentId = current.deploymentId;
         ctx.log(`  ~ promoted build on existing '${environment}' deployment`);
       } catch (err) {
-        ctx.log(`  ! update of '${environment}' deployment refused (${err.name}: ${err.message}); replacing it`);
+        ctx.log(`  ! the service refused to update the '${environment}' deployment in place ` +
+          `(${err.name}: ${err.message}); replacing it`);
         await send(ctx, 'DeleteApplicationDeploymentCommand',
           { applicationIdentifier: appId, deploymentIdentifier: current.deploymentId });
         const created = await withLangFallback('CreateApplicationDeploymentCommand', {
@@ -776,6 +809,9 @@ const deployApplication = {
           deploymentId,
           buildId,
           at: new Date().toISOString(),
+          // An ACXD-only bundle imports no Contact Flow: the block to re-point
+          // is in the customer's own flow, and --rebind-alias does not exist.
+          managesContactFlow: ctx.managesContactFlow !== false,
         };
       }
     } else {
@@ -831,16 +867,32 @@ function recordAliasRotation(ctx, rotation) {
   ctx.state.aliasRotation = rotation;
   const bar = '  ' + '!'.repeat(72);
   ctx.log(bar);
-  ctx.log('  !! ALIAS ROTATED — the published Contact Flow now points at the OLD build.');
+  if (rotation.managesContactFlow === false) {
+    ctx.log('  !! ALIAS ROTATED — a contact flow that already uses this application now points at');
+    ctx.log('  !! the OLD build.');
+  } else {
+    ctx.log('  !! ALIAS ROTATED — the published Contact Flow now points at the OLD build.');
+  }
   ctx.log(`  !! The '${rotation.environment}' deployment could not be updated in place, so it was`);
   ctx.log(`  !! replaced (${rotation.previousDeploymentId} -> ${rotation.deploymentId}). Replacing a`);
   ctx.log('  !! deployment issues a new deployment key, and the Agentic CX block still holds');
   ctx.log('  !! the previous one — which still resolves, to the previous build.');
   ctx.log('  !! Fix it in the Connect flow designer, exactly:');
   ctx.log('  !!   1. Open the contact flow that carries the Agentic CX block');
-  ctx.log('  !!   2. Click the block -> Alias dropdown');
-  ctx.log(`  !!   3. Re-select the environment alias (the '${rotation.environment}' entry)`);
+  ctx.log('  !!   2. Click the block -> re-select the application, then open the Alias dropdown');
+  ctx.log(`  !!   3. Pick the alias (ACXD lists it as 'Production', also for the '${rotation.environment}'`);
+  ctx.log('  !!      environment) -> Confirm');
   ctx.log('  !!   4. Save -> Publish');
+  // Live (2026-09-28): a contact keeps the key its block started with, and Connect's
+  // test chat reopens a chat that has not ended, so a re-pointed flow can look stale.
+  ctx.log('  !! A chat or call already in the block stays on the previous build: test with a new one.');
+  if (rotation.managesContactFlow === false) {
+    // This bundle imports no Contact Flow, so deploy.sh cannot re-point one.
+    ctx.log('  !! This bundle does not manage that contact flow; nothing to do if none uses it yet.');
+    ctx.log('  !! The ACXD Studio test panel always runs the latest flows.');
+    ctx.log(bar);
+    return;
+  }
   ctx.log('  !! Or non-interactively: ./deploy.sh --rebind-alias <deploymentKey>');
   ctx.log('  !! (or re-run the deploy with ACXD_ALIAS_ID=<deploymentKey>). The deploymentKey');
   ctx.log('  !! is NOT in the SDK — read it from the console-internal endpoint');

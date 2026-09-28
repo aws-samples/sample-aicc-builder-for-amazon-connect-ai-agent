@@ -440,8 +440,17 @@ class _RuntimeContract:
         escalation_topics: Optional[Any] = None,
         result_templates: Optional[list] = None,
         handoff_notices: Optional[list] = None,
+        sibling_flows: Optional[dict] = None,
+        timezone: Optional[str] = None,
     ) -> None:
         self.flow = flow
+        #: the zone the business runs on — the one the interview recorded, else
+        #: the one the flow's language implies (J11). None when neither names one.
+        from tools.acxd_timezone import business_timezone
+        self.timezone = business_timezone(timezone, flow.get("mainLanguageCode"))
+        #: the application's OTHER operation flows: flow id -> routing
+        #: description. A carrying journey gets one exit per flow (J8).
+        self.sibling_flows = {str(k): str(v) for k, v in (sibling_flows or {}).items() if k and v}
         #: the plan's route guardrails that carry a mandated sentence
         #: ([{"keywords": [...], "message": "..."}]): every journey of an
         #: operation flow says the sentence verbatim and hands off when the
@@ -490,8 +499,14 @@ class _RuntimeContract:
         #: ({captures: [slot names], journey_tools: [...], description}); the
         #: n-th journey node in the document realises the n-th step (J2-J5).
         self.journey_steps = [s for s in (journey_steps or []) if isinstance(s, dict)]
-        #: the bundle's FAQ knowledge base name, for a journey's knowledgeBase tool
-        self.kb_name = str(kb_name).strip() if kb_name else None
+        #: the bundle's FAQ knowledge base name, for a journey's knowledgeBase tool;
+        #: the runner resolves {KB:<name>} against the DEPLOYED name, which the
+        #: resource builder sanitises (a Korean name would never resolve).
+        if kb_name:
+            from tools.acxd_resource_builders import sanitize_kb_name
+            self.kb_name = sanitize_kb_name(str(kb_name).strip())
+        else:
+            self.kb_name = None
         #: slot name -> the interview's slot plan ({type, regex, examples, …}).
         #: The plan carries the FieldSpec constraints (a 10-digit order number)
         #: that the attached slot needs as an NLX built-in + regex (S1/S5).
@@ -1246,7 +1261,7 @@ class _RuntimeContract:
             # exactly that list, in the flow's language
             cfg["prompt"] = (prompt + ("\n" if prompt else "")
                              + ("다음 값만 사용해 한두 문장으로 자연스럽게 안내하세요 (값을 바꾸거나 새 사실을 덧붙이지 마세요): "
-                                if self.is_korean else
+                                if self.is_korean() else
                                 "Use only these values, in one or two natural sentences (do not alter them or add facts): ")
                              + body)
         self.change(
@@ -1519,6 +1534,85 @@ class _RuntimeContract:
                     f"Escalation (R7)")
 
     # ==================================================================
+    # K1 — a knowledge base answer is spoken by a message that references it
+    # ==================================================================
+
+    def rule_k1(self) -> None:
+        """A knowledge_base node says nothing itself: its answer lands in the
+        output variable `metadata.knowledgeBase.name` and reaches the caller only
+        where a message references `{<name>.answer:NLX.Local}` (the service's own
+        documentation: "Connect the Match path to a Basic node ... reference the
+        answer in the message"). Live (sandbox, 2026-09-27): the node retrieved the
+        answer with confidence 95 and the caller heard only the follow-up question.
+        The success path gets a basic node saying the answer; a reference to the
+        output under another spelling is rewritten to the one that renders."""
+        from tools.acxd_system_flows import KB_ANSWER_VAR, kb_answer_placeholder
+
+        for index, (node_id, node) in enumerate(list(self.nodes_of_type("knowledge_base"))):
+            kb = _meta(node).get("knowledgeBase")
+            if not isinstance(kb, dict):
+                continue
+            self._kb_no_match_edge(node_id, node)
+            name = str(kb.get("name") or "")
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", name):
+                name = KB_ANSWER_VAR if index == 0 else f"{KB_ANSWER_VAR}{index + 1}"
+                kb["name"] = name
+                self.change(f"{_label(node_id, node)}: output variable named {name!r} — the answer is "
+                            f"referenced by that name (K1)")
+            placeholder = kb_answer_placeholder(name)
+            wrong = re.compile(r"\{" + re.escape(name) + r"(?:\.[A-Za-z_]+)?:NLX\.(?:Variable|Local|Context)\}")
+            said = False
+            for other in self.nodes.values():
+                if not isinstance(other, dict):
+                    continue
+                for message in other.get("messages") or []:
+                    body = message.get("body") if isinstance(message, dict) else None
+                    if not isinstance(body, str):
+                        continue
+                    fixed = wrong.sub(placeholder, body)
+                    if fixed != body:
+                        message["body"] = fixed
+                        self.change(f"{_label(str(other.get('nodeId') or ''), other)}: answer reference → "
+                                    f"{placeholder} (K1)")
+                    said = said or placeholder in message["body"]
+            if said:
+                continue
+            edges = _edges(node)
+            success = next((e for e in edges if _has_status(e, "success")), None) \
+                or next((e for e in edges if not e.get("conditions")), None)
+            if success is None or not success.get("nodeId"):
+                self.violation("K1", "flow", f"{_label(node_id, node)} has no success path to say its answer on")
+                continue
+            say_id = _derived_id("4b0a0001", f"{self.flow_id}#{node_id}#kb-answer")
+            if say_id not in self.nodes:
+                self.nodes[say_id] = {"nodeId": say_id, "type": "basic",
+                                      "messages": [{"type": "text", "body": placeholder}],
+                                      "childNodes": [{"nodeId": success["nodeId"], "name": "next"}]}
+            success["nodeId"] = say_id
+            self.change(f"{_label(node_id, node)}: success path says the answer ({placeholder}) before "
+                        f"going on (K1)")
+
+    def _kb_no_match_edge(self, node_id: str, node: dict) -> None:
+        """Live (sandbox, 2026-09-28, the deployed runtime behind a Connect
+        chat): the service judges a knowledge_base node as match / no_match /
+        failure / timeout and takes a `success` edge on no_match too, so a
+        question the FAQ could not answer got an empty answer and then the
+        follow-up question. no_match goes where the node's failure goes."""
+        edges = _edges(node)
+        if any(_has_status(e, "no_match") for e in edges):
+            return
+        if not any(_has_status(e, "success") or _has_status(e, "match") for e in edges):
+            return
+        miss = next((e for e in edges if _has_status(e, "failure") and e.get("nodeId")), None) \
+            or next((e for e in edges if _has_status(e, "timeout") and e.get("nodeId")), None)
+        if miss is None:
+            return
+        node.setdefault("childNodes", []).insert(
+            0, {"nodeId": miss["nodeId"], "name": "noMatch", "conditions": [_status_condition("no_match")]})
+        self.change(f"{_label(node_id, node)}: no_match goes where failure goes — a success edge is taken "
+                    f"on no_match with an empty answer (K1)")
+
+    # ==================================================================
     # R9 — a hand-off carries the values the conversation collected
     # ==================================================================
 
@@ -1564,6 +1658,69 @@ class _RuntimeContract:
                 meta["stateModifications"] = mods
                 self.change(f"{_label(node_id, node)}: hand-off carries {added} into the application's "
                             f"context variables (R9)")
+
+    # ==================================================================
+    # R10 — the escalation flow says the hand-off line, once
+    # ==================================================================
+
+    #: Sentences that announce the transfer itself ("connecting you", "please hold").
+    _HANDOFF_SPEECH = {
+        "ko": re.compile(r"연결(?:을|해|하여|해서)?\s*(?:드리|드릴|드립|드렸|해\s*드|하겠|할게|합니다|해요)"
+                         r"|연결\s*도와|이관(?:해|하여)?\s*(?:드리|드릴|하겠)|잠시만?\s*기다려"),
+        "en": re.compile(r"\b(?:connect(?:ing)?|transferr?(?:ing)?)\s+you\b|\bput you through\b"
+                         r"|\bplease hold\b|\bone moment\b", re.I),
+        "ja": re.compile(r"お繋ぎ|おつなぎ|お待ちください"),
+    }
+
+    def rule_r10(self) -> None:
+        """Live (Hanbit e2e, 2026-09-27): the journey's failure edge redirected to
+        EscalationFlow saying "예약 접수가 어려워 상담원에게 연결해 드리겠습니다.
+        잠시만 기다려 주세요." and EscalationFlow then said "상담원에게 연결해
+        드리겠습니다." — the caller heard the hand-off twice. The escalation flow
+        speaks the approved hand-off line, so a redirect to it (directly or via
+        the agent-request flow) keeps only its reason sentences; one with nothing
+        else to say redirects silently."""
+        code = str(self.flow.get("mainLanguageCode") or "").lower()[:2]
+        pattern = self._HANDOFF_SPEECH.get("ko" if self.is_korean() else code)
+        if pattern is None or self.role not in ("operation", "help"):
+            return
+        from tools.acxd_system_flows import split_sentences
+
+        def hands_off(node: dict) -> bool:
+            redirect = ((node.get("metadata") or {}).get("redirect") or {}) if isinstance(node.get("metadata"), dict) else {}
+            return node.get("type") == "redirect" and self._is_hand_off_target(redirect.get("flowId"))
+
+        for node_id, node in list(self.nodes.items()):
+            if not isinstance(node, dict) or not node.get("messages"):
+                continue
+            if node.get("type") == "redirect":
+                if not hands_off(node):
+                    continue
+            elif node.get("type") == "basic":
+                # A basic node whose only way on is the hand-off says it just
+                # before EscalationFlow does (Hanbit, 2026-09-27: DepartmentInfo's
+                # "…담당 직원에게 연결해 드리겠습니다." then "상담원에게 연결해 드리겠습니다.").
+                children = [self.nodes.get((c or {}).get("nodeId")) for c in node.get("childNodes") or []]
+                if not children or not all(isinstance(c, dict) and hands_off(c) for c in children):
+                    continue
+            else:
+                continue
+            kept_messages, dropped = [], []
+            for message in node["messages"]:
+                body = str((message or {}).get("body") or "") if isinstance(message, dict) else ""
+                sentences = split_sentences(body)
+                kept = [s for s in sentences if not pattern.search(s)]
+                dropped += [s for s in sentences if pattern.search(s)]
+                if kept:
+                    kept_messages.append({**message, "body": " ".join(kept)})
+            if not dropped:
+                continue
+            if kept_messages:
+                node["messages"] = kept_messages
+            else:
+                node.pop("messages", None)
+            self.change(f"{_label(node_id, node)}: dropped {dropped} — the escalation flow says the "
+                        f"hand-off line (R10)")
 
     # ==================================================================
     # R6 — retry = recovery basic that CLEARS the slot, then re-asks
@@ -2178,7 +2335,17 @@ class _RuntimeContract:
                         added.append(field)
                     else:
                         missing.append(field)
-                if added or (payload and entry.get("payload") != payload):
+                # A field the request does not declare is not part of the
+                # customer's API contract (BACKEND-CONTRACT.md is written from the
+                # request schema): drop it rather than post it.
+                undeclared = [name for name in payload if name not in properties]
+                for name in undeclared:
+                    payload.pop(name)
+                if undeclared:
+                    self.change(
+                        f"{_label(node_id, node)} {request_id}: payload no longer sends "
+                        f"{undeclared}: not in the request schema (D3)")
+                if added or undeclared or (payload and entry.get("payload") != payload):
                     entry["payload"] = payload
                 if added:
                     self.change(
@@ -2989,12 +3156,28 @@ class _RuntimeContract:
         one, else ``{field: {slot:NLX.Slot}}`` for the request fields the flow
         has slots for (the runtime fills the call from the model's arguments;
         the template only documents the mapping)."""
-        if isinstance(existing, dict) and existing:
-            return existing
         document = self.data_requests.get(request_id) or {}
         schema = document.get("requestSchema") if isinstance(document.get("requestSchema"), dict) else {}
         props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        if isinstance(existing, dict) and existing:
+            return self._declared_payload(request_id, existing, props)
         return {name: f"{{{name}:NLX.Slot}}" for name in props if name in self.slot_names}
+
+    def _declared_payload(self, request_id: str, payload: dict, props: dict) -> dict:
+        """Only the fields the data request declares. Live (SELC, 2026-09-25 and
+        again 2026-09-26): the price lookup's payload also carried the journey's
+        `quantity` and `installLocationType`, which `getCleaningPrice` does not
+        accept; D9 passed it and only a reviewer advisory noticed. The customer's
+        API is written from BACKEND-CONTRACT.md, i.e. from the request schema, so
+        an undeclared field is at best ignored and at worst rejected."""
+        if not props:
+            return payload
+        extra = [name for name in payload if name not in props]
+        if not extra:
+            return payload
+        self.change(f"dataRequest tool {request_id!r} payload no longer sends {extra}: "
+                    f"not in the request schema (J8)")
+        return {name: value for name, value in payload.items() if name in props}
 
     def _complete_payload(self, request_id: str, payload: dict, capture_names: set,
                           label: str) -> dict:
@@ -3008,10 +3191,21 @@ class _RuntimeContract:
         document = self.data_requests.get(request_id) or {}
         schema = document.get("requestSchema") if isinstance(document.get("requestSchema"), dict) else {}
         required = [r for r in (schema.get("required") or []) if isinstance(r, str)]
+        known = set(self.slot_names) | set(capture_names)
+        # Optional request fields the journey collects too, as rule D3 does for a
+        # fixed data_request node. Live (Hanbit e2e, 2026-09-27): cancelAppointment
+        # takes appointmentId OR phoneNumber + birthDate; the journey captured all
+        # three and the payload carried only appointmentId and action, so a caller
+        # without the appointment number could not be looked up.
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        optional = [p for p in props if p not in payload and p not in required and p in known]
+        if optional:
+            payload = dict(payload, **{p: f"{{{p}:NLX.Slot}}" for p in optional})
+            self.change(f"{label}: dataRequest tool {request_id!r} payload now carries optional "
+                        f"{optional} the journey collects (J8)")
         missing = [r for r in required if r not in payload]
         if not missing:
             return payload
-        known = set(self.slot_names) | set(capture_names)
         filled = [r for r in missing if r in known]
         if filled:
             payload = dict(payload, **{r: f"{{{r}:NLX.Slot}}" for r in filled})
@@ -3092,6 +3286,50 @@ class _RuntimeContract:
         self.nodes[end_id] = {"nodeId": end_id, "type": "end", "childNodes": []}
         return end_id
 
+    def _mark_done_hand_off(self, node: dict, cfg: dict, label: str) -> None:
+        """The `done` exit fires once the customer has said they need nothing else,
+        so FollowUpFlow must close instead of asking again. Live (sandbox,
+        2026-09-27): "아니요 없어요" to the journey's "더 필요한 것이 있으신가요?" was
+        answered with FollowUpFlow's "더 도와드릴 일이 있을까요?". The done edge's
+        redirect to the follow-up flow sets journeyDone = 1 — on a redirect of its
+        own when another exit (anotherRequest) shares the node (J8)."""
+        from tools.acxd_system_flows import JOURNEY_DONE_VAR
+
+        if not self.follow_up_flow_id:
+            return
+        conditions = [c for c in (cfg.get("exitConditions") or []) if isinstance(c, dict)]
+        done_index = next((i for i, c in enumerate(conditions)
+                           if str(c.get("name") or "") == self.DONE_EXIT_NAME), None)
+        if done_index is None:
+            return
+        edge = next((e for e in _edges(node) if self._journey_index(e) == done_index), None)
+        target = self.nodes.get(edge.get("nodeId")) if edge else None
+        if not (isinstance(target, dict) and target.get("type") == "redirect"):
+            return
+        redirect = ((target.get("metadata") or {}).get("redirect") or {}) if isinstance(target.get("metadata"), dict) else {}
+        if str(redirect.get("flowId") or "") != self.follow_up_flow_id:
+            return
+        target_id = edge["nodeId"]
+        shared = any(e is not edge and e.get("nodeId") == target_id
+                     for n in self.nodes.values() if isinstance(n, dict) for e in _edges(n))
+        if shared:
+            own_id = _derived_id("d0e0a001", f"{self.flow_id}#followup-done")
+            if own_id not in self.nodes:
+                clone = copy.deepcopy(target)
+                clone["nodeId"] = own_id
+                self.nodes[own_id] = clone
+            edge["nodeId"] = own_id
+            target = self.nodes[own_id]
+        meta = _meta(target)
+        mods = [m for m in (meta.get("stateModifications") or []) if isinstance(m, dict)]
+        if not any(m.get("type") == "context" and m.get("name") == JOURNEY_DONE_VAR for m in mods):
+            mods.append({"type": "context", "name": JOURNEY_DONE_VAR, "modification": "set",
+                         "value": {"type": "constant", "value": 1}})
+            meta["stateModifications"] = mods
+            self.change(f"{label}: the '{self.DONE_EXIT_NAME}' hand-off sets {JOURNEY_DONE_VAR} = 1, so "
+                        f"{self.follow_up_flow_id} closes instead of asking again (J8)")
+        self._declare_context(JOURNEY_DONE_VAR, "number")
+
     def _ensure_another_request_exit(self, node: dict, cfg: dict, label: str) -> None:
         """A carrying journey hands a request it has no tool for to the follow-up
         flow, which listens and routes it (J8)."""
@@ -3111,54 +3349,316 @@ class _RuntimeContract:
         self.change(f"{label}: exit condition {index} '{self.ANOTHER_REQUEST_EXIT_NAME}' → follow-up "
                     f"[{target[:8]}] (J8)")
 
+    #: One exit per other operation of the application. Live (sandbox,
+    #: 2026-09-27): "새로 진료 예약도 하고 싶어요" inside the lookup journey took the
+    #: anotherRequest exit and FollowUpFlow answered "더 도와드릴 일이 있을까요?" —
+    #: the request was lost, because the NLU does not classify a journey's turn
+    #: (the turn's capture state stays on the journey's flow) and a User input
+    #: reached afterwards captured nothing (probed with an unconditional edge).
+    #: The journey's own judgement is the one place that understood the request,
+    #: so it hands over to the flow that serves it.
+    SIBLING_EXIT_PREFIX = "switchTo"
+    SIBLING_EXIT_PROMPTS = {
+        "ko": "고객이 이 대화의 업무가 아니라 다음 업무를 원한다: {task}",
+        "en": "The customer now wants this other task instead of this conversation's: {task}",
+        "ja": "お客様がこの会話の用件ではなく次の別の用件を希望している: {task}",
+    }
+    MAX_SIBLING_EXITS = 6
+
+    def _ensure_sibling_exits(self, node: dict, cfg: dict, label: str) -> None:
+        """J8 — a carrying journey hands a request for another operation straight
+        to that operation's flow, instead of asking "anything else?" first."""
+        siblings = [(fid, desc) for fid, desc in (self.sibling_flows or {}).items()
+                    if fid and fid != self.flow_id and str(desc or "").strip()][:self.MAX_SIBLING_EXITS]
+        if not siblings:
+            return
+        conditions = [c for c in (cfg.get("exitConditions") or []) if isinstance(c, dict)]
+        present = {str(c.get("name") or "") for c in conditions}
+        template = self.SIBLING_EXIT_PROMPTS.get(self._language(), self.SIBLING_EXIT_PROMPTS["en"])
+        end_id = self._end_node_id()
+        for flow_id, description in siblings:
+            name = f"{self.SIBLING_EXIT_PREFIX}{flow_id}"
+            if name in present:
+                continue
+            conditions.append({"name": name, "prompt": template.format(task=str(description).strip()[:300])})
+            index = len(conditions) - 1
+            target = _derived_id("5b1b0001", f"{self.flow_id}#to#{flow_id}")
+            if target not in self.nodes:
+                # the flow's slots are cleared on the way out (S6 ran before J)
+                self.nodes[target] = {
+                    "nodeId": target, "type": "redirect",
+                    "metadata": {"redirect": {"type": "flow", "flowId": flow_id},
+                                 "stateModifications": [_clear_modification(s) for s in self.slot_names]},
+                    "childNodes": [{"nodeId": end_id, "name": "next"}],
+                }
+            node.setdefault("childNodes", []).append({
+                "nodeId": target, "name": name,
+                "conditions": [{"left": {"type": "system", "name": "System.gjConditionIndex"},
+                                "operator": "eq", "right": {"type": "constant", "value": index}}]})
+            self.change(f"{label}: exit condition {index} '{name}' → {flow_id} (J8)")
+        cfg["exitConditions"] = conditions
+
     JOURNEY_TOOL_MARKER = "[tool use]"
 
-    def _journey_tool_rules(self, request_ids: list[str]) -> str:
+    #: J10 — the line that tells the model how to fill a result sentence's
+    #: plain [field] slots (one per language; its presence makes J10 idempotent).
+    _RESULT_FILL_RULE = {
+        "ko": "- 안내 문구의 [필드] 자리에는 도구 결과에서 같은 이름의 값을 넣어 말합니다. 대괄호와 필드 이름은 소리 내어 읽지 않습니다.",
+        "ja": "- 案内文の [フィールド] には、ツール結果の同じ名前の値を入れて話します。角かっこやフィールド名は読み上げません。",
+        "en": "- In a result sentence, fill each [field] with the value of that name from the tool result; never "
+              "say the brackets or the field name.",
+    }
+
+    def _journey_result_placeholders(self, cfg: dict, request_ids: list[str], label: str) -> None:
+        """J10 — a carrying journey's result sentence names its values in plain words.
+
+        e2e 2026-09-25 (SELC, ACXD only; the 09-22 Hanbit bundle had the same):
+        the approved result sentence reached the journey prompt as
+        ``{get_delivery_status_by_order_number.deliveryStatus:NLX.Variable}`` —
+        an operation id that no variable carries, so the placeholder renders
+        empty, and even the data request's own id only holds a value after the
+        journey's tool call, later than the prompt is rendered. The sentence
+        stays verbatim; each placeholder of the journey's own requests becomes
+        ``[field]``, which the model fills from the tool result it just read. A
+        placeholder that names no data request at all is reported."""
+        prompt = cfg.get("prompt")
+        if not isinstance(prompt, str) or ":NLX.Variable}" not in prompt:
+            return
+        own = set(request_ids)
+        rewritten: list[str] = []
+        unknown: list[str] = []
+
+        def repl(match: re.Match) -> str:
+            name, kind = match.group(1), match.group(2)
+            head, dot, field = name.partition(".")
+            if kind != "Variable" or not dot or not field:
+                return match.group(0)
+            request_id = _resolve_request_id(head, self.data_requests) if self.data_requests else None
+            if request_id is None:
+                declared = {str(v.get("name")) for v in (self.flow.get("contextVariables") or [])
+                            if isinstance(v, dict)}
+                if head not in self.context_variables and head not in declared:
+                    unknown.append(match.group(0))
+                return match.group(0)
+            if request_id not in own:
+                return match.group(0)     # an upstream request: its value exists when the prompt renders
+            properties = ((self.data_requests.get(request_id) or {}).get("responseSchema") or {}).get(
+                "properties") or {}
+            if isinstance(properties, dict) and properties and field not in properties:
+                field = self._close_field(field, properties) or field
+            rewritten.append(f"{name} → [{field}]")
+            return f"[{field}]"
+
+        new_prompt = _PLACEHOLDER.sub(repl, prompt)
+        for token in unknown:
+            self.violation("J10", "flow",
+                           f"{label} prompt placeholder {token} names no data request or context variable — "
+                           f"it renders empty")
+        if not rewritten:
+            return
+        rule = self._RESULT_FILL_RULE.get(self._language(), self._RESULT_FILL_RULE["en"])
+        if rule not in new_prompt:
+            new_prompt = new_prompt.rstrip() + "\n" + rule
+        cfg["prompt"] = new_prompt
+        self.change(f"{label}: result placeholders filled from the tool result: {', '.join(rewritten)} (J10)")
+    def _journey_tool_rules(self, request_ids: list[str], has_kb: bool = False) -> str:
         """How a carrying journey uses its tools and announces results — the
         counterpart of the conversation-style block (J7) for journeys that
         call the backend themselves."""
         names = ", ".join(request_ids) if request_ids else "the data request tools"
         lang = self._language()
+        tail = self._journey_scope_rules(lang, has_kb)
+        call_rule = self._TOOL_CALL_RULE.get(lang, self._TOOL_CALL_RULE["en"]).format(names=names)
+        date_rule = self._TOOL_RELATIVE_DATE_LINE.get(lang, self._TOOL_RELATIVE_DATE_LINE["en"])
         if lang == "ja":
             return (f"{self.JOURNEY_TOOL_MARKER}\n"
-                    f"- 照会（読み取り）は必要な値がそろい次第 {names} を呼び出します。登録・変更・予約など状態を変える呼び出しは、"
-                    "内容をまとめて読み上げ、お客様が承諾してからにします。\n"
+                    f"{call_rule}\n"
                     "- ツールの結果だけを伝えます。結果にない金額・状態・番号は作りません。失敗（success が false）なら結果の message を伝え、"
                     "再試行するか担当者への引き継ぎを提案します。\n"
                     "- 結果は値の意味と単位（円、台）を添えて文で伝えます。コロンやスラッシュで並べず、CONFIRMED のようなコード値は読み上げません。\n"
-                    "- 「今週の金曜日」のような相対的な日付は自分で曜日計算をせず、お客様に何月何日かを確認して確定します。\n"
+                    f"{date_rule}\n"
                     "- 形式の決まった値（電話番号、注文番号）は読み上げて確認し、形式が合わなければ聞き直します。\n"
-                    "- 結果を案内した後は「他に必要なことはないか」を尋ねて会話を続けます。変更・取消・追加の質問には、ツールがあれば"
-                    "ツールで、なければ伝えられた規則を説明してオペレーターへの引き継ぎを提案します。お客様が明確に終わりだと言ったときだけ会話を終えます。")
+                    + tail)
         if lang == "en":
             return (f"{self.JOURNEY_TOOL_MARKER}\n"
-                    f"- Call {names} for a lookup as soon as the values it needs are known. A call that creates or "
-                    "changes something (a booking, a request) waits until you have read the details back and the "
-                    "customer agreed.\n"
+                    f"{call_rule}\n"
                     "- Say only what the tool returned; never invent an amount, a status or a number that is not in "
                     "the result. When it fails (success is false), relay the result's message and offer to retry or "
                     "hand off to an agent.\n"
                     "- Announce results as sentences that name each value by its meaning with its unit; never list "
                     "values after colons or slashes, and never read a code such as CONFIRMED aloud.\n"
-                    "- Do not compute weekdays yourself: turn a relative date ('this Friday') into a month and day "
-                    "by confirming it with the customer.\n"
+                    f"{date_rule}\n"
                     "- Read strict-format values (phone, order number) back and re-ask when the shape is wrong.\n"
-                    "- After announcing a result, ask whether anything else is needed and keep the conversation: "
-                    "handle changes, cancellations and follow-up questions here — with a tool when you have one, "
-                    "otherwise by explaining the rules you were given and offering an agent. Finish only when the "
-                    "customer clearly says they are done.")
+                    + tail)
         return (f"{self.JOURNEY_TOOL_MARKER}\n"
-                f"- 조회(읽기)는 필요한 값이 모이면 바로 {names} 도구를 호출합니다. 예약·접수·변경처럼 상태를 바꾸는 호출은 "
-                "내용을 한 번에 되읽어 고객이 동의한 뒤에만 합니다.\n"
+                f"{call_rule}\n"
                 "- 도구 결과만 말합니다. 결과에 없는 금액·상태·번호는 만들지 않습니다. 실패(success가 false)면 결과의 message를 "
                 "전하고 다시 시도하거나 상담원 연결을 제안합니다.\n"
                 "- 결과는 값의 의미와 단위(원, 대)를 붙여 문장으로 말합니다. 콜론(:)이나 슬래시로 나열하지 않고, CONFIRMED 같은 "
                 "코드값은 읽지 않습니다.\n"
-                "- '이번 주 금요일' 같은 상대적 날짜는 스스로 요일을 계산하지 말고, 고객에게 몇 월 며칠인지 확인해 확정합니다.\n"
+                f"{date_rule}\n"
                 "- 전화번호·주문번호처럼 형식이 정해진 값은 되읽어 확인하고, 형식이 맞지 않으면 다시 묻습니다.\n"
-                "- 결과를 안내한 뒤에는 '더 필요한 것이 있으신지' 묻고 대화를 이어갑니다. 변경·취소·추가 질문 같은 반응은 이 대화에서 "
-                "계속 처리합니다: 도구가 있으면 도구로, 없으면 안내받은 규칙을 설명하고 상담원 연결을 제안합니다. "
-                "고객이 분명히 끝났다고 말할 때만 대화를 마칩니다.")
+                + tail)
+
+    #: The first [tool use] line before 2026-09-28. Live (sandbox): "이번 주 금요일
+    #: 오후 2시에 피부과로 예약해 주세요" was booked at once with no read-back — the
+    #: line listed every tool, the booking too, after "a lookup is called as soon
+    #: as its values are known", and the caller's "예약해 주세요" passed as consent.
+    #: A bundle packaged earlier carries it; J8 rewrites it.
+    _OLD_TOOL_CALL_RULE = {
+        "ko": "- 조회(읽기)는 필요한 값이 모이면 바로 {names} 도구를 호출합니다. 예약·접수·변경처럼 상태를 바꾸는 호출은 "
+              "내용을 한 번에 되읽어 고객이 동의한 뒤에만 합니다.",
+        "ja": "- 照会（読み取り）は必要な値がそろい次第 {names} を呼び出します。登録・変更・予約など状態を変える呼び出しは、"
+              "内容をまとめて読み上げ、お客様が承諾してからにします。",
+        "en": "- Call {names} for a lookup as soon as the values it needs are known. A call that creates or "
+              "changes something (a booking, a request) waits until you have read the details back and the "
+              "customer agreed.",
+    }
+    _TOOL_CALL_RULE = {
+        "ko": "- 도구: {names}. 조회(읽기) 도구는 필요한 값이 모이면 바로 호출합니다. 예약·접수·변경·취소처럼 상태를 바꾸는 "
+              "도구는 호출하기 전에 내용을 한 번에 되읽고, 고객이 '네'라고 답한 뒤에만 호출합니다. 고객이 처음부터 '예약해 "
+              "주세요'라고 말했어도 되읽은 내용에 대한 답을 따로 받습니다.",
+        "ja": "- ツール: {names}。照会（読み取り）のツールは必要な値がそろい次第呼び出します。登録・変更・予約・取消など"
+              "状態を変えるツールは、呼び出す前に内容をまとめて読み上げ、お客様が「はい」と答えてから呼び出します。最初に"
+              "「予約してください」と言われていても、読み上げた内容への返事を別に受けます。",
+        "en": "- Tools: {names}. Call a lookup tool as soon as the values it needs are known. A tool that "
+              "creates, changes or cancels something (a booking, a request) waits until you have read the "
+              "details back in one sentence and the customer said yes; even when they asked for it outright "
+              "('book it for me'), get that yes to the read-back first.",
+    }
+    #: The relative-date lines of the [conversation style] (J7) and [tool use]
+    #: (J8) blocks. Without a known business time zone the journey confirms the
+    #: month and day with the customer; with one, J11 drops them — its [date
+    #: basis] block counts from the business's own today (the runtime's clock is
+    #: America/New_York) and reads the date back before a tool uses it.
+    _STYLE_RELATIVE_DATE_LINE = {
+        "ko": "- '다음주', '내일 오후' 같은 상대적 날짜·시간은 스스로 요일을 계산하지 말고, 고객에게 몇 월 며칠인지 확인해 "
+              "확정한 뒤 진행하세요.",
+        "ja": "- 「来週」のような相対的な日付は自分で曜日計算をせず、お客様に何月何日かを確認して確定してから進めます。",
+        "en": "- Turn relative dates and times ('next week', 'tomorrow afternoon') into a concrete month and day "
+              "by confirming them with the caller — do not compute weekdays yourself.",
+    }
+    _TOOL_RELATIVE_DATE_LINE = {
+        "ko": "- '이번 주 금요일' 같은 상대적 날짜는 스스로 요일을 계산하지 말고, 고객에게 몇 월 며칠인지 확인해 확정합니다.",
+        "ja": "- 「今週の金曜日」のような相対的な日付は自分で曜日計算をせず、お客様に何月何日かを確認して確定します。",
+        "en": "- Do not compute weekdays yourself: turn a relative date ('this Friday') into a month and day "
+              "by confirming it with the customer.",
+    }
+
+    #: The last [tool use] line before 2026-09-27. Live (sandbox): in the lookup
+    #: journey "그리고 주차는 어떻게 하나요?" got "주차 안내는 제가 도와드릴 수 있는
+    #: 업무가 아닙니다 … 연결해드릴까요?" — "handle follow-up questions here, else
+    #: explain and offer an agent" beat the anotherRequest exit although the FAQ
+    #: answers parking. A bundle packaged earlier carries it; J8 rewrites it.
+    _OLD_CONTINUE_RULE = {
+        "ko": "- 결과를 안내한 뒤에는 '더 필요한 것이 있으신지' 묻고 대화를 이어갑니다. 변경·취소·추가 질문 같은 반응은 이 대화에서 "
+              "계속 처리합니다: 도구가 있으면 도구로, 없으면 안내받은 규칙을 설명하고 상담원 연결을 제안합니다. "
+              "고객이 분명히 끝났다고 말할 때만 대화를 마칩니다.",
+        "ja": "- 結果を案内した後は「他に必要なことはないか」を尋ねて会話を続けます。変更・取消・追加の質問には、ツールがあれば"
+              "ツールで、なければ伝えられた規則を説明してオペレーターへの引き継ぎを提案します。お客様が明確に終わりだと言ったときだけ会話を終えます。",
+        "en": "- After announcing a result, ask whether anything else is needed and keep the conversation: "
+              "handle changes, cancellations and follow-up questions here — with a tool when you have one, "
+              "otherwise by explaining the rules you were given and offering an agent. Finish only when the "
+              "customer clearly says they are done.",
+    }
+    _CONTINUE_RULE = {
+        "ko": "- 결과를 안내한 뒤에는 '더 필요한 것이 있으신지' 묻고 대화를 이어갑니다. 이 업무에 대한 변경·취소·추가 질문은 이 "
+              "대화에서 계속 처리합니다: 도구가 있으면 도구로, 없으면 안내받은 규칙을 설명합니다. 고객이 분명히 끝났다고 말할 "
+              "때만 대화를 마칩니다.",
+        "ja": "- 結果を案内した後は「他に必要なことはないか」を尋ねて会話を続けます。この用件の変更・取消・追加の質問には、ツールが"
+              "あればツールで、なければ伝えられた規則を説明して対応します。お客様が明確に終わりだと言ったときだけ会話を終えます。",
+        "en": "- After announcing a result, ask whether anything else is needed and keep the conversation: "
+              "handle changes, cancellations and follow-up questions about this task here — with a tool when you "
+              "have one, otherwise by explaining the rules you were given. Finish only when the customer clearly "
+              "says they are done.",
+    }
+    _KB_TOOL_RULE = {
+        "ko": "- 운영시간·위치·주차·정책처럼 일반 안내를 물으면 knowledgeBase 도구로 찾아 그 내용만 답하고, 하던 업무를 "
+              "이어갑니다.",
+        "ja": "- 営業時間・場所・駐車場・規定のような一般的な質問には knowledgeBase ツールで調べてその内容だけを答え、用件を続けます。",
+        "en": "- Answer a general information question (hours, location, parking, policies) with the knowledgeBase "
+              "tool, say only what it returns, then continue the task.",
+    }
+    _ANOTHER_REQUEST_RULE = {
+        "ko": "- 이 대화의 도구로 처리할 수 없는 다른 업무를 원하면 거절하거나 상담원 연결을 권하지 말고 anotherRequest 종료 "
+              "조건으로 넘깁니다.",
+        "ja": "- ツールで対応できない別の用件を求められたら、断ったりオペレーターを勧めたりせず anotherRequest の終了条件に"
+              "進みます。",
+        "en": "- When the customer wants a different task that your tools cannot do, do not refuse it and do not "
+              "offer an agent: take the anotherRequest exit.",
+    }
+    #: Live (sandbox, 2026-09-27): entered from the lookup journey's
+    #: switchToBookAppointment exit, the booking journey's first reply was "네,
+    #: 새로운 진료 예약을 도와드리겠습니다. 담당 흐름으로 연결해 드릴게요." — a wasted
+    #: turn that also said an internal word ("흐름", from the hand-on line above).
+    _HANDOVER_START_RULE = {
+        "ko": "- 다른 업무를 하다가 이 업무로 넘어왔다면 연결한다는 안내 없이 이 업무의 첫 질문부터 바로 시작합니다.",
+        "ja": "- 別の用件からこの用件に移ってきた場合は、引き継ぎの案内をせず、この用件の最初の質問からすぐに始めます。",
+        "en": "- If the conversation comes here from another task, do not announce a hand-over; start this task "
+              "with its first question right away.",
+    }
+    #: Lines an earlier version of this block wrote; the upgrade removes them.
+    _SUPERSEDED_SCOPE_LINES = {
+        "ko": ["- 이 대화의 도구로 처리할 수 없는 다른 업무를 원하면 거절하거나 상담원 연결을 권하지 말고 anotherRequest 종료 "
+               "조건으로 넘깁니다. 그 요청은 다음 흐름에서 처리됩니다."],
+        "ja": ["- ツールで対応できない別の用件を求められたら、断ったりオペレーターを勧めたりせず anotherRequest の終了条件に"
+               "進みます。その用件は次のフローで対応します。"],
+        "en": ["- When the customer wants a different task that your tools cannot do, do not refuse it and do not "
+               "offer an agent: take the anotherRequest exit; the next flow handles it."],
+    }
+
+    def _has_sibling_exits(self) -> bool:
+        return self.role == "operation" and any(fid != self.flow_id for fid in self.sibling_flows)
+
+    def _journey_scope_rules(self, lang: str, has_kb: bool) -> str:
+        """The [tool use] lines about what the journey handles itself (this task,
+        general questions through the knowledge base) and what it hands on."""
+        lines = [self._CONTINUE_RULE.get(lang, self._CONTINUE_RULE["en"])]
+        if has_kb:
+            lines.append(self._KB_TOOL_RULE.get(lang, self._KB_TOOL_RULE["en"]))
+        if self.follow_up_flow_id:
+            lines.append(self._ANOTHER_REQUEST_RULE.get(lang, self._ANOTHER_REQUEST_RULE["en"]))
+        if self._has_sibling_exits():
+            lines.append(self._HANDOVER_START_RULE.get(lang, self._HANDOVER_START_RULE["en"]))
+        return "\n".join(lines)
+
+    def _upgrade_journey_scope_rules(self, cfg: dict, has_kb: bool, label: str) -> None:
+        """A [tool use] block written before 2026-09-27 still says "handle
+        follow-up questions here, else offer an agent". Replace that line with
+        the scoped rules, and add a rule an existing block lacks."""
+        prompt = cfg.get("prompt")
+        if not isinstance(prompt, str) or self.JOURNEY_TOOL_MARKER not in prompt:
+            return
+        lang = self._language()
+        wanted = self._journey_scope_rules(lang, has_kb).split("\n")
+        old = self._OLD_CONTINUE_RULE.get(lang, self._OLD_CONTINUE_RULE["en"])
+        updated = prompt
+        for superseded in self._SUPERSEDED_SCOPE_LINES.get(lang, []):
+            updated = updated.replace(superseded + "\n", "").replace(superseded, "")
+        if old in updated:
+            updated = updated.replace(old, "\n".join(wanted), 1)
+        else:
+            anchor = self._CONTINUE_RULE.get(lang, self._CONTINUE_RULE["en"])
+            missing = [line for line in wanted if line not in updated]
+            if missing:
+                if anchor in updated:
+                    # keep the block's order: insert each missing line after the
+                    # last wanted line already present before it
+                    lines = updated.split("\n")
+                    for line in wanted:
+                        if line in lines:
+                            continue
+                        prev = wanted[:wanted.index(line)]
+                        at = max((lines.index(p) for p in prev if p in lines), default=len(lines) - 1)
+                        lines.insert(at + 1, line)
+                    updated = "\n".join(lines)
+                else:
+                    updated = updated.rstrip() + "\n" + "\n".join(missing)
+        if updated != prompt:
+            cfg["prompt"] = updated
+            self.change(f"{label}: tool-use rules scoped to this task — general questions "
+                        f"{'through the knowledge base, ' if has_kb else ''}other tasks through "
+                        f"'{self.ANOTHER_REQUEST_EXIT_NAME}' (J8)")
 
     TOPIC_EXIT_PREFIX = "handOffTopic"
 
@@ -3168,7 +3668,7 @@ class _RuntimeContract:
             return "ja"
         if code.startswith("en"):
             return "en"
-        return "ko" if (code.startswith("ko") or self.is_korean) else "en"
+        return "ko" if (code.startswith("ko") or self.is_korean()) else "en"
 
     def _capture_label(self, name: str) -> str:
         """The interview's wording for a slot when it has one, else the slot name."""
@@ -3458,6 +3958,9 @@ class _RuntimeContract:
 
             if carrying:
                 self._ensure_another_request_exit(node, cfg, label)
+                self._mark_done_hand_off(node, cfg, label)
+                if self.role == "operation":
+                    self._ensure_sibling_exits(node, cfg, label)
 
             # --- confirmation of what was captured (J6) ------------------------
             # Live (2026-09-17): the sentence a journey composes on the turn it
@@ -3476,6 +3979,16 @@ class _RuntimeContract:
             kept = []
             request_ids: list[str] = []
             for tool in tools:
+                if "interimMessages" in tool:
+                    # Live (2026-09-28, Connect chat through the Agentic CX block):
+                    # on both builds whose journey tool sent an interim message the
+                    # block left the conversation about 5 s into the tool turn,
+                    # before the application's answer (8.2 s and 8.4 s); the same
+                    # bundle without them answered such turns (6-9 s).
+                    tool = {k: v for k, v in tool.items() if k != "interimMessages"}
+                    self.change(f"{label}: interimMessages removed from a {tool.get('type')!r} tool — "
+                                "over a Connect chat the Agentic CX block leaves the conversation "
+                                "on such a turn (J8)")
                 kind = tool.get("type")
                 if kind == "mcpFlow":
                     self.violation(
@@ -3498,8 +4011,8 @@ class _RuntimeContract:
                     payload = self._complete_payload(
                         rid, self._tool_payload(rid, dr.get("payload")), capture_names, label)
                     if dr.get("dataRequestId") != rid or dr.get("payload") != payload or set(tool) - {
-                            "type", "dataRequest", "interimMessages", "prompt"}:
-                        tool = {k: v for k, v in tool.items() if k in ("type", "interimMessages", "prompt")}
+                            "type", "dataRequest", "prompt"}:
+                        tool = {k: v for k, v in tool.items() if k in ("type", "prompt")}
                         tool["dataRequest"] = {"dataRequestId": rid, "payload": payload}
                         self.change(f"{label}: dataRequest tool {rid!r} normalised to "
                                     f"{{dataRequestId, payload}} (J8)")
@@ -3516,11 +4029,16 @@ class _RuntimeContract:
                                                  rid, self._tool_payload(rid, None), capture_names, label)}})
                 request_ids.append(rid)
                 self.change(f"{label}: dataRequest tool {rid!r} from the plan's journey_tools (J8)")
-            wants_kb = "knowledge_base" in [str(t) for t in (step.get("journey_tools") or [])]
+            # A carrying journey answers general questions from the FAQ itself
+            # (live sandbox 2026-09-27: the lookup journey had no knowledge
+            # tool and offered an agent for a parking question the FAQ covers).
+            wants_kb = ("knowledge_base" in [str(t) for t in (step.get("journey_tools") or [])]
+                        or (carrying and self.role == "operation"))
             if wants_kb and self.kb_name and not any(t.get("type") == "knowledgeBase" for t in kept):
                 kept.append({"type": "knowledgeBase", "knowledgeBaseId": f"{{KB:{self.kb_name}}}",
                              "scopeTags": []})
                 self.change(f"{label}: knowledgeBase tool {self.kb_name!r} (J5)")
+            has_kb_tool = any(t.get("type") == "knowledgeBase" for t in kept)
             if kept or tools:
                 cfg["tools"] = kept
 
@@ -3558,8 +4076,14 @@ class _RuntimeContract:
                 cfg["prompt"] = prompt_text
                 self.change(f"{label}: conversation-style rules appended to the journey prompt (J7)")
             if carrying and self.JOURNEY_TOOL_MARKER not in prompt_text:
-                cfg["prompt"] = prompt_text.rstrip() + "\n\n" + self._journey_tool_rules(request_ids)
+                cfg["prompt"] = prompt_text.rstrip() + "\n\n" + self._journey_tool_rules(request_ids, has_kb_tool)
                 self.change(f"{label}: tool-use rules appended to the journey prompt (J8)")
+            elif carrying:
+                self._upgrade_journey_scope_rules(cfg, has_kb_tool, label)
+                self._upgrade_tool_call_rule(cfg, label)
+            # --- result placeholders the journey fills itself (J10) --------------
+            if carrying:
+                self._journey_result_placeholders(cfg, request_ids, label)
             # --- mandated hand-off notices (J9) ---------------------------------
             # Live (Hanbit e2e, 2026-09-22): the requirements said "응급/피가/숨이
             # → say '응급 상황이면 119 또는 응급실(24시간)로 연락해 주세요' and hand
@@ -3571,8 +4095,173 @@ class _RuntimeContract:
                 cfg["prompt"] = str(cfg.get("prompt") or "").rstrip() + "\n\n" + self._handoff_notice_rules()
                 self.change(f"{label}: {len(self.handoff_notices)} mandated hand-off notice(s) appended "
                             f"to the journey prompt (J9)")
+            # --- the business's calendar (J11) ---------------------------------
+            self._journey_date_basis(cfg, label)
 
     HANDOFF_NOTICE_MARKER = "[hand-off notices]"
+
+    # ==================================================================
+    # K2 — a knowledge-base placeholder belongs in knowledgeBaseId only
+    # ==================================================================
+
+    _KB_TOKEN = re.compile(r"\{KB:([^{}\n]+)\}")
+    #: `{name:Namespace}` with a namespace the runtime does not know
+    _FOREIGN_TOKEN = re.compile(r"\{[A-Za-z_][\w.]*:(?!NLX\.)[A-Za-z_][\w.]*\}")
+    _KB_WORDS = {"ko": "knowledgeBase 도구({name})", "ja": "knowledgeBase ツール（{name}）",
+                 "en": "the knowledgeBase tool ({name})"}
+
+    def rule_k2(self) -> None:
+        """Live (sandbox, 2026-09-28, a Hanbit bundle regenerated on the dev
+        builder): the booking journey's prompt listed its knowledge tool as
+        "- {KB:FAQ}: 진료시간 … 이 지식베이스로 답하고" (the generator is told to
+        copy that placeholder verbatim) and every booking ended at once with
+        "상담원에게 연결해 드리겠습니다": the runtime read {KB:FAQ} as a variable
+        ("Slot=KB is unresolved", AgentFailure) and took the failure branch. The
+        runner resolves the placeholder in knowledgeBaseId only, so in any text
+        it becomes plain words; any other {name:Namespace} outside the NLX
+        namespaces is reported, because it fails the turn the same way."""
+        words = self._KB_WORDS.get(self._language(), self._KB_WORDS["en"])
+
+        def fix(text: Any, where: str) -> Any:
+            if not isinstance(text, str) or "{" not in text:
+                return text
+            new = self._KB_TOKEN.sub(lambda m: words.format(name=m.group(1).strip()), text)
+            if new != text:
+                self.change(f"{where}: knowledge-base placeholder in text written as plain words (K2)")
+            for token in self._FOREIGN_TOKEN.findall(new):
+                self.violation("K2", "flow", f"{where} carries {token!r}, which the runtime cannot "
+                                             f"resolve: the turn fails with UnresolvedSlot")
+            return new
+
+        def fix_key(holder: Any, key: str, where: str) -> None:
+            if isinstance(holder, dict) and isinstance(holder.get(key), str):
+                holder[key] = fix(holder[key], where)
+
+        for node_id, node in self.nodes.items():
+            if not isinstance(node, dict):
+                continue
+            label = _label(node_id, node)
+            for message in node.get("messages") or []:
+                fix_key(message, "body", f"{label} message")
+            meta = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+            journey = meta.get("generativeJourney") if isinstance(meta.get("generativeJourney"), dict) else None
+            if journey is not None:
+                fix_key(journey, "prompt", f"{label} prompt")
+                fix_key(journey.get("dataCapture"), "prompt", f"{label} data-capture prompt")
+                for condition in journey.get("exitConditions") or []:
+                    fix_key(condition, "prompt", f"{label} exit condition")
+                for tool in journey.get("tools") or []:
+                    fix_key(tool, "prompt", f"{label} tool prompt")
+            fix_key(meta.get("generativeText"), "prompt", f"{label} prompt")
+
+    # ==================================================================
+    # J11 — a journey counts dates in the business's time zone
+    # ==================================================================
+
+    JOURNEY_DATE_MARKER = "[date basis]"
+
+    def _date_basis_rules(self) -> str:
+        """The [date basis] block: which zone "today" is in, how relative dates
+        become dates, and the read-back before a tool uses one."""
+        from tools.acxd_timezone import offset_summary, runtime_clock_example
+        zone = str(self.timezone)
+        lang = self._language()
+        offset = offset_summary(zone, lang)
+        example = runtime_clock_example(zone)
+        if lang == "ja":
+            where = f"{zone}（{offset}）" if offset else zone
+            return (f"{self.JOURNEY_DATE_MARKER}\n"
+                    f"- この業務の基準タイムゾーンは {where} です。システムが伝える現在時刻は別のタイムゾーン"
+                    f"（例: {example}）の場合があるため、まず {zone} の時刻に直した日付を今日とします。"
+                    "タイムゾーンは、お客様に聞かれない限り口にしません。\n"
+                    "- 「今日」「明日」「明後日」「今週の金曜日」「来週の月曜日」などは、この今日を基準に日付へ直します。"
+                    "直した日付はツールで使う前に「M月D日（曜日）」で読み上げ、お客様が正しいと答えてから使います。\n"
+                    f"- ツールに渡す日付も {zone} 基準の YYYY-MM-DD です。")
+        if lang == "en":
+            where = f"{zone} time ({offset})" if offset else f"{zone} time"
+            return (f"{self.JOURNEY_DATE_MARKER}\n"
+                    f"- This business runs on {where}. The current time the system gives you may be in "
+                    f"another time zone (for example {example}); convert it to {zone} first and treat that "
+                    "date as today. Do not mention the time zone unless the customer asks.\n"
+                    "- Turn 'today', 'tomorrow', 'the day after tomorrow', 'this Friday' or 'next Monday' into "
+                    "a date counted from that today. Before a tool uses that date, read it back once with the "
+                    "month, day and weekday, and use it only after the customer confirms it.\n"
+                    f"- A date you pass to a tool is YYYY-MM-DD in {zone}.")
+        where = f"{zone}({offset})" if offset else zone
+        return (f"{self.JOURNEY_DATE_MARKER}\n"
+                f"- 이 업무의 기준 시간대는 {where}입니다. 시스템이 알려 주는 현재 시각은 다른 시간대"
+                f"(예: {example})로 되어 있을 수 있으니, 먼저 {zone} 시각으로 바꾼 날짜를 오늘로 삼습니다. "
+                "시간대는 고객이 묻지 않으면 말하지 않습니다.\n"
+                "- '오늘', '내일', '모레', '이번 주 금요일', '다음 주 월요일' 같은 말은 이 오늘을 기준으로 날짜로 "
+                "바꿉니다. 바꾼 날짜는 도구에 쓰기 전에 'M월 D일 (요일)'로 되읽고, 고객이 맞다고 답한 뒤에 씁니다.\n"
+                f"- 도구에 넘기는 날짜도 {zone} 기준의 YYYY-MM-DD입니다.")
+
+    def _journey_captures_date(self, cfg: dict) -> bool:
+        types = {str(s.get("name")): str(s.get("type") or "") for s in self.attached}
+        capture = cfg.get("dataCapture") if isinstance(cfg.get("dataCapture"), dict) else {}
+        return any(isinstance(entry, dict) and types.get(str(entry.get("name"))) == "NLX.Date"
+                   for entry in capture.get("data") or [])
+
+    def _journey_date_basis(self, cfg: dict, label: str) -> None:
+        """J11 — the journey counts "today" in the business's time zone.
+
+        Live (Workshop Studio sandbox, 2026-09-28 09:28 Seoul time): the
+        runtime told the booking journey "Now it is Sunday, 2026-09-27 8:28 PM
+        (America/New_York)"; ``{System.timezone:NLX.System}`` printed
+        America/New_York although the caller's browser was on Asia/Seoul, and
+        no application, workspace or SDK setting names a zone. For a Korean
+        caller "내일" was a day early from 00:00 to 13:00 every day (the backend
+        refused it as a same-day booking at 00:10). Told the business's zone,
+        the same journey said "오늘 2026-09-28 (월요일), Asia/Seoul" and booked
+        "내일 오전 10시" on 2026-09-29.
+
+        The [date basis] block replaces the older "do not compute weekdays, ask
+        for the month and day" lines, and it keeps their safety: a date turned
+        from words is read back with its weekday and confirmed before a tool
+        uses it. A journey that captures a date and runs on the fast model is
+        moved to the tool model — live, Haiku made "이번 주 금요일" October 3rd,
+        a Saturday, where Sonnet said October 2nd. Without a known zone
+        nothing changes."""
+        if not self.timezone:
+            return
+        prompt = str(cfg.get("prompt") or "")
+        obsolete = {line for table in (self._STYLE_RELATIVE_DATE_LINE, self._TOOL_RELATIVE_DATE_LINE)
+                    for line in table.values()}
+        text = "\n".join(line for line in prompt.split("\n") if line.strip() not in obsolete)
+        block = self._date_basis_rules()
+        start = text.find(self.JOURNEY_DATE_MARKER)
+        if start < 0:
+            text = text.rstrip() + ("\n\n" if text.strip() else "") + block
+        else:
+            end = text.find("\n\n[", start + len(self.JOURNEY_DATE_MARKER))
+            current = text[start:end if end >= 0 else len(text)].rstrip()
+            if current != block:
+                text = text[:start] + block + (text[end:] if end >= 0 else "")
+        if text != prompt:
+            cfg["prompt"] = text
+            self.change(f"{label}: dates counted in {self.timezone}, read back before a tool uses one "
+                        f"(the runtime's clock runs on America/New_York) (J11)")
+        if self._journey_captures_date(cfg) and self._is_fast_model(cfg.get("modelType")):
+            self.change(f"{label}: modelType {cfg['modelType']} → {self.JOURNEY_TOOL_MODEL} (the journey "
+                        f"turns 'this Friday' into a date; the fast model got the weekday wrong live) (J11)")
+            cfg["modelType"] = self.JOURNEY_TOOL_MODEL
+
+    def _upgrade_tool_call_rule(self, cfg: dict, label: str) -> None:
+        """A [tool use] block written before 2026-09-28 opens with "a lookup is
+        called as soon as its values are known: <every tool>", booking included;
+        rewrite it to the line that asks for a yes to the read-back first."""
+        prompt = cfg.get("prompt")
+        if not isinstance(prompt, str) or self.JOURNEY_TOOL_MARKER not in prompt:
+            return
+        updated = prompt
+        for lang, old in self._OLD_TOOL_CALL_RULE.items():
+            pattern = re.escape(old).replace(re.escape("{names}"), "(?P<names>.+?)")
+            new = self._TOOL_CALL_RULE[lang]
+            updated = re.sub(pattern, lambda m, new=new: new.format(names=m.group("names")), updated)
+        if updated != prompt:
+            cfg["prompt"] = updated
+            self.change(f"{label}: tool-use rules ask for a yes to the read-back before a call that "
+                        f"changes something (J8)")
 
     def _handoff_notice_rules(self) -> str:
         lang = self._language()
@@ -3598,12 +4287,13 @@ class _RuntimeContract:
 
     def _journey_style_rules(self) -> str:
         lang = self._language()
+        date_rule = self._STYLE_RELATIVE_DATE_LINE.get(lang, self._STYLE_RELATIVE_DATE_LINE["en"])
         if lang == "ja":
             return (f"{self.JOURNEY_STYLE_MARKER}\n"
                     "- お客様の回答を毎回繰り返さないでください。必要なときだけ一文で短く確認します。\n"
                     "- 一度の発話に複数の値が含まれていればすべて受け取り、足りないものだけを尋ねます。\n"
                     "- 質問は一度に一つか二つまで。すでに述べられた値は聞き直しません。\n"
-                    "- 「来週」のような相対的な日付は自分で曜日計算をせず、お客様に何月何日かを確認して確定してから進めます。\n"
+                    f"{date_rule}\n"
                     "- 価格・規約・在庫など、渡されていない事実は作らず、分からないと伝えます。\n"
                     "- 必要な値がそろったら、まとめて一度だけ確認して終了します。")
         if lang == "en":
@@ -3611,15 +4301,14 @@ class _RuntimeContract:
                     "- Do not echo each answer back; acknowledge briefly and only when it helps.\n"
                     "- If one utterance carries several values, take them all and ask only for what is missing.\n"
                     "- Ask for at most one or two things per turn; never re-ask what the caller already said.\n"
-                    "- Turn relative dates and times ('next week', 'tomorrow afternoon') into a concrete month and day "
-                    "by confirming them with the caller — do not compute weekdays yourself.\n"
+                    f"{date_rule}\n"
                     "- Never invent prices, policies or availability you were not given; say you do not know.\n"
                     "- Once every value is known, confirm them together once, then finish.")
         return (f"{self.JOURNEY_STYLE_MARKER}\n"
                 "- 고객의 답을 매번 되풀이하지 마세요. 필요할 때만 한 문장으로 짧게 확인합니다.\n"
                 "- 한 발화에 여러 값이 들어 있으면 모두 받아들이고, 빠진 값만 물어보세요.\n"
                 "- 한 번에 한두 가지만 묻고, 고객이 이미 말한 값은 다시 묻지 마세요.\n"
-                "- '다음주', '내일 오후' 같은 상대적 날짜·시간은 스스로 요일을 계산하지 말고, 고객에게 몇 월 며칠인지 확인해 확정한 뒤 진행하세요.\n"
+                f"{date_rule}\n"
                 "- 가격·정책·재고처럼 전달받지 않은 사실은 만들어 내지 말고 모른다고 말하세요.\n"
                 "- 필요한 값이 모두 모이면 한 번에 정리해 확인하고 마무리하세요.")
 
@@ -3792,7 +4481,10 @@ class _RuntimeContract:
         self.rule_j2()
         self.rule_j()
         self.rule_a2()
+        self.rule_k1()
+        self.rule_k2()
         self.rule_r9()
+        self.rule_r10()
         self.prune_disconnected(before)
 
 
@@ -3842,6 +4534,8 @@ def apply_runtime_contract(
     escalation_topics: Optional[Any] = None,
     result_templates: Optional[list] = None,
     handoff_notices: Optional[list] = None,
+    sibling_flows: Optional[dict] = None,
+    timezone: Optional[str] = None,
 ) -> tuple[dict, list[str]]:
     """Normalize ``flow`` onto the live-verified runtime contract.
 
@@ -3880,7 +4574,7 @@ def apply_runtime_contract(
         slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
         journey_steps=journey_steps, kb_name=kb_name, request_steps=request_steps,
         escalation_topics=escalation_topics, result_templates=result_templates,
-        handoff_notices=handoff_notices)
+        handoff_notices=handoff_notices, sibling_flows=sibling_flows, timezone=timezone)
     engine.run()
     return engine.flow, engine.changes
 
@@ -3906,6 +4600,8 @@ def runtime_contract_violations(
     escalation_topics: Optional[Any] = None,
     result_templates: Optional[list] = None,
     handoff_notices: Optional[list] = None,
+    sibling_flows: Optional[dict] = None,
+    timezone: Optional[str] = None,
 ) -> list[str]:
     """Report what the runtime contract cannot repair. Never mutates ``flow``.
 
@@ -3937,7 +4633,7 @@ def runtime_contract_violations(
         slot_plans=slot_plans, field_labels=field_labels, field_enums=field_enums,
         journey_steps=journey_steps, kb_name=kb_name, request_steps=request_steps,
         escalation_topics=escalation_topics, result_templates=result_templates,
-        handoff_notices=handoff_notices)
+        handoff_notices=handoff_notices, sibling_flows=sibling_flows, timezone=timezone)
     engine.run()
     wanted = set(ALL_SCOPES) if scope == "all" else {scope}
     return [message for item_scope, _rule, message in engine.violations
