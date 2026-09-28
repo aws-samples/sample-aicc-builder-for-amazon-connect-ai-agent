@@ -1552,6 +1552,7 @@ class _RuntimeContract:
             kb = _meta(node).get("knowledgeBase")
             if not isinstance(kb, dict):
                 continue
+            self._kb_no_match_edge(node_id, node)
             name = str(kb.get("name") or "")
             if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", name):
                 name = KB_ANSWER_VAR if index == 0 else f"{KB_ANSWER_VAR}{index + 1}"
@@ -1590,6 +1591,26 @@ class _RuntimeContract:
             success["nodeId"] = say_id
             self.change(f"{_label(node_id, node)}: success path says the answer ({placeholder}) before "
                         f"going on (K1)")
+
+    def _kb_no_match_edge(self, node_id: str, node: dict) -> None:
+        """Live (sandbox, 2026-09-28, the deployed runtime behind a Connect
+        chat): the service judges a knowledge_base node as match / no_match /
+        failure / timeout and takes a `success` edge on no_match too, so a
+        question the FAQ could not answer got an empty answer and then the
+        follow-up question. no_match goes where the node's failure goes."""
+        edges = _edges(node)
+        if any(_has_status(e, "no_match") for e in edges):
+            return
+        if not any(_has_status(e, "success") or _has_status(e, "match") for e in edges):
+            return
+        miss = next((e for e in edges if _has_status(e, "failure") and e.get("nodeId")), None) \
+            or next((e for e in edges if _has_status(e, "timeout") and e.get("nodeId")), None)
+        if miss is None:
+            return
+        node.setdefault("childNodes", []).insert(
+            0, {"nodeId": miss["nodeId"], "name": "noMatch", "conditions": [_status_condition("no_match")]})
+        self.change(f"{_label(node_id, node)}: no_match goes where failure goes — a success edge is taken "
+                    f"on no_match with an empty answer (K1)")
 
     # ==================================================================
     # R9 — a hand-off carries the values the conversation collected

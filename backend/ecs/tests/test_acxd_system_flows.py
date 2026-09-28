@@ -925,15 +925,21 @@ def test_faq_flow_is_built_only_when_a_knowledge_base_ships():
 
     flow = build_faq_flow(KB_SPEC)
     assert flow["flowId"] == "FaqFlow" and flow["untrained"] is False
-    assert _walk(flow) == ["start", "knowledge_base", "basic", "redirect", "redirect", "end"]
+    assert _walk(flow) == ["start", "knowledge_base", "redirect", "basic", "end", "redirect"]
     kb_node = _node_of_type(flow, "knowledge_base")
+    # no_match first: the service takes a success edge on no_match with an empty
+    # answer (deployed runtime, 2026-09-28); it goes where failure goes
+    first = kb_node["childNodes"][0]
+    assert first["name"] == "noMatch" and first["conditions"][0]["right"]["value"] == "no_match"
+    assert first["nodeId"] == next(e["nodeId"] for e in kb_node["childNodes"] if e["name"] == "notAnswered")
     # `name` is the node's OUTPUT VARIABLE; the answer is said by the basic node
     # that references it (live sandbox 2026-09-27: without it every answer was dropped).
     assert kb_node["metadata"]["knowledgeBase"] == {"knowledgeBaseId": "{KB:gaon-faq}", "name": "faqAnswer"}
     assert "messages" not in kb_node
     say = flow["nodes"][next(c["nodeId"] for c in kb_node["childNodes"] if c["name"] == "answered")]
     assert say["type"] == "basic" and say["messages"][0]["body"] == "{faqAnswer.answer:NLX.Local}"
-    assert [c["conditions"][0]["right"]["value"] for c in kb_node["childNodes"]] == ["success", "failure", "timeout"]
+    assert [c["conditions"][0]["right"]["value"] for c in kb_node["childNodes"]] == [
+        "no_match", "success", "failure", "timeout"]
     assert sorted(_redirect_targets(flow)) == ["FallbackFlow", "FollowUpFlow"]
     assert "policies" in flow["aiDescription"] and all(ord(c) < 128 for c in flow["aiDescription"])
     assert validate_acxd_asset("flow", flow) == []

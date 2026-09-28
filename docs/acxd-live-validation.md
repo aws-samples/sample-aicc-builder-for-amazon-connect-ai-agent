@@ -435,6 +435,30 @@ Greeting, FAQ + "no", the emergency words and "상담원 연결해 주세요" be
 before. Not tested: voice and a Contact Flow (whether the Agentic CX block passes
 a zone is unknown; the `[date basis]` rules hold whatever zone the runtime reports).
 
+### Later the same day: the dev pipeline and a Connect chat
+
+The Hanbit session was regenerated on the dev builder with this code and
+packaged there; the bundle deployed to the sandbox and was driven through the
+Studio test panel and through a Contact Flow with the Agentic CX block
+(Connect's own test chat).
+
+| Finding | Fix |
+|---|---|
+| The dev orchestrator answered "재생성 성공 (status: success, problems: [], flows=9)" and then called only `reviewer_agent`; the assets were a day old. Neither claim check fired: no tool was named and the turn did call a tool | the claim audit reports a regeneration or packaging result when no tool of that kind ran, and the next turn is told to make the real call |
+| The regenerated booking journey listed its knowledge tool as "- {KB:FAQ}: …" in its prompt; every booking ended at once in the agent hand-off (`Slot=KB is unresolved`, `AgentFailure`) | K2: `{KB:<name>}` outside `knowledgeBaseId` becomes plain words; other `{name:Namespace}` tokens outside `NLX.*` are reported; the generator is told to keep the placeholder in `knowledgeBaseId` |
+| Through Connect the FAQ answer never arrived (`KbResponded status: failure`); the knowledge base had been created as en-US because its document named no language. The test panel still answered | the knowledge base carries the application's languages, and packaging fills them into a KB asset generated earlier; after the redeploy the Connect chat said the parking answer and the follow-up question |
+| The deployed runtime judges a knowledge_base node as `match` / `no_match` / `failure` / `timeout`, and a `success` edge was taken on `no_match` with an empty answer | K1 adds a `no_match` edge to where `failure` goes; FaqFlow has it first |
+| A Contact Flow imported as JSON with the ids and the deployment key stayed silent (no conversation reached the application); picking workspace, application and alias in the block's dropdowns and clicking the panel's **Confirm** made it answer | WIRING-GUIDE: set the contact language, pick the three values, Confirm, publish; the alias is listed as `Production` even for the development environment |
+
+Through Connect chat the greeting, a two-message turn, the FAQ answer, the
+follow-up question and the booking journey's first question all arrived, and
+`{System.timezone:NLX.System}` printed `America/New_York` there too
+(`channelType=API`, `environment=development`). Still open, both on the
+service side: a journey turn that called the backend took 8.2 s and the block
+took its Error branch about 5 s in, before the application answered (twice);
+and after a redeploy replaced the deployment, re-selecting `Production` in the
+block twice left it on the previous build. Voice was not tested.
+
 ## Service contract facts (not in the SDK types, learned from the API)
 
 | Area | Fact | Where it is enforced now |
@@ -492,6 +516,10 @@ a zone is unknown; the `[date basis]` rules hold whatever zone the runtime repor
 | Deployment update | `UpdateApplicationDeployment` answered `InternalServerException: Failed to update deployment.` for five request shapes (2026-09-27; also 2026-09-10) | runner replaces the deployment and says so once |
 | Generative / KB nodes | Need a generative model configured on the workspace; without one the node is silent although the deployment and knowledge base succeed | documented prerequisite (`WIRING-GUIDE.md`) |
 | Knowledge base answer | A `knowledge_base` node says nothing: its answer lands in the output variable named by `metadata.knowledgeBase.name` and is spoken only where a message references `{<name>.answer:NLX.Local}`. `NLX.Variable` references render empty; `{<name>:NLX.Local}` fails the turn | runtime contract K1 (2026-09-27) |
+| Knowledge base language | A knowledge base created without `mainLanguageCode` / `languageCodes` is stored as en-US; a ko-KR conversation's lookup then fails in the deployed runtime (`KbResponded status: failure`) although the Studio test panel answers (2026-09-28) | KB document carries the application's languages; packaging fills them |
+| Knowledge base outcome | The deployed runtime evaluates a knowledge_base node as `match` / `no_match` / `failure` / `timeout`; an edge on `success` is taken on `no_match` too, with an empty answer (2026-09-28) | K1 `no_match` edge |
+| Placeholders in text | `{KB:<name>}` resolves in `knowledgeBaseId` only; in a journey prompt it fails the journey (`Slot=KB is unresolved`, `AgentFailure`) (2026-09-28) | runtime contract K2 |
+| Agentic CX block | Values set by JSON import did not reach the application; the block's dropdowns plus the panel's **Confirm** did. The alias list shows the deployment as `Production` for the development environment. Over chat a turn taking 8.2 s ended in the block's Error branch about 5 s in (2026-09-28) | WIRING-GUIDE |
 | Routing text | `description` / `aiDescription` are ASCII-only; non-ASCII is rejected on create | system flows and the generator write English routing text; the bundle loader strips non-ASCII |
 | Slot regex | The `regex` attached to a built-in slot is not enforced at capture: a value of the wrong shape is stored (an order number in the return-number slot) and reaches the Data Request. A `matches_regex` condition on the slot IS evaluated, against the delivered (separator-stripped) value | runtime contract F1: a `matches_regex` guard after every pattern-bearing capture, separators optional, letters either case; adapter reassigns a value that fits exactly one other field |
 | Associated slots | `choice.associatedSlotTypeIds` is accepted by the API and silently discarded (by slot name and by identifier); a capture node listens on one slot only | no second slot per node; E2 tests the utterance instead |

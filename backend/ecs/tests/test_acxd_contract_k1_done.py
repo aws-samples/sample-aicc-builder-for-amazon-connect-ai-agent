@@ -96,3 +96,29 @@ def test_an_unusable_output_name_is_renamed_and_a_wrong_reference_fixed():
     assert out["nodes"][F]["messages"][0]["body"] == "{FAQ.answer:NLX.Local}"
     success = next(e for e in out["nodes"][K]["childNodes"] if e["name"] == "answered")
     assert success["nodeId"] == F     # already said downstream: no second answer node
+
+
+def test_no_match_goes_where_failure_goes():
+    """Deployed runtime (2026-09-28): a success edge is taken on no_match with an
+    empty answer, so the caller heard only the follow-up question."""
+    out, notes = _apply(_kb_flow())
+    edges = out["nodes"][K]["childNodes"]
+    assert edges[0]["name"] == "noMatch" and edges[0]["conditions"][0]["right"]["value"] == "no_match"
+    assert edges[0]["nodeId"] == X                                       # the failure target
+    assert any("no_match" in n for n in notes)
+    again, notes_again = _apply(copy.deepcopy(out))
+    assert again == out and not any("no_match" in n for n in notes_again)
+
+
+def test_knowledge_bases_get_the_application_languages_at_packaging():
+    from tools.validate_acxd_consistency import normalize_bundle_languages
+    bundle = {"application": {"settings": {"languageCode": "ko-KR", "languageCodes": ["ko-KR"]}},
+              "knowledge_bases": [{"name": "FAQ", "type": "articles"}]}
+    notes = normalize_bundle_languages(bundle)
+    assert bundle["knowledge_bases"][0]["mainLanguageCode"] == "ko-KR"
+    assert bundle["knowledge_bases"][0]["languageCodes"] == ["ko-KR"]
+    assert notes and normalize_bundle_languages(bundle) == []
+    from tools.acxd_resource_builders import build_knowledge_base
+    doc = build_knowledge_base({"application": {"primary_locale": "ja-JP", "locales": ["ja-JP"]},
+                                "knowledge_base": {"name": "faq", "articles": [{"question": "q", "answer": "a"}]}})
+    assert doc["mainLanguageCode"] == "ja-JP" and doc["languageCodes"] == ["ja-JP"]

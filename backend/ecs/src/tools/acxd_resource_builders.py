@@ -41,8 +41,40 @@ def sanitize_kb_name(raw: str | None, fallback: str = "AICC FAQ") -> str:
     return (kept or fallback)[:100]
 
 
+def application_languages(spec: dict) -> tuple[str, list[str]]:
+    """(primary locale, locales) of the application: the recorded ones, else the
+    flows' / business language, else the default — never an English default
+    for a Korean project."""
+    app = spec.get("application") or {}
+    profile = spec.get("business_profile") or {}
+    flow_plans = spec.get("flows") or []
+    locales = list(app.get("locales") or app.get("languages") or [])
+    if not locales:
+        flow_langs = [f.get("language") for f in flow_plans
+                      if isinstance(f, dict) and f.get("language")]
+        business_lang = profile.get("language") or profile.get("primary_language")
+        candidate = next((lang for lang in flow_langs if lang), None) or business_lang
+        if candidate:
+            from tools.acxd_contract import canonical_language
+            try:
+                candidate = canonical_language(candidate)
+            except Exception:
+                pass
+            locales = [candidate]
+    if not locales:
+        locales = [_LANG_DEFAULT]
+    primary = app.get("primary_locale") or app.get("primary_language") or locales[0]
+    return primary, locales
+
+
 def build_knowledge_base(spec: dict) -> Optional[dict]:
-    """KB document from the spec (None when the interview defined no KB)."""
+    """KB document from the spec (None when the interview defined no KB).
+
+    Live (sandbox, 2026-09-28, through a Connect chat): a KB created without
+    languages is stored as en-US, and a ko-KR conversation's knowledge_base node
+    answered `KbResponded status: failure` on every question — the Studio test
+    panel still answered, so only the deployed path showed it. The KB carries
+    the application's languages."""
     plan = spec.get("knowledge_base") or {}
     articles = plan.get("articles") or []
     if not plan.get("name") and not articles and not plan.get("topics"):
@@ -51,6 +83,7 @@ def build_knowledge_base(spec: dict) -> Optional[dict]:
     company = profile.get("company_name") or "AICC"
     name = sanitize_kb_name(plan.get("name"),
                             fallback=sanitize_kb_name(f"{company} FAQ", "AICC FAQ"))
+    primary, locales = application_languages(spec)
 
     doc = {
         "name": name[:100],
@@ -58,6 +91,8 @@ def build_knowledge_base(spec: dict) -> Optional[dict]:
         "description": (plan.get("description")
                         or f"FAQ knowledge base for {profile.get('company_name', 'the business')}")[:200],
         "response": {"summarize": True, "minConfidenceScore": 70, "k": 3},
+        "mainLanguageCode": primary,
+        "languageCodes": list(dict.fromkeys([primary, *locales])),
         "articles": [
             {
                 "question": {"text": a["question"]},
@@ -606,23 +641,7 @@ def build_application(spec: dict) -> dict:
     # deployment refused the language ("ko-KR is not included in this build")
     # and a Korean PoC deployed as an English application — the agent answered
     # nothing usable. Fall back to the flows' / business language, not en-US.
-    locales = app.get("locales") or app.get("languages") or []
-    if not locales:
-        flow_langs = [f.get("language") for f in flow_plans
-                      if isinstance(f, dict) and f.get("language")]
-        business_lang = (profile.get("language") or profile.get("primary_language")
-                         or (spec.get("business_profile") or {}).get("language"))
-        candidate = next((lang for lang in flow_langs if lang), None) or business_lang
-        if candidate:
-            from tools.acxd_contract import canonical_language
-            try:
-                candidate = canonical_language(candidate)
-            except Exception:
-                pass
-            locales = [candidate]
-    if not locales:
-        locales = [_LANG_DEFAULT]
-    primary = app.get("primary_locale") or app.get("primary_language") or locales[0]
+    primary, locales = application_languages(spec)
 
     # defaultFlows: explicit mapping first, then role-based flows fill gaps.
     # ONLY these eight events exist (application schema, additionalProperties

@@ -27,6 +27,7 @@ def test_the_language_is_set_before_the_block_and_the_alias_is_named_as_acxd_sho
     assert "`UpdateContactData` action" in guide and "`LanguageCode: ko-KR`" in guide
     assert guide.index("set the contact's language") < guide.index("Add the **Agentic CX** block")
     assert "`Production`" in guide and "development environment" in guide
+    assert "**Confirm**" in guide and "Chat response time" in guide
     assert "`patientName`" in guide
 
 

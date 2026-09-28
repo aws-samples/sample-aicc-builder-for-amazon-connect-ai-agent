@@ -686,6 +686,32 @@ def _sibling_operation_flows(flows: list, spec: Optional[dict]) -> dict[str, str
     return out
 
 
+def normalize_bundle_languages(bundle: dict) -> list[str]:
+    """Knowledge bases speak the application's languages, IN PLACE.
+
+    Live (sandbox, 2026-09-28, a Connect chat): a knowledge base created
+    without languages is stored as en-US, and a ko-KR conversation's
+    knowledge_base node answered `KbResponded status: failure` on every
+    question while the Studio test panel still answered, so only the deployed
+    path showed it. A KB asset generated before the builder set its languages
+    gets the application's here. Returns the notes."""
+    settings = (bundle.get("application") or {}).get("settings") or {}
+    codes = [str(c) for c in (settings.get("languageCodes") or []) if c]
+    primary = str(settings.get("languageCode") or (codes[0] if codes else "") or "")
+    if not primary:
+        return []
+    wanted = list(dict.fromkeys([primary, *codes]))
+    notes: list[str] = []
+    for doc in bundle.get("knowledge_bases") or []:
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("mainLanguageCode") != primary or list(doc.get("languageCodes") or []) != wanted:
+            doc["mainLanguageCode"] = primary
+            doc["languageCodes"] = wanted
+            notes.append(f"knowledge base {doc.get('name')!r}: languages {wanted} (the application's)")
+    return notes
+
+
 def normalize_bundle_flows(bundle: dict, spec: Optional[dict] = None) -> list[str]:
     """Run the runtime contract over the bundle's operation flows IN PLACE, as a
     last deterministic pass before packaging.

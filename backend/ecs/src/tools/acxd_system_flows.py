@@ -1153,7 +1153,10 @@ def build_faq_flow(spec: dict, *, flow_ids: Optional[dict] = None) -> dict:
                 "childNodes": [_child(answer, "toKnowledgeBase")]},
         answer: {"nodeId": answer, "type": "knowledge_base",
                  "metadata": {"knowledgeBase": {"knowledgeBaseId": f"{{KB:{kb_name}}}", "name": KB_ANSWER_VAR}},
-                 "childNodes": [_child(say, "answered", [_node_status("success")]),
+                 # no_match first: the service takes a `success` edge on no_match
+                 # too, with an empty answer (deployed runtime, 2026-09-28).
+                 "childNodes": [_child(no_answer, "noMatch", [_node_status("no_match")]),
+                                _child(say, "answered", [_node_status("success")]),
                                 _child(no_answer, "notAnswered", [_node_status("failure")]),
                                 _child(no_answer, "timedOut", [_node_status("timeout")])]},
         say: {"nodeId": say, "type": "basic",

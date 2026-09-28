@@ -41,6 +41,15 @@ The Classic and ACXD targets are unchanged.
 - A date the caller gives in words ("this Friday") is read back with its weekday and
   confirmed before it is used, and a booking, change or cancellation waits for the
   caller's yes to the read-back even when they asked for it outright.
+- FAQ answers reach callers behind a Contact Flow: the knowledge base is created in the
+  application's language (it defaulted to English and the deployed application found no
+  answer), and a question the FAQ does not cover takes the no-answer path instead of an
+  empty reply.
+- A journey whose prompt named the knowledge base by its `{KB:…}` placeholder failed on
+  its first turn; the placeholder now stays in the tool definition.
+- `WIRING-GUIDE.md` covers what the Agentic CX block needs: the contact language set
+  before it, the alias ACXD lists as `Production`, the panel's Confirm button, and a
+  test chat after every redeploy.
 
 ## [3.0.0] - 2026-09-15
 

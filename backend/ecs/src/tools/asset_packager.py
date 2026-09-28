@@ -444,6 +444,9 @@ def _prepare_acxd_package(session_id: str, project_name: str) -> tuple[dict, dic
         notes = normalize_bundle_flows(bundle, spec)
         if notes:
             logger.info("[packager] runtime contract pass at packaging: %d change(s)", len(notes))
+        from .validate_acxd_consistency import normalize_bundle_languages
+        for note in normalize_bundle_languages(bundle):
+            logger.info("[packager] %s", note)
     except Exception as exc:  # pragma: no cover - never block packaging on the pass
         logger.warning("[packager] runtime contract pass skipped: %s", exc)
     manifest = build_manifest(bundle, project_name=project_name,
@@ -795,7 +798,8 @@ def _generate_acxd_only_wiring_guide(bundle: dict) -> str:
         "3. Add the **Agentic CX** block where the caller should meet the assistant.",
         f"4. In the block pick the ACXD workspace, the application **{name}** and its alias. The",
         "   alias list shows the deployment `deploy.sh` created under the name ACXD gives it",
-        "   (`Production`, even for a deployment to the development environment); then save.",
+        "   (`Production`, even for a deployment to the development environment). Click",
+        "   **Confirm** at the bottom of the block panel; without it the block keeps its old values.",
         "5. Wire the block's branches:",
         "   - **Default**: the conversation finished (the assistant said goodbye), usually a",
         "     disconnect.",
@@ -814,8 +818,14 @@ def _generate_acxd_only_wiring_guide(bundle: dict) -> str:
         "- **Workspace model.** Knowledge-base answers and generative replies run on the default",
         "  generative model of the ACXD workspace. Set it before the first contact.",
         "- **After a redeploy.** When a redeploy has to replace the application deployment, its",
-        "  alias key changes and the block keeps serving the previous build: re-select the alias",
-        "  in the block and publish.",
+        "  alias key changes and the block keeps serving the previous build. Re-select the",
+        "  application and alias in the block, click **Confirm** and publish, then check with a",
+        "  test chat that the new build answers: re-selecting the same `Production` entry has",
+        "  left the block on the previous deployment.",
+        "- **Chat response time.** Over a chat contact the block took its Error branch about five",
+        "  seconds into a turn whose journey called the backend (the application answered after",
+        "  eight). Test the turns that call your API through your own chat entry point before",
+        "  going live.",
     ]
     if context_names:
         lines += [
