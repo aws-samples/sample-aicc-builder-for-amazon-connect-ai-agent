@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from strands import tool
 
@@ -360,7 +360,9 @@ def _mask_trigger(plan: dict) -> str:
     """The trigger a guardrail rule runs on.
 
     A PII ``mask`` belongs on what the CUSTOMER says: that is where a phone
-    number or an address enters the transcript. On ``output`` the same regex
+    number or an address enters the transcript — and only over a value no flow
+    collects, since an input mask hands the journey "[REDACTED]" instead
+    (``keep_collected_value_masks_advisory``). On ``output`` the same regex
     rewrites the bot's own words — live (2026-09-14 and again 2026-09-17) it
     turned "010-1234-5678 형식으로 말씀해 주세요" into "[REDACTED] 형식으로", twice,
     the second time with a regex the review had written on purpose. So a mask
@@ -445,6 +447,192 @@ def _keep_derived_input_routes_advisory(doc: dict, plan: dict) -> None:
                 doc.get("name"), method, action)
 
 
+#: Values of the NLX built-ins a flow may collect without a regex, in the forms
+#: callers say them — what an input mask would find in the utterance.
+_BUILTIN_VALUE_SAMPLES = {
+    "NLX.PhoneNumber": ("010-1234-5678", "01012345678", "555-123-4567", "5551234567"),
+    "NLX.Date": ("1990-05-12", "19900512", "1990.05.12"),
+    "NLX.Email": ("name@example.com",),
+}
+
+
+def regex_samples(pattern: str, limit: int = 24) -> list[str]:
+    """A few strings ``pattern`` matches in full: optional parts both left out
+    and present, bounded repeats at both ends, every alternative. Enough to ask
+    whether another regex finds the same kind of value; empty when the pattern
+    cannot be read."""
+    try:
+        from re import _constants as c, _parser as parser  # Python 3.11+
+    except ImportError:  # pragma: no cover - older interpreters
+        import sre_constants as c  # type: ignore[no-redef]
+        import sre_parse as parser  # type: ignore[no-redef]
+    try:
+        tree = parser.parse(str(pattern or ""))
+    except Exception:
+        return []
+    categories = {c.CATEGORY_DIGIT: "1", c.CATEGORY_WORD: "a", c.CATEGORY_SPACE: " "}
+    repeats = {c.MAX_REPEAT, c.MIN_REPEAT, getattr(c, "POSSESSIVE_REPEAT", c.MAX_REPEAT)}
+
+    def one_of(items) -> Optional[str]:
+        if any(op == c.NEGATE for op, _ in items):
+            allowed = re.compile(_negated_class_source(items, c))
+            return next((ch for ch in "a1-_ .A" if allowed.fullmatch(ch)), None)
+        for op, av in items:
+            if op == c.LITERAL:
+                return chr(av)
+            if op == c.RANGE:
+                low, high = av
+                return chr(low + 1 if high > low else low)
+            if op == c.CATEGORY:
+                return categories.get(av, "a")
+        return None
+
+    def generate(sequence) -> Optional[list[str]]:
+        out = [""]
+        for op, av in sequence:
+            if op == c.AT:
+                continue
+            if op == c.LITERAL:
+                options = [chr(av)]
+            elif op == c.NOT_LITERAL:
+                options = ["a" if av != ord("a") else "b"]
+            elif op == c.ANY:
+                options = ["a"]
+            elif op == c.IN:
+                char = one_of(av)
+                if char is None:
+                    return None
+                options = [char]
+            elif op == c.CATEGORY:
+                options = [categories.get(av, "a")]
+            elif op == c.BRANCH:
+                options = []
+                for alternative in av[1]:
+                    options.extend(generate(alternative) or [])
+                if not options:
+                    return None
+            elif op == c.SUBPATTERN:
+                options = generate(av[-1])
+                if options is None:
+                    return None
+            elif op == getattr(c, "ATOMIC_GROUP", None):
+                options = generate(av)
+                if options is None:
+                    return None
+            elif op in repeats:
+                low, high, item = av
+                body = generate(item)
+                if body is None:
+                    return None
+                counts = {low}
+                if low == 0:
+                    counts.add(1)
+                if high != c.MAXREPEAT and low < high <= low + 8:
+                    counts.add(high)
+                options = [piece * count for piece in body for count in sorted(counts)]
+            else:  # back-references, look-arounds: not a value shape to sample
+                return None
+            out = [head + tail for head in out for tail in options][:limit]
+        return out
+
+    samples = generate(tree) or []
+    try:
+        compiled = re.compile(pattern)
+    except re.error:
+        return []
+    return [sample for sample in dict.fromkeys(samples) if compiled.fullmatch(sample)]
+
+
+def _negated_class_source(items, c) -> str:
+    """Source text of a negated character class, from its parsed items."""
+    parts = []
+    for op, av in items:
+        if op == c.LITERAL:
+            parts.append(re.escape(chr(av)))
+        elif op == c.RANGE:
+            parts.append(f"{re.escape(chr(av[0]))}-{re.escape(chr(av[1]))}")
+        elif op == c.CATEGORY:
+            parts.append({c.CATEGORY_DIGIT: r"\d", c.CATEGORY_WORD: r"\w", c.CATEGORY_SPACE: r"\s",
+                          c.CATEGORY_NOT_DIGIT: r"\D", c.CATEGORY_NOT_WORD: r"\W",
+                          c.CATEGORY_NOT_SPACE: r"\S"}.get(av, ""))
+    return "[^" + "".join(parts) + "]"
+
+
+def collected_value_samples(slot: dict) -> list[str]:
+    """How the value an attached slot collects looks in what the caller says."""
+    samples = [str(slot["example"])] if slot.get("example") else []
+    regex = slot.get("regex")
+    if isinstance(regex, str) and regex:
+        samples.extend(regex_samples(regex))
+    else:
+        samples.extend(_BUILTIN_VALUE_SAMPLES.get(str(slot.get("type") or ""), ()))
+    return list(dict.fromkeys(samples))
+
+
+def mask_hidden_slots(pattern: str, slots: list[dict], examples: Any = ()) -> list[str]:
+    """Names of the collected ``slots`` whose values the mask ``pattern`` finds.
+
+    Two directions, so a sample the generator reads differently still counts:
+    the mask finds a sample of the slot's value, or one of the mask's own
+    examples (or samples) is a value the slot accepts."""
+    try:
+        mask = re.compile(str(pattern or ""))
+    except re.error:
+        return []
+    if not pattern:
+        return []
+    mask_values = [str(e) for e in examples or [] if isinstance(e, str) and e] + regex_samples(pattern)
+    hidden: list[str] = []
+    for slot in slots or []:
+        name = str((slot or {}).get("name") or "") if isinstance(slot, dict) else ""
+        if not name or name in hidden:
+            continue
+        found = any(mask.search(sample) for sample in collected_value_samples(slot))
+        regex = slot.get("regex")
+        if not found and isinstance(regex, str) and regex:
+            try:
+                accepts = re.compile(regex)
+            except re.error:
+                accepts = None
+            found = bool(accepts) and any(accepts.fullmatch(value) for value in mask_values)
+        if found:
+            hidden.append(name)
+    return hidden
+
+
+def keep_collected_value_masks_advisory(doc: dict, slots: list[dict], examples: Any = ()) -> list[str]:
+    """An input ``mask`` must not hide a value the flows collect, IN PLACE.
+
+    The mask rewrites the caller's words before the flow reads them, so the
+    journey itself receives "[REDACTED]". Live (5-use-case run, 2026-09-28): a
+    birth-date mask (``\\d{8}``) made identity verification ask for the birth
+    date again and again, and a phone mask (``\\d{3}-\\d{4}-\\d{4}``) ended a
+    cleaning-booking journey in AgentFailure right after the caller gave the
+    number. The value is marked ``sensitive`` on its slot (FieldSpec
+    ``is_pii``); a mask over it is kept as ``flag`` with the reason on the rule.
+    A mask over values no flow asks for (a card number) keeps its action.
+    Returns the notes."""
+    if doc.get("trigger", "input") != "input":
+        return []
+    notes: list[str] = []
+    for rule in doc.get("rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        detection = rule.get("detection") or {}
+        if (rule.get("enforcement") or {}).get("action") != "mask" or detection.get("method") != "regex":
+            continue
+        hidden = mask_hidden_slots(detection.get("pattern") or "", slots, examples)
+        if not hidden:
+            continue
+        rule["enforcement"] = {"action": "flag"}
+        rule["description"] = f"AICC: flag, not mask: it would hide {', '.join(hidden)} from the flow"[:100]
+        notes.append(f"guardrail {doc.get('name')!r}: input mask kept as flag — it would hide "
+                     f"{', '.join(hidden)} from the flow that collects it")
+        logger.info("[ACXDGuardrails] %s: input mask kept advisory (flag) — it would hide %s "
+                    "from the flow", doc.get("name"), ", ".join(hidden))
+    return notes
+
+
 def _project_scoped_name(spec: dict, name: str) -> str:
     """``<projectSlug>-<name>`` (ASCII, ≤100 chars) when the spec knows its project."""
     slug = re.sub(r"[^A-Za-z0-9]", "", str(((spec or {}).get("infrastructure") or {}).get("project_name") or ""))
@@ -472,6 +660,12 @@ def _guardrail_name(plan: dict, index: int) -> str:
         if len(derived) >= 3:
             return derived[:100]
     return f"guardrail{index + 1}"
+
+
+def _collected_slots(spec: dict) -> list[dict]:
+    """Every slot the planned flows collect from the caller."""
+    return [slot for plan in (spec or {}).get("flows") or [] if isinstance(plan, dict)
+            for slot in plan.get("slots") or [] if isinstance(slot, dict) and slot.get("name")]
 
 
 def build_guardrails(spec: dict) -> tuple[list[dict], list[str]]:
@@ -556,6 +750,7 @@ def build_guardrails(spec: dict) -> tuple[list[dict], list[str]]:
         }
         _keep_derived_output_rules_advisory(doc, plan)
         _keep_derived_input_routes_advisory(doc, plan)
+        keep_collected_value_masks_advisory(doc, _collected_slots(spec), plan.get("examples") or [])
         errors = validate_acxd_asset("guardrail", doc)
         if errors:
             problems.extend(f"guardrails[{i}] ({name}): {e}" for e in errors)

@@ -487,6 +487,59 @@ def test_acxd_only_download_without_a_name_uses_the_recorded_project_name(monkey
     assert manifest["project"] == "selc-voice"
 
     monkeypatch.setattr(flow_spec, "get_acxd_flow_spec", lambda _sid=None: None)
+
+def test_packaging_ships_whole_faq_answers_and_no_mask_over_a_collected_value(monkeypatch):
+    """Live (5-use-case run, 2026-09-28): the SELC and GreenCart knowledge
+    bases held one lead sentence of each FAQ answer, and input masks over the
+    phone and birth date the flows collect handed the journeys "[REDACTED]". A
+    bundle generated before those fixes is repaired when it is packaged."""
+    import tools.asset_packager as packager
+    import tools.acxd_manifest_builder as manifest_builder
+
+    session_id = "session-f23"
+    faq = ("# 반품 정책\n\n## 질문 (Question)\n반품 정책이 어떻게 되나요?\n\n## 답변 (Answer)\n"
+           "반품 정책을 안내해 드립니다.\n\n## 반품 가능 기간\n- 배송완료일로부터 14일 이내\n\n"
+           "## 관련 정보 (Related Information)\n- 반품 조회\n\n## 메타데이터 (Metadata)\n- 키워드: 반품\n")
+    contents = {f"assets/{session_id}/faq/knowledge_base/01_return_policy.md": faq}
+    knowledge_base = {"name": "FAQ", "type": "articles", "articles": [{
+        "question": {"text": "반품 정책이 어떻게 되나요?"},
+        "responses": [{"type": "text", "body": "반품 정책을 안내해 드립니다."}]}]}
+    flow = {"flowId": "MainFlow", "nodes": {}, "slotTypes": [
+        {"name": "phoneNumber", "type": "NLX.PhoneNumber", "sensitive": True,
+         "regex": "^010-[0-9]{4}-[0-9]{4}$"}]}
+    guardrail = {"name": "selcvoice-guardrail1", "trigger": "input", "active": True, "rules": [{
+        "name": "selcvoice-guardrail1", "detection": {"method": "regex", "pattern": r"\d{3}-\d{4}-\d{4}"},
+        "enforcement": {"action": "mask", "behavior": {"maskText": "[REDACTED]"}}, "active": True}],
+        "fallbackBehavior": {"type": "continue"}}
+    client = _FakeS3()
+    monkeypatch.setattr(packager, "_is_acxd_target", lambda _s: True)
+    monkeypatch.setattr(packager, "_is_acxd_only_target", lambda _s: True)
+    monkeypatch.setattr(packager, "_load_acxd_bundle", lambda _s: _bundle(
+        flows=[flow], knowledge_bases=[knowledge_base], guardrails=[guardrail]))
+    monkeypatch.setattr(packager, "_run_d9_checks", lambda _s, _b: [])
+    monkeypatch.setattr(packager, "_acxd_only_backend_settings",
+                        lambda _s: {"base_url": "https://api.example.com/v1", "auth_header": "x-api-key"})
+    monkeypatch.setattr(manifest_builder, "acxd_only_backend",
+                        lambda _s: (True, "https://api.example.com/v1"))
+    monkeypatch.setattr(packager, "get_bucket_name", lambda: "test-bucket")
+    monkeypatch.setattr(packager, "get_s3_client", lambda: client)
+    monkeypatch.setattr(packager, "list_session_assets", lambda *_a, **_k: list(contents))
+    monkeypatch.setattr(packager, "get_asset_from_s3", lambda key, **_k: contents.get(key))
+
+    result = packager.package_assets_impl(session_id, "selc")
+
+    assert result["success"] is True, result
+    with zipfile.ZipFile(io.BytesIO(client.payload)) as archive:
+        shipped_kb = json.loads(archive.read("selc/assets/acxd/knowledge-bases/FAQ.json"))
+        guardrail_files = [n for n in archive.namelist() if n.startswith("selc/assets/acxd/guardrails/")]
+        shipped_guardrail = json.loads(archive.read(guardrail_files[0]))
+    body = shipped_kb["articles"][0]["responses"][0]["body"]
+    assert body.startswith("반품 정책을 안내해 드립니다.")
+    assert "**반품 가능 기간**" in body and "14일 이내" in body and "키워드" not in body
+    rule = shipped_guardrail["rules"][0]
+    assert rule["enforcement"] == {"action": "flag"}
+    assert "phoneNumber" in rule["description"]
+
     assert packager._session_project_name("session-y") is None
 
 

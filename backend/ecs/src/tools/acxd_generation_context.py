@@ -256,6 +256,39 @@ def _section(content: str, headings: tuple[str, ...]) -> str:
     return match.group(1).strip() if match else ""
 
 
+#: The fixed sections ``save_faq_document`` (agents/faq_generator/agent.py)
+#: writes AFTER the answer. The answer runs until one of them, not until the
+#: next '## ' line.
+_FAQ_SECTIONS_AFTER_ANSWER = (
+    "관련 정보 (Related Information)", "Related Information", "관련 정보",
+    "메타데이터 (Metadata)", "Metadata", "메타데이터", "Keywords", "키워드",
+)
+_FAQ_ANSWER_START = re.compile(r"(?:^|\n)## (?:답변 \(Answer\)|Answer|답변)[ \t]*\n", re.IGNORECASE)
+_FAQ_ANSWER_END = re.compile(
+    r"\n## (?:" + "|".join(re.escape(item) for item in _FAQ_SECTIONS_AFTER_ANSWER) + r")[ \t]*(?:\n|$)",
+    re.IGNORECASE)
+_MARKDOWN_HEADING = re.compile(r"(?m)^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$")
+
+
+def _answer_section(content: str) -> str:
+    """The FAQ document's whole answer.
+
+    Live (5-use-case run, 2026-09-28): the FAQ generator put the answer's
+    details under '## ' headings of their own ('## 반품 가능 기간', '## 배송비 부담
+    기준'), inside the answer it passes to ``save_faq_document``. Ending the
+    answer at the next '## ' kept only the lead sentence — SELC and GreenCart
+    articles were 18-58 characters ('그린카트의 반품 정책을 안내해 드립니다.') and
+    the knowledge base answered FAQ questions with nothing. The answer's own
+    headings become bold label lines, the form the other runs wrote."""
+    start = _FAQ_ANSWER_START.search(content)
+    if not start:
+        return ""
+    rest = "\n" + content[start.end():]
+    end = _FAQ_ANSWER_END.search(rest)
+    body = rest[:end.start()] if end else rest
+    return _MARKDOWN_HEADING.sub(r"**\1**", body).strip()
+
+
 def _article_from_content(content: str) -> Optional[dict]:
     try:
         parsed = json.loads(content)
@@ -268,7 +301,7 @@ def _article_from_content(content: str) -> Optional[dict]:
             "tags": parsed.get("tags") or parsed.get("keywords") or [],
         }
     question = _section(content, ("Question", "질문 (Question)", "질문"))
-    answer = _section(content, ("Answer", "답변 (Answer)", "답변"))
+    answer = _answer_section(content)
     keywords = _section(content, ("Keywords", "메타데이터 (Metadata)"))
     if not question or not answer:
         return None
@@ -279,16 +312,23 @@ def _article_from_content(content: str) -> Optional[dict]:
     return {"question": question, "answer": answer, "tags": tags}
 
 
-def _load_faq_articles(session_id: str) -> list[dict]:
-    """Parse FAQ assets produced by the unchanged FAQ generator."""
+def _load_faq_articles(session_id: str, list_assets=None, get_asset=None) -> list[dict]:
+    """Parse FAQ assets produced by the unchanged FAQ generator.
+
+    ``list_assets`` / ``get_asset`` let the packager read through its own
+    storage calls (authoritative S3 listing); the defaults are the shared ones."""
     articles: list[dict] = []
     try:
-        from tools.s3_asset_storage import get_asset_from_s3, list_session_assets
+        if list_assets is None or get_asset is None:
+            from tools.s3_asset_storage import get_asset_from_s3, list_session_assets
 
-        for key in sorted(list_session_assets(session_id)):
+            list_assets = list_assets or list_session_assets
+            get_asset = get_asset or get_asset_from_s3
+
+        for key in sorted(list_assets(session_id)):
             if "/faq/" not in f"/{key}" or not key.lower().endswith((".txt", ".md", ".json")):
                 continue
-            content = get_asset_from_s3(key)
+            content = get_asset(key)
             if not content:
                 continue
             article = _article_from_content(content)
