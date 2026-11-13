@@ -225,6 +225,29 @@ while True:
 PYEOF
 }
 
+# Bucket names here are derived from account ID + region, so any other account
+# can create them first. Create the bucket if it is missing, then refuse to use
+# it unless THIS account owns it (head-bucket fails with 403 otherwise).
+ensure_owned_bucket() {
+    local bucket="$1"
+    if aws s3api head-bucket --bucket "$bucket" --expected-bucket-owner "$ACCOUNT_ID" \
+        --region "$REGION" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "$REGION" = "us-east-1" ]; then
+        aws s3api create-bucket --bucket "$bucket" --region "$REGION" >/dev/null 2>&1 || true
+    else
+        aws s3api create-bucket --bucket "$bucket" --region "$REGION" \
+            --create-bucket-configuration LocationConstraint="$REGION" >/dev/null 2>&1 || true
+    fi
+    if ! aws s3api head-bucket --bucket "$bucket" --expected-bucket-owner "$ACCOUNT_ID" \
+        --region "$REGION" >/dev/null 2>&1; then
+        echo "   ❌ S3 bucket '$bucket' could not be created or is owned by another account." >&2
+        echo "      Refusing to use it. Re-run with a different deployment name." >&2
+        exit 1
+    fi
+}
+
 # =============================================================================
 # State file (records created resource IDs for idempotent re-runs & cleanup)
 # =============================================================================
@@ -500,21 +523,14 @@ phase_cloudformation() {
     echo ""
     echo "📦 Phase 1: Deploying CloudFormation stack..."
 
-    if ! aws s3 ls "s3://$TEMPLATE_BUCKET" --region "$REGION" &>/dev/null; then
-        info "Creating S3 bucket for templates..."
-        if [ "$REGION" = "us-east-1" ]; then
-            aws s3api create-bucket --bucket "$TEMPLATE_BUCKET" --region "$REGION" >/dev/null
-        else
-            aws s3api create-bucket --bucket "$TEMPLATE_BUCKET" --region "$REGION" \
-                --create-bucket-configuration LocationConstraint="$REGION" >/dev/null
-        fi
-        aws s3api put-bucket-versioning --bucket "$TEMPLATE_BUCKET" \
-            --versioning-configuration Status=Enabled --region "$REGION"
-    fi
+    ensure_owned_bucket "$TEMPLATE_BUCKET"
+    aws s3api put-bucket-versioning --bucket "$TEMPLATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" \
+        --versioning-configuration Status=Enabled --region "$REGION"
 
     TEMPLATE_KEY="infrastructure-$(date +%Y%m%d-%H%M%S).yaml"
     info "Uploading template: s3://$TEMPLATE_BUCKET/$TEMPLATE_KEY"
-    aws s3 cp "$CFN_TEMPLATE" "s3://$TEMPLATE_BUCKET/$TEMPLATE_KEY" --region "$REGION" >/dev/null
+    aws s3api put-object --bucket "$TEMPLATE_BUCKET" --key "$TEMPLATE_KEY" --body "$CFN_TEMPLATE" \
+        --expected-bucket-owner "$ACCOUNT_ID" --region "$REGION" >/dev/null
     TEMPLATE_URL="https://s3.${REGION}.amazonaws.com/${TEMPLATE_BUCKET}/${TEMPLATE_KEY}"
 
     # Un-updatable terminal states (failed first creation etc.) must be
@@ -984,14 +1000,7 @@ for inst in json.load(sys.stdin)['InstanceSummaryList']:
 
     # Storage config for recordings/transcripts
     CONNECT_STORAGE_BUCKET="${PROJECT_NAME}-connect-${ACCOUNT_ID}-${REGION}"
-    if ! aws s3 ls "s3://$CONNECT_STORAGE_BUCKET" --region "$REGION" &>/dev/null; then
-        if [ "$REGION" = "us-east-1" ]; then
-            aws s3api create-bucket --bucket "$CONNECT_STORAGE_BUCKET" --region "$REGION" >/dev/null 2>&1 || true
-        else
-            aws s3api create-bucket --bucket "$CONNECT_STORAGE_BUCKET" --region "$REGION" \
-                --create-bucket-configuration LocationConstraint="$REGION" >/dev/null 2>&1 || true
-        fi
-    fi
+    ensure_owned_bucket "$CONNECT_STORAGE_BUCKET"
     for STORAGE_TYPE in CALL_RECORDINGS CHAT_TRANSCRIPTS; do
         aws connect associate-instance-storage-config \
             --instance-id "$CONNECT_INSTANCE_ID" --resource-type "$STORAGE_TYPE" \
@@ -3597,7 +3606,8 @@ for p in json.load(sys.stdin).get('credentialProviders', []):
         info "Waiting for stack deletion..."
         aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" || true
     fi
-    if aws s3 ls "s3://$TEMPLATE_BUCKET" --region "$REGION" &>/dev/null; then
+    if aws s3api head-bucket --bucket "$TEMPLATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" \
+        --region "$REGION" &>/dev/null; then
         aws s3 rm "s3://$TEMPLATE_BUCKET" --recursive --region "$REGION" >/dev/null 2>&1 || true
         purge_bucket_versions "$TEMPLATE_BUCKET"
         aws s3api delete-bucket --bucket "$TEMPLATE_BUCKET" --region "$REGION" 2>/dev/null || true
