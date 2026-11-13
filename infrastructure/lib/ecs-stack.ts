@@ -205,6 +205,11 @@ export class EcsStack extends cdk.Stack {
           "arn:aws:s3:::aiccbuilder*",
           "arn:aws:s3:::aiccbuilder*/*",
         ],
+        // S3 ARNs carry no account ID: without this the wildcard also matches
+        // same-named buckets that another account created.
+        conditions: {
+          StringEquals: { "s3:ResourceAccount": this.account },
+        },
       })
     );
 

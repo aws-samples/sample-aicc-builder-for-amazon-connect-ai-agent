@@ -1522,11 +1522,17 @@ If your template is > 51KB, you must upload it to S3 first:
 
 ```bash
 # Create S3 bucket for templates
-BUCKET=""" + project_name + """-cfn-templates-$(aws sts get-caller-identity --query Account --output text)"
-aws s3 mb "s3://$BUCKET" --region ap-northeast-2
+set -e
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET=""" + project_name + """-cfn-templates-$ACCOUNT_ID-ap-northeast-2"
+aws s3api create-bucket --bucket "$BUCKET" --region ap-northeast-2 \\
+  --create-bucket-configuration LocationConstraint=ap-northeast-2 || true
+# The name is guessable: stop unless THIS account owns the bucket
+aws s3api head-bucket --bucket "$BUCKET" --expected-bucket-owner "$ACCOUNT_ID"
 
 # Upload template
-aws s3 cp cloudformation/infrastructure.yaml "s3://$BUCKET/infrastructure.yaml"
+aws s3api put-object --bucket "$BUCKET" --key infrastructure.yaml \\
+  --body cloudformation/infrastructure.yaml --expected-bucket-owner "$ACCOUNT_ID"
 
 # Deploy using S3 URL
 aws cloudformation deploy \\
